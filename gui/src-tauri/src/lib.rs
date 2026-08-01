@@ -216,9 +216,20 @@ async fn bootstrap(project_root: Option<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn send_message(conversation_id: i64, text: String) -> Result<Value, String> {
+async fn send_message(
+    conversation_id: i64,
+    text: String,
+    attachments: Option<Vec<String>>,
+) -> Result<Value, String> {
     let root = default_project_root()?;
-    let req = json!({"cmd": "send_message", "conversation_id": conversation_id, "text": text});
+    // The daemon ignores `attachments` today (its Request struct has no such
+    // field, and Go JSON decoding drops unknown keys); the frontend already
+    // prefixes the paths into `text`. Forwarded now so the daemon-side
+    // change needs no further GUI work.
+    let mut req = json!({"cmd": "send_message", "conversation_id": conversation_id, "text": text});
+    if let Some(paths) = attachments {
+        req["attachments"] = json!(paths);
+    }
     run_command(root, req).await
 }
 

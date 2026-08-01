@@ -39,11 +39,11 @@ export type EventType =
   | "review_action"
   | (string & {});
 
-// Payload keys by event type (M0):
-//   user_message      { text }
+// Payload keys by event type (ADR-0002):
+//   user_message      { text, attachments? }
 //   agent_text        { text }
-//   agent_tool_call   { name, args }      (M1+; the M0 adapter never emits it)
-//   agent_tool_result { name, result }    (M1+; the M0 adapter never emits it)
+//   agent_tool_call   { tool, args }
+//   agent_tool_result { tool, result }
 //   agent_done        { summary }
 //   agent_error       { error }
 //   review_action     { action: "accept" | "reject", diff_id }
@@ -51,11 +51,12 @@ export interface EventPayload {
   text?: string;
   summary?: string;
   error?: string;
-  name?: string;
+  tool?: string;
   args?: unknown;
   result?: unknown;
   action?: string;
   diff_id?: number;
+  attachments?: string[];
 }
 
 export interface OdoEvent {
@@ -86,6 +87,13 @@ export interface BootstrapResponse {
   agent_running?: boolean;
   diff?: Diff | null;
 }
+
+// Type alias (not interface) so it is assignable to Tauri's InvokeArgs.
+export type SendMessageRequest = {
+  conversationId: number;
+  text: string;
+  attachments?: string[];
+};
 
 export interface SendMessageResponse {
   ok: boolean;

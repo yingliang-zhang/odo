@@ -1,3 +1,4 @@
+import { basename } from "../files";
 import type { OdoEvent } from "../types";
 
 const REVIEW_LABEL: Record<string, string> = {
@@ -15,6 +16,15 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
       return (
         <div className="bubble bubble-user">
           <div className="bubble-text">{p.text ?? ""}</div>
+          {p.attachments != null && p.attachments.length > 0 && (
+            <div className="attachment-chips">
+              {p.attachments.map((a) => (
+                <span className="attachment-chip" key={a} title={a}>
+                  <code>{basename(a)}</code>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       );
 
@@ -29,7 +39,7 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
       return (
         <div className="bubble bubble-tool">
           <code>
-            → {p.name ?? "tool"} {p.args != null ? JSON.stringify(p.args) : ""}
+            → {p.tool ?? "tool"} {p.args != null ? JSON.stringify(p.args) : ""}
           </code>
         </div>
       );
@@ -39,7 +49,7 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
         <div className="bubble bubble-tool">
           <details>
             <summary>
-              <code>← {p.name ?? "result"}</code>
+              <code>← {p.tool ?? "result"}</code>
             </summary>
             <pre>{typeof p.result === "string" ? p.result : JSON.stringify(p.result, null, 2)}</pre>
           </details>

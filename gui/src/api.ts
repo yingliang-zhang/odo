@@ -8,6 +8,7 @@ import type {
   BootstrapResponse,
   PollEventsResponse,
   RejectDiffResponse,
+  SendMessageRequest,
   SendMessageResponse,
 } from "./types";
 
@@ -17,8 +18,21 @@ export function bootstrap(projectRoot?: string): Promise<BootstrapResponse> {
   return invoke<BootstrapResponse>("bootstrap", { projectRoot: projectRoot ?? null });
 }
 
-export function sendMessage(conversationId: number, text: string): Promise<SendMessageResponse> {
-  return invoke<SendMessageResponse>("send_message", { conversationId, text });
+export function sendMessage(
+  conversationId: number,
+  text: string,
+  attachments?: string[],
+): Promise<SendMessageResponse> {
+  const req: SendMessageRequest = { conversationId, text };
+  const paths = (attachments ?? []).filter((a) => a.trim() !== "");
+  if (paths.length > 0) {
+    // The daemon doesn't consume an `attachments` field yet (Go side lands
+    // separately), so paths also ride in the message text where the M0
+    // adapter and the journal both see them.
+    req.attachments = paths;
+    req.text = `Attached files: ${paths.join(", ")}. ${text}`;
+  }
+  return invoke<SendMessageResponse>("send_message", req);
 }
 
 export function pollEvents(conversationId: number, afterSeq: number): Promise<PollEventsResponse> {

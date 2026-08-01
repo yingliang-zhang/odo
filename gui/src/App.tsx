@@ -87,11 +87,11 @@ export default function App() {
   }, [booted, recordEvents]);
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (text: string, attachments: string[]) => {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
       try {
-        const resp = unwrap(await sendMessage(cid, text));
+        const resp = unwrap(await sendMessage(cid, text, attachments));
         if (resp.event) recordEvents([resp.event]);
         // The daemon starts the agent synchronously inside send_message.
         setAgentRunning(true);
