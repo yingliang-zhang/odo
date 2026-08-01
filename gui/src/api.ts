@@ -26,11 +26,7 @@ export function sendMessage(
   const req: SendMessageRequest = { conversationId, text };
   const paths = (attachments ?? []).filter((a) => a.trim() !== "");
   if (paths.length > 0) {
-    // The daemon doesn't consume an `attachments` field yet (Go side lands
-    // separately), so paths also ride in the message text where the M0
-    // adapter and the journal both see them.
     req.attachments = paths;
-    req.text = `Attached files: ${paths.join(", ")}. ${text}`;
   }
   return invoke<SendMessageResponse>("send_message", req);
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/git"
@@ -182,9 +183,22 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		}
 	}
 
-	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(map[string]interface{}{"text": req.Text}))
+	// Journal the user message with attachments (spec item 5).
+	msgPayload := map[string]interface{}{"text": req.Text}
+	if len(req.Attachments) > 0 {
+		msgPayload["attachments"] = req.Attachments
+	}
+	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
+	}
+
+	// Build the prompt for the agent. If attachments are present, inject
+	// the file paths so the agent reads them before proceeding.
+	prompt := req.Text
+	if len(req.Attachments) > 0 {
+		prompt = fmt.Sprintf("Attached files: %s. Read them before proceeding.\n\n%s",
+			strings.Join(req.Attachments, ", "), req.Text)
 	}
 
 	// Setup failures after this point revoke the run with a journaled
@@ -198,7 +212,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		return Response{}, fmt.Errorf("bind worktree: %w", err)
 	}
 
-	runID, err := s.adapter.Start(ctx, wtPath, req.Text)
+	runID, err := s.adapter.Start(ctx, wtPath, prompt)
 	if err != nil {
 		_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
 		_ = s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, nil)

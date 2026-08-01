@@ -17,12 +17,13 @@ const (
 
 // Request is one command line on the socket.
 type Request struct {
-	Cmd            string `json:"cmd"`
-	ProjectRoot    string `json:"project_root,omitempty"`
-	ConversationID int64  `json:"conversation_id,omitempty"`
-	Text           string `json:"text,omitempty"`
-	AfterSeq       int    `json:"after_seq,omitempty"`
-	DiffID         int64  `json:"diff_id,omitempty"`
+	Cmd            string   `json:"cmd"`
+	ProjectRoot    string   `json:"project_root,omitempty"`
+	ConversationID int64    `json:"conversation_id,omitempty"`
+	Text           string   `json:"text,omitempty"`
+	Attachments    []string `json:"attachments,omitempty"`
+	AfterSeq       int      `json:"after_seq,omitempty"`
+	DiffID         int64    `json:"diff_id,omitempty"`
 }
 
 // DiffInfo carries a diff record plus its file content to the client.
