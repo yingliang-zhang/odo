@@ -20,3 +20,10 @@ Append-only. If it's not in the log, it didn't happen.
 
 Per K3's recommendation: build end-to-end ugly vertical slice first, not layer-by-layer.
 Order: type request → OMP runs (polled) → diff as text in chat → Accept runs git apply → kill+relaunch → conversation restored.
+
+### Session switch — M0 implementation handoff
+
+- Context full after multi-round dual-model design discussion
+- Handoff prompt saved: docs/session-prompts/2026-08-01-m0-implementation.md
+- New session should read that prompt + milestone spec + ADRs + log.md
+- HEAD: 9e9aa44 (initial commit with docs only, pushed to origin/main)
