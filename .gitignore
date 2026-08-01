@@ -43,6 +43,4 @@ Thumbs.db
 *.db-shm
 
 # Odo project-local state
-.odo/worktrees/
-.odo/diffs/
-.odo/journal.sqlite
+.odo/
