@@ -27,3 +27,22 @@ Order: type request → OMP runs (polled) → diff as text in chat → Accept ru
 - Handoff prompt saved: docs/session-prompts/2026-08-01-m0-implementation.md
 - New session should read that prompt + milestone spec + ADRs + log.md
 - HEAD: 9e9aa44 (initial commit with docs only, pushed to origin/main)
+
+### M0 implementation — Step 1: Go daemon (completed)
+
+- Dispatched K3 via OMP wrapper (coupled-v1, implement, 600s)
+- K3 wrote 15 Go files (2222 lines): store (6+test), adapter (2), git (1), worktree (1), ipc (2+test), main.go
+- Schema matches ADR-0002 exactly (5 tables: projects, workstreams, conversations, events, diffs)
+- modernc.org/sqlite v1.55.0 (pure Go, no CGO), WAL mode, MaxOpenConns(1)
+- OMP adapter: 5-verb interface, subprocess via Hermes wrapper, print mode
+- Worktree: git worktree at <project>/.odo/worktrees/<run-id>, persists until accept/reject
+- IPC: Unix socket, line-delimited JSON (bootstrap, send_message, poll_events, accept_diff, reject_diff)
+- Build: go build ./... ✓ | Vet: go vet ./... ✓ | Tests: 10/10 ✓ (store 9 + e2e 1)
+- Committed: 09d1027, pushed to main
+- HEAD: 09d1027
+
+### M0 implementation — Step 2: Tauri 2 + React frontend (in progress)
+
+- Dispatched K3 via OMP wrapper (coupled-v1, implement, 600s)
+- Prompt: .odo/prompts/step2-tauri-react.md
+- Target: Tauri 2 shell + React/Vite frontend + Rust Unix socket client + chat/diff/poll UI + session restore
