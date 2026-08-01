@@ -257,11 +257,11 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	if err != nil {
 		return err
 	}
-	meta.consumed += len(evs)
 	for _, ev := range evs {
 		if _, err := s.store.AppendEvent(ctx, meta.conversationID, ev.Type, mustJSON(ev.Payload)); err != nil {
 			return err
 		}
+		meta.consumed++ // advance per successfully journaled event
 	}
 	if len(evs) == 0 {
 		return nil // still running
@@ -269,7 +269,6 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	if t := evs[len(evs)-1].Type; t != store.EventAgentDone && t != store.EventAgentError {
 		return nil // more events to come (not reached in M0: terminal batch is atomic)
 	}
-	meta.finished = true
 
 	// The diff is extracted whether the run succeeded or failed: partial
 	// changes are reviewable, and the human decides. (ADR-0001.)
@@ -284,11 +283,13 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		return nil
 	}
 	if diffPath == "" {
-		return nil // agent changed nothing; no diff to review
+		meta.finished = true // agent changed nothing; run is complete
+		return nil
 	}
 	if _, err := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA); err != nil {
 		return err
 	}
+	meta.finished = true // mark finished only after the diff row exists
 	return nil
 }
 
@@ -320,13 +321,16 @@ func (s *Server) handleReviewDiff(ctx context.Context, diffID int64, action stri
 	if action == "reject" {
 		status = store.DiffRejected
 	}
+	// Update diff status first: if the event journal fails, the diff is at
+	// least correctly marked and a retry returns "already accepted/rejected"
+	// instead of re-running git apply on an already-applied patch.
+	if err := s.store.UpdateDiffStatus(ctx, diffID, status); err != nil {
+		return Response{}, err
+	}
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":  action,
 		"diff_id": d.ID,
 	})); err != nil {
-		return Response{}, err
-	}
-	if err := s.store.UpdateDiffStatus(ctx, diffID, status); err != nil {
 		return Response{}, err
 	}
 
