@@ -58,3 +58,19 @@ Order: type request → OMP runs (polled) → diff as text in chat → Accept ru
 - GLM-5.2 audit dispatched (proc_d00af52fb7e5, 900s)
 - K3 audit dispatched (proc_76135922108a, 900s)
 - Both running in parallel, normal tier, read-only
+
+### M0 implementation — Step 3: Dual-model direction audit (completed)
+
+- GLM-5.2 verdict: ✅ ACCEPT — zero direction drift, schema-perfect, all 3 invariants hold, worktree lifecycle correct, infra budget met (~30-35% plumbing)
+- K3 verdict: ✅ ACCEPT — zero direction drift, schema exact, 0 lines trust/governance infra, tests re-verified
+- Both flagged: hardcoded provider/model in omp.go (spec-authorized but deferred from prefs.md)
+- K3 found 2 journal truth ordering issues in server.go (≤10 line fixes each)
+- Applied 3 fixes: (1) advance consumed per journaled event, (2) set finished after diff insert, (3) update diff status before review_action event
+- Committed: 19eaf37, pushed to main
+
+### M0 implementation — Step 4: E2e demo verification (completed)
+
+- Automated demo with stub OMP wrapper (writes "Hello from Odo" to hello.txt)
+- Full visible loop verified: bootstrap → send_message → poll (agent_text + agent_done) → accept_diff → hello.txt exists with correct content → kill daemon → restart → 4 events restored
+- All 9 M0 demo steps pass
+- HEAD: 19eaf37
