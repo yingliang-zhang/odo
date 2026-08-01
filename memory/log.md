@@ -41,8 +41,20 @@ Order: type request → OMP runs (polled) → diff as text in chat → Accept ru
 - Committed: 09d1027, pushed to main
 - HEAD: 09d1027
 
-### M0 implementation — Step 2: Tauri 2 + React frontend (in progress)
+### M0 implementation — Step 2: Tauri 2 + React frontend (completed)
 
 - Dispatched K3 via OMP wrapper (coupled-v1, implement, 600s)
-- Prompt: .odo/prompts/step2-tauri-react.md
-- Target: Tauri 2 shell + React/Vite frontend + Rust Unix socket client + chat/diff/poll UI + session restore
+- K3 wrote 23 source files: React components (App, ChatSurface, MessageBubble, ToolTicker, DiffViewer, Sidebar) + Rust lib.rs (Unix socket client + Tauri commands) + config + icons
+- K3 ran full e2e smoke test with stub OMP wrapper: bootstrap → send → poll → accept → reject → restore ✓
+- tsc --noEmit ✓ | vite build ✓ (39 modules) | cargo check ✓ | cargo test ✓ (2 skipped)
+- tauri dev launched: daemon + vite on 1420 + app window running ✓
+- K3 fixed UX issue: failed send no longer clears draft
+- Committed: c3dac2c (79 files, 7912 insertions), pushed to main
+- HEAD: c3dac2c
+
+### M0 implementation — Step 3: Dual-model direction audit (in progress)
+
+- Review prompt: /tmp/odo-m0-review.md (direction drift + schema compliance + code quality + invariants + infra budget)
+- GLM-5.2 audit dispatched (proc_d00af52fb7e5, 900s)
+- K3 audit dispatched (proc_76135922108a, 900s)
+- Both running in parallel, normal tier, read-only
