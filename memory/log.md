@@ -74,3 +74,14 @@ Order: type request → OMP runs (polled) → diff as text in chat → Accept ru
 - Full visible loop verified: bootstrap → send_message → poll (agent_text + agent_done) → accept_diff → hello.txt exists with correct content → kill daemon → restart → 4 events restored
 - All 9 M0 demo steps pass
 - HEAD: 19eaf37
+
+### M0 milestone closed — 2026-08-01
+
+User ran the actual `tauri dev` Demo and confirmed:
+- Send message → OMP completes → diff appears
+- Accept → file created in project
+- Quit + reopen → conversation restored
+
+M0 "Visible Loop" milestone is CLOSED (human-verified, per governance rule: human-only close).
+Pain points #2 (context loss on session switch) and #3 (can't see agent progress) are relieved.
+HEAD: b5a8e9e
