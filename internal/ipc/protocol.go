@@ -8,11 +8,14 @@ import (
 
 // Commands.
 const (
-	CmdBootstrap   = "bootstrap"
-	CmdSendMessage = "send_message"
-	CmdPollEvents  = "poll_events"
-	CmdAcceptDiff  = "accept_diff"
-	CmdRejectDiff  = "reject_diff"
+	CmdBootstrap        = "bootstrap"
+	CmdSendMessage      = "send_message"
+	CmdPollEvents       = "poll_events"
+	CmdAcceptDiff       = "accept_diff"
+	CmdRejectDiff       = "reject_diff"
+	CmdCreateWorkstream = "create_workstream"
+	CmdListWorkstreams  = "list_workstreams"
+	CmdDistill          = "distill"
 )
 
 // Request is one command line on the socket.
@@ -20,10 +23,14 @@ type Request struct {
 	Cmd            string   `json:"cmd"`
 	ProjectRoot    string   `json:"project_root,omitempty"`
 	ConversationID int64    `json:"conversation_id,omitempty"`
+	WorkstreamID   int64    `json:"workstream_id,omitempty"`
+	Name           string   `json:"name,omitempty"`
 	Text           string   `json:"text,omitempty"`
 	Attachments    []string `json:"attachments,omitempty"`
 	AfterSeq       int      `json:"after_seq,omitempty"`
 	DiffID         int64    `json:"diff_id,omitempty"`
+	Steer          bool     `json:"steer,omitempty"`
+	Adapter        string   `json:"adapter,omitempty"`
 }
 
 // DiffInfo carries a diff record plus its file content to the client.
@@ -41,6 +48,7 @@ type Response struct {
 	Error        string              `json:"error,omitempty"`
 	Project      *store.Project      `json:"project,omitempty"`
 	Workstream   *store.Workstream   `json:"workstream,omitempty"`
+	Workstreams  []store.Workstream  `json:"workstreams,omitempty"`
 	Conversation *store.Conversation `json:"conversation,omitempty"`
 	Event        *store.Event        `json:"event,omitempty"`
 	Events       []store.Event       `json:"events,omitempty"`
@@ -48,4 +56,6 @@ type Response struct {
 	Diff         *DiffInfo           `json:"diff,omitempty"`
 	DiffID       int64               `json:"diff_id,omitempty"`
 	Applied      bool                `json:"applied,omitempty"`
+	WikiPath     string              `json:"wiki_path,omitempty"`
+	Epoch        int                 `json:"epoch,omitempty"`
 }

@@ -328,3 +328,70 @@ func TestDiffLifecycle(t *testing.T) {
 		t.Errorf("LatestDiff on empty conversation: err = %v, want sql.ErrNoRows", err)
 	}
 }
+
+func TestListWorkstreams(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	p, _ := s.CreateOrGetProject(ctx, "/repo/lws", "lws")
+	other, _ := s.CreateOrGetProject(ctx, "/repo/lws2", "lws2")
+
+	w1, err := s.CreateOrGetWorkstream(ctx, p.ID, "main")
+	if err != nil {
+		t.Fatalf("create main: %v", err)
+	}
+	// New workstreams get their name as the git branch.
+	if w1.Branch == nil || *w1.Branch != "main" {
+		t.Errorf("branch = %v, want \"main\"", w1.Branch)
+	}
+	w2, _ := s.CreateOrGetWorkstream(ctx, p.ID, "feature-x")
+	if _, err := s.CreateOrGetWorkstream(ctx, other.ID, "elsewhere"); err != nil {
+		t.Fatalf("create other project workstream: %v", err)
+	}
+
+	got, err := s.ListWorkstreams(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ListWorkstreams: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListWorkstreams returned %d, want 2 (other project's workstream must not leak)", len(got))
+	}
+	if got[0].ID != w1.ID || got[1].ID != w2.ID {
+		t.Errorf("order = [%d %d], want [%d %d]", got[0].ID, got[1].ID, w1.ID, w2.ID)
+	}
+
+	if got, err := s.ListWorkstreams(ctx, 4242); err != nil || len(got) != 0 {
+		t.Errorf("ListWorkstreams on empty project = (%v, %v), want empty", got, err)
+	}
+}
+
+func TestIncrementEpoch(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	p, _ := s.CreateOrGetProject(ctx, "/repo/ep", "ep")
+	w, _ := s.CreateOrGetWorkstream(ctx, p.ID, "main")
+	c, _ := s.CreateConversation(ctx, w.ID, "")
+	if c.Epoch != 1 {
+		t.Fatalf("new conversation epoch = %d, want 1", c.Epoch)
+	}
+
+	for i, want := range []int{2, 3} {
+		got, err := s.IncrementEpoch(ctx, c.ID)
+		if err != nil {
+			t.Fatalf("IncrementEpoch %d: %v", i, err)
+		}
+		if got != want {
+			t.Errorf("IncrementEpoch returned %d, want %d", got, want)
+		}
+	}
+	// The epoch column persisted, not just the return value.
+	got, err := s.GetConversation(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if got.Epoch != 3 {
+		t.Errorf("stored epoch = %d, want 3", got.Epoch)
+	}
+	if _, err := s.IncrementEpoch(ctx, 4242); err == nil {
+		t.Error("IncrementEpoch on missing conversation: want error, got nil")
+	}
+}

@@ -54,7 +54,9 @@ func main() {
 	}
 
 	omp := adapter.NewOMP(mgr.StateDir())
+	pi := adapter.NewPi(mgr.StateDir())
 	srv := ipc.NewServer(st, root, omp, mgr)
+	srv.RegisterAdapter("pi", pi)
 
 	socket := socketFlag
 	if socket == "" {
@@ -87,6 +89,7 @@ func main() {
 	// Kill in-flight agents so no orphan keeps writing into a worktree, then
 	// release resources. Worktrees and diffs persist for review on next boot.
 	omp.CloseAll()
+	pi.CloseAll()
 	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		log.Printf("close listener: %v", err)
 	}

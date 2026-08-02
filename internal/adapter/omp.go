@@ -224,9 +224,32 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 	return runID, nil
 }
 
-// Send implements Adapter. Steering is not part of M0 (milestone: M1+).
+// Send implements Adapter. Since M1 it appends the steering message to
+// steering.txt in the run's session directory — a best-effort hand-off the
+// wrapper may read between turns. A wrapper that never reads it just ignores
+// the file; the daemon already journaled the message.
 func (a *OMP) Send(ctx context.Context, runID string, message string) error {
-	return fmt.Errorf("omp: Send: steering not supported in M0")
+	a.mu.Lock()
+	r, ok := a.runs[runID]
+	a.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("omp: unknown run %q", runID)
+	}
+	select {
+	case <-r.done:
+		return fmt.Errorf("omp: run %q already finished", runID)
+	default:
+	}
+	f, err := os.OpenFile(filepath.Join(r.sessionDir, "steering.txt"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("omp: steering file: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(message + "\n"); err != nil {
+		return fmt.Errorf("omp: write steering: %w", err)
+	}
+	return nil
 }
 
 // Events implements Adapter. While the run is in flight it returns nothing;
@@ -437,12 +460,12 @@ func parseSessionJSONL(r *ompRun) []AgentEvent {
 		// Process assistant messages (content is an array of blocks).
 		if msg.Role == "assistant" {
 			var blocks []struct {
-				Type       string `json:"type"`
-				Text       string `json:"text"`
-				Thinking   string `json:"thinking"`
-				Name       string `json:"name"`
+				Type       string          `json:"type"`
+				Text       string          `json:"text"`
+				Thinking   string          `json:"thinking"`
+				Name       string          `json:"name"`
 				Arguments  json.RawMessage `json:"arguments"`
-				ToolCallID string `json:"id"`
+				ToolCallID string          `json:"id"`
 			}
 			if err := json.Unmarshal(msg.Content, &blocks); err != nil {
 				continue
@@ -470,8 +493,8 @@ func parseSessionJSONL(r *ompRun) []AgentEvent {
 		// Process toolResult messages.
 		if msg.Role == "toolResult" {
 			var result struct {
-				ToolName  string          `json:"toolName"`
-				Content   json.RawMessage `json:"content"`
+				ToolName string          `json:"toolName"`
+				Content  json.RawMessage `json:"content"`
 			}
 			if err := json.Unmarshal(entry.Message, &result); err != nil {
 				continue

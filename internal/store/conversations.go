@@ -34,6 +34,19 @@ func (s *Store) GetConversation(ctx context.Context, id int64) (Conversation, er
 	return c, nil
 }
 
+// IncrementEpoch bumps the conversation's epoch by one (a distill splits the
+// journal into epochs) and returns the new value.
+func (s *Store) IncrementEpoch(ctx context.Context, conversationID int64) (int, error) {
+	var epoch int
+	err := s.db.QueryRowContext(ctx,
+		`UPDATE conversations SET epoch = epoch + 1 WHERE id = ?
+		 RETURNING epoch`, conversationID).Scan(&epoch)
+	if err != nil {
+		return 0, fmt.Errorf("store: increment epoch for conversation %d: %w", conversationID, err)
+	}
+	return epoch, nil
+}
+
 // GetActiveConversation returns the most recent active conversation for a
 // workstream, or an error wrapping sql.ErrNoRows when none exists.
 func (s *Store) GetActiveConversation(ctx context.Context, workstreamID int64) (Conversation, error) {
