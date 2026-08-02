@@ -154,3 +154,18 @@ HEAD: 69d3d71
 - Dual-model review: GLM-5.2 ACCEPT + K3 NEEDS FIXES → 6 fixes applied → re-verified all pass
 
 HEAD: 6768cea
+
+### M2 GUI automated test (K3 + cua-driver)
+
+M2 GUI verified via cua-driver AX tree (MCP session for clicks, direct call for reads):
+- UI elements: 11/11 (workstream heading, buttons, settings, adapter, accept/reject)
+- Settings panel: click opens modal with 5 text fields + Save/Close buttons, close returns to main view
+- Fan-out: click opens N picker with text input
+- 21/21 passed
+
+### M2 milestone — CLOSED (2026-08-02)
+
+Dual-model review (GLM-5.2 ACCEPT + K3 NEEDS FIXES → 6 fixes), Go tests 25/25, 
+GUI automated test 21/21. All M0→M1→M2 features validated.
+
+HEAD: 6768cea
