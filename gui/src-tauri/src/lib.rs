@@ -29,6 +29,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// so its read timeout must cover the worst case plus margin.
 const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(660);
 
+/// M2: `review_diff` waits on every configured review model daemon-side
+/// (sequentially in the worst case). Five minutes plus margin covers the
+/// expected multi-model latency without hanging the UI forever.
+const REVIEW_READ_TIMEOUT: Duration = Duration::from_secs(330);
+
 /// How long to wait for a freshly spawned daemon to answer its socket.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -300,6 +305,41 @@ async fn reject_diff(diff_id: i64) -> Result<Value, String> {
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M2: ask the configured review models to grade the pending diff. Blocks
+// daemon-side until every reviewer answers, hence the long read timeout.
+#[tauri::command]
+async fn review_diff(diff_id: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "review_diff", "diff_id": diff_id});
+    run_command(root, req, REVIEW_READ_TIMEOUT).await
+}
+
+// M2 settings: read the project-scoped settings file through the daemon.
+#[tauri::command]
+async fn get_settings(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "get_settings", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M2 settings: `settings` is forwarded verbatim; the daemon validates and
+// merges it (unknown keys are its problem, not this shell's).
+#[tauri::command]
+async fn update_settings(project_root: Option<String>, settings: Value) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "update_settings", "project_root": root, "settings": settings});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M2 fan-out: start N parallel agent runs on one prompt. The daemon returns
+// immediately with the run list; progress arrives through the poll loop.
+#[tauri::command]
+async fn fanout_send(conversation_id: i64, text: String, n: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "fanout_send", "conversation_id": conversation_id, "text": text, "n": n});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,7 +558,11 @@ pub fn run() {
             reject_diff,
             create_workstream,
             list_workstreams,
-            distill
+            distill,
+            review_diff,
+            get_settings,
+            update_settings,
+            fanout_send
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

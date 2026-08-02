@@ -8,11 +8,18 @@ import type {
   BootstrapResponse,
   CreateWorkstreamResponse,
   DistillResponse,
+  FanoutSendRequest,
+  FanoutSendResponse,
+  GetSettingsResponse,
   ListWorkstreamsResponse,
   PollEventsResponse,
   RejectDiffResponse,
+  ReviewDiffResponse,
   SendMessageRequest,
   SendMessageResponse,
+  Settings,
+  UpdateSettingsRequest,
+  UpdateSettingsResponse,
 } from "./types";
 
 // Tauri v2 maps JS camelCase args onto the Rust snake_case parameters.
@@ -78,6 +85,28 @@ export function acceptDiff(diffId: number): Promise<AcceptDiffResponse> {
 
 export function rejectDiff(diffId: number): Promise<RejectDiffResponse> {
   return invoke<RejectDiffResponse>("reject_diff", { diffId });
+}
+
+// M2: review_diff blocks daemon-side while every configured review model
+// grades the diff; the Rust bridge uses a matching long read timeout.
+export function reviewDiff(diffId: number): Promise<ReviewDiffResponse> {
+  return invoke<ReviewDiffResponse>("review_diff", { diffId });
+}
+
+// M2 settings: the daemon resolves the project root when none is passed.
+export function getSettings(): Promise<GetSettingsResponse> {
+  return invoke<GetSettingsResponse>("get_settings", { projectRoot: null });
+}
+
+export function updateSettings(settings: Partial<Settings>): Promise<UpdateSettingsResponse> {
+  const req: UpdateSettingsRequest = { settings };
+  return invoke<UpdateSettingsResponse>("update_settings", { projectRoot: null, ...req });
+}
+
+// M2 fan-out: run the same prompt through N parallel agent runs.
+export function fanoutSend(conversationId: number, text: string, n: number): Promise<FanoutSendResponse> {
+  const req: FanoutSendRequest = { conversationId, text, n };
+  return invoke<FanoutSendResponse>("fanout_send", req);
 }
 
 // Daemon-level failures arrive with ok:false; transport failures (invoke

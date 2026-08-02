@@ -5,6 +5,7 @@ import {
   createWorkstream,
   distill,
   errorMessage,
+  fanoutSend,
   listWorkstreams,
   pollEvents,
   rejectDiff,
@@ -141,6 +142,23 @@ export default function App() {
     [recordEvents, adapter],
   );
 
+  // M2 fan-out: N parallel runs on one prompt. Resolves to the number of
+  // runs the daemon started so the composer can show the indicator.
+  const handleFanout = useCallback(async (text: string, n: number): Promise<number> => {
+    const cid = conversationRef.current;
+    if (cid == null) throw new Error("no active conversation yet");
+    try {
+      const resp = unwrap(await fanoutSend(cid, text, n));
+      const started = resp.runs?.length ?? 0;
+      if (started > 0) setAgentRunning(true);
+      setError(null);
+      return started;
+    } catch (e) {
+      setError(`fan-out failed: ${errorMessage(e)}`);
+      throw e; // let the composer keep the draft
+    }
+  }, []);
+
   const handleSwitchWorkstream = useCallback(
     async (workstreamId: number) => {
       if (workstreamId === workstream?.id) return;
@@ -249,6 +267,7 @@ export default function App() {
           agentRunning={agentRunning}
           sendDisabled={!booted}
           onSend={handleSend}
+          onFanout={handleFanout}
           epoch={conversation?.epoch ?? 1}
           distilledTo={lastDistillPath}
         />

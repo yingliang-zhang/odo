@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../api";
 import { basename } from "../files";
 import type { Conversation, Project, Workstream } from "../types";
+import SettingsPanel from "./SettingsPanel";
 
 const DISTILL_TOAST_MS = 5000;
 
@@ -49,6 +50,7 @@ export default function Sidebar({
   const [newName, setNewName] = useState("");
   const [distillBusy, setDistillBusy] = useState(false);
   const [distillToast, setDistillToast] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const toastTimer = useRef<ToastTimer | null>(null);
 
   useEffect(() => {
@@ -99,7 +101,19 @@ export default function Sidebar({
 
   return (
     <aside className="sidebar">
-      <h1 className="sidebar-app">Odo</h1>
+      <div className="sidebar-head">
+        <h1 className="sidebar-app">Odo</h1>
+        <button
+          type="button"
+          className="gear-btn"
+          title="Settings"
+          aria-label="Settings"
+          onClick={() => setShowSettings(true)}
+        >
+          ⚙
+        </button>
+      </div>
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
 
       <div className="sidebar-section">
         <div className="sidebar-section-head">

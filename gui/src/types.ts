@@ -149,3 +149,66 @@ export interface DistillResponse {
   // epoch is the NEW epoch after the increment (the distilled one is N-1).
   epoch?: number;
 }
+
+// ---------- M2: review panel, settings, fan-out ----------
+
+export type ReviewVerdict = "accept" | "reject" | "needs_fixes" | (string & {});
+
+// One reviewer's verdict on a pending diff (daemon `review_diff`).
+export interface ReviewResult {
+  model: string;
+  verdict: ReviewVerdict;
+  comments: string;
+}
+
+export interface ReviewDiffResponse {
+  ok: boolean;
+  error?: string;
+  reviews?: ReviewResult[];
+}
+
+// Daemon-managed project settings (daemon `get_settings` / `update_settings`).
+export interface Settings {
+  coding_model: string;
+  coding_provider: string;
+  orchestrator_model: string;
+  orchestrator_provider: string;
+  omp_timeout: string;
+  default_adapter: string;
+  review_models: string;
+}
+
+export interface GetSettingsResponse {
+  ok: boolean;
+  error?: string;
+  settings?: Settings;
+}
+
+export interface UpdateSettingsResponse {
+  ok: boolean;
+  error?: string;
+}
+
+// Type alias (not interface) so it is assignable to Tauri's InvokeArgs.
+export type UpdateSettingsRequest = {
+  settings: Partial<Settings>;
+};
+
+// One parallel run started by `fanout_send`.
+export interface RunInfo {
+  run_id: string;
+  status: "running" | "done" | "error" | (string & {});
+}
+
+// Type alias (not interface) so it is assignable to Tauri's InvokeArgs.
+export type FanoutSendRequest = {
+  conversationId: number;
+  text: string;
+  n: number;
+};
+
+export interface FanoutSendResponse {
+  ok: boolean;
+  error?: string;
+  runs?: RunInfo[];
+}

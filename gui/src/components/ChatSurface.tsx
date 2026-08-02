@@ -10,6 +10,9 @@ interface Props {
   agentRunning: boolean;
   sendDisabled: boolean;
   onSend: (text: string, attachments: string[], steer: boolean) => Promise<void>;
+  // M2 fan-out: run the prompt through N parallel runs; resolves to the
+  // number of runs the daemon started. Rejects on failure.
+  onFanout: (text: string, n: number) => Promise<number>;
   // M1 memory distiller: current epoch (banner shown when > 1) and the wiki
   // path of the most recent distill, when known this session.
   epoch: number;
@@ -21,13 +24,24 @@ interface Props {
 // clipboard paste. HTML5 drag events are kept as a fallback; they only fire
 // if `dragDropEnabled` is ever disabled in tauri.conf.json, so the two paths
 // never double-fire.
-export default function ChatSurface({ events, agentRunning, sendDisabled, onSend, epoch, distilledTo }: Props) {
+export default function ChatSurface({ events, agentRunning, sendDisabled, onSend, onFanout, epoch, distilledTo }: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  // M2 fan-out composer state: N picker open, chosen N, active run count.
+  const [fanoutOpen, setFanoutOpen] = useState(false);
+  const [fanoutN, setFanoutN] = useState(2);
+  const [fanoutBusy, setFanoutBusy] = useState(false);
+  const [fanoutActive, setFanoutActive] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
+
+  // Fan-out runs report through the same agent_running signal; when the
+  // daemon goes quiet the indicator has served its purpose.
+  useEffect(() => {
+    if (!agentRunning) setFanoutActive(null);
+  }, [agentRunning]);
 
   // Keep the newest event in view as the journal grows.
   useEffect(() => {
@@ -113,6 +127,24 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
     }
   };
 
+  const handleFanout = async () => {
+    const text = draft.trim();
+    const n = Math.max(2, Math.floor(fanoutN));
+    if (text === "" || fanoutBusy || sendDisabled) return;
+    setFanoutBusy(true);
+    try {
+      const started = await onFanout(text, n);
+      setFanoutActive(started > 0 ? started : n);
+      setDraft("");
+      setAttachments([]);
+      setFanoutOpen(false);
+    } catch {
+      // App already surfaced the error; keep the draft for retry.
+    } finally {
+      setFanoutBusy(false);
+    }
+  };
+
   // M1 epoch filtering: show only events from the current epoch.
   // The last distill review_action marks the epoch boundary; events after
   // it belong to the current epoch. If no distill has happened, show all.
@@ -179,6 +211,19 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
             ))}
           </div>
         )}
+        {fanoutActive != null && (
+          <div className="fanout-indicator">
+            {fanoutActive} runs active
+            <button
+              type="button"
+              className="fanout-dismiss"
+              aria-label="Dismiss fan-out indicator"
+              onClick={() => setFanoutActive(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
         <form className="chat-input" onSubmit={handleSubmit}>
           <input
             type="text"
@@ -195,6 +240,44 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
             disabled={sendDisabled || sending}
             autoFocus
           />
+          {fanoutOpen && (
+            <span className="fanout-picker">
+              <label htmlFor="fanout-n">×</label>
+              <input
+                id="fanout-n"
+                type="number"
+                min={2}
+                max={8}
+                value={fanoutN}
+                onChange={(e) => setFanoutN(Number(e.target.value))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void handleFanout();
+                  } else if (e.key === "Escape") {
+                    setFanoutOpen(false);
+                  }
+                }}
+                disabled={fanoutBusy}
+                autoFocus
+              />
+            </span>
+          )}
+          <button
+            type="button"
+            className="fanout-btn"
+            disabled={sendDisabled || sending || fanoutBusy || draft.trim() === ""}
+            title="Run this prompt through N parallel agents"
+            onClick={() => {
+              if (fanoutOpen) {
+                void handleFanout();
+              } else {
+                setFanoutOpen(true);
+              }
+            }}
+          >
+            {fanoutBusy ? "Starting…" : fanoutOpen ? "Start" : "Fan-out"}
+          </button>
           <button type="submit" disabled={sendDisabled || sending || !canSend}>
             {agentRunning ? "Steer" : "Send"}
           </button>

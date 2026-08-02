@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
+import { errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
-import type { Diff } from "../types";
+import type { Diff, ReviewResult } from "../types";
 
 interface Props {
   diff: Diff;
@@ -46,7 +47,26 @@ function renderCode(prefix: string, code: string, lang: Language | null): ReactN
 // Only a `pending` diff is actionable; afterwards this becomes a record card.
 export default function DiffViewer({ diff, onAccept, onReject }: Props) {
   const [acting, setActing] = useState(false);
+  const [reviews, setReviews] = useState<ReviewResult[] | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const pending = diff.status === "pending";
+  // Any rejecting reviewer flags the whole card so it cannot be missed.
+  const hasReject = reviews?.some((r) => r.verdict === "reject") ?? false;
+
+  const runReview = async () => {
+    if (reviewing) return;
+    setReviewing(true);
+    setReviewError(null);
+    try {
+      const resp = unwrap(await reviewDiff(diff.id));
+      setReviews(resp.reviews ?? []);
+    } catch (e) {
+      setReviewError(errorMessage(e));
+    } finally {
+      setReviewing(false);
+    }
+  };
 
   const act = async (fn: (id: number) => Promise<void>) => {
     setActing(true);
@@ -81,11 +101,19 @@ export default function DiffViewer({ diff, onAccept, onReject }: Props) {
   });
 
   return (
-    <section className="diff-card">
+    <section className={`diff-card${hasReject ? " review-rejected" : ""}`}>
       <header className="diff-header">
         <span className="diff-title">Diff #{diff.id}</span>
         {pending ? (
           <span className="diff-actions">
+            <button
+              className="btn-review"
+              disabled={acting || reviewing}
+              title="Ask the configured review models to grade this diff"
+              onClick={() => void runReview()}
+            >
+              {reviewing ? "Reviewing…" : "Review"}
+            </button>
             <button className="btn-accept" disabled={acting} onClick={() => void act(onAccept)}>
               Accept
             </button>
@@ -99,6 +127,25 @@ export default function DiffViewer({ diff, onAccept, onReject }: Props) {
           </span>
         )}
       </header>
+      {reviewError && <div className="review-error">{reviewError}</div>}
+      {reviews && (
+        <div className="review-results">
+          {reviews.length === 0 && (
+            <div className="review-empty">No reviewers returned a verdict.</div>
+          )}
+          {reviews.map((r, i) => (
+            <div className="review-item" key={`${r.model}-${i}`}>
+              <div className="review-item-head">
+                <span className="review-model">{r.model}</span>
+                <span className={`verdict-badge verdict-${r.verdict}`}>
+                  {r.verdict.replace("_", " ")}
+                </span>
+              </div>
+              {r.comments !== "" && <p className="review-comments">{r.comments}</p>}
+            </div>
+          ))}
+        </div>
+      )}
       {diff.content === "" ? (
         <div className="diff-empty">Diff file is empty or unreadable.</div>
       ) : (
