@@ -690,10 +690,10 @@ func TestAttachmentsJournal(t *testing.T) {
 	// Send with attachments.
 	files := []string{"/path/to/main.py", "/path/to/utils.go"}
 	sent := rig.call(t, Request{
-		Cmd:           CmdSendMessage,
+		Cmd:            CmdSendMessage,
 		ConversationID: convID,
-		Text:          "Create hello.txt (attachment test)",
-		Attachments:   files,
+		Text:           "Create hello.txt (attachment test)",
+		Attachments:    files,
 	})
 	if sent.Event == nil || sent.Event.Type != store.EventUserMessage {
 		t.Fatalf("send_message: bad event %+v", sent.Event)
@@ -731,5 +731,380 @@ func TestAttachmentsJournal(t *testing.T) {
 	}
 	if !foundAttach {
 		t.Error("no user_message event with attachments found in poll")
+	}
+}
+
+// writePrefs writes ~/.odo/prefs.md in the test home directory.
+func writePrefs(t *testing.T, home, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".odo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".odo", "prefs.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reviewStubWrapper serves both the coding run (default model) and the two
+// MoA review runs (models rm1/rm2, selected by --hermes-model). The review
+// branch proves parallel execution: each reviewer drops a marker and waits
+// for the other's; a sequential executor would time out and exit 1, which
+// degrades that review to an error the verdict assertions then catch.
+const reviewStubWrapper = `#!/bin/sh
+prompt_file="$2"
+output_file="$3"
+model=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--hermes-model" ]; then shift; model="$1"; fi
+  shift
+done
+case "$model" in
+  rm1|rm2)
+    : > "$ODO_REVIEW_MARKER/$model.started"
+    i=0
+    while [ $i -lt 100 ]; do
+      if [ -f "$ODO_REVIEW_MARKER/rm1.started" ] && [ -f "$ODO_REVIEW_MARKER/rm2.started" ]; then break; fi
+      i=$((i+1))
+      sleep 0.1
+    done
+    if [ ! -f "$ODO_REVIEW_MARKER/rm1.started" ] || [ ! -f "$ODO_REVIEW_MARKER/rm2.started" ]; then
+      echo "reviews ran sequentially" >&2
+      exit 1
+    fi
+    if [ "$model" = "rm1" ]; then
+      printf 'ACCEPT\nShip it.\n' > "$output_file"
+    else
+      printf 'REJECT\nNeeds tests.\n' > "$output_file"
+    fi
+    exit 0
+    ;;
+esac
+sleep 1
+cp "$prompt_file" hello.txt
+printf 'Created hello.txt as requested.\n' > "$output_file"
+exit 0
+`
+
+// TestReviewDiff covers the MoA review fan-out: the diff goes to every model
+// on the prefs.md review: line in parallel, verdicts and comments come back
+// in config order, and the result is journaled as a review_action event
+// (action "moa_review").
+func TestReviewDiff(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, reviewStubWrapper))
+	markerDir := t.TempDir()
+	t.Setenv("ODO_REVIEW_MARKER", markerDir)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff to review")
+	}
+	diffID := done.Diff.ID
+
+	// Without a review: line the command refuses.
+	resp := rig.callExpectErr(t, Request{Cmd: CmdReviewDiff, DiffID: diffID})
+	if !strings.Contains(resp.Error, "No review models configured.") {
+		t.Errorf("review without models: error = %q", resp.Error)
+	}
+	// A line whose entries are all malformed refuses too.
+	writePrefs(t, home, "review: not-a-model\n")
+	resp = rig.callExpectErr(t, Request{Cmd: CmdReviewDiff, DiffID: diffID})
+	if !strings.Contains(resp.Error, "No review models configured.") {
+		t.Errorf("malformed review line: error = %q", resp.Error)
+	}
+	// Missing diff_id is an error.
+	resp = rig.callExpectErr(t, Request{Cmd: CmdReviewDiff})
+	if !strings.Contains(resp.Error, "diff_id is required") {
+		t.Errorf("missing diff_id: error = %q", resp.Error)
+	}
+
+	// Two reviewers: prefs are re-read for every command.
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
+	rev := rig.call(t, Request{Cmd: CmdReviewDiff, DiffID: diffID})
+	if len(rev.Reviews) != 2 {
+		t.Fatalf("reviews = %d, want 2", len(rev.Reviews))
+	}
+	if want := (ReviewResult{Model: "rm1@test", Verdict: "accept", Comments: "Ship it."}); rev.Reviews[0] != want {
+		t.Errorf("review[0] = %+v, want %+v", rev.Reviews[0], want)
+	}
+	if want := (ReviewResult{Model: "rm2@test", Verdict: "reject", Comments: "Needs tests."}); rev.Reviews[1] != want {
+		t.Errorf("review[1] = %+v, want %+v", rev.Reviews[1], want)
+	}
+	// The marker files prove both reviewers started; the stub exits 1 when
+	// they did not overlap, which would have surfaced as a failed review
+	// (verdict needs_fixes, "review failed:" comments) above.
+	for _, m := range []string{"rm1", "rm2"} {
+		if _, err := os.Stat(filepath.Join(markerDir, m+".started")); err != nil {
+			t.Errorf("marker for %s missing: %v", m, err)
+		}
+	}
+
+	// The review is journaled as a review_action with action moa_review.
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	last := events[len(events)-1]
+	if last.Type != store.EventReviewAction {
+		t.Fatalf("last event = %s, want review_action", last.Type)
+	}
+	var payload struct {
+		Action  string `json:"action"`
+		DiffID  int64  `json:"diff_id"`
+		Reviews []struct {
+			Model   string `json:"model"`
+			Verdict string `json:"verdict"`
+		} `json:"reviews"`
+	}
+	if err := json.Unmarshal(last.Payload, &payload); err != nil {
+		t.Fatalf("review_action payload: %v", err)
+	}
+	if payload.Action != "moa_review" || payload.DiffID != diffID {
+		t.Errorf("review_action payload = action %q diff %d", payload.Action, payload.DiffID)
+	}
+	if len(payload.Reviews) != 2 {
+		t.Errorf("journaled reviews = %d, want 2", len(payload.Reviews))
+	}
+}
+
+// TestGetSettings covers get_settings: absent prefs yield the compiled-in
+// defaults; a full prefs.md overrides every field.
+func TestGetSettings(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	// No prefs.md yet: everything falls back to the adapter defaults.
+	got := rig.call(t, Request{Cmd: CmdGetSettings, ProjectRoot: root})
+	if got.Settings == nil {
+		t.Fatal("get_settings: settings missing")
+	}
+	want := Settings{
+		CodingModel:          "t9s/kimi-k3",
+		CodingProvider:       "sudo",
+		OrchestratorModel:    "t9s/kimi-k3",
+		OrchestratorProvider: "sudo",
+		OMPTimeout:           "600",
+		DefaultAdapter:       "omp",
+		ReviewModels:         "",
+	}
+	if *got.Settings != want {
+		t.Errorf("defaults = %+v, want %+v", *got.Settings, want)
+	}
+
+	// A full prefs.md overrides every field.
+	writePrefs(t, home, "# my prefs\ncoding: glm-5.2@sudo\norchestrator: orch-model@orch-prov\nreview: rm1@test,rm2@test\nomp_timeout: 900\ndefault_adapter: pi\n")
+	got = rig.call(t, Request{Cmd: CmdGetSettings, ProjectRoot: root})
+	want = Settings{
+		CodingModel:          "glm-5.2",
+		CodingProvider:       "sudo",
+		OrchestratorModel:    "orch-model",
+		OrchestratorProvider: "orch-prov",
+		OMPTimeout:           "900",
+		DefaultAdapter:       "pi",
+		ReviewModels:         "rm1@test,rm2@test",
+	}
+	if *got.Settings != want {
+		t.Errorf("from prefs = %+v, want %+v", *got.Settings, want)
+	}
+}
+
+// TestUpdateSettings covers update_settings: non-empty fields are updated in
+// place or appended, a half-given model pair keeps the file's other half,
+// and unmanaged lines pass through untouched.
+func TestUpdateSettings(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	writePrefs(t, home, "# my prefs\ncoding: glm-5.2@sudo\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	// A request without a settings object is an error.
+	resp := rig.callExpectErr(t, Request{Cmd: CmdUpdateSettings, ProjectRoot: root})
+	if !strings.Contains(resp.Error, "settings object is required") {
+		t.Errorf("nil settings: error = %q", resp.Error)
+	}
+
+	upd := rig.call(t, Request{
+		Cmd:         CmdUpdateSettings,
+		ProjectRoot: root,
+		Settings: &Settings{
+			CodingModel:    "t9s/kimi-k3", // provider keeps the file's "sudo"
+			ReviewModels:   "rm1@test,rm2@test",
+			OMPTimeout:     "900",
+			DefaultAdapter: "pi",
+		},
+	})
+	s := *upd.Settings
+	if s.CodingModel != "t9s/kimi-k3" || s.CodingProvider != "sudo" {
+		t.Errorf("coding after update = %s@%s", s.CodingModel, s.CodingProvider)
+	}
+	if s.ReviewModels != "rm1@test,rm2@test" || s.OMPTimeout != "900" || s.DefaultAdapter != "pi" {
+		t.Errorf("settings after update = %+v", s)
+	}
+
+	// Exact rewrite: comment kept, coding updated in place, new keys appended.
+	content, err := os.ReadFile(filepath.Join(home, ".odo", "prefs.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# my prefs\ncoding: t9s/kimi-k3@sudo\nreview: rm1@test,rm2@test\nomp_timeout: 900\ndefault_adapter: pi\n"
+	if string(content) != want {
+		t.Errorf("prefs.md = %q, want %q", content, want)
+	}
+
+	// A later update touching one key leaves everything else byte-identical.
+	rig.call(t, Request{
+		Cmd:         CmdUpdateSettings,
+		ProjectRoot: root,
+		Settings:    &Settings{OMPTimeout: "1200"},
+	})
+	content, err = os.ReadFile(filepath.Join(home, ".odo", "prefs.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "# my prefs\ncoding: t9s/kimi-k3@sudo\nreview: rm1@test,rm2@test\nomp_timeout: 1200\ndefault_adapter: pi\n"
+	if string(content) != want {
+		t.Errorf("prefs.md after second update = %q, want %q", content, want)
+	}
+}
+
+// TestFanoutSend covers parallel agent fan-out: one message starts N runs,
+// each producing its own diff in its own worktree; the runs are tracked in
+// poll_events while active, and reviewing one diff retires only its own
+// run, leaving sibling diffs reviewable.
+func TestFanoutSend(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sent := rig.call(t, Request{Cmd: CmdFanoutSend, ConversationID: convID, Text: "Create hello.txt", N: 2})
+	if sent.Event == nil || sent.Event.Type != store.EventUserMessage {
+		t.Fatalf("fanout_send: bad event %+v", sent.Event)
+	}
+	if len(sent.Runs) != 2 {
+		t.Fatalf("fanout_send: runs = %d, want 2", len(sent.Runs))
+	}
+	for _, r := range sent.Runs {
+		if r.Status != "running" {
+			t.Errorf("run %s status = %q, want running", r.RunID, r.Status)
+		}
+	}
+	if sent.Runs[0].RunID == sent.Runs[1].RunID {
+		t.Error("fanout runs share a run id")
+	}
+
+	// A plain send is refused while the fan-out runs.
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "more work"})
+	if !strings.Contains(resp.Error, "already running") {
+		t.Errorf("send during fanout: error = %q", resp.Error)
+	}
+
+	// Both runs finish and report done; each journaled its own agent events.
+	done := rig.pollUntilDone(t, convID)
+	if len(done.Runs) != 2 {
+		t.Fatalf("final poll: runs = %d, want 2", len(done.Runs))
+	}
+	for _, r := range done.Runs {
+		if r.Status != "done" {
+			t.Errorf("run %s final status = %q, want done", r.RunID, r.Status)
+		}
+	}
+	var texts, dones int
+	for _, e := range rig.allEventTypes(t, convID) {
+		switch e {
+		case store.EventAgentText:
+			texts++
+		case store.EventAgentDone:
+			dones++
+		}
+	}
+	if texts != 2 || dones != 2 {
+		t.Errorf("agent events: %d texts, %d dones; want 2 each", texts, dones)
+	}
+
+	// Each run produced its own pending diff (distinct files, both real).
+	rows, err := rig.store.DB().QueryContext(context.Background(),
+		`SELECT id, path_on_disk, status FROM diffs WHERE conversation_id = ? ORDER BY id`, convID)
+	if err != nil {
+		t.Fatalf("list diffs: %v", err)
+	}
+	defer rows.Close()
+	var diffIDs []int64
+	var diffPaths []string
+	for rows.Next() {
+		var id int64
+		var path, status string
+		if err := rows.Scan(&id, &path, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status != store.DiffPending {
+			t.Errorf("diff %d status = %q, want pending", id, status)
+		}
+		diffIDs = append(diffIDs, id)
+		diffPaths = append(diffPaths, path)
+	}
+	if len(diffIDs) != 2 {
+		t.Fatalf("diffs = %d, want 2", len(diffIDs))
+	}
+	if diffPaths[0] == diffPaths[1] {
+		t.Error("both diffs share a path")
+	}
+	for _, p := range diffPaths {
+		b, err := os.ReadFile(p)
+		if err != nil || !strings.Contains(string(b), "hello.txt") {
+			t.Errorf("diff %s missing hello.txt (err=%v)", p, err)
+		}
+	}
+
+	// Accepting one diff retires only its own run and worktree.
+	acc := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: diffIDs[0]})
+	if !acc.Applied {
+		t.Error("accept_diff: applied must be true")
+	}
+	poll := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
+	if len(poll.Runs) != 1 {
+		t.Fatalf("runs after first review = %d, want 1", len(poll.Runs))
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".odo", "worktrees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("worktrees after first review = %d, want 1", len(entries))
+	}
+	d, err := rig.store.GetDiff(context.Background(), diffIDs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Status != store.DiffPending {
+		t.Errorf("sibling diff status = %q, want pending", d.Status)
+	}
+
+	// Rejecting the sibling diff retires it too; the fan-out is drained.
+	rig.call(t, Request{Cmd: CmdRejectDiff, DiffID: diffIDs[1]})
+	poll = rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
+	if len(poll.Runs) != 0 {
+		t.Errorf("runs after both reviews = %d, want 0", len(poll.Runs))
+	}
+	entries, err = os.ReadDir(filepath.Join(root, ".odo", "worktrees"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("worktrees after both reviews = %d, want 0", len(entries))
 	}
 }

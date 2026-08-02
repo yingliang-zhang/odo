@@ -3,8 +3,13 @@
 package ipc
 
 import (
+	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
+
+// Settings aliases the adapter package's settings shape so IPC payloads and
+// prefs.md handling share one definition.
+type Settings = adapter.Settings
 
 // Commands.
 const (
@@ -16,21 +21,40 @@ const (
 	CmdCreateWorkstream = "create_workstream"
 	CmdListWorkstreams  = "list_workstreams"
 	CmdDistill          = "distill"
+	CmdReviewDiff       = "review_diff"
+	CmdGetSettings      = "get_settings"
+	CmdUpdateSettings   = "update_settings"
+	CmdFanoutSend       = "fanout_send"
 )
 
 // Request is one command line on the socket.
 type Request struct {
-	Cmd            string   `json:"cmd"`
-	ProjectRoot    string   `json:"project_root,omitempty"`
-	ConversationID int64    `json:"conversation_id,omitempty"`
-	WorkstreamID   int64    `json:"workstream_id,omitempty"`
-	Name           string   `json:"name,omitempty"`
-	Text           string   `json:"text,omitempty"`
-	Attachments    []string `json:"attachments,omitempty"`
-	AfterSeq       int      `json:"after_seq,omitempty"`
-	DiffID         int64    `json:"diff_id,omitempty"`
-	Steer          bool     `json:"steer,omitempty"`
-	Adapter        string   `json:"adapter,omitempty"`
+	Cmd            string    `json:"cmd"`
+	ProjectRoot    string    `json:"project_root,omitempty"`
+	ConversationID int64     `json:"conversation_id,omitempty"`
+	WorkstreamID   int64     `json:"workstream_id,omitempty"`
+	Name           string    `json:"name,omitempty"`
+	Text           string    `json:"text,omitempty"`
+	Attachments    []string  `json:"attachments,omitempty"`
+	AfterSeq       int       `json:"after_seq,omitempty"`
+	DiffID         int64     `json:"diff_id,omitempty"`
+	Steer          bool      `json:"steer,omitempty"`
+	Adapter        string    `json:"adapter,omitempty"`
+	N              int       `json:"n,omitempty"`
+	Settings       *Settings `json:"settings,omitempty"`
+}
+
+// ReviewResult is one model's verdict on a diff (MoA review fan-out).
+type ReviewResult struct {
+	Model    string `json:"model"`
+	Verdict  string `json:"verdict"` // "accept" | "reject" | "needs_fixes"
+	Comments string `json:"comments"`
+}
+
+// RunInfo reports the status of one fan-out run.
+type RunInfo struct {
+	RunID  string `json:"run_id"`
+	Status string `json:"status"` // "running" | "done" | "error"
 }
 
 // DiffInfo carries a diff record plus its file content to the client.
@@ -58,4 +82,7 @@ type Response struct {
 	Applied      bool                `json:"applied,omitempty"`
 	WikiPath     string              `json:"wiki_path,omitempty"`
 	Epoch        int                 `json:"epoch,omitempty"`
+	Reviews      []ReviewResult      `json:"reviews,omitempty"`
+	Runs         []RunInfo           `json:"runs,omitempty"`
+	Settings     *Settings           `json:"settings,omitempty"`
 }

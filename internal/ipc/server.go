@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -34,6 +35,7 @@ type runMeta struct {
 	worktreePath   string
 	consumed       int  // adapter events already journaled
 	finished       bool // terminal adapter event (done/error) journaled
+	errored        bool // terminal adapter event was agent_error
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -45,8 +47,9 @@ type Server struct {
 	distillAdapter adapter.Adapter            // uses orchestrator model from prefs.md
 	mgr            *worktree.Manager
 
-	runs   map[string]*runMeta // adapter runID -> meta
-	byConv map[int64]string    // conversationID -> adapter runID (active run)
+	runs       map[string]*runMeta // adapter runID -> meta
+	byConv     map[int64]string    // conversationID -> adapter runID (active run)
+	fanoutRuns map[int64][]string  // conversationID -> fan-out adapter runIDs (kept until their diffs are reviewed)
 }
 
 // NewServer builds a Server bound to one project root. ad becomes the default
@@ -59,6 +62,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		mgr:         mgr,
 		runs:        make(map[string]*runMeta),
 		byConv:      make(map[int64]string),
+		fanoutRuns:  make(map[int64][]string),
 	}
 	s.adapters[""] = ad
 	s.adapters["omp"] = ad
@@ -139,9 +143,17 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	case CmdPollEvents:
 		resp, err = s.handlePollEvents(ctx, req)
 	case CmdAcceptDiff:
-		resp, err = s.handleReviewDiff(ctx, req.DiffID, "accept")
+		resp, err = s.handleDiffAction(ctx, req.DiffID, "accept")
 	case CmdRejectDiff:
-		resp, err = s.handleReviewDiff(ctx, req.DiffID, "reject")
+		resp, err = s.handleDiffAction(ctx, req.DiffID, "reject")
+	case CmdReviewDiff:
+		resp, err = s.handleReviewDiff(ctx, req)
+	case CmdGetSettings:
+		resp, err = s.handleGetSettings(ctx, req)
+	case CmdUpdateSettings:
+		resp, err = s.handleUpdateSettings(ctx, req)
+	case CmdFanoutSend:
+		resp, err = s.handleFanoutSend(ctx, req)
 	case CmdDistill:
 		resp, err = s.handleDistill(ctx, req)
 	default:
@@ -297,6 +309,9 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 			return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 		}
 	}
+	if s.fanoutActive(c.ID) {
+		return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
+	}
 
 	// Journal the user message with attachments (spec item 5).
 	msgPayload := map[string]interface{}{"text": req.Text}
@@ -308,13 +323,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		return Response{}, err
 	}
 
-	// Build the prompt for the agent. If attachments are present, inject
-	// the file paths so the agent reads them before proceeding.
-	prompt := req.Text
-	if len(req.Attachments) > 0 {
-		prompt = fmt.Sprintf("Attached files: %s. Read them before proceeding.\n\n%s",
-			strings.Join(req.Attachments, ", "), req.Text)
-	}
+	prompt := buildPrompt(req.Text, req.Attachments)
 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
@@ -346,6 +355,114 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	s.runs[runID] = meta
 	s.byConv[c.ID] = runID
 	return Response{Event: &ev}, nil
+}
+
+// buildPrompt renders the agent prompt for a user message. If attachments
+// are present, the file paths are injected so the agent reads them before
+// proceeding.
+func buildPrompt(text string, attachments []string) string {
+	if len(attachments) == 0 {
+		return text
+	}
+	return fmt.Sprintf("Attached files: %s. Read them before proceeding.\n\n%s",
+		strings.Join(attachments, ", "), text)
+}
+
+// handleFanoutSend journals the user message once and starts N parallel
+// agent runs sharing the conversation, each in its own worktree. Polling
+// drains and reviews each run independently, producing one diff per run.
+func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, error) {
+	if req.Text == "" {
+		return Response{}, fmt.Errorf("fanout_send: text is required")
+	}
+	n := req.N
+	if n < 1 {
+		n = 2 // default fan-out width when the client sends no count
+	}
+	c, err := s.checkConversation(ctx, req.ConversationID)
+	if err != nil {
+		return Response{}, err
+	}
+	ad, ok := s.adapters[req.Adapter]
+	if req.Adapter != "" && !ok {
+		return Response{}, fmt.Errorf("fanout_send: unknown adapter %q", req.Adapter)
+	}
+	if runID, ok := s.byConv[c.ID]; ok {
+		if meta := s.runs[runID]; meta != nil && !meta.finished {
+			return Response{}, fmt.Errorf("fanout_send: agent already running for conversation %d", c.ID)
+		}
+	}
+	if s.fanoutActive(c.ID) {
+		return Response{}, fmt.Errorf("fanout_send: agent already running for conversation %d", c.ID)
+	}
+
+	msgPayload := map[string]interface{}{"text": req.Text}
+	if len(req.Attachments) > 0 {
+		msgPayload["attachments"] = req.Attachments
+	}
+	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
+	if err != nil {
+		return Response{}, err
+	}
+
+	prompt := buildPrompt(req.Text, req.Attachments)
+
+	// All-or-nothing: a failed setup cancels every run started so far so no
+	// orphan agent process or worktree is left behind.
+	runs := make([]RunInfo, 0, n)
+	started := make([]*runMeta, 0, n)
+	for range n {
+		runDirID := worktree.NewRunID()
+		wtPath, err := s.mgr.Create(runDirID)
+		if err != nil {
+			s.cancelFanout(ctx, ad, started)
+			return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("fanout_send: create worktree: %w", err))
+		}
+		runID, err := ad.Start(ctx, wtPath, prompt)
+		if err != nil {
+			_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
+			s.cancelFanout(ctx, ad, started)
+			return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("fanout_send: start agent: %w", err))
+		}
+		meta := &runMeta{
+			runID:          runID,
+			runDirID:       runDirID,
+			adapter:        req.Adapter,
+			conversationID: c.ID,
+			workstreamID:   c.WorkstreamID,
+			worktreePath:   wtPath,
+		}
+		s.runs[runID] = meta
+		s.fanoutRuns[c.ID] = append(s.fanoutRuns[c.ID], runID)
+		started = append(started, meta)
+		runs = append(runs, RunInfo{RunID: runID, Status: "running"})
+	}
+	return Response{Event: &ev, Runs: runs}, nil
+}
+
+// cancelFanout unwinds the fan-out runs that already started after a sibling
+// run's setup failed.
+func (s *Server) cancelFanout(ctx context.Context, ad adapter.Adapter, started []*runMeta) {
+	for _, meta := range started {
+		_ = ad.Cancel(ctx, meta.runID)
+		_ = ad.Close(ctx, meta.runID)
+		delete(s.runs, meta.runID)
+		ids := s.fanoutRuns[meta.conversationID]
+		for i, id := range ids {
+			if id == meta.runID {
+				ids = append(ids[:i], ids[i+1:]...)
+				break
+			}
+		}
+		if len(ids) == 0 {
+			delete(s.fanoutRuns, meta.conversationID)
+		} else {
+			s.fanoutRuns[meta.conversationID] = ids
+		}
+		if err := s.mgr.Remove(meta.worktreePath); err != nil {
+			log.Printf("fanout_send: remove worktree %s: %v", meta.worktreePath, err)
+		}
+	}
 }
 
 // handleSteering journals a steering message for a conversation without
@@ -381,16 +498,24 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 }
 
 // handlePollEvents drains finished-run adapter events into the journal,
-// extracts the run's diff once, then returns journal events after afterSeq.
+// extracts each run's diff once, then returns journal events after afterSeq.
+// Fan-out conversations drain every tracked run and report all of them in
+// the runs field.
 func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, error) {
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
 	}
 
-	agentRunning := false
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
+			if err := s.drainRun(ctx, meta); err != nil {
+				return Response{}, err
+			}
+		}
+	}
+	for _, id := range s.fanoutRuns[c.ID] {
+		if meta := s.runs[id]; meta != nil && !meta.finished {
 			if err := s.drainRun(ctx, meta); err != nil {
 				return Response{}, err
 			}
@@ -401,6 +526,7 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 	if err != nil {
 		return Response{}, err
 	}
+	agentRunning := s.fanoutActive(c.ID)
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			agentRunning = true
@@ -410,7 +536,43 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 		Events:       events,
 		AgentRunning: new(agentRunning),
 		Diff:         s.latestDiffInfo(ctx, c.ID),
+		Runs:         s.runInfos(c.ID),
 	}, nil
+}
+
+// fanoutActive reports whether any fan-out run for the conversation is still
+// unfinished.
+func (s *Server) fanoutActive(conversationID int64) bool {
+	for _, id := range s.fanoutRuns[conversationID] {
+		if meta := s.runs[id]; meta != nil && !meta.finished {
+			return true
+		}
+	}
+	return false
+}
+
+// runInfos snapshots all tracked fan-out runs for the conversation — running,
+// done, and errored alike. A run leaves the list only when its diff is
+// reviewed (retireRunForDiff drops it).
+func (s *Server) runInfos(conversationID int64) []RunInfo {
+	ids := s.fanoutRuns[conversationID]
+	if len(ids) == 0 {
+		return nil
+	}
+	infos := make([]RunInfo, 0, len(ids))
+	for _, id := range ids {
+		status := "done"
+		if meta := s.runs[id]; meta != nil {
+			switch {
+			case !meta.finished:
+				status = "running"
+			case meta.errored:
+				status = "error"
+			}
+		}
+		infos = append(infos, RunInfo{RunID: id, Status: status})
+	}
+	return infos
 }
 
 // drainRun pulls new adapter events into the journal once. When the terminal
@@ -432,6 +594,7 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	if t := evs[len(evs)-1].Type; t != store.EventAgentDone && t != store.EventAgentError {
 		return nil // more events to come (not reached in M0: terminal batch is atomic)
 	}
+	meta.errored = evs[len(evs)-1].Type == store.EventAgentError
 
 	// The diff is extracted whether the run succeeded or failed: partial
 	// changes are reviewable, and the human decides. (ADR-0001.)
@@ -457,10 +620,10 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	return nil
 }
 
-// handleReviewDiff implements accept_diff and reject_diff. Accept applies the
+// handleDiffAction implements accept_diff and reject_diff. Accept applies the
 // diff to the user's working tree with git apply (the visible loop closes
 // here). Both journal a review_action and retire the run's worktree.
-func (s *Server) handleReviewDiff(ctx context.Context, diffID int64, action string) (Response, error) {
+func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action string) (Response, error) {
 	if diffID == 0 {
 		return Response{}, fmt.Errorf("%s_diff: diff_id is required", action)
 	}
@@ -507,8 +670,38 @@ func (s *Server) handleReviewDiff(ctx context.Context, diffID int64, action stri
 		return Response{}, err
 	}
 
-	s.retireRun(ctx, d.ConversationID)
+	s.retireRunForDiff(ctx, d)
 	return Response{DiffID: diffID, Applied: applied}, nil
+}
+
+// retireRunForDiff releases resources after a diff review. A fan-out run is
+// retired individually — only the run whose diff was reviewed is closed and
+// its worktree removed, leaving sibling runs reviewable. Everything else
+// takes the whole-conversation retirement. (Fan-out run tracking is
+// in-memory only: after a daemon restart a reviewed fan-out diff leaves its
+// worktree to `git worktree prune`, same as any crash-orphaned worktree.)
+func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
+	// The diff file basename is the run's runDirID (see worktree.DiffPath).
+	runDirID := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
+	if ids, ok := s.fanoutRuns[d.ConversationID]; ok {
+		for i, id := range ids {
+			meta := s.runs[id]
+			if meta == nil || meta.runDirID != runDirID {
+				continue
+			}
+			_ = s.adapterFor(meta.adapter).Close(ctx, id)
+			delete(s.runs, id)
+			s.fanoutRuns[d.ConversationID] = append(ids[:i], ids[i+1:]...)
+			if len(s.fanoutRuns[d.ConversationID]) == 0 {
+				delete(s.fanoutRuns, d.ConversationID)
+			}
+			if err := s.mgr.Remove(meta.worktreePath); err != nil {
+				log.Printf("ipc: retire fanout run: remove worktree %s: %v", meta.worktreePath, err)
+			}
+			return
+		}
+	}
+	s.retireRun(ctx, d.ConversationID)
 }
 
 // retireRun closes the adapter run and removes the worktree for a concluded
@@ -545,6 +738,153 @@ func (s *Server) retireRun(ctx context.Context, conversationID int64) {
 	}
 }
 
+// moaReviewTimeout bounds each parallel review run. The adapter wrapper
+// applies its own timeout (default 600s); a skew between the two only
+// changes which error message lands in the review comments.
+const moaReviewTimeout = 5 * time.Minute
+
+// reviewModel is one parsed entry of the prefs.md `review:` line.
+type reviewModel struct {
+	model    string
+	provider string
+}
+
+// handleReviewDiff implements review_diff: the diff is fanned out to every
+// model on the prefs.md `review:` line, each as a one-shot OMP run in a temp
+// directory (the distill pattern). Reviews run in parallel; the call blocks
+// until all finish — like distill, it blocks the single-connection daemon.
+// Results are journaled as a review_action event with action "moa_review".
+func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, error) {
+	if req.DiffID == 0 {
+		return Response{}, fmt.Errorf("review_diff: diff_id is required")
+	}
+	d, err := s.store.GetDiff(ctx, req.DiffID)
+	if err != nil {
+		return Response{}, err
+	}
+	content, err := os.ReadFile(d.PathOnDisk)
+	if err != nil {
+		return Response{}, fmt.Errorf("review_diff: read diff: %w", err)
+	}
+	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
+	if len(models) == 0 {
+		return Response{}, errors.New("No review models configured.")
+	}
+
+	reviews := make([]ReviewResult, len(models))
+	var wg sync.WaitGroup
+	for i, m := range models {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reviews[i] = s.reviewWithModel(ctx, m, string(content))
+		}()
+	}
+	wg.Wait()
+
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action":  "moa_review",
+		"diff_id": d.ID,
+		"reviews": reviews,
+	})); err != nil {
+		return Response{}, err
+	}
+	return Response{Reviews: reviews}, nil
+}
+
+// reviewWithModel runs the review prompt through one explicit-model OMP
+// adapter and parses the verdict. A failed run degrades to needs_fixes with
+// the error as comments: a review that never happened must not read as an
+// accept.
+func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, diffContent string) ReviewResult {
+	label := m.model + "@" + m.provider
+	ad := adapter.NewOMPExplicit(s.mgr.StateDir(), m.model, m.provider)
+	text, err := runOneShot(ctx, ad, reviewPrompt(diffContent), moaReviewTimeout)
+	if err != nil {
+		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error()}
+	}
+	return parseVerdict(label, text)
+}
+
+// parseReviewModels parses the comma-separated `review:` prefs value into
+// model/provider pairs, skipping blank and malformed entries.
+func parseReviewModels(raw string) []reviewModel {
+	var out []reviewModel
+	for entry := range strings.SplitSeq(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		model, provider := adapter.ParseModelProvider(entry)
+		if model == "" {
+			continue
+		}
+		out = append(out, reviewModel{model: model, provider: provider})
+	}
+	return out
+}
+
+// reviewPrompt wraps the diff content with the MoA review instruction.
+func reviewPrompt(diffContent string) string {
+	return "Review the following diff. Provide your verdict and comments.\n\n" +
+		"Verdict must be one of: ACCEPT, REJECT, NEEDS_FIXES\n\n" + diffContent
+}
+
+// parseVerdict extracts the verdict (the first line containing ACCEPT,
+// REJECT, or NEEDS_FIXES) and the comments (everything after that line).
+// Output with no recognizable verdict degrades to needs_fixes with the full
+// text as comments — an unparseable review must never read as an accept.
+func parseVerdict(model, text string) ReviewResult {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		up := strings.ToUpper(line)
+		verdict := ""
+		switch {
+		case strings.Contains(up, "NEEDS_FIXES"):
+			verdict = "needs_fixes"
+		case strings.Contains(up, "REJECT"):
+			verdict = "reject"
+		case strings.Contains(up, "ACCEPT"):
+			verdict = "accept"
+		}
+		if verdict != "" {
+			return ReviewResult{
+				Model:    model,
+				Verdict:  verdict,
+				Comments: strings.TrimSpace(strings.Join(lines[i+1:], "\n")),
+			}
+		}
+	}
+	return ReviewResult{Model: model, Verdict: "needs_fixes", Comments: strings.TrimSpace(text)}
+}
+
+// handleGetSettings returns the effective daemon settings: prefs.md values
+// where present, compiled-in adapter defaults elsewhere.
+func (s *Server) handleGetSettings(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("get_settings: %w", err)
+	}
+	st := adapter.ReadSettings()
+	return Response{Settings: &st}, nil
+}
+
+// handleUpdateSettings writes the request's non-empty fields to prefs.md and
+// returns the resulting effective settings. The daemon is not restarted —
+// adapters re-read prefs on every run, so changes take effect on next run.
+func (s *Server) handleUpdateSettings(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("update_settings: %w", err)
+	}
+	if req.Settings == nil {
+		return Response{}, fmt.Errorf("update_settings: settings object is required")
+	}
+	if err := adapter.UpdateSettings(*req.Settings); err != nil {
+		return Response{}, err
+	}
+	st := adapter.ReadSettings()
+	return Response{Settings: &st}, nil
+}
+
 // distillTimeout bounds the blocking distill agent run. The adapter wrapper
 // applies its own timeout on a similar scale; a skew between the two only
 // changes which error message the user sees.
@@ -565,6 +905,9 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			return Response{}, fmt.Errorf("distill: agent still running for conversation %d", c.ID)
 		}
+	}
+	if s.fanoutActive(c.ID) {
+		return Response{}, fmt.Errorf("distill: agent still running for conversation %d", c.ID)
 	}
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
 	if err != nil {
@@ -603,27 +946,33 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	return Response{WikiPath: wikiPath, Epoch: newEpoch}, nil
 }
 
-// runDistillAgent runs the summary prompt through the default adapter in a
-// temp directory and returns the concatenated agent_text output (the wiki
-// note body). It blocks until the run's terminal event or distillTimeout.
+// runDistillAgent runs the summary prompt through the orchestrator adapter
+// as a one-shot run and returns the wiki note body.
 func (s *Server) runDistillAgent(ctx context.Context, events []store.Event) (string, error) {
 	ad := s.distillAdapter
 	if ad == nil {
 		ad = s.adapters[""] // fallback to default if distill adapter not configured
 	}
-	tmpDir, err := os.MkdirTemp("", "odo-distill-")
+	return runOneShot(ctx, ad, distillPrompt(events), distillTimeout)
+}
+
+// runOneShot runs prompt through ad in a throwaway directory, blocking until
+// the run's terminal event or timeout, and returns the concatenated
+// agent_text output. Distill and the MoA review fan-out both use it.
+func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout time.Duration) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "odo-oneshot-")
 	if err != nil {
-		return "", fmt.Errorf("distill dir: %w", err)
+		return "", fmt.Errorf("oneshot dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	runID, err := ad.Start(ctx, tmpDir, distillPrompt(events))
+	runID, err := ad.Start(ctx, tmpDir, prompt)
 	if err != nil {
-		return "", fmt.Errorf("start distill run: %w", err)
+		return "", fmt.Errorf("start run: %w", err)
 	}
 	defer ad.Close(ctx, runID)
 
-	deadline := time.Now().Add(distillTimeout)
+	deadline := time.Now().Add(timeout)
 	consumed := 0
 	var texts []string
 	var runErr string
@@ -652,18 +1001,18 @@ func (s *Server) runDistillAgent(ctx context.Context, events []store.Event) (str
 		}
 		if time.Now().After(deadline) {
 			_ = ad.Cancel(ctx, runID)
-			return "", fmt.Errorf("distill run timed out")
+			return "", fmt.Errorf("run timed out")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	note := strings.Join(texts, "\n\n")
-	if note == "" {
+	out := strings.Join(texts, "\n\n")
+	if out == "" {
 		if runErr != "" {
 			return "", errors.New(runErr)
 		}
-		return "", fmt.Errorf("distill run produced no summary")
+		return "", fmt.Errorf("run produced no output")
 	}
-	return note, nil
+	return out, nil
 }
 
 // distillPrompt renders journaled events into the summary prompt: the M1

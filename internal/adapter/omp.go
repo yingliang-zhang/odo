@@ -35,10 +35,12 @@ const (
 
 // OMP is the M0 Adapter backed by the Hermes OMP wrapper script.
 type OMP struct {
-	wrapperPath string
-	stateDir    string // <project>/.odo; prompt/session/output files live here
-	timeout     string
-	prefsKey    string // prefs.md key to read model from ("coding" or "orchestrator")
+	wrapperPath      string
+	stateDir         string // <project>/.odo; prompt/session/output files live here
+	timeout          string
+	prefsKey         string // prefs.md key to read model from ("coding" or "orchestrator")
+	modelOverride    string // non-empty: bypass prefs.md for the model
+	providerOverride string // non-empty: bypass prefs.md for the provider
 
 	mu           sync.Mutex // guards runs + configLogged; run results sync via done channel
 	runs         map[string]*ompRun
@@ -107,52 +109,30 @@ func NewOMPForKey(stateDir, key string) *OMP {
 	return o
 }
 
-// loadPrefs reads ~/.odo/prefs.md and parses the `key: model@provider`
-// line (e.g. `coding: t9s/kimi-k3@sudo`). The `@` separator splits at the
-// last occurrence so model names may themselves contain `@`. Returns empty
-// strings when the file is missing/unreadable or the line is
-// absent/malformed.
-func loadPrefsByKey(key string) (model, provider string) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", ""
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".odo", "prefs.md"))
-	if err != nil {
-		return "", ""
-	}
-	prefix := key + ":"
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		val := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-		at := strings.LastIndex(val, "@")
-		if at <= 0 || at == len(val)-1 {
-			return "", "" // line present but malformed
-		}
-		model = strings.TrimSpace(val[:at])
-		provider = strings.TrimSpace(val[at+1:])
-		if model == "" || provider == "" {
-			return "", ""
-		}
-		return model, provider
-	}
-	return "", ""
-}
-
-// loadPrefs reads the `coding:` key (backwards-compatible wrapper).
-func loadPrefs() (model, provider string) {
-	return loadPrefsByKey("coding")
+// NewOMPExplicit creates an OMP adapter with an explicit model/provider pair,
+// bypassing prefs.md. The MoA review fan-out uses it so each reviewer runs
+// its own configured model.
+func NewOMPExplicit(stateDir, model, provider string) *OMP {
+	o := NewOMP(stateDir)
+	o.modelOverride = model
+	o.providerOverride = provider
+	return o
 }
 
 // resolveModelConfig resolves the wrapper's --hermes-model / --hermes-provider
-// args from ~/.odo/prefs.md, re-read on every call so prefs edits apply to the
-// next run without a daemon restart. Falls back to the M0 defaults. The
-// resolved pair is logged to stderr once (first use) for debugging.
+// args. Explicit overrides (NewOMPExplicit) win; otherwise ~/.odo/prefs.md is
+// re-read on every call so prefs edits apply to the next run without a daemon
+// restart. Falls back to the M0 defaults. The resolved pair is logged to
+// stderr once (first use) for debugging.
 func (a *OMP) resolveModelConfig() (model, providerArg string) {
-	model, provider := loadPrefsByKey(a.prefsKey)
+	model, provider := a.modelOverride, a.providerOverride
+	pModel, pProvider := LoadPrefsByKey(a.prefsKey)
+	if model == "" {
+		model = pModel
+	}
+	if provider == "" {
+		provider = pProvider
+	}
 	if model == "" {
 		model = defaultModel
 	}
@@ -198,7 +178,7 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 
 	model, providerArg := a.resolveModelConfig()
 	args := []string{
-		a.timeout,
+		resolveTimeout(a.timeout),
 		promptFile,
 		outputFile,
 		"--workflow", "coupled-v1",
