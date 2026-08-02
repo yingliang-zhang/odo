@@ -105,3 +105,24 @@ HEAD: 378d837
 - Frontend (a510def): workstream sidebar, steering input, distill button, adapter selector. 8 files, +743 lines. tsc + vite + cargo check pass.
 - Dual-model review dispatched (GLM-5.2 + K3, parallel, 900s each).
 - HEAD: a510def
+
+### M1 review fixes (bd86530)
+
+4 fixes from dual-model review (GLM-5.2 + K3, both NEEDS FIXES):
+1. Distiller uses orchestrator model (NewOMPForKey "orchestrator")
+2. Worktree leak on UpdateWorkstreamWorktree failure
+3. Steering error message conditional ("not supported" only)
+4. UI epoch filter (ChatSurface shows only current epoch)
+
+### M1 E2E verification (69d3d71)
+
+- Daemon-level E2E: 26/26 passed (M0 visible loop + M0.1 polish + M1 multi-workstream/steering/distill/Pi)
+- GUI automated test (cua-driver AX tree): 13/16 passed (3 unverifiable due to no Screen Recording permission)
+- Go unit tests: all pass (adapter 3s + ipc 24s + store 1s)
+- Attachment test added (TestAttachmentsJournal) — gap identified by GLM-5.2 verification
+- Dual-model verification: GLM-5.2 ACCEPT + K3 ACCEPT
+
+### M1 milestone — CLOSED (2026-08-02)
+
+Dual-model verification passed. All M0→M1 features validated via automated tests.
+HEAD: 69d3d71
