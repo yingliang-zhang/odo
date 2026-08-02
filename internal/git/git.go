@@ -66,6 +66,17 @@ func ApplyDiff(repoPath, diffPath string) error {
 	return err
 }
 
+// CommitAll stages all changes and creates a commit with the given message.
+// Used after applying a diff so the next worktree (created from HEAD) includes
+// the accepted files. Requires git user.name and user.email to be configured.
+func CommitAll(repoPath, message string) error {
+	if _, err := run(repoPath, "add", "-A"); err != nil {
+		return err
+	}
+	_, err := run(repoPath, "commit", "-m", message, "--no-verify")
+	return err
+}
+
 // CurrentSHA returns the full HEAD commit SHA of repoPath.
 func CurrentSHA(repoPath string) (string, error) {
 	out, err := run(repoPath, "rev-parse", "HEAD")

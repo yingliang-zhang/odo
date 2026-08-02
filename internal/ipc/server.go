@@ -329,6 +329,15 @@ func (s *Server) handleReviewDiff(ctx context.Context, diffID int64, action stri
 			// Stay pending: review didn't conclude. The git error text says why.
 			return Response{}, fmt.Errorf("accept_diff: apply: %w", err)
 		}
+		// Commit the applied diff so the next worktree (created from HEAD)
+		// includes all previously accepted files. Without this, files applied
+		// via `git apply` but never committed don't appear in new worktrees,
+		// and the agent can't modify them in isolation.
+		if err := git.CommitAll(s.projectRoot, fmt.Sprintf("odo: accept diff #%d", diffID)); err != nil {
+			// Non-fatal: the file is already applied to the working tree.
+			// The commit just ensures worktree freshness for future runs.
+			log.Printf("accept_diff: auto-commit failed (non-fatal): %v", err)
+		}
 		applied = true
 	}
 
