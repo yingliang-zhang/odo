@@ -66,6 +66,27 @@ func (s *Store) UpdateDiffStatus(ctx context.Context, diffID int64, status strin
 	return nil
 }
 
+// ListPendingDiffs returns all pending diffs for a conversation, ordered by id.
+func (s *Store) ListPendingDiffs(ctx context.Context, conversationID int64) ([]Diff, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, conversation_id, path_on_disk, base_sha, status, created_at
+		 FROM diffs WHERE conversation_id = ? AND status = ? ORDER BY id`,
+		conversationID, DiffPending)
+	if err != nil {
+		return nil, fmt.Errorf("store: list pending diffs: %w", err)
+	}
+	defer rows.Close()
+	var diffs []Diff
+	for rows.Next() {
+		d, err := s.scanDiff(rows)
+		if err != nil {
+			return nil, err
+		}
+		diffs = append(diffs, d)
+	}
+	return diffs, rows.Err()
+}
+
 func (s *Store) scanDiff(row interface{ Scan(...interface{}) error }) (Diff, error) {
 	var d Diff
 	err := row.Scan(&d.ID, &d.ConversationID, &d.PathOnDisk, &d.BaseSHA, &d.Status, &d.CreatedAt)

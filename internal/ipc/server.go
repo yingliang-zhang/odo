@@ -379,6 +379,9 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 	if n < 1 {
 		n = 2 // default fan-out width when the client sends no count
 	}
+	if n > 8 {
+		return Response{}, fmt.Errorf("fanout_send: n must be ≤ 8, got %d", n)
+	}
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
@@ -671,6 +674,14 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 	}
 
 	s.retireRunForDiff(ctx, d)
+
+	// Fan-out auto-reject: when one diff from a fan-out is accepted,
+	// auto-reject all sibling pending diffs from the same fan-out batch.
+	// This prevents worktree leaks and unreviewable sibling diffs.
+	if action == "accept" {
+		s.autoRejectFanoutSiblings(ctx, d)
+	}
+
 	return Response{DiffID: diffID, Applied: applied}, nil
 }
 
@@ -680,6 +691,56 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 // takes the whole-conversation retirement. (Fan-out run tracking is
 // in-memory only: after a daemon restart a reviewed fan-out diff leaves its
 // worktree to `git worktree prune`, same as any crash-orphaned worktree.)
+
+// autoRejectFanoutSiblings rejects all other pending diffs from the same
+// fan-out batch when one diff is accepted. This prevents worktree leaks and
+// ensures the user isn't stuck with unreviewable sibling diffs.
+func (s *Server) autoRejectFanoutSiblings(ctx context.Context, accepted store.Diff) {
+	ids, ok := s.fanoutRuns[accepted.ConversationID]
+	if !ok {
+		return // not a fan-out run, nothing to clean up
+	}
+	acceptedRunDir := strings.TrimSuffix(filepath.Base(accepted.PathOnDisk), ".diff")
+	// Get all pending diffs for this conversation.
+	pendingDiffs, err := s.store.ListPendingDiffs(ctx, accepted.ConversationID)
+	if err != nil {
+		log.Printf("auto-reject: list pending diffs: %v", err)
+		return
+	}
+	for _, sd := range pendingDiffs {
+		if sd.ID == accepted.ID {
+			continue // skip the accepted diff itself
+		}
+		// Reject the sibling diff.
+		if err := s.store.UpdateDiffStatus(ctx, sd.ID, store.DiffRejected); err != nil {
+			log.Printf("auto-reject: update diff %d status: %v", sd.ID, err)
+			continue
+		}
+		_, _ = s.store.AppendEvent(ctx, accepted.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+			"action":  "reject",
+			"diff_id": sd.ID,
+		}))
+	}
+	// Close all fan-out runs and remove worktrees (except the accepted one
+	// which was already retired by retireRunForDiff).
+	for _, id := range ids {
+		meta := s.runs[id]
+		if meta == nil {
+			continue
+		}
+		if meta.runDirID == acceptedRunDir {
+			continue // already retired
+		}
+		_ = s.adapterFor(meta.adapter).Close(ctx, id)
+		delete(s.runs, id)
+		if err := s.mgr.Remove(meta.worktreePath); err != nil {
+			log.Printf("auto-reject: remove worktree %s: %v", meta.worktreePath, err)
+		}
+	}
+	// Clear the fan-out tracking for this conversation.
+	delete(s.fanoutRuns, accepted.ConversationID)
+}
+
 func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
 	// The diff file basename is the run's runDirID (see worktree.DiffPath).
 	runDirID := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
@@ -830,21 +891,22 @@ func reviewPrompt(diffContent string) string {
 		"Verdict must be one of: ACCEPT, REJECT, NEEDS_FIXES\n\n" + diffContent
 }
 
-// parseVerdict extracts the verdict (the first line containing ACCEPT,
-// REJECT, or NEEDS_FIXES) and the comments (everything after that line).
-// Output with no recognizable verdict degrades to needs_fixes with the full
-// text as comments — an unparseable review must never read as an accept.
+// parseVerdict extracts the verdict (the first line that IS or STARTS WITH
+// ACCEPT, REJECT, or NEEDS_FIXES) and the comments (everything after that line).
+// A line like "I cannot accept this" must NOT match — only a verdict token
+// on its own or as the first word of the line counts. Unparseable output
+// degrades to needs_fixes — a review must never silently read as an accept.
 func parseVerdict(model, text string) ReviewResult {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		up := strings.ToUpper(line)
+		up := strings.ToUpper(strings.TrimSpace(line))
 		verdict := ""
 		switch {
-		case strings.Contains(up, "NEEDS_FIXES"):
+		case up == "NEEDS_FIXES" || strings.HasPrefix(up, "NEEDS_FIXES ") || strings.HasPrefix(up, "NEEDS FIXES"):
 			verdict = "needs_fixes"
-		case strings.Contains(up, "REJECT"):
+		case up == "REJECT" || strings.HasPrefix(up, "REJECT "):
 			verdict = "reject"
-		case strings.Contains(up, "ACCEPT"):
+		case up == "ACCEPT" || strings.HasPrefix(up, "ACCEPT "):
 			verdict = "accept"
 		}
 		if verdict != "" {

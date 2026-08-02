@@ -165,8 +165,24 @@ func UpdateSettings(up Settings) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("prefs: create dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		return fmt.Errorf("prefs: write: %w", err)
+	// Atomic write: temp file in the same directory, then rename.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".prefs-*.tmp")
+	if err != nil {
+		return fmt.Errorf("prefs: create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("prefs: write temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("prefs: close temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("prefs: rename: %w", err)
 	}
 	return nil
 }

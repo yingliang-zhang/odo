@@ -130,7 +130,7 @@ export default function SettingsPanel({ onClose }: Props) {
                 type="text"
                 value={settings.review_models}
                 onChange={(e) => set("review_models", e.target.value)}
-                placeholder="comma-separated, e.g. gpt-4o, claude-sonnet"
+                placeholder="comma-separated model@provider, e.g. glm-5.2@sudo, t9s/kimi-k3@sudo"
               />
             </label>
 

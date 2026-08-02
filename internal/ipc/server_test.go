@@ -1070,41 +1070,29 @@ func TestFanoutSend(t *testing.T) {
 		}
 	}
 
-	// Accepting one diff retires only its own run and worktree.
+	// Accepting one diff auto-rejects all sibling diffs and retires
+	// all fan-out runs/worktrees (spec: "accept one → auto-reject others").
 	acc := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: diffIDs[0]})
 	if !acc.Applied {
 		t.Error("accept_diff: applied must be true")
 	}
 	poll := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
-	if len(poll.Runs) != 1 {
-		t.Fatalf("runs after first review = %d, want 1", len(poll.Runs))
+	if len(poll.Runs) != 0 {
+		t.Fatalf("runs after accept = %d, want 0 (auto-reject siblings)", len(poll.Runs))
 	}
 	entries, err := os.ReadDir(filepath.Join(root, ".odo", "worktrees"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("worktrees after first review = %d, want 1", len(entries))
+	if len(entries) != 0 {
+		t.Errorf("worktrees after accept = %d, want 0 (auto-reject siblings)", len(entries))
 	}
+	// Sibling diff should be auto-rejected.
 	d, err := rig.store.GetDiff(context.Background(), diffIDs[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Status != store.DiffPending {
-		t.Errorf("sibling diff status = %q, want pending", d.Status)
-	}
-
-	// Rejecting the sibling diff retires it too; the fan-out is drained.
-	rig.call(t, Request{Cmd: CmdRejectDiff, DiffID: diffIDs[1]})
-	poll = rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
-	if len(poll.Runs) != 0 {
-		t.Errorf("runs after both reviews = %d, want 0", len(poll.Runs))
-	}
-	entries, err = os.ReadDir(filepath.Join(root, ".odo", "worktrees"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("worktrees after both reviews = %d, want 0", len(entries))
+	if d.Status != store.DiffRejected {
+		t.Errorf("sibling diff status = %q, want rejected (auto-reject)", d.Status)
 	}
 }

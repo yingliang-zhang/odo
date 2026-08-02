@@ -114,7 +114,7 @@ export default function DiffViewer({ diff, onAccept, onReject }: Props) {
             >
               {reviewing ? "Reviewing…" : "Review"}
             </button>
-            <button className="btn-accept" disabled={acting} onClick={() => void act(onAccept)}>
+            <button className="btn-accept" disabled={acting || hasReject} onClick={() => void act(onAccept)}>
               Accept
             </button>
             <button className="btn-reject" disabled={acting} onClick={() => void act(onReject)}>
