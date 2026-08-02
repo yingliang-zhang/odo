@@ -31,16 +31,6 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
     if (el) el.scrollTop = el.scrollHeight;
   }, [events.length, agentRunning]);
 
-  const overComposer = (pos: { x: number; y: number }): boolean => {
-    const rect = composerRef.current?.getBoundingClientRect();
-    if (!rect) return true; // no layout yet: accept rather than drop silently
-    // Tauri 2's onDragDropEvent reports PhysicalPosition (physical pixels);
-    // getBoundingClientRect returns CSS pixels. Convert to CSS space.
-    const dpr = window.devicePixelRatio || 1;
-    return pos.x / dpr >= rect.left && pos.x / dpr <= rect.right
-        && pos.y / dpr >= rect.top && pos.y / dpr <= rect.bottom;
-  };
-
   const addAttachments = (paths: string[]) => {
     const clean = paths.filter((p) => p.trim() !== "");
     if (clean.length === 0) return;
@@ -54,15 +44,17 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
   };
 
   // Tauri drag-drop: window-level events carrying absolute file paths.
-  // Highlight the composer only while the pointer is actually over it.
+  // The composer is the only sensible drop target in M0.1, so we accept
+  // all drops without position checking — Tauri 2's PhysicalPosition
+  // coordinate space is inconsistent across platforms and DPI modes.
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
       if (p.type === "enter" || p.type === "over") {
-        setDragOver(overComposer(p.position));
+        setDragOver(true);
       } else if (p.type === "drop") {
         setDragOver(false);
-        if (overComposer(p.position)) addAttachments(p.paths);
+        addAttachments(p.paths);
       } else if (p.type === "leave") {
         setDragOver(false);
       }
