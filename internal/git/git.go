@@ -61,8 +61,14 @@ func ExtractDiff(worktreePath string) (string, error) {
 }
 
 // ApplyDiff applies a unified diff file to the working tree of repoPath.
+// It stages all current files first (so untracked-but-applied files from
+// previous accepts are in the index), then uses --3way to handle cases
+// where the target file already exists with different content.
 func ApplyDiff(repoPath, diffPath string) error {
-	_, err := run(repoPath, "apply", diffPath)
+	if _, err := run(repoPath, "add", "-A"); err != nil {
+		return fmt.Errorf("stage before apply: %w", err)
+	}
+	_, err := run(repoPath, "apply", "--3way", diffPath)
 	return err
 }
 
