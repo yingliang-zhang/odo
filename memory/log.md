@@ -85,3 +85,16 @@ User ran the actual `tauri dev` Demo and confirmed:
 M0 "Visible Loop" milestone is CLOSED (human-verified, per governance rule: human-only close).
 Pain points #2 (context loss on session switch) and #3 (can't see agent progress) are relieved.
 HEAD: b5a8e9e
+
+### M0.1 known issues — deferred to M1 E2E verification
+
+1. **Accept may fail on stale diffs** — old diffs (created before the --3way fix) may still fail `git apply`. Fix: kill old daemon, rebuild, restart. The auto-commit + --3way fix works for NEW diffs.
+2. **K3 thinking blocks not round-tripped** — OMP harness for custom:sudo doesn't send thinking blocks back in subsequent turns → K3 may degrade in multi-turn. OMP limitation, not Odo bug. M1 consideration: custom adapter or JSON streaming mode.
+3. **Clipboard paste attaches filename only** — webview security exposes `File.name`, not absolute path. Chips show but paths won't resolve. Platform limitation.
+4. **ToolTicker shows post-completion** — M0 adapter emits events atomically after OMP exits; tool calls appear as transcript, not live during execution. M1: streaming events.
+
+### M0.1 milestone — user-verified (2026-08-02)
+
+User verified: tool calls display in ticker, diff syntax highlighting works, drag-and-drop chips appear, completion text shows. Accept on stale diffs pending M1 E2E.
+
+HEAD: 378d837
