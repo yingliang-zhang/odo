@@ -11,6 +11,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -45,6 +46,7 @@ type OMP struct {
 
 type ompRun struct {
 	id         string
+	sessionDir string // directory containing the OMP JSONL transcript
 	workdir    string
 	outputFile string
 	cmd        *exec.Cmd
@@ -204,6 +206,7 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 	}
 	r := &ompRun{
 		id:         runID,
+		sessionDir: sessionDir,
 		workdir:    workdir,
 		outputFile: outputFile,
 		cmd:        cmd,
@@ -308,22 +311,32 @@ func parseToolCalls(text string) []AgentEvent {
 	return events
 }
 
-// buildEvents derives the run's terminal events from process state. Parsed
-// tool-call events (with any text-before-tools) come first; agent_done or
-// agent_error comes last. Call only after <-r.done.
+// buildEvents derives the run's terminal events from process state.
+// It reads the OMP session JSONL transcript (which contains structured
+// content blocks: text, toolCall, toolResult, thinking) instead of the
+// print-mode stdout, because print mode only emits text blocks and
+// omits ⏺/⇐ tool markers (those are TUI decorations).
+// Falls back to the print-mode output file when no JSONL is available.
 func (a *OMP) buildEvents(r *ompRun) []AgentEvent {
-	text := ""
-	if data, err := os.ReadFile(r.outputFile); err == nil {
-		text = strings.TrimSpace(string(data))
-	}
+	events := parseSessionJSONL(r)
 
-	events := parseToolCalls(text)
-	if len(events) == 0 && text != "" {
-		// No recognizable tool calls: whole output is the agent's text.
-		events = append(events, AgentEvent{
-			Type:    "agent_text",
-			Payload: map[string]interface{}{"text": text},
-		})
+	// Fallback: if JSONL parsing produced nothing, use the print-mode
+	// output file (which may contain the final text response, or just
+	// "Working..." when the model didn't emit a text block).
+	if len(events) == 0 {
+		text := ""
+		if data, err := os.ReadFile(r.outputFile); err == nil {
+			text = strings.TrimSpace(string(data))
+		}
+		// Strip the "Working..." status prefix that OMP emits to stderr
+		// (which the wrapper merges into stdout via 2>&1).
+		text = stripWorkingPrefix(text)
+		if text != "" {
+			events = append(events, AgentEvent{
+				Type:    "agent_text",
+				Payload: map[string]interface{}{"text": text},
+			})
+		}
 	}
 
 	if r.err != nil {
@@ -338,20 +351,158 @@ func (a *OMP) buildEvents(r *ompRun) []AgentEvent {
 		return events
 	}
 
-	summary := text
-	if i := strings.IndexByte(summary, '\n'); i >= 0 {
-		summary = summary[:i]
-	}
-	if len(summary) > 200 {
-		summary = summary[:200]
-	}
-	if summary == "" {
-		summary = "agent completed"
+	// Build summary from the first agent_text event, or "agent completed".
+	summary := "agent completed"
+	for _, ev := range events {
+		if ev.Type == "agent_text" {
+			if t, ok := ev.Payload["text"].(string); ok && t != "" {
+				summary = t
+				if i := strings.IndexByte(summary, '\n'); i >= 0 {
+					summary = summary[:i]
+				}
+				if len(summary) > 200 {
+					summary = summary[:200]
+				}
+			}
+			break
+		}
 	}
 	events = append(events, AgentEvent{
 		Type:    "agent_done",
 		Payload: map[string]interface{}{"summary": summary},
 	})
+	return events
+}
+
+// stripWorkingPrefix removes the "Working..." status line that OMP emits
+// at the start of print-mode output (merged from stderr via 2>&1).
+func stripWorkingPrefix(text string) string {
+	// "Working..." is the OMP initial status; strip it if it's the only
+	// content or if it's a prefix followed by the real output.
+	if text == "Working..." || text == "Working…" {
+		return ""
+	}
+	// Strip leading "Working...\n" prefix
+	for _, prefix := range []string{"Working...\n", "Working…\n"} {
+		if strings.HasPrefix(text, prefix) {
+			return strings.TrimSpace(text[len(prefix):])
+		}
+	}
+	return text
+}
+
+// parseSessionJSONL reads the OMP session JSONL transcript and extracts
+// agent_text, agent_tool_call, and agent_tool_result events from the
+// structured message content blocks.
+func parseSessionJSONL(r *ompRun) []AgentEvent {
+	// Find the JSONL file in the session directory.
+	matches, err := filepath.Glob(filepath.Join(r.sessionDir, "*.jsonl"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	// Use the first (and typically only) JSONL file.
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		return nil
+	}
+
+	var events []AgentEvent
+	// Track the last tool name for tool_result attribution.
+	lastTool := ""
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// JSONL entries are objects with "message" containing "role" and "content".
+		// We use encoding/json for robust parsing.
+		var entry struct {
+			Type    string          `json:"type"`
+			Message json.RawMessage `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+
+		// Parse the message object.
+		var msg struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(entry.Message, &msg); err != nil {
+			continue
+		}
+
+		// Process assistant messages (content is an array of blocks).
+		if msg.Role == "assistant" {
+			var blocks []struct {
+				Type       string `json:"type"`
+				Text       string `json:"text"`
+				Thinking   string `json:"thinking"`
+				Name       string `json:"name"`
+				Arguments  json.RawMessage `json:"arguments"`
+				ToolCallID string `json:"id"`
+			}
+			if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+				continue
+			}
+			for _, b := range blocks {
+				switch b.Type {
+				case "text":
+					if b.Text != "" {
+						events = append(events, AgentEvent{
+							Type:    "agent_text",
+							Payload: map[string]interface{}{"text": b.Text},
+						})
+					}
+				case "toolCall":
+					args := strings.TrimSpace(string(b.Arguments))
+					events = append(events, AgentEvent{
+						Type:    "agent_tool_call",
+						Payload: map[string]interface{}{"tool": b.Name, "args": args},
+					})
+					lastTool = b.Name
+				}
+			}
+		}
+
+		// Process toolResult messages.
+		if msg.Role == "toolResult" {
+			var result struct {
+				ToolName  string          `json:"toolName"`
+				Content   json.RawMessage `json:"content"`
+			}
+			if err := json.Unmarshal(entry.Message, &result); err != nil {
+				continue
+			}
+			// Extract text from content array.
+			resultText := ""
+			var contentBlocks []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(result.Content, &contentBlocks); err == nil {
+				for _, cb := range contentBlocks {
+					if cb.Type == "text" && cb.Text != "" {
+						resultText = cb.Text
+						break
+					}
+				}
+			}
+			tool := result.ToolName
+			if tool == "" {
+				tool = lastTool
+			}
+			if tool != "" {
+				events = append(events, AgentEvent{
+					Type:    "agent_tool_result",
+					Payload: map[string]interface{}{"tool": tool, "result": resultText},
+				})
+			}
+		}
+	}
+
 	return events
 }
 

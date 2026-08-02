@@ -34,7 +34,11 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
   const overComposer = (pos: { x: number; y: number }): boolean => {
     const rect = composerRef.current?.getBoundingClientRect();
     if (!rect) return true; // no layout yet: accept rather than drop silently
-    return pos.x >= rect.left && pos.x <= rect.right && pos.y >= rect.top && pos.y <= rect.bottom;
+    // Tauri 2's onDragDropEvent reports PhysicalPosition (physical pixels);
+    // getBoundingClientRect returns CSS pixels. Convert to CSS space.
+    const dpr = window.devicePixelRatio || 1;
+    return pos.x / dpr >= rect.left && pos.x / dpr <= rect.right
+        && pos.y / dpr >= rect.top && pos.y / dpr <= rect.bottom;
   };
 
   const addAttachments = (paths: string[]) => {

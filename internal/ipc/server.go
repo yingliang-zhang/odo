@@ -294,6 +294,7 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	if err != nil {
 		_, _ = s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError,
 			mustJSON(map[string]interface{}{"error": fmt.Sprintf("extract diff: %v", err)}))
+		meta.finished = true // mark finished so polling stops even on diff failure
 		return nil
 	}
 	if diffPath == "" {

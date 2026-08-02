@@ -26,7 +26,7 @@ export default function ToolTicker({ running, events }: Props) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [toolCalls.length]);
 
-  if (!running) return null;
+  if (!running && toolCalls.length === 0) return null;
 
   return (
     <div className="tool-ticker">
