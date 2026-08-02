@@ -39,10 +39,11 @@ type runMeta struct {
 // Server dispatches IPC commands against the store, adapters, and worktree
 // manager for one project.
 type Server struct {
-	store       *store.Store
-	projectRoot string
-	adapters    map[string]adapter.Adapter // "" and "omp" = default adapter
-	mgr         *worktree.Manager
+	store          *store.Store
+	projectRoot    string
+	adapters       map[string]adapter.Adapter // "" and "omp" = default adapter
+	distillAdapter adapter.Adapter            // uses orchestrator model from prefs.md
+	mgr            *worktree.Manager
 
 	runs   map[string]*runMeta // adapter runID -> meta
 	byConv map[int64]string    // conversationID -> adapter runID (active run)
@@ -68,6 +69,12 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 // under the given name (e.g. "pi").
 func (s *Server) RegisterAdapter(name string, ad adapter.Adapter) {
 	s.adapters[name] = ad
+}
+
+// SetDistillAdapter sets the adapter used for distill runs (uses the
+// orchestrator model from prefs.md instead of the coding model).
+func (s *Server) SetDistillAdapter(ad adapter.Adapter) {
+	s.distillAdapter = ad
 }
 
 // adapterFor resolves a run/request adapter name to its Adapter. Unknown
@@ -317,6 +324,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("create worktree: %w", err))
 	}
 	if err := s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, &wtPath); err != nil {
+		_ = s.mgr.Remove(wtPath) // don't orphan the worktree we just created
 		return Response{}, fmt.Errorf("bind worktree: %w", err)
 	}
 
@@ -361,8 +369,12 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 	}
 	if err := s.adapterFor(meta.adapter).Send(ctx, runID, req.Text); err != nil {
 		log.Printf("steering: send to run %s: %v", runID, err)
+		msg := err.Error()
+		if strings.Contains(msg, "not supported") {
+			msg = "Steering not supported by current adapter."
+		}
 		_, _ = s.store.AppendEvent(ctx, c.ID, store.EventAgentError, mustJSON(map[string]interface{}{
-			"error": "Steering not supported by current adapter.",
+			"error": msg,
 		}))
 	}
 	return Response{Event: &ev}, nil
@@ -595,7 +607,10 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 // temp directory and returns the concatenated agent_text output (the wiki
 // note body). It blocks until the run's terminal event or distillTimeout.
 func (s *Server) runDistillAgent(ctx context.Context, events []store.Event) (string, error) {
-	ad := s.adapters[""]
+	ad := s.distillAdapter
+	if ad == nil {
+		ad = s.adapters[""] // fallback to default if distill adapter not configured
+	}
 	tmpDir, err := os.MkdirTemp("", "odo-distill-")
 	if err != nil {
 		return "", fmt.Errorf("distill dir: %w", err)

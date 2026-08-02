@@ -1,4 +1,4 @@
-import { ClipboardEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { ClipboardEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
 import type { OdoEvent } from "../types";
@@ -113,6 +113,21 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
     }
   };
 
+  // M1 epoch filtering: show only events from the current epoch.
+  // The last distill review_action marks the epoch boundary; events after
+  // it belong to the current epoch. If no distill has happened, show all.
+  const lastDistillSeq = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.type === "review_action" && e.payload?.action === "distill") {
+        return e.seq;
+      }
+    }
+    return 0;
+  }, [events]);
+
+  const visibleEvents = events.filter((e) => e.seq > lastDistillSeq);
+
   return (
     <section className="chat-surface">
       <div className="message-list" ref={listRef}>
@@ -129,13 +144,13 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
             )}
           </div>
         )}
-        {events.length === 0 && (
+        {visibleEvents.length === 0 && (
           <div className="empty-hint">
             No messages yet. Ask the agent to change something — every run is journaled
             and its diff lands here for review.
           </div>
         )}
-        {events.map((ev) => (
+        {visibleEvents.map((ev) => (
           <MessageBubble key={ev.seq} event={ev} />
         ))}
         <ToolTicker running={agentRunning} events={events} />

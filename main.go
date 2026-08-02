@@ -55,8 +55,10 @@ func main() {
 
 	omp := adapter.NewOMP(mgr.StateDir())
 	pi := adapter.NewPi(mgr.StateDir())
+	distillOMP := adapter.NewOMPForKey(mgr.StateDir(), "orchestrator")
 	srv := ipc.NewServer(st, root, omp, mgr)
 	srv.RegisterAdapter("pi", pi)
+	srv.SetDistillAdapter(distillOMP)
 
 	socket := socketFlag
 	if socket == "" {

@@ -38,6 +38,7 @@ type OMP struct {
 	wrapperPath string
 	stateDir    string // <project>/.odo; prompt/session/output files live here
 	timeout     string
+	prefsKey    string // prefs.md key to read model from ("coding" or "orchestrator")
 
 	mu           sync.Mutex // guards runs + configLogged; run results sync via done channel
 	runs         map[string]*ompRun
@@ -93,16 +94,25 @@ func NewOMP(stateDir string) *OMP {
 		wrapperPath: wrapper,
 		stateDir:    stateDir,
 		timeout:     defaultTimeoutSeconds,
+		prefsKey:    "coding",
 		runs:        make(map[string]*ompRun),
 	}
 }
 
-// loadPrefs reads ~/.odo/prefs.md and parses the `coding: model@provider`
+// NewOMPForKey creates an OMP adapter that reads its model config from the
+// given prefs.md key (e.g. "orchestrator" for the distill use case).
+func NewOMPForKey(stateDir, key string) *OMP {
+	o := NewOMP(stateDir)
+	o.prefsKey = key
+	return o
+}
+
+// loadPrefs reads ~/.odo/prefs.md and parses the `key: model@provider`
 // line (e.g. `coding: t9s/kimi-k3@sudo`). The `@` separator splits at the
 // last occurrence so model names may themselves contain `@`. Returns empty
 // strings when the file is missing/unreadable or the line is
 // absent/malformed.
-func loadPrefs() (model, provider string) {
+func loadPrefsByKey(key string) (model, provider string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", ""
@@ -111,15 +121,16 @@ func loadPrefs() (model, provider string) {
 	if err != nil {
 		return "", ""
 	}
+	prefix := key + ":"
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "coding:") {
+		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		val := strings.TrimSpace(strings.TrimPrefix(line, "coding:"))
+		val := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 		at := strings.LastIndex(val, "@")
 		if at <= 0 || at == len(val)-1 {
-			return "", "" // coding line present but malformed
+			return "", "" // line present but malformed
 		}
 		model = strings.TrimSpace(val[:at])
 		provider = strings.TrimSpace(val[at+1:])
@@ -131,12 +142,17 @@ func loadPrefs() (model, provider string) {
 	return "", ""
 }
 
+// loadPrefs reads the `coding:` key (backwards-compatible wrapper).
+func loadPrefs() (model, provider string) {
+	return loadPrefsByKey("coding")
+}
+
 // resolveModelConfig resolves the wrapper's --hermes-model / --hermes-provider
 // args from ~/.odo/prefs.md, re-read on every call so prefs edits apply to the
 // next run without a daemon restart. Falls back to the M0 defaults. The
 // resolved pair is logged to stderr once (first use) for debugging.
 func (a *OMP) resolveModelConfig() (model, providerArg string) {
-	model, provider := loadPrefs()
+	model, provider := loadPrefsByKey(a.prefsKey)
 	if model == "" {
 		model = defaultModel
 	}
