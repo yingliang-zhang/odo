@@ -98,3 +98,10 @@ HEAD: b5a8e9e
 User verified: tool calls display in ticker, diff syntax highlighting works, drag-and-drop chips appear, completion text shows. Accept on stale diffs pending M1 E2E.
 
 HEAD: 378d837
+
+### M1 implementation — Go daemon + frontend (completed)
+
+- Go daemon (f0102ae): multi-workstream IPC, steering, distill, Pi adapter. 10 files, +1241 lines. 6 new tests, all pass.
+- Frontend (a510def): workstream sidebar, steering input, distill button, adapter selector. 8 files, +743 lines. tsc + vite + cargo check pass.
+- Dual-model review dispatched (GLM-5.2 + K3, parallel, 900s each).
+- HEAD: a510def
