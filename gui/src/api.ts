@@ -6,6 +6,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AcceptDiffResponse,
   BootstrapResponse,
+  CreateWorkstreamResponse,
+  DistillResponse,
+  ListWorkstreamsResponse,
   PollEventsResponse,
   RejectDiffResponse,
   SendMessageRequest,
@@ -14,21 +17,55 @@ import type {
 
 // Tauri v2 maps JS camelCase args onto the Rust snake_case parameters.
 
-export function bootstrap(projectRoot?: string): Promise<BootstrapResponse> {
-  return invoke<BootstrapResponse>("bootstrap", { projectRoot: projectRoot ?? null });
+export function bootstrap(projectRoot?: string, workstreamId?: number): Promise<BootstrapResponse> {
+  return invoke<BootstrapResponse>("bootstrap", {
+    projectRoot: projectRoot ?? null,
+    workstreamId: workstreamId ?? null,
+  });
+}
+
+export interface SendOptions {
+  // steer: journal the message for the running agent (no new run started).
+  steer?: boolean;
+  // adapter: backend to run with ("omp" | "pi"); ignored for steering.
+  adapter?: string;
 }
 
 export function sendMessage(
   conversationId: number,
   text: string,
   attachments?: string[],
+  opts?: SendOptions,
 ): Promise<SendMessageResponse> {
   const req: SendMessageRequest = { conversationId, text };
   const paths = (attachments ?? []).filter((a) => a.trim() !== "");
   if (paths.length > 0) {
     req.attachments = paths;
   }
+  if (opts?.steer) {
+    req.steer = true;
+  }
+  if (opts?.adapter) {
+    req.adapter = opts.adapter;
+  }
   return invoke<SendMessageResponse>("send_message", req);
+}
+
+export function listWorkstreams(projectRoot: string): Promise<ListWorkstreamsResponse> {
+  return invoke<ListWorkstreamsResponse>("list_workstreams", { projectRoot });
+}
+
+export function createWorkstream(
+  projectRoot: string,
+  name: string,
+): Promise<CreateWorkstreamResponse> {
+  return invoke<CreateWorkstreamResponse>("create_workstream", { projectRoot, name });
+}
+
+// distill blocks daemon-side until the summary agent finishes (up to 10
+// minutes); the Rust bridge uses a matching read timeout for this command.
+export function distill(conversationId: number): Promise<DistillResponse> {
+  return invoke<DistillResponse>("distill", { conversationId });
 }
 
 export function pollEvents(conversationId: number, afterSeq: number): Promise<PollEventsResponse> {

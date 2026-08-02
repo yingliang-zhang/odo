@@ -9,7 +9,11 @@ interface Props {
   events: OdoEvent[];
   agentRunning: boolean;
   sendDisabled: boolean;
-  onSend: (text: string, attachments: string[]) => Promise<void>;
+  onSend: (text: string, attachments: string[], steer: boolean) => Promise<void>;
+  // M1 memory distiller: current epoch (banner shown when > 1) and the wiki
+  // path of the most recent distill, when known this session.
+  epoch: number;
+  distilledTo?: string | null;
 }
 
 // Chat log plus composer. File attachments arrive via Tauri's drag-drop
@@ -17,7 +21,7 @@ interface Props {
 // clipboard paste. HTML5 drag events are kept as a fallback; they only fire
 // if `dragDropEnabled` is ever disabled in tauri.conf.json, so the two paths
 // never double-fire.
-export default function ChatSurface({ events, agentRunning, sendDisabled, onSend }: Props) {
+export default function ChatSurface({ events, agentRunning, sendDisabled, onSend, epoch, distilledTo }: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -97,7 +101,9 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
     if (!canSend || sending || sendDisabled) return;
     setSending(true);
     try {
-      await onSend(text, attachments);
+      // M1 steering: while the agent runs, the button is a Steer button and
+      // the same message journals with steer=true instead of a new run.
+      await onSend(text, attachments, agentRunning);
       setDraft("");
       setAttachments([]);
     } catch {
@@ -110,6 +116,19 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
   return (
     <section className="chat-surface">
       <div className="message-list" ref={listRef}>
+        {epoch > 1 && (
+          <div className="epoch-banner">
+            Epoch {epoch}
+            {distilledTo ? (
+              <>
+                {" — previous epoch distilled to "}
+                <code>{distilledTo}</code>
+              </>
+            ) : (
+              " — previous epochs distilled to the wiki"
+            )}
+          </div>
+        )}
         {events.length === 0 && (
           <div className="empty-hint">
             No messages yet. Ask the agent to change something — every run is journaled
@@ -155,14 +174,14 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
               dragOver
                 ? "Drop files to attach them…"
                 : agentRunning
-                  ? "Agent is running…"
+                  ? "Steer the running agent…"
                   : "Describe the change you want…"
             }
             disabled={sendDisabled || sending}
             autoFocus
           />
           <button type="submit" disabled={sendDisabled || sending || !canSend}>
-            Send
+            {agentRunning ? "Steer" : "Send"}
           </button>
         </form>
       </div>

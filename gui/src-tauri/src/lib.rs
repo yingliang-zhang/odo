@@ -24,6 +24,11 @@ use std::time::Duration;
 /// first call while the OS warms caches.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// `distill` runs a full summary-agent turn daemon-side (bounded by the
+/// daemon's 10-minute `distillTimeout`) and serves one connection at a time,
+/// so its read timeout must cover the worst case plus margin.
+const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(660);
+
 /// How long to wait for a freshly spawned daemon to answer its socket.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -54,10 +59,10 @@ fn daemon_binary(project_root: &str) -> PathBuf {
 /// Single request → single response on a fresh connection. The daemon serves
 /// one connection at a time until EOF, so keeping connections open would
 /// starve the polling loop; every call connects, exchanges, and drops.
-fn round_trip(project_root: &str, req: &Value) -> Result<Value, String> {
+fn round_trip(project_root: &str, req: &Value, read_timeout: Duration) -> Result<Value, String> {
     let socket = socket_path(project_root);
     let mut stream = UnixStream::connect(&socket).map_err(|e| format!("connect {}: {e}", socket.display()))?;
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(read_timeout));
 
     stream
         .write_all(req.to_string().as_bytes())
@@ -189,30 +194,35 @@ fn ensure_daemon_running(project_root: &str) -> Result<(), String> {
 
 /// Round trip with one recovery retry: the first failure usually means the
 /// daemon died (or was never started), so ensure it's up and try once more.
-fn send_to_daemon(project_root: &str, req: &Value) -> Result<Value, String> {
-    match round_trip(project_root, req) {
+fn send_to_daemon(project_root: &str, req: &Value, read_timeout: Duration) -> Result<Value, String> {
+    match round_trip(project_root, req, read_timeout) {
         Ok(resp) => Ok(resp),
         Err(first) => {
             if let Err(e) = ensure_daemon_running(project_root) {
                 return Err(format!("{first} (daemon restart failed: {e})"));
             }
-            round_trip(project_root, req)
+            round_trip(project_root, req, read_timeout)
         }
     }
 }
 
 /// Execute a command off the async runtime's workers: socket IO is blocking.
-async fn run_command(project_root: String, req: Value) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || send_to_daemon(&project_root, &req))
+async fn run_command(project_root: String, req: Value, read_timeout: Duration) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || send_to_daemon(&project_root, &req, read_timeout))
         .await
         .map_err(|e| format!("command task failed: {e}"))?
 }
 
 #[tauri::command]
-async fn bootstrap(project_root: Option<String>) -> Result<Value, String> {
+async fn bootstrap(project_root: Option<String>, workstream_id: Option<i64>) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    let req = json!({"cmd": "bootstrap", "project_root": root});
-    run_command(root, req).await
+    let mut req = json!({"cmd": "bootstrap", "project_root": root});
+    // M1: when set, bootstrap targets that workstream's latest conversation
+    // (workstream switch in the sidebar).
+    if let Some(id) = workstream_id {
+        req["workstream_id"] = json!(id);
+    }
+    run_command(root, req, READ_TIMEOUT).await
 }
 
 #[tauri::command]
@@ -220,6 +230,8 @@ async fn send_message(
     conversation_id: i64,
     text: String,
     attachments: Option<Vec<String>>,
+    steer: Option<bool>,
+    adapter: Option<String>,
 ) -> Result<Value, String> {
     let root = default_project_root()?;
     // The daemon ignores `attachments` today (its Request struct has no such
@@ -230,28 +242,62 @@ async fn send_message(
     if let Some(paths) = attachments {
         req["attachments"] = json!(paths);
     }
-    run_command(root, req).await
+    // M1: steer journals the message for the running agent without starting
+    // a new run; adapter selects the backend ("omp" | "pi").
+    if let Some(steer) = steer {
+        req["steer"] = json!(steer);
+    }
+    if let Some(adapter) = adapter {
+        if !adapter.is_empty() {
+            req["adapter"] = json!(adapter);
+        }
+    }
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+#[tauri::command]
+async fn create_workstream(project_root: Option<String>, name: String) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "create_workstream", "project_root": root, "name": name});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+#[tauri::command]
+async fn list_workstreams(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "list_workstreams", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+#[tauri::command]
+async fn distill(conversation_id: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    // The daemon's distillTimeout is 10 minutes and it serves one connection
+    // at a time: this command holds the daemon until the note is written.
+    // The frontend pauses its poll loop while a distill is in flight.
+    let req = json!({"cmd": "distill", "conversation_id": conversation_id});
+    run_command(root, req, DISTILL_READ_TIMEOUT).await
 }
 
 #[tauri::command]
 async fn poll_events(conversation_id: i64, after_seq: i64) -> Result<Value, String> {
     let root = default_project_root()?;
     let req = json!({"cmd": "poll_events", "conversation_id": conversation_id, "after_seq": after_seq});
-    run_command(root, req).await
+    run_command(root, req, READ_TIMEOUT).await
 }
 
 #[tauri::command]
 async fn accept_diff(diff_id: i64) -> Result<Value, String> {
     let root = default_project_root()?;
     let req = json!({"cmd": "accept_diff", "diff_id": diff_id});
-    run_command(root, req).await
+    run_command(root, req, READ_TIMEOUT).await
 }
 
 #[tauri::command]
 async fn reject_diff(diff_id: i64) -> Result<Value, String> {
     let root = default_project_root()?;
     let req = json!({"cmd": "reject_diff", "diff_id": diff_id});
-    run_command(root, req).await
+    run_command(root, req, READ_TIMEOUT).await
 }
 
 #[cfg(test)]
@@ -273,13 +319,14 @@ mod tests {
             return;
         };
 
-        let boot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root})).unwrap();
+        let boot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root}), READ_TIMEOUT).unwrap();
         assert_eq!(boot["ok"], true);
         let cid = boot["conversation"]["id"].as_i64().unwrap();
 
         let sent = send_to_daemon(
             &root,
             &json!({"cmd": "send_message", "conversation_id": cid, "text": "smoke: create a file"}),
+            READ_TIMEOUT,
         )
         .unwrap();
         assert_eq!(sent["ok"], true);
@@ -292,6 +339,7 @@ mod tests {
             let poll = send_to_daemon(
                 &root,
                 &json!({"cmd": "poll_events", "conversation_id": cid, "after_seq": seq}),
+                READ_TIMEOUT,
             )
             .unwrap();
             assert_eq!(poll["ok"], true);
@@ -317,15 +365,15 @@ mod tests {
         }
         assert!(diff_id > 0, "stub run should produce a pending diff");
 
-        let accepted = send_to_daemon(&root, &json!({"cmd": "accept_diff", "diff_id": diff_id})).unwrap();
+        let accepted = send_to_daemon(&root, &json!({"cmd": "accept_diff", "diff_id": diff_id}), READ_TIMEOUT).unwrap();
         assert_eq!(accepted, json!({"ok": true, "diff_id": diff_id, "applied": true}));
 
         // Review is single-shot: a second accept must fail.
-        let again = send_to_daemon(&root, &json!({"cmd": "accept_diff", "diff_id": diff_id})).unwrap();
+        let again = send_to_daemon(&root, &json!({"cmd": "accept_diff", "diff_id": diff_id}), READ_TIMEOUT).unwrap();
         assert_eq!(again["ok"], false);
 
         // Session restore: bootstrap replays the journal including the review.
-        let reboot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root})).unwrap();
+        let reboot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root}), READ_TIMEOUT).unwrap();
         let reviews = reboot["events"]
             .as_array()
             .unwrap()
@@ -336,13 +384,116 @@ mod tests {
         assert_eq!(reboot["diff"]["status"], "accepted");
     }
 
+    /// M1 flow end to end over the socket layer: workstream create/list,
+    /// bootstrap switch, adapter selection, steering, distill. The request
+    /// shapes mirror the JSON the Tauri commands above assemble.
+    #[test]
+    fn m1_workstream_steer_distill() {
+        let Some(root) = smoke_root() else {
+            eprintln!("skipping: ODO_SMOKE_ROOT daemon not available");
+            return;
+        };
+
+        let boot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root}), READ_TIMEOUT).unwrap();
+        assert_eq!(boot["ok"], true);
+        let main_ws = boot["workstream"]["id"].as_i64().unwrap();
+
+        let listed = send_to_daemon(&root, &json!({"cmd": "list_workstreams", "project_root": root}), READ_TIMEOUT).unwrap();
+        assert_eq!(listed["ok"], true);
+        assert!(listed["workstreams"].as_array().unwrap().iter().any(|w| w["id"].as_i64() == Some(main_ws)));
+
+        let created = send_to_daemon(
+            &root,
+            &json!({"cmd": "create_workstream", "project_root": root, "name": "smoke refactor"}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(created["ok"], true);
+        let ws2 = created["workstream"]["id"].as_i64().unwrap();
+        // The daemon sanitizes names into git-safe branch names.
+        assert_eq!(created["workstream"]["name"], "smoke-refactor");
+
+        // Workstream switch: bootstrap targeted at the new workstream returns
+        // a fresh conversation with an empty journal.
+        let switched = send_to_daemon(
+            &root,
+            &json!({"cmd": "bootstrap", "project_root": root, "workstream_id": ws2}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(switched["ok"], true);
+        assert_eq!(switched["workstream"]["id"].as_i64(), Some(ws2));
+        let cid = switched["conversation"]["id"].as_i64().unwrap();
+        assert_eq!(switched["conversation"]["epoch"], 1);
+
+        // Start a run on the Pi adapter.
+        let sent = send_to_daemon(
+            &root,
+            &json!({"cmd": "send_message", "conversation_id": cid, "text": "smoke m1", "adapter": "pi"}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(sent["ok"], true);
+
+        // Steer while the stub run is in flight: the message is journaled as
+        // a user_message without starting a second run.
+        let steered = send_to_daemon(
+            &root,
+            &json!({"cmd": "send_message", "conversation_id": cid, "text": "and also this", "steer": true}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(steered["ok"], true);
+        assert_eq!(steered["event"]["type"], "user_message");
+
+        // Wait out the stub agent (same poll loop as full_visible_loop).
+        // Adapters without mid-run steering support journal an agent_error;
+        // either way the steering user_message stays put.
+        std::thread::sleep(Duration::from_secs(1));
+        let mut seq = steered["event"]["seq"].as_i64().unwrap_or(1);
+        for _ in 0..50 {
+            let poll = send_to_daemon(
+                &root,
+                &json!({"cmd": "poll_events", "conversation_id": cid, "after_seq": seq}),
+                READ_TIMEOUT,
+            )
+            .unwrap();
+            for ev in poll["events"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+                seq = seq.max(ev["seq"].as_i64().unwrap());
+            }
+            if poll["agent_running"].as_bool() == Some(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        // A second (non-steer) send while the agent ran must have been
+        // impossible; only the steering path got queued. The stub always
+        // finishes, so distill is allowed now.
+        let distilled = send_to_daemon(&root, &json!({"cmd": "distill", "conversation_id": cid}), DISTILL_READ_TIMEOUT).unwrap();
+        assert_eq!(distilled["ok"], true);
+        assert_eq!(distilled["epoch"], 2);
+        let wiki = distilled["wiki_path"].as_str().unwrap();
+        assert!(wiki.contains("/wiki/") && wiki.ends_with("-epoch-1.md"));
+        assert!(std::path::Path::new(wiki).exists());
+
+        // The epoch bump is visible on the next bootstrap targeted here.
+        let reboot = send_to_daemon(
+            &root,
+            &json!({"cmd": "bootstrap", "workstream_id": ws2, "project_root": root}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(reboot["conversation"]["epoch"], 2);
+    }
+
     #[test]
     fn unknown_diff_errors_cleanly() {
         let Some(root) = smoke_root() else {
             eprintln!("skipping: ODO_SMOKE_ROOT daemon not available");
             return;
         };
-        let resp = send_to_daemon(&root, &json!({"cmd": "reject_diff", "diff_id": 999999})).unwrap();
+        let resp = send_to_daemon(&root, &json!({"cmd": "reject_diff", "diff_id": 999999}), READ_TIMEOUT).unwrap();
         assert_eq!(resp["ok"], false);
         assert!(resp["error"].as_str().unwrap().contains("999999"));
     }
@@ -364,7 +515,10 @@ pub fn run() {
             send_message,
             poll_events,
             accept_diff,
-            reject_diff
+            reject_diff,
+            create_workstream,
+            list_workstreams,
+            distill
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

@@ -57,6 +57,9 @@ export interface EventPayload {
   action?: string;
   diff_id?: number;
   attachments?: string[];
+  // review_action when action == "distill" (M1 memory distiller).
+  epoch?: number;
+  wiki_path?: string;
 }
 
 export interface OdoEvent {
@@ -93,6 +96,10 @@ export type SendMessageRequest = {
   conversationId: number;
   text: string;
   attachments?: string[];
+  // M1: steer journals the message for a running agent instead of starting
+  // a new run; adapter selects the backend ("omp" | "pi").
+  steer?: boolean;
+  adapter?: string;
 };
 
 export interface SendMessageResponse {
@@ -121,4 +128,24 @@ export interface RejectDiffResponse {
   error?: string;
   diff_id?: number;
   applied?: boolean;
+}
+
+export interface ListWorkstreamsResponse {
+  ok: boolean;
+  error?: string;
+  workstreams?: Workstream[];
+}
+
+export interface CreateWorkstreamResponse {
+  ok: boolean;
+  error?: string;
+  workstream?: Workstream;
+}
+
+export interface DistillResponse {
+  ok: boolean;
+  error?: string;
+  wiki_path?: string;
+  // epoch is the NEW epoch after the increment (the distilled one is N-1).
+  epoch?: number;
 }

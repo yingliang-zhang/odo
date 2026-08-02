@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { acceptDiff, bootstrap, errorMessage, pollEvents, rejectDiff, sendMessage, unwrap } from "./api";
+import {
+  acceptDiff,
+  bootstrap,
+  createWorkstream,
+  distill,
+  errorMessage,
+  listWorkstreams,
+  pollEvents,
+  rejectDiff,
+  sendMessage,
+  unwrap,
+} from "./api";
 import ChatSurface from "./components/ChatSurface";
 import DiffViewer from "./components/DiffViewer";
 import Sidebar from "./components/Sidebar";
-import type { Conversation, Diff, OdoEvent, Project, Workstream } from "./types";
+import type { BootstrapResponse, Conversation, Diff, OdoEvent, Project, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket).
 const POLL_INTERVAL_MS = 1500;
@@ -19,20 +30,42 @@ function mergeEvents(prev: OdoEvent[], next: OdoEvent[]): OdoEvent[] {
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [workstream, setWorkstream] = useState<Workstream | null>(null);
+  const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [events, setEvents] = useState<OdoEvent[]>([]);
   const [agentRunning, setAgentRunning] = useState(false);
   const [diff, setDiff] = useState<Diff | null>(null);
+  const [adapter, setAdapter] = useState("omp");
+  const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const lastSeqRef = useRef(0);
   const conversationRef = useRef<number | null>(null);
+  // The daemon serves one connection at a time and distill can block for
+  // minutes; polling is paused for the duration instead of queueing up
+  // certain timeout failures.
+  const distillingRef = useRef(false);
 
   const recordEvents = useCallback((incoming: OdoEvent[]) => {
     if (incoming.length === 0) return;
     setEvents((prev) => mergeEvents(prev, incoming));
     lastSeqRef.current = Math.max(lastSeqRef.current, ...incoming.map((e) => e.seq));
+  }, []);
+
+  // Whole-context replacement: bootstrap (initial or workstream switch)
+  // returns the target conversation's full journal, which supersedes any
+  // events accumulated under the previous workstream.
+  const applyBootstrap = useCallback((resp: BootstrapResponse) => {
+    setWorkstream(resp.workstream ?? null);
+    setConversation(resp.conversation ?? null);
+    conversationRef.current = resp.conversation?.id ?? null;
+    const evs = resp.events ?? [];
+    lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
+    setEvents(evs);
+    setAgentRunning(resp.agent_running ?? false);
+    setDiff(resp.diff ?? null);
+    setLastDistillPath(null);
   }, []);
 
   // Session restore: bootstrap returns project/workstream/conversation plus
@@ -44,12 +77,11 @@ export default function App() {
         const resp = unwrap(await bootstrap());
         if (cancelled) return;
         setProject(resp.project ?? null);
-        setWorkstream(resp.workstream ?? null);
-        setConversation(resp.conversation ?? null);
-        conversationRef.current = resp.conversation?.id ?? null;
-        recordEvents(resp.events ?? []);
-        setAgentRunning(resp.agent_running ?? false);
-        setDiff(resp.diff ?? null);
+        applyBootstrap(resp);
+        if (resp.project) {
+          const list = unwrap(await listWorkstreams(resp.project.root_path));
+          if (!cancelled) setWorkstreams(list.workstreams ?? []);
+        }
         setBooted(true);
       } catch (e) {
         if (!cancelled) setError(`bootstrap failed: ${errorMessage(e)}`);
@@ -58,18 +90,20 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [recordEvents]);
+  }, [applyBootstrap]);
 
   // Poll the daemon for new journal events after the last seen seq.
   useEffect(() => {
     if (!booted) return;
     let inFlight = false;
     const tick = async () => {
+      if (distillingRef.current) return;
       const cid = conversationRef.current;
       if (cid == null || inFlight) return;
       inFlight = true;
       try {
         const resp = unwrap(await pollEvents(cid, lastSeqRef.current));
+        if (conversationRef.current !== cid) return; // workstream switched mid-flight
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
         // The daemon always reports the latest diff (any status); only a
@@ -77,7 +111,9 @@ export default function App() {
         if (resp.diff) setDiff(resp.diff);
         setError(null);
       } catch (e) {
-        setError(`poll failed: ${errorMessage(e)}`);
+        if (!distillingRef.current) {
+          setError(`poll failed: ${errorMessage(e)}`);
+        }
       } finally {
         inFlight = false;
       }
@@ -87,22 +123,84 @@ export default function App() {
   }, [booted, recordEvents]);
 
   const handleSend = useCallback(
-    async (text: string, attachments: string[]) => {
+    async (text: string, attachments: string[], steer: boolean) => {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
       try {
-        const resp = unwrap(await sendMessage(cid, text, attachments));
+        const resp = unwrap(await sendMessage(cid, text, attachments, { steer, adapter }));
         if (resp.event) recordEvents([resp.event]);
         // The daemon starts the agent synchronously inside send_message.
-        setAgentRunning(true);
+        // A steering message does not start a run.
+        if (!steer) setAgentRunning(true);
         setError(null);
       } catch (e) {
         setError(`send failed: ${errorMessage(e)}`);
         throw e; // let the composer keep the draft
       }
     },
-    [recordEvents],
+    [recordEvents, adapter],
   );
+
+  const handleSwitchWorkstream = useCallback(
+    async (workstreamId: number) => {
+      if (workstreamId === workstream?.id) return;
+      try {
+        const resp = unwrap(await bootstrap(project?.root_path, workstreamId));
+        applyBootstrap(resp);
+        setError(null);
+      } catch (e) {
+        setError(`switch failed: ${errorMessage(e)}`);
+      }
+    },
+    [workstream?.id, project?.root_path, applyBootstrap],
+  );
+
+  const handleCreateWorkstream = useCallback(
+    async (name: string) => {
+      const root = project?.root_path;
+      if (!root) throw new Error("no project loaded yet");
+      const created = unwrap(await createWorkstream(root, name));
+      try {
+        // Re-list rather than trusting the created row: a duplicate name
+        // returns the pre-existing workstream, and the list is the single
+        // source of truth for order and contents.
+        const list = unwrap(await listWorkstreams(root));
+        setWorkstreams(list.workstreams ?? []);
+      } catch {
+        setWorkstreams((prev) =>
+          created.workstream && !prev.some((w) => w.id === created.workstream?.id)
+            ? [...prev, created.workstream]
+            : prev,
+        );
+      }
+      if (created.workstream) {
+        await handleSwitchWorkstream(created.workstream.id);
+      }
+      setError(null);
+    },
+    [project?.root_path, handleSwitchWorkstream],
+  );
+
+  const handleDistill = useCallback(async (): Promise<string> => {
+    const cid = conversationRef.current;
+    if (cid == null) throw new Error("no active conversation yet");
+    distillingRef.current = true;
+    try {
+      const resp = unwrap(await distill(cid));
+      if (resp.epoch != null) {
+        const epoch = resp.epoch;
+        setConversation((prev) => (prev ? { ...prev, epoch } : prev));
+      }
+      setLastDistillPath(resp.wiki_path ?? null);
+      setError(null);
+      return resp.wiki_path ?? "";
+    } catch (e) {
+      setError(`distill failed: ${errorMessage(e)}`);
+      throw e; // Sidebar clears its busy state; keep the toast hidden.
+    } finally {
+      distillingRef.current = false;
+    }
+  }, []);
 
   const handleAccept = useCallback(async (diffId: number) => {
     try {
@@ -132,14 +230,27 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar project={project} workstream={workstream} conversationId={conversation?.id ?? null} />
+      <Sidebar
+        project={project}
+        workstream={workstream}
+        conversationId={conversation?.id ?? null}
+        workstreams={workstreams}
+        agentRunning={agentRunning}
+        adapter={adapter}
+        onAdapterChange={setAdapter}
+        onSwitchWorkstream={handleSwitchWorkstream}
+        onCreateWorkstream={handleCreateWorkstream}
+        onDistill={handleDistill}
+      />
       <main className="app-main">
         {error && <div className="error-banner">{error}</div>}
         <ChatSurface
           events={events}
           agentRunning={agentRunning}
-          sendDisabled={!booted || agentRunning}
+          sendDisabled={!booted}
           onSend={handleSend}
+          epoch={conversation?.epoch ?? 1}
+          distilledTo={lastDistillPath}
         />
         {diff && <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />}
       </main>

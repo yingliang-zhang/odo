@@ -71,6 +71,17 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
       );
 
     case "review_action":
+      // The memory distiller journals its epoch bump as a review_action with
+      // action "distill" and no diff (ADR-0002); render it as a memory event.
+      if (p.action === "distill") {
+        return (
+          <div className="bubble bubble-review">
+            <span className="badge badge-other" title={p.wiki_path ?? "distilled to wiki"}>
+              Distilled · epoch {p.epoch ?? "?"}
+            </span>
+          </div>
+        );
+      }
       return (
         <div className="bubble bubble-review">
           <span className={`badge badge-${REVIEW_LABEL[p.action ?? ""] ? p.action : "other"}`}>
