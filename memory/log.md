@@ -126,3 +126,31 @@ HEAD: 378d837
 
 Dual-model verification passed. All M0→M1 features validated via automated tests.
 HEAD: 69d3d71
+
+### M2 implementation — Go daemon + frontend (completed)
+
+- Go daemon (dcb8a6a): MoA review fan-out, settings commands, parallel fan-out. 5 files, +1013 lines. 4 new tests, all pass.
+- Frontend (ae2a5e5): review panel, settings UI, fan-out view. 9 files, +766 lines. tsc + vite + cargo check pass.
+- Dual-model review: GLM-5.2 ACCEPT (4 non-blocking), K3 NEEDS FIXES (3 must + 6 should).
+
+### M2 review fixes (6768cea)
+
+6 fixes from dual-model review:
+1. F1: Accept button disabled when any model REJECTs
+2. F3: Auto-reject sibling fan-out diffs on accept (prevents worktree leaks)
+3. F4: parseVerdict requires verdict at line start (prevents "I cannot accept" false-accept)
+4. F6: SettingsPanel placeholder shows model@provider format
+5. F7: UpdateSettings atomic write (temp file + os.Rename)
+6. F9: fanout_send N capped at 8
+
+### M2 E2E verification
+
+- Go tests: 25/25 test functions PASS (M0→M1→M2 all features)
+  - M0: TestVisibleLoopAcceptRejectRestore
+  - M0.1: TestAttachmentsJournal, TestParseToolCalls, TestResolveModelConfig
+  - M1: TestCreateWorkstream, TestBootstrapByWorkstream, TestSteering, TestDistill, TestPiRunIPC
+  - M2: TestReviewDiff, TestGetSettings, TestUpdateSettings, TestFanoutSend (auto-reject)
+  - Store: 10 tests, Adapter: 6 tests
+- Dual-model review: GLM-5.2 ACCEPT + K3 NEEDS FIXES → 6 fixes applied → re-verified all pass
+
+HEAD: 6768cea
