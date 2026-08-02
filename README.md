@@ -138,6 +138,29 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 | Markdown wiki | Odo (context) | architecture, decisions, conventions |
 | Global prefs | Odo (context) | `~/.odo/prefs.md` — user preferences, model defaults |
 
+## Memory architecture
+
+Memory is layered, scoped, and journal-anchored (full rationale:
+[ADR-0003](docs/adr/0003-memory-architecture.md)):
+
+| Layer | Path | Injected? | Holds |
+|---|---|---|---|
+| journal | `.odo/journal.db` | never (substrate) | everything, full fidelity |
+| epoch notes | `wiki/<ws>-epoch-N.md` | selected ≤12 KB | records — narratives, dated decisions |
+| topic pages + `index.md` | `wiki/` (M5) | index ≤2 KB always | curated project knowledge |
+| `memory.md` | `.odo/memory.md` (M4) | always ≤4 KB | project rules every run obeys |
+| `user.md` | `~/.odo/user.md` | always ≤4 KB | global durable principles |
+| `ledger.md` | `.odo/ledger.md` (M6) | never (pulled) | verbatim metrics, daemon-written |
+
+Core rules: agents (OMP/Pi) never write any memory layer — the distiller
+harvests behavioral signals from the journal instead. Rules live in
+`memory.md`/`user.md`; records live in the wiki; numbers live in the ledger
+with verbatim quotes the daemon verifies mechanically — no LLM in the
+metric path. Everything derived is rebuildable from the journal; nothing is
+silently truncated or deleted (overflow demotes to an append-only archive).
+Promotion flows one way up: journal → epoch note → topic page → memory.md →
+user.md (a rule seen in 2+ projects earns global promotion).
+
 ### Session continuity
 
 When a Hermes session compresses or switches, the project repo is the
