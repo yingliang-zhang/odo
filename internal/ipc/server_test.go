@@ -675,3 +675,61 @@ func TestPiRunIPC(t *testing.T) {
 		t.Errorf("unexpected diff from no-op pi run: %+v", done.Diff)
 	}
 }
+
+// TestAttachmentsJournal verifies that attachments sent with send_message
+// are journaled in the user_message event payload.
+func TestAttachmentsJournal(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Send with attachments.
+	files := []string{"/path/to/main.py", "/path/to/utils.go"}
+	sent := rig.call(t, Request{
+		Cmd:           CmdSendMessage,
+		ConversationID: convID,
+		Text:          "Create hello.txt (attachment test)",
+		Attachments:   files,
+	})
+	if sent.Event == nil || sent.Event.Type != store.EventUserMessage {
+		t.Fatalf("send_message: bad event %+v", sent.Event)
+	}
+
+	// Verify the journaled event payload contains the attachments.
+	var payload struct {
+		Attachments []string `json:"attachments"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal user_message payload: %v", err)
+	}
+	if len(payload.Attachments) != len(files) {
+		t.Fatalf("attachments: got %d, want %d", len(payload.Attachments), len(files))
+	}
+	for i, want := range files {
+		if payload.Attachments[i] != want {
+			t.Errorf("attachment[%d]: got %q, want %q", i, payload.Attachments[i], want)
+		}
+	}
+
+	// Poll all events and verify the user_message carries attachments.
+	all := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
+	var foundAttach bool
+	for _, ev := range all.Events {
+		if ev.Type == store.EventUserMessage {
+			var p struct {
+				Attachments []string `json:"attachments"`
+			}
+			_ = json.Unmarshal(ev.Payload, &p)
+			if len(p.Attachments) == len(files) {
+				foundAttach = true
+			}
+		}
+	}
+	if !foundAttach {
+		t.Error("no user_message event with attachments found in poll")
+	}
+}
