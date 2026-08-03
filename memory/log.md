@@ -197,3 +197,76 @@ HEAD: 6768cea
   - Demo C: status bar `running — 3s`; diff lifecycle; `pending_counts` IPC `{"ok": true}`
 
 HEAD: 4af1ead
+
+## M4 GUI (cua-driver)
+
+Full M4 GUI E2E via cua-driver AX tree + SQLite journal + IPC socket verification
+(hybrid pattern: direct call for get_window_state, MCP stdio session for click/type).
+34 tests: 33 PASS / 0 FAIL / 1 SKIP (badge consumed after apply — expected).
+
+### Demo A: project memory learned and injected
+
+| Test | Result | Method | Evidence |
+|---|---|---|---|
+| A1: type + Send | ✅ | AX | text 'hello' in input field; Send clicked |
+| A1: recall chip | ✅ | AX | `memory: user.md + 1 note(s)` (no memory.md yet) |
+| A1: journal recall | ✅ | SQLite | `recall=["~/.odo/user.md", ".../main-epoch-1.md"]` — user.md first |
+| A1: journal receipt | ✅ | SQLite | `receipt={"~/.odo/user.md": "fec0f06d8f3463f1", ".../main-epoch-1.md": "b267447428c803da"}` |
+| A2: agent done | ✅ | IPC | agent finished; diff 1 accepted |
+| A3: distill click | ✅ | AX | Distill button clicked |
+| A3: proposals IPC | ✅ | IPC | epoch=1, 2 memory proposals |
+| A3: journal propose | ✅ | SQLite | `memory_propose` event: epoch=1, 2 memory proposals |
+| A3: review badge | ✅ | AX | `2 memory proposed — Review` |
+| A4: review open | ✅ | AX | Review button → MemoryReviewPanel opened |
+| A4: apply click | ✅ | AX | `Apply (2 accepted)` button clicked |
+| A4: memory.md | ✅ | File | memory.md written (174 bytes), `go test` + `cites: main-epoch-1` |
+| A4: read_memory IPC | ✅ | IPC | `read_memory` returns 174 bytes memory + user.md |
+| A4: journal apply | ✅ | SQLite | `memory_apply`: epoch=1, metrics={accepted:2, rejected:0} |
+| A4: journal update | ✅ | SQLite | `memory_update(apply)`: layer=memory, detail="accepted 2 rule(s)" |
+| A5: memory chip | ✅ | AX | `memory updated` chip in sidebar (recordEvents path, not applyBootstrap) |
+| A6: journal recall | ✅ | SQLite | recall includes `.odo/memory.md` + `~/.odo/user.md` + wiki note |
+| A6: journal receipt | ✅ | SQLite | receipt includes `.odo/memory.md`: `8a1ec6eeaa95c990` |
+| A6: recall chip | ✅ | AX | `memory: user.md + memory.md + 1 note(s)` — memory.md now present |
+
+### Demo B: user.md cross-project promotion
+
+| Test | Result | Method | Evidence |
+|---|---|---|---|
+| B1: distill epoch 2 | ✅ | IPC | memory_proposals=2, wiki=main-epoch-2.md |
+| B2: proposals | ✅ | IPC | 1 user.md proposal + 1 memory.md proposal (sibling registry ≥2 gate) |
+| B3: apply | ✅ | IPC | applied 2 proposals (memory.md + user.md) |
+| B4: user.md | ✅ | File | user.md updated: `seen: odo, ananke` cross-project promotion |
+| B5: memory.md | ✅ | File | memory.md has epoch-2 rule (242 bytes) |
+| B6: journal user update | ✅ | SQLite | `memory_update`: layer=user, cause=apply, detail="accepted 1 rule(s)" |
+| B7: read_memory | ✅ | IPC | `read_memory` returns updated user.md with promoted rule |
+| B8: AX badge | ⏭️ SKIP | AX | badge consumed after apply (expected — not a failure) |
+
+## M4 (learning) — CLOSED
+
+### Implementation (4 commits)
+
+| SHA | Content |
+|---|---|
+| 70abe3a | docs(m4): frozen spec — GLM-5.2 + K3 dual-model ACCEPT (5 rounds) |
+| f63ecae | feat(m4): memory learning — backend (registry/learner/io/buildPrompt 5-arg/IPC/memory_update) + frontend (MemoryReviewPanel/sidebar chip/recall chip/lib.rs 960s) |
+| 297ec91 | fix(m4): audit must-fixes — distinct rotate/retract memory_update events + all-or-nothing apply on mid-write failure |
+| c54f28a | fix(m4): user.md apply idempotent skip — retry converges instead of duplicate lines/deadlock |
+
+### Review (dual-model)
+
+| Model | Verdict | Findings |
+|---|---|---|
+| GLM-5.2 | ACCEPT (initial NEEDS_FIXES → 2 fixes → re-review ACCEPT) | rotate/retract distinct events; apply write order archive→user→memory(last) |
+| K3 | ACCEPT (initial NEEDS_FIXES → user.md idempotent skip → re-review ACCEPT) | retry convergence on mid-write failure; userRuleBody+normalized dedup |
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| Go build/vet/test ./... (10 new M4 tests + 2 fix tests) | ✅ all green (ipc ~58s) |
+| gui: npx tsc --noEmit + npm run build | ✅ |
+| gui/src-tauri: cargo check | ✅ |
+| Dual-model review | ✅ GLM-5.2 ACCEPT + K3 ACCEPT |
+| GUI E2E (cua-driver AX + SQLite + IPC) | ✅ 33 PASS / 0 FAIL / 1 SKIP |
+
+HEAD: c54f28a
