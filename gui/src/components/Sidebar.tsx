@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { errorMessage } from "../api";
+import { errorMessage, listTopics } from "../api";
 import { basename } from "../files";
 import type { Conversation, Project, Workstream } from "../types";
 import MemoryReviewPanel from "./MemoryReviewPanel";
@@ -24,6 +24,11 @@ interface Props {
   // then omitted) and a refresh hook fired when the browser closes.
   wikiNoteCount: number | null;
   onWikiBrowserClosed: () => void;
+  // M5 (spec §8): curator pass + pin affordance handlers, and the topic
+  // page count (null = unknown; the line is then omitted). All owned by App.
+  onCurate: () => Promise<void>;
+  onPin: (text: string) => Promise<void>;
+  topicCount: number | null;
   // M3 visibility (spec §3c): per-workstream pending-diff counts and the
   // workstreams with a live run, from the daemon's pending_counts poll.
   pendingCounts: Record<number, number>;
@@ -61,6 +66,9 @@ export default function Sidebar({
   onDistill,
   wikiNoteCount,
   onWikiBrowserClosed,
+  onCurate,
+  onPin,
+  topicCount,
   pendingCounts,
   runningWorkstreams,
   pendingMemoryProposals,
@@ -74,16 +82,28 @@ export default function Sidebar({
   const [newName, setNewName] = useState("");
   const [distillBusy, setDistillBusy] = useState(false);
   const [distillToast, setDistillToast] = useState<string | null>(null);
+  // M5: the curate busy/toast mirror the distill pair; the pin form keeps
+  // its own error line because refusals (e.g. overflow) name the pin text.
+  const [curateBusy, setCurateBusy] = useState(false);
+  const [curateToast, setCurateToast] = useState<string | null>(null);
+  const [pinText, setPinText] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [pinToast, setPinToast] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showWiki, setShowWiki] = useState(false);
   const [showMemoryReview, setShowMemoryReview] = useState(false);
   // Review opens the proposal tab; the memory-updated chip opens the reader.
   const [memoryReviewTab, setMemoryReviewTab] = useState<"proposals" | "files">("proposals");
   const toastTimer = useRef<ToastTimer | null>(null);
+  const curateToastTimer = useRef<ToastTimer | null>(null);
+  const pinToastTimer = useRef<ToastTimer | null>(null);
 
   useEffect(() => {
     return () => {
-      if (toastTimer.current) clearTimeout(toastTimer.current);
+      clearTimeout(toastTimer.current ?? undefined);
+      clearTimeout(curateToastTimer.current ?? undefined);
+      clearTimeout(pinToastTimer.current ?? undefined);
     };
   }, []);
 
@@ -132,6 +152,47 @@ export default function Sidebar({
       // The error banner in App already carries the message.
     } finally {
       setDistillBusy(false);
+    }
+  };
+
+  // M5: on success the toast names the topic count. App's topicCount prop
+  // may not have re-rendered yet, so read the daemon (the single source of
+  // truth) directly for a deterministic number.
+  const handleCurate = async () => {
+    if (curateBusy) return;
+    setCurateBusy(true);
+    setCurateToast(null);
+    try {
+      await onCurate();
+      const topics = await listTopics();
+      setCurateToast(`Curated ${topics.wiki_notes?.length ?? 0} topics`);
+      clearTimeout(curateToastTimer.current ?? undefined);
+      curateToastTimer.current = setTimeout(() => setCurateToast(null), DISTILL_TOAST_MS);
+    } catch {
+      // The error banner in App already carries the message.
+    } finally {
+      setCurateBusy(false);
+    }
+  };
+
+  // M5: store the pin verbatim; on success clear the input and toast. A
+  // refusal (overflow names the pin text) shows in the pin error line.
+  const handlePin = async (e: FormEvent) => {
+    e.preventDefault();
+    const text = pinText.trim();
+    if (text === "" || pinBusy || conversationId == null) return;
+    setPinBusy(true);
+    setPinError(null);
+    try {
+      await onPin(text);
+      setPinText("");
+      setPinToast(`Pinned: ${text}`);
+      clearTimeout(pinToastTimer.current ?? undefined);
+      pinToastTimer.current = setTimeout(() => setPinToast(null), DISTILL_TOAST_MS);
+    } catch (err) {
+      setPinError(errorMessage(err));
+    } finally {
+      setPinBusy(false);
     }
   };
 
@@ -265,6 +326,38 @@ export default function Sidebar({
         >
           Browse
         </button>
+        <button
+          type="button"
+          className="distill-btn"
+          disabled={curateBusy || conversationId == null}
+          title="Rewrite wiki topic pages + index from all epoch notes"
+          onClick={() => void handleCurate()}
+        >
+          {curateBusy ? "Curating…" : "Curate"}
+        </button>
+        {topicCount != null && <div className="wiki-count">{topicCount} topics</div>}
+        <form className="pin-form" onSubmit={handlePin}>
+          <input
+            type="text"
+            className="pin-input"
+            value={pinText}
+            onChange={(e) => setPinText(e.target.value)}
+            placeholder="remember: Never deploy on Fridays"
+            disabled={conversationId == null}
+            title="Store a verbatim pin in .odo/pins.md (always injected, human-owned)"
+          />
+          <button
+            type="submit"
+            className="pin-btn"
+            disabled={pinBusy || conversationId == null || pinText.trim() === ""}
+            title="Store a verbatim pin in .odo/pins.md"
+          >
+            Pin
+          </button>
+        </form>
+        {pinError && <div className="pin-error">{pinError}</div>}
+        {pinToast && <div className="distill-toast">{pinToast}</div>}
+        {curateToast && <div className="distill-toast">{curateToast}</div>}
         {distillToast && <div className="distill-toast">{distillToast}</div>}
         {showWiki && conversationId != null && (
           <WikiBrowser

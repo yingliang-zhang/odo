@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { errorMessage, listWiki, readWiki } from "../api";
+import { errorMessage, listTopics, listWiki, readWiki } from "../api";
 import type { WikiNoteInfo } from "../types";
 
 // The daemon allows exactly one path outside <project>/wiki/: the pinned
-// global user memory, shown as the always-present first row.
+// global user memory, shown as the always-present first row of the Notes
+// tab.
 const USER_MD_PATH = "~/.odo/user.md";
 const USER_MD_HINT =
   "No ~/.odo/user.md yet — create it to give agents your durable principles.";
+
+// M5: topic pages live under wiki/topics/ — the reader flags their bullets.
+const TOPICS_MARKER = "/wiki/topics/";
+
+// M5 (spec §9): a topic-page bullet must trace to a source epoch note via a
+// trailing "(epoch-N)" citation; bullets without one are flagged "uncited".
+const CITATION_RE = /\(epoch-(\d+)\)$/;
 
 interface Props {
   conversationId: number;
@@ -26,12 +34,17 @@ function relativeTime(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-// M3 wiki browser (spec §2b): modal with the wiki note list on the left —
-// a pinned user.md (global) row first, then the workstream's notes newest
-// epoch first — and a dependency-free preformatted reader on the right.
+// M3 wiki browser (spec §2b) + M5 Topics tab (spec §9): modal with tabs on
+// top — "Notes" (the workstream's epoch notes, user.md pinned first) and
+// "Topics" (the curator's project-wide topic pages) — and a
+// dependency-free reader on the right. Topic pages render line-by-line so
+// uncited bullets are flagged and (epoch-N) citations are clickable.
 export default function WikiBrowser({ conversationId, onClose }: Props) {
+  const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  const [topics, setTopics] = useState<WikiNoteInfo[] | null>(null);
+  const [topicsError, setTopicsError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string>(USER_MD_PATH);
   const [content, setContent] = useState<string | null>(null);
   const [contentLoading, setContentLoading] = useState(true);
@@ -56,6 +69,24 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
       cancelled = true;
     };
   }, [conversationId]);
+
+  // M5: topics are project-wide (not per-workstream) — fetched lazily on
+  // the first switch to the Topics tab.
+  useEffect(() => {
+    if (tab !== "topics" || topics !== null || topicsError !== null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await listTopics();
+        if (!cancelled) setTopics(resp.wiki_notes ?? []);
+      } catch (e) {
+        if (!cancelled) setTopicsError(errorMessage(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, topics, topicsError]);
 
   // Reader: fetch the selected entry once, then serve from the cache.
   useEffect(() => {
@@ -95,6 +126,17 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // M5 (spec §9): a citation click jumps to the source epoch note in the
+  // Notes tab, when the current workstream's list contains it.
+  const jumpToEpoch = (epoch: number) => {
+    const note = notes?.find((n) => n.epoch === epoch);
+    if (!note) return;
+    setTab("notes");
+    setSelected(note.path);
+  };
+
+  const isTopicPage = selected.includes(TOPICS_MARKER);
+
   return (
     <div className="settings-overlay" onClick={onClose}>
       <div
@@ -111,41 +153,96 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
           </button>
         </div>
 
+        <div className="wiki-tabs" role="tablist" aria-label="Wiki sections">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "notes"}
+            className={`wiki-tab${tab === "notes" ? " active" : ""}`}
+            onClick={() => setTab("notes")}
+          >
+            Notes
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "topics"}
+            className={`wiki-tab${tab === "topics" ? " active" : ""}`}
+            onClick={() => setTab("topics")}
+          >
+            Topics
+          </button>
+        </div>
+
         <div className="wiki-body">
           <div className="wiki-list">
-            <button
-              type="button"
-              className={`wiki-row${selected === USER_MD_PATH ? " selected" : ""}`}
-              onClick={() => setSelected(USER_MD_PATH)}
-            >
-              <span className="wiki-row-name">user.md (global)</span>
-            </button>
-            {notes === null && !listError && <div className="wiki-hint">Loading…</div>}
-            {listError && <div className="wiki-hint">list failed: {listError}</div>}
-            {notes !== null && notes.length === 0 && (
-              <div className="wiki-hint">No wiki notes yet — Distill writes the first one.</div>
+            {tab === "notes" && (
+              <>
+                <button
+                  type="button"
+                  className={`wiki-row${selected === USER_MD_PATH ? " selected" : ""}`}
+                  onClick={() => setSelected(USER_MD_PATH)}
+                >
+                  <span className="wiki-row-name">user.md (global)</span>
+                </button>
+                {notes === null && !listError && <div className="wiki-hint">Loading…</div>}
+                {listError && <div className="wiki-hint">list failed: {listError}</div>}
+                {notes !== null && notes.length === 0 && (
+                  <div className="wiki-hint">No wiki notes yet — Distill writes the first one.</div>
+                )}
+                {notes?.map((n) => (
+                  <button
+                    type="button"
+                    key={n.path}
+                    className={`wiki-row${selected === n.path ? " selected" : ""}`}
+                    title={n.path}
+                    onClick={() => setSelected(n.path)}
+                  >
+                    <span className="wiki-row-name">{n.name}</span>
+                    <span className="wiki-row-meta">
+                      epoch {n.epoch}
+                      {relativeTime(n.modified_at) !== "" ? ` · ${relativeTime(n.modified_at)}` : ""}
+                    </span>
+                  </button>
+                ))}
+              </>
             )}
-            {notes?.map((n) => (
-              <button
-                type="button"
-                key={n.path}
-                className={`wiki-row${selected === n.path ? " selected" : ""}`}
-                title={n.path}
-                onClick={() => setSelected(n.path)}
-              >
-                <span className="wiki-row-name">{n.name}</span>
-                <span className="wiki-row-meta">
-                  epoch {n.epoch}
-                  {relativeTime(n.modified_at) !== "" ? ` · ${relativeTime(n.modified_at)}` : ""}
-                </span>
-              </button>
-            ))}
+            {tab === "topics" && (
+              <>
+                {topics === null && !topicsError && <div className="wiki-hint">Loading…</div>}
+                {topicsError && <div className="wiki-hint">list failed: {topicsError}</div>}
+                {topics !== null && topics.length === 0 && (
+                  <div className="wiki-hint">No topic pages yet — Curate writes the first set.</div>
+                )}
+                {topics?.map((topic) => (
+                  <button
+                    type="button"
+                    key={topic.path}
+                    className={`wiki-row${selected === topic.path ? " selected" : ""}`}
+                    title={topic.path}
+                    onClick={() => setSelected(topic.path)}
+                  >
+                    <span className="wiki-row-name">{topic.name}</span>
+                    <span className="wiki-row-meta">
+                      {relativeTime(topic.modified_at) !== "" ? relativeTime(topic.modified_at) : ""}
+                    </span>
+                  </button>
+                ))}
+              </>
+            )}
           </div>
 
           <div className="wiki-reader">
             {contentLoading && <div className="wiki-hint">Loading…</div>}
-            {!contentLoading && content !== null && content !== "" && (
+            {!contentLoading && content !== null && content !== "" && !isTopicPage && (
               <pre className="wiki-content">{content}</pre>
+            )}
+            {!contentLoading && content !== null && content !== "" && isTopicPage && (
+              <div className="wiki-content wiki-topic-content">
+                {content.split("\n").map((line, i) => (
+                  <TopicLine key={i} line={line} onJumpToEpoch={jumpToEpoch} />
+                ))}
+              </div>
             )}
             {!contentLoading && content === "" && selected === USER_MD_PATH && (
               <div className="wiki-hint">{USER_MD_HINT}</div>
@@ -156,6 +253,45 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// TopicLine renders one line of a topic page. A bullet ending in
+// "(epoch-N)" gets a clickable citation that jumps to the source note; a
+// bullet without a citation is flagged "⚠ uncited" (still injected into
+// prompts — the flag is the user's verification surface, spec §9).
+function TopicLine({
+  line,
+  onJumpToEpoch,
+}: {
+  line: string;
+  onJumpToEpoch: (epoch: number) => void;
+}) {
+  if (!line.startsWith("- ")) {
+    return <div className="wiki-topic-line">{line}</div>;
+  }
+  const match = line.match(CITATION_RE);
+  if (!match) {
+    return (
+      <div className="wiki-topic-line wiki-line-uncited">
+        {line} <span className="wiki-uncited-badge">⚠ uncited</span>
+      </div>
+    );
+  }
+  const epoch = Number(match[1]);
+  const text = line.slice(0, match.index);
+  return (
+    <div className="wiki-topic-line">
+      {text}
+      <button
+        type="button"
+        className="wiki-epoch-link"
+        title={`Jump to the epoch ${epoch} source note (Notes tab)`}
+        onClick={() => onJumpToEpoch(epoch)}
+      >
+        {match[0]}
+      </button>
     </div>
   );
 }

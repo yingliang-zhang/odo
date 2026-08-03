@@ -31,6 +31,13 @@ const (
 	CmdReadMemory       = "read_memory"
 	CmdMemoryProposals  = "memory_proposals"
 	CmdApplyMemory      = "apply_memory"
+	// M5 (Curation): curate rewrites topic pages + wiki/index.md from the full
+	// epoch-note set; pin/read_pins manage the human-owned .odo/pins.md;
+	// list_topics lists wiki/topics/*.md for the browser's Topics tab.
+	CmdCurate     = "curate"
+	CmdPin        = "pin"
+	CmdReadPins   = "read_pins"
+	CmdListTopics = "list_topics"
 )
 
 // Request is one command line on the socket.

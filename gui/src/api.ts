@@ -9,16 +9,20 @@ import type {
   ApplyMemoryResponse,
   BootstrapResponse,
   CreateWorkstreamResponse,
+  CurateResponse,
   DistillResponse,
   FanoutSendRequest,
   FanoutSendResponse,
   GetSettingsResponse,
+  ListTopicsResponse,
   ListWikiResponse,
   ListWorkstreamsResponse,
   MemoryProposalsResponse,
   PendingCountsResponse,
+  PinResponse,
   PollEventsResponse,
   ReadMemoryResponse,
+  ReadPinsResponse,
   ReadWikiResponse,
   RejectDiffResponse,
   ReviewDiffResponse,
@@ -156,6 +160,32 @@ export async function applyMemory(req: ApplyMemoryRequest): Promise<ApplyMemoryR
       accepted: req.accepted,
     }),
   );
+}
+
+// M5 curation: curate blocks daemon-side up to 10 minutes while the
+// curator reads the full epoch-note set and rewrites every topic page +
+// index.md; the Rust bridge uses CURATE_READ_TIMEOUT for this command.
+export function curate(conversationId: number): Promise<CurateResponse> {
+  return invoke<CurateResponse>("curate", { conversationId });
+}
+
+// M5 curation: store a verbatim pin in .odo/pins.md. A refusal (empty
+// text, or the file would overflow its 2 KB cap) arrives as ok:false
+// naming the pin text; nothing is written.
+export function pin(conversationId: number, text: string): Promise<PinResponse> {
+  return invoke<PinResponse>("pin", { conversationId, text });
+}
+
+// M5 curation: .odo/pins.md content for the review panel reader; same
+// shape and unwrap semantics as readMemory.
+export async function readPins(): Promise<ReadPinsResponse> {
+  return unwrap(await invoke<ReadPinsResponse>("read_pins", { projectRoot: null }));
+}
+
+// M5 curation: topic pages for the wiki browser's Topics tab; the daemon
+// uses its bound project root (a project root is never sent).
+export async function listTopics(): Promise<ListTopicsResponse> {
+  return unwrap(await invoke<ListTopicsResponse>("list_topics", { projectRoot: null }));
 }
 
 // Daemon-level failures arrive with ok:false; transport failures (invoke

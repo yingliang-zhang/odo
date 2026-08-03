@@ -7,10 +7,13 @@ const REVIEW_LABEL: Record<string, string> = {
 };
 
 // M3 recall: the daemon journals injected memory paths on user_message;
-// M4 adds .odo/memory.md between user.md and the note paths. These two are
-// fixed markers — everything else is a recalled wiki note.
+// M4 adds .odo/memory.md between user.md and the note paths; M5 adds
+// .odo/pins.md and wiki/index.md between memory.md and the note paths.
+// These are fixed markers — everything else is a recalled wiki note.
 const USER_MD_PATH = "~/.odo/user.md";
 const PROJECT_MEM_PATH = ".odo/memory.md";
+const PINS_PATH = ".odo/pins.md";
+const INDEX_PATH = "wiki/index.md";
 
 // Tooltip lists the injected sources with wiki paths shortened to
 // "wiki/<basename>" (spec §1b); the fixed markers render as their literal
@@ -18,21 +21,33 @@ const PROJECT_MEM_PATH = ".odo/memory.md";
 function shortRecallPath(path: string): string {
   if (path === USER_MD_PATH) return "user.md";
   if (path === PROJECT_MEM_PATH) return "memory.md";
+  if (path === PINS_PATH) return "pins";
+  if (path === INDEX_PATH) return "index";
   const marker = "/wiki/";
   const at = path.indexOf(marker);
   return at >= 0 ? path.slice(at + 1) : basename(path);
 }
 
-// M4 (spec §8): the chip label is presence-conditioned — only layers
-// actually in `recall` render, e.g. "memory: user.md + memory.md + 1
-// note(s)", "memory: memory.md + 2 note(s)", "memory: 2 note(s)".
+// M4/M5 (spec §8/§10): the chip label is presence-conditioned — only layers
+// actually in `recall` render, e.g. "memory: user.md + memory.md + pins +
+// index + 2 note(s)", "memory: memory.md + index + 1 note(s)", "memory:
+// 2 note(s)".
 function recallChipLabel(recall: string[]): string {
   const hasUser = recall.includes(USER_MD_PATH);
   const hasMem = recall.includes(PROJECT_MEM_PATH);
-  const notes = recall.length - (hasUser ? 1 : 0) - (hasMem ? 1 : 0);
+  const hasPins = recall.includes(PINS_PATH);
+  const hasIndex = recall.includes(INDEX_PATH);
+  const notes =
+    recall.length -
+    (hasUser ? 1 : 0) -
+    (hasMem ? 1 : 0) -
+    (hasPins ? 1 : 0) -
+    (hasIndex ? 1 : 0);
   const parts: string[] = [];
   if (hasUser) parts.push("user.md");
   if (hasMem) parts.push("memory.md");
+  if (hasPins) parts.push("pins");
+  if (hasIndex) parts.push("index");
   if (notes > 0) parts.push(`${notes} note(s)`);
   return `memory: ${parts.join(" + ")}`;
 }

@@ -31,6 +31,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// timeout covers both plus margin (10m + 5m + margin).
 const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(960);
 
+/// `curate` runs the curator one-shot (bounded by the daemon's 10-minute
+/// `curatorTimeout`): it reads up to 50 epoch notes and rewrites every topic
+/// page plus wiki/index.md synchronously before answering — 10m + margin.
+const CURATE_READ_TIMEOUT: Duration = Duration::from_secs(660);
+
 /// M2: `review_diff` waits on every configured review model daemon-side
 /// (sequentially in the worst case). Five minutes plus margin covers the
 /// expected multi-model latency without hanging the UI forever.
@@ -399,6 +404,44 @@ async fn apply_memory(conversation_id: i64, epoch: i64, accepted: Value) -> Resu
     run_command(root, req, REVIEW_READ_TIMEOUT).await
 }
 
+// M5 curation: the curator one-shot rewrites wiki/topics/*.md + wiki/index.md
+// from the full epoch-note set (generation-2 rule). Blocks daemon-side like
+// distill, hence the curator-length read timeout; the frontend pauses its
+// poll loop while a curate is in flight.
+#[tauri::command]
+async fn curate(conversation_id: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "curate", "conversation_id": conversation_id});
+    run_command(root, req, CURATE_READ_TIMEOUT).await
+}
+
+// M5 curation: store one verbatim pin line in .odo/pins.md (no LLM
+// processing; overflow refuses with an error naming the pin text).
+#[tauri::command]
+async fn pin(conversation_id: i64, text: String) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "pin", "conversation_id": conversation_id, "text": text});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M5 curation: read .odo/pins.md through the daemon (same resolve-root guard
+// and memory_content field as read_memory; "" when the file is absent).
+#[tauri::command]
+async fn read_pins(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "read_pins", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M5 curation: list wiki/topics/*.md pages (title parsed from the first `# `
+// line) through the daemon's list_topics command.
+#[tauri::command]
+async fn list_topics(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "list_topics", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,7 +671,11 @@ pub fn run() {
             pending_counts,
             read_memory,
             memory_proposals,
-            apply_memory
+            apply_memory,
+            curate,
+            pin,
+            read_pins,
+            list_topics
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

@@ -3,13 +3,16 @@ import {
   acceptDiff,
   bootstrap,
   createWorkstream,
+  curate,
   distill,
   errorMessage,
   fanoutSend,
+  listTopics,
   listWiki,
   listWorkstreams,
   memoryProposals,
   pendingCounts as fetchPendingCounts,
+  pin,
   pollEvents,
   rejectDiff,
   sendMessage,
@@ -49,6 +52,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   // M3: wiki note count for the sidebar Memory section (null = unknown).
   const [wikiNoteCount, setWikiNoteCount] = useState<number | null>(null);
+  // M5: topic page count beside the wiki note count (null = unknown).
+  const [topicCount, setTopicCount] = useState<number | null>(null);
   // M4: pending learner-proposal count (sidebar badge) and the ephemeral
   // "memory updated" chip state. Both live beside wikiNoteCount.
   const [pendingMemoryProposals, setPendingMemoryProposals] = useState(0);
@@ -72,6 +77,9 @@ export default function App() {
   // minutes; polling is paused for the duration instead of queueing up
   // certain timeout failures.
   const distillingRef = useRef(false);
+  // M5: curate blocks daemon-side like distill (one connection at a time),
+  // so the poll loop pauses for the curator one-shot the same way.
+  const curatingRef = useRef(false);
   // Auto-dismiss timer for the memory_update chip.
   const memoryChipTimer = useRef<number | undefined>(undefined);
 
@@ -98,8 +106,9 @@ export default function App() {
     }
   }, []);
 
-  // Wiki note count for the sidebar. Failures degrade to "unknown" (the
-  // line is omitted); they never surface in the error banner.
+  // Wiki note + topic counts for the sidebar. Failures degrade to
+  // "unknown" (the lines are omitted); they never surface in the error
+  // banner.
   const refreshWikiCount = useCallback(async (conversationId: number) => {
     try {
       const resp = await listWiki(conversationId);
@@ -107,6 +116,14 @@ export default function App() {
       setWikiNoteCount(resp.ok ? (resp.wiki_notes?.length ?? 0) : null);
     } catch {
       if (conversationRef.current === conversationId) setWikiNoteCount(null);
+    }
+    // M5: topics are project-wide (not per-workstream), but the same
+    // refresh hook + degrade pattern covers them.
+    try {
+      const topics = await listTopics();
+      setTopicCount(topics.wiki_notes?.length ?? 0);
+    } catch {
+      setTopicCount(null);
     }
   }, []);
 
@@ -182,7 +199,7 @@ export default function App() {
     if (!booted) return;
     let inFlight = false;
     const tick = async () => {
-      if (distillingRef.current) return;
+      if (distillingRef.current || curatingRef.current) return;
       pollTickRef.current += 1;
       const cid = conversationRef.current;
       if (cid == null || inFlight) return;
@@ -216,7 +233,7 @@ export default function App() {
         }
         setError(null);
       } catch (e) {
-        if (!distillingRef.current) {
+        if (!distillingRef.current && !curatingRef.current) {
           setError(`poll failed: ${errorMessage(e)}`);
         }
       } finally {
@@ -330,6 +347,41 @@ export default function App() {
     }
   }, [refreshWikiCount, refreshMemoryProposals]);
 
+  // M5: the curator one-shot rewrites every topic page + wiki/index.md
+  // from the full epoch-note set. Blocks daemon-side like distill, so the
+  // poll loop pauses; counts refresh on success.
+  const handleCurate = useCallback(async () => {
+    const cid = conversationRef.current;
+    if (cid == null) throw new Error("no active conversation yet");
+    curatingRef.current = true;
+    try {
+      unwrap(await curate(cid));
+      void refreshWikiCount(cid);
+      setError(null);
+    } catch (e) {
+      setError(`curate failed: ${errorMessage(e)}`);
+      throw e; // Sidebar clears its busy state; keep the toast hidden.
+    } finally {
+      curatingRef.current = false;
+    }
+  }, [refreshWikiCount]);
+
+  // M5: a pin is a verbatim user statement hoovered into .odo/pins.md — no
+  // LLM processing, no poll pause (returns immediately). The journaled
+  // memory_update{layer:"pins"} arrives on the next poll tick and chips
+  // the sidebar through the generic recordEvents branch.
+  const handlePin = useCallback(async (text: string) => {
+    const cid = conversationRef.current;
+    if (cid == null) throw new Error("no active conversation yet");
+    try {
+      unwrap(await pin(cid, text));
+      setError(null);
+    } catch (e) {
+      setError(`pin failed: ${errorMessage(e)}`);
+      throw e; // Sidebar shows the refusal (e.g. overflow names the pin).
+    }
+  }, []);
+
   const handleAccept = useCallback(async (diffId: number) => {
     try {
       const resp = unwrap(await acceptDiff(diffId));
@@ -398,6 +450,9 @@ export default function App() {
         onDistill={handleDistill}
         wikiNoteCount={wikiNoteCount}
         onWikiBrowserClosed={handleWikiBrowserClosed}
+        onCurate={handleCurate}
+        onPin={handlePin}
+        topicCount={topicCount}
         pendingCounts={pendingCounts}
         runningWorkstreams={runningWorkstreams}
         pendingMemoryProposals={pendingMemoryProposals}

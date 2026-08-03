@@ -1151,6 +1151,119 @@ body {
   line-height: 1.5;
 }
 
+/* ---------- M5: curation (spec §8/§9) ---------- */
+
+/* Sidebar pin affordance: single-line input + Pin button row; the error
+   line surfaces daemon refusals (overflow names the pin text). */
+.pin-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.pin-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.pin-input:disabled {
+  opacity: 0.5;
+}
+
+.pin-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pin-btn:hover:not(:disabled) {
+  border-color: var(--accent-user);
+}
+
+.pin-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pin-error {
+  margin-top: 4px;
+  color: var(--err);
+  font-size: 11px;
+}
+
+/* Wiki browser Notes | Topics tab switcher. */
+.wiki-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.wiki-tab {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wiki-tab:hover {
+  color: var(--text);
+}
+
+.wiki-tab.active {
+  color: var(--text);
+  border-color: var(--accent-user);
+}
+
+/* Topic pages render line-by-line so citations stay clickable and uncited
+   bullets can be flagged; typography matches .wiki-content. */
+.wiki-topic-line {
+  min-height: 1.5em;
+}
+
+.wiki-line-uncited {
+  background: rgba(195, 74, 74, 0.12);
+  border-left: 2px solid var(--err);
+  padding-left: 6px;
+  margin-left: -8px;
+}
+
+.wiki-uncited-badge {
+  color: var(--err);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.wiki-epoch-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent-user);
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.wiki-epoch-link:hover {
+  filter: brightness(1.25);
+}
+
 /* ---------- M4: learning (spec §7/§8) ---------- */
 
 /* Sidebar badge-button for pending learner proposals ("N memory proposed —

@@ -48,7 +48,13 @@ export type EventType =
 //   agent_done        { summary }
 //   agent_error       { error }
 //   review_action     { action: "accept" | "reject", diff_id }
+//                       — also "distill" { epoch, wiki_path } (M1) and
+//                       "curate" { action, topics, notes_read } (M5).
 //   memory_update     { layer, cause, before_sha?, after_sha?, detail? }
+//                       layer: "memory" | "user" | "learner" (M4) |
+//                       "curator" | "index" | "pins" (M5); cause:
+//                       "apply" | "rotate" | "retract" | "failed" (M4) |
+//                       "curate" | "pin" (M5).
 export interface EventPayload {
   text?: string;
   summary?: string;
@@ -60,19 +66,28 @@ export interface EventPayload {
   diff_id?: number;
   attachments?: string[];
   // M3: memory recall — user_message journals the paths injected into the
-  // prompt (~/.odo/user.md first when present, then wiki note paths).
+  // prompt. Fixed markers come first in daemon order: ~/.odo/user.md →
+  // .odo/memory.md (M4) → .odo/pins.md (M5) → wiki/index.md (M5), then the
+  // recalled wiki note paths.
   recall?: string[];
   // M4: injection receipt — content hashes (sha256[:16]) of the exact
-  // blocks injected, keyed by the same path strings used in `recall`.
+  // blocks injected, keyed by the same path strings used in `recall` (M5
+  // adds the .odo/pins.md and wiki/index.md fixed markers).
   receipt?: Record<string, string>;
-  // memory_update payload fields (M4): which layer changed, why
-  // (apply | rotate | retract | failed), and a human-readable summary.
+  // memory_update payload fields (M4, extended M5): which layer changed
+  // (memory | user | learner | curator | index | pins), why
+  // (apply | rotate | retract | failed | curate | pin), and a
+  // human-readable summary.
   layer?: string;
   cause?: string;
   detail?: string;
   // review_action when action == "distill" (M1 memory distiller).
   epoch?: number;
   wiki_path?: string;
+  // review_action when action == "curate" (M5 curator pass): how many
+  // topic pages were rewritten and how many epoch notes were read.
+  topics?: number;
+  notes_read?: number;
 }
 
 export interface OdoEvent {
@@ -320,4 +335,41 @@ export interface ReadMemoryResponse {
   memory_content?: string;
   archive_content?: string;
   user_content?: string;
+}
+
+// ---------- M5: curation (topic pages + index.md + pins) ----------
+
+// curate: the curator rewrites wiki/topics/*.md + wiki/index.md from the
+// full epoch-note set (generation-2 rule). wiki_path is "wiki/index.md";
+// memory_proposals is 0 (the sidebar topic count comes from list_topics).
+export interface CurateResponse {
+  ok: boolean;
+  error?: string;
+  wiki_path?: string;
+  memory_proposals?: number;
+}
+
+// pin: store a verbatim pin in .odo/pins.md. ok:false (e.g. the overflow
+// refusal, which names the pin text) means nothing was written.
+export interface PinResponse {
+  ok: boolean;
+  error?: string;
+  applied?: boolean;
+}
+
+// read_pins: .odo/pins.md content, "" when absent (same shape as
+// read_memory).
+export interface ReadPinsResponse {
+  ok: boolean;
+  error?: string;
+  memory_content?: string;
+}
+
+// list_topics: one WikiNoteInfo per wiki/topics/<slug>.md — Name is the
+// parsed topic title (first `# ` line, falling back to the slug) and Epoch
+// is always 0 (topics are not per-epoch notes).
+export interface ListTopicsResponse {
+  ok: boolean;
+  error?: string;
+  wiki_notes?: WikiNoteInfo[];
 }

@@ -178,6 +178,14 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleMemoryProposals(ctx, req)
 	case CmdApplyMemory:
 		resp, err = s.handleApplyMemory(ctx, req)
+	case CmdCurate:
+		resp, err = s.handleCurate(ctx, req)
+	case CmdPin:
+		resp, err = s.handlePin(ctx, req)
+	case CmdReadPins:
+		resp, err = s.handleReadPins(ctx, req)
+	case CmdListTopics:
+		resp, err = s.handleListTopics(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -363,7 +371,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.wiki)
+	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki)
 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
@@ -403,19 +411,24 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 type memoryLayers struct {
 	user    string // ~/.odo/user.md (global principles)
 	project string // .odo/memory.md (project behavior rules)
+	pins    string // .odo/pins.md (M5: user-authored, verbatim)
+	index   string // wiki/index.md (M5: always-injected)
 	wiki    string // recalled epoch notes block
 	recall  []string
 	receipt map[string]string
 }
 
 // memoryLayers reads the current memory layers for the workstream and builds
-// the recall list (user.md → memory.md → note paths) plus the sha16 receipt
-// for every non-empty layer (per-note hashes cover the exact injected block,
-// header and separator included). Layers absent/empty appear in neither.
+// the recall list (user.md → memory.md → pins.md → index.md → note paths)
+// plus the sha16 receipt for every non-empty layer (per-note hashes cover
+// the exact injected block, header and separator included). Layers
+// absent/empty appear in neither.
 func (s *Server) memoryLayers(wsName string) memoryLayers {
 	ml := memoryLayers{
 		user:    readUserMemory(),
 		project: readProjectMemory(s.projectRoot),
+		pins:    readPins(s.projectRoot),
+		index:   readIndex(s.projectRoot),
 		receipt: map[string]string{},
 	}
 	m, notePaths, noteBytes := recallWikiNotes(s.projectRoot, wsName)
@@ -428,6 +441,14 @@ func (s *Server) memoryLayers(wsName string) memoryLayers {
 		ml.receipt[".odo/memory.md"] = sha16([]byte(ml.project))
 		ml.recall = append(ml.recall, ".odo/memory.md")
 	}
+	if ml.pins != "" {
+		ml.receipt[".odo/pins.md"] = sha16([]byte(ml.pins))
+		ml.recall = append(ml.recall, ".odo/pins.md")
+	}
+	if ml.index != "" {
+		ml.receipt["wiki/index.md"] = sha16([]byte(ml.index))
+		ml.recall = append(ml.recall, "wiki/index.md")
+	}
 	for i, p := range notePaths {
 		ml.receipt[p] = sha16(noteBytes[i])
 	}
@@ -436,10 +457,11 @@ func (s *Server) memoryLayers(wsName string) memoryLayers {
 }
 
 // buildPrompt renders the agent prompt. Layers inject in ADR-0003's stable
-// order: userMem (global, durable user principles), projectMem (.odo/memory.md
-// behavior rules), then recalled wiki notes, attachment hints, and the user's
-// text last (cache-friendly stable prefix, inv 6).
-func buildPrompt(text string, attachments []string, userMem, projectMem, memory string) string {
+// order (inv 6 extended, M5): userMem (global, durable user principles),
+// projectMem (.odo/memory.md behavior rules), pins (.odo/pins.md, verbatim),
+// index (wiki/index.md, always-injected), then recalled wiki notes,
+// attachment hints, and the user's text last (cache-friendly stable prefix).
+func buildPrompt(text string, attachments []string, userMem, projectMem, pins, index, memory string) string {
 	var b strings.Builder
 	if userMem != "" {
 		b.WriteString("## User memory (durable cross-project principles)\n\n")
@@ -449,6 +471,16 @@ func buildPrompt(text string, attachments []string, userMem, projectMem, memory 
 	if projectMem != "" {
 		b.WriteString("## Project memory (behavior rules)\n\n")
 		b.WriteString(projectMem)
+		b.WriteString("\n\n---\n\n")
+	}
+	if pins != "" {
+		b.WriteString("## Pins (user-authored, verbatim)\n\n")
+		b.WriteString(pins)
+		b.WriteString("\n\n---\n\n")
+	}
+	if index != "" {
+		b.WriteString("## Wiki index\n\n")
+		b.WriteString(index)
 		b.WriteString("\n\n---\n\n")
 	}
 	if memory != "" {
@@ -522,7 +554,7 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.wiki)
+	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki)
 
 	// All-or-nothing: a failed setup cancels every run started so far so no
 	// orphan agent process or worktree is left behind.

@@ -1301,9 +1301,9 @@ func TestRecallEmptyWhenNoWiki(t *testing.T) {
 	if done.Diff == nil {
 		t.Fatal("no diff")
 	}
-	want := buildPrompt(text, nil, "", "", "")
+	want := buildPrompt(text, nil, "", "", "", "", "")
 	if want != text {
-		t.Fatalf("buildPrompt(%q, nil, \"\", \"\", \"\") = %q, want the text unchanged", text, want)
+		t.Fatalf("buildPrompt(%q, nil, empty layers) = %q, want the text unchanged", text, want)
 	}
 	if !strings.Contains(done.Diff.Content, "+"+want) {
 		t.Errorf("diff content does not contain the plain prompt")
