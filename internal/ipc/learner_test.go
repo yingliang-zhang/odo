@@ -1004,3 +1004,163 @@ func TestApplyMemoryIdempotent(t *testing.T) {
 		t.Errorf("memory_proposals after retry = epoch %d, want 0 (consumed)", pend.Epoch)
 	}
 }
+
+// TestUserMemoryIdempotency covers the mid-write retry window for user.md:
+// writes go archive → user.md → memory.md, so when the memory.md write
+// fails AFTER user.md was written the batch stays pending with the user
+// rule already in the file. The retry replans against that user.md and must
+// skip the already-stored rule body (exactly one "seen:" line, no
+// duplicate), while a genuinely new rule in a later set still appends.
+func TestUserMemoryIdempotency(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	memRule := "Always run go test ./... before claiming done."
+	userRule := "Prefer boring solutions over clever ones."
+	seedProposeBatch(t, rig, convID, 1, []MemoryProposal{
+		{Target: "memory.md", Rule: memRule, Evidence: "main-epoch-1"},
+		{Target: "user.md", Rule: userRule, Projects: []string{"odo", "ananke"}},
+	}, nil)
+
+	// Sabotage the memory.md write: a directory at its path makes the
+	// atomic rename fail AFTER user.md is already written — the apply
+	// errors, the batch stays pending, user.md holds the rule.
+	memPath := filepath.Join(root, ".odo", "memory.md")
+	if err := os.MkdirAll(memPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resp := rig.callExpectErr(t, Request{
+		Cmd:            CmdApplyMemory,
+		ConversationID: convID,
+		Epoch:          1,
+		Accepted: []MemoryAccept{
+			{Target: "memory.md", Index: 0},
+			{Target: "user.md", Index: 1},
+		},
+	})
+	if !strings.Contains(resp.Error, "write memory.md") {
+		t.Fatalf("sabotaged apply error = %q, want the memory.md write failure", resp.Error)
+	}
+	userPath := filepath.Join(home, ".odo", "user.md")
+	wantUserLine := "- " + userRule + " — seen: odo, ananke\n"
+	if got := readFileStr(t, userPath); got != wantUserLine {
+		t.Fatalf("user.md after partial apply = %q, want %q (written before the failure)", got, wantUserLine)
+	}
+	if pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID}); pend.Epoch != 1 {
+		t.Fatalf("batch after partial apply = epoch %d, want 1 pending", pend.Epoch)
+	}
+
+	// Restore the write path and retry the SAME batch: planUserApply replans
+	// against the already-applied user.md and skips the stored body.
+	if err := os.Remove(memPath); err != nil {
+		t.Fatal(err)
+	}
+	retry := rig.call(t, Request{
+		Cmd:            CmdApplyMemory,
+		ConversationID: convID,
+		Epoch:          1,
+		Accepted: []MemoryAccept{
+			{Target: "memory.md", Index: 0},
+			{Target: "user.md", Index: 1},
+		},
+	})
+	if !retry.Applied {
+		t.Fatal("retry apply_memory: applied must be true")
+	}
+	userContent := readFileStr(t, userPath)
+	if userContent != wantUserLine {
+		t.Errorf("user.md after retry = %q, want unchanged %q", userContent, wantUserLine)
+	}
+	if n := strings.Count(userContent, userRule); n != 1 {
+		t.Errorf("user rule appears %d times in user.md, want exactly 1", n)
+	}
+	wantMem := "- " + memRule + " — cites: main-epoch-1; reaffirmed: 1\n"
+	if got := readFileStr(t, memPath); got != wantMem {
+		t.Errorf("memory.md after retry = %q, want %q", got, wantMem)
+	}
+	// The skipped user write journals no user-layer apply event (the failed
+	// attempt journaled nothing, the retry changed nothing).
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	userUpdates := 0
+	for _, mu := range memoryUpdatesByCause(t, events, "apply") {
+		if mu["layer"] == "user" {
+			userUpdates++
+		}
+	}
+	if userUpdates != 0 {
+		t.Errorf("memory_update(apply, layer user) = %d, want 0 (retry skipped the stored rule)", userUpdates)
+	}
+
+	// A later batch re-proposing the stored body (different seen list) still
+	// skips it — skip is by rule body, not by seen set — while a genuinely
+	// new rule in the same set appends.
+	newRule := "Ship only after a smoke test."
+	seedProposeBatch(t, rig, convID, 2, []MemoryProposal{
+		{Target: "user.md", Rule: userRule, Projects: []string{"odo"}},
+		{Target: "user.md", Rule: newRule, Projects: []string{"odo", "projb"}},
+	}, nil)
+	second := rig.call(t, Request{
+		Cmd:            CmdApplyMemory,
+		ConversationID: convID,
+		Epoch:          2,
+		Accepted: []MemoryAccept{
+			{Target: "user.md", Index: 0},
+			{Target: "user.md", Index: 1},
+		},
+	})
+	if !second.Applied {
+		t.Fatal("second apply_memory: applied must be true")
+	}
+	final := readFileStr(t, userPath)
+	wantFinal := wantUserLine + "- " + newRule + " — seen: odo, projb\n"
+	if final != wantFinal {
+		t.Errorf("user.md final = %q, want %q (stored rule untouched, new rule appended)", final, wantFinal)
+	}
+	if n := strings.Count(final, userRule); n != 1 {
+		t.Errorf("user rule appears %d times after second apply, want exactly 1", n)
+	}
+}
+
+// TestPlanUserApplySkip pins the retry-skip contract of planUserApply: a
+// rule whose normalized body is already stored is skipped — same body with
+// a different seen list, letter case, or spacing included — an
+// empty-normalized-body rule is never skipped (mirroring the memory.md
+// guard), and a replay of the same set against the applied file converges.
+func TestPlanUserApplySkip(t *testing.T) {
+	old := "- Prefer boring solutions over clever ones. — seen: odo, ananke\n" +
+		"- hand edited line without any seen list\n"
+	got, err := planUserApply(old, []acceptedUserRule{
+		// Duplicate: same body, different seen list + case/whitespace.
+		{rule: "  prefer   BORING solutions over clever ones. ", projects: []string{"projb"}},
+		{rule: "Ship only after a smoke test.", projects: []string{"odo"}},
+		// Normalizes to "" — never skipped, appended verbatim.
+		{rule: "   ", projects: []string{"odo"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := old +
+		"- Ship only after a smoke test. — seen: odo\n" +
+		"-     — seen: odo\n" // "- " + 3-space rule + " — seen:"
+	if got != want {
+		t.Errorf("planUserApply = %q, want %q", got, want)
+	}
+
+	// Replay the same set against the applied file (pending-batch retry):
+	// the stored body is skipped and the file is byte-identical.
+	again, err := planUserApply(got, []acceptedUserRule{
+		{rule: "Ship only after a smoke test.", projects: []string{"odo", "ananke"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != got {
+		t.Errorf("replay = %q, want unchanged %q (retry converges)", again, got)
+	}
+}

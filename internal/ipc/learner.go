@@ -529,12 +529,47 @@ func contentLen(rules []memoryRule) int {
 	return n
 }
 
+// userRuleBody extracts the rule portion of a stored user.md line
+// (`- <rule> — seen: <p1>, <p2>`): drop the "- " marker and everything from
+// the " — seen:" separator on. Lines without the daemon shape reduce to
+// their whole text.
+func userRuleBody(line string) string {
+	body := strings.TrimPrefix(line, "- ")
+	if i := strings.Index(body, " — seen:"); i >= 0 {
+		body = body[:i]
+	}
+	return body
+}
+
 // planUserApply computes the new user.md for an accepted set, refusing the
 // whole set when the result would exceed memoryCap (spec §3: never truncate
 // a user file, error names the offending rule). old is FULL uncapped.
+//
+// A rule whose normalized body is already stored is skipped (spec §5: no
+// duplicate lines) — mirroring planMemoryApply's accepted-rule skip. Writes
+// go archive → user.md → memory.md, so a mid-write failure after the user
+// write leaves the batch pending and the retry replans against an
+// already-applied user.md; the skip makes that retry converge instead of
+// double-appending (a duplicate append near the cap would push the file
+// over memoryCap and refuse the batch forever, deadlocking the epoch).
 func planUserApply(old string, accepted []acceptedUserRule) (string, error) {
 	out := strings.TrimRight(old, "\n")
+	existing := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if nb := normalizeRule(userRuleBody(line)); nb != "" {
+			existing[nb] = true
+		}
+	}
 	for _, a := range accepted {
+		// Skip by rule BODY, not by seen set: a re-proposed rule with a
+		// different recurrence list is still the same rule. The na != ""
+		// guard mirrors memory.md — an empty normalized body never skips.
+		if na := normalizeRule(a.rule); na != "" {
+			if existing[na] {
+				continue
+			}
+			existing[na] = true
+		}
 		line := fmt.Sprintf("- %s — seen: %s", a.rule, strings.Join(a.projects, ", "))
 		join := ""
 		if out != "" {
