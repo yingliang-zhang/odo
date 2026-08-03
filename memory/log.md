@@ -169,3 +169,31 @@ Dual-model review (GLM-5.2 ACCEPT + K3 NEEDS FIXES → 6 fixes), Go tests 25/25,
 GUI automated test 21/21. All M0→M1→M2 features validated.
 
 HEAD: 6768cea
+
+## M3 (memory recall + wiki browser + user.md + visibility) — CLOSED
+
+### Implementation (commit 4af1ead)
+
+1. **Memory recall**: `recallWikiNotes` (≤12KB, epoch-desc, note-boundary) + `readUserMemory` (`~/.odo/user.md`, ≤4KB, line-boundary) → `buildPrompt` (user.md → wiki → attachments → text, ADR-0003 inv. 6); `recall: [paths]` on `user_message` + `fanout_send` payloads.
+2. **Wiki browser**: `list_wiki`/`read_wiki` IPC (guard: only `<project>/wiki/**` + exact `~/.odo/user.md`); `WikiBrowser.tsx` modal with pinned synthetic user.md row + create-hint; sidebar "N wiki notes" + Browse.
+3. **Visibility pack**: run status bar `running — <elapsed> — tool: <last> (call <n>)`; notification on `agent_done` when `document.hidden` (`@tauri-apps/plugin-notification`); sidebar badges (green dot running, red pill pending diff count) via `pending_counts` IPC fallback.
+4. **default_adapter fix**: empty workstream adapter → prefs `default_adapter` → `"omp"`.
+
+### Review (dual-model)
+
+| Model | Verdict | Findings |
+|---|---|---|
+| GLM-5.2 | ACCEPT | 2 MINOR (test traversal coverage, handleReadWiki ctx param) |
+| K3 | ACCEPT | 2 MINOR (elapsed anchor, tooltip path shortening) |
+| Re-review | PASS | All 4 fixed |
+
+### Verification
+
+- Go: build/vet/test pass (10 new M3 tests)
+- Frontend: tsc/build/cargo check pass
+- GUI E2E (cua-driver AX tree + SQLite journal): 16/16 PASS
+  - Demo A: recall chip `memory: user.md + 1 note(s) recalled`; journal `recall: ["~/.odo/user.md", ".../main-epoch-1.md"]`
+  - Demo B: wiki browser pinned row + note render + user.md content + modal close
+  - Demo C: status bar `running — 3s`; diff lifecycle; `pending_counts` IPC `{"ok": true}`
+
+HEAD: 4af1ead
