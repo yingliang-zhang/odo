@@ -270,3 +270,42 @@ Full M4 GUI E2E via cua-driver AX tree + SQLite journal + IPC socket verificatio
 | GUI E2E (cua-driver AX + SQLite + IPC) | ✅ 33 PASS / 0 FAIL / 1 SKIP |
 
 HEAD: c54f28a
+
+## M5 (curation) — CLOSED
+
+### Implementation (commit 86ea66c)
+
+14 files, +1740 lines. K3 `--thinking max` (initial dispatch timed out at 600s with 5 scouts; resume by exact UUID completed remaining files).
+
+| Area | Files | Lines |
+|---|---|---|
+| Backend: curator pass | `internal/ipc/curator.go` (new) | 364 |
+| Backend: pin affordance | `internal/ipc/pins.go` (new) | 86 |
+| Backend: dispatch + buildPrompt 7-arg | `internal/ipc/server.go` | +50 |
+| Backend: IPC constants | `internal/ipc/protocol.go` | +7 |
+| Tests: 12 Go tests | `internal/ipc/curator_test.go` (new) | 650 |
+| Frontend: App state + handlers | `gui/src/App.tsx` | +63 |
+| Frontend: Sidebar Curate + Pin | `gui/src/components/Sidebar.tsx` | +97 |
+| Frontend: WikiBrowser Topics tab | `gui/src/components/WikiBrowser.tsx` | +200 |
+| Frontend: recall chip extension | `gui/src/components/MessageBubble.tsx` | +27 |
+| Frontend: API + types + CSS | `gui/src/api.ts` + `types.ts` + `app.css` | +203 |
+| Tauri: 4 new commands | `gui/src-tauri/src/lib.rs` | +49 |
+
+### Review (tri-model blind, 3/3 ACCEPT)
+
+| Model | Verdict | Key findings |
+|---|---|---|
+| K3 | ACCEPT | ⚠️ pin doesn't trim/reject multi-line (frontend enforces; socket-direct edge) · ⚠️ write-failure path unjournaled (asymmetric with parse-failure; re-curate recovers) |
+| GLM-5.2 | ACCEPT | ⚠️ DISTILL_READ_TIMEOUT bump (1200s) not implemented — spec marks optional/conditional on `curate:true` flag, defaults off · ⚠️ citation jump cross-workstream ambiguity (frontend, no Go test) |
+| DeepSeek | ACCEPT | ⚠️ `jumpToEpoch` matches only current workstream's epoch — cross-workstream same-number ambiguity · spec risk #3 accepts degraded links |
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| go build/vet/test ./... (12 new M5 tests + all M0-M4) | ✅ (ipc 67s) |
+| npx tsc --noEmit + npm run build | ✅ (204.88 kB) |
+| cargo check | ✅ |
+| Tri-model blind review | ✅ 3/3 ACCEPT |
+
+HEAD: 86ea66c
