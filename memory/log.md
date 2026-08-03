@@ -360,3 +360,37 @@ Full M5 GUI E2E via cua-driver AX tree + SQLite journal + IPC socket verificatio
 - IPC fallback for send_message was needed because the daemon's one-connection-at-a-time model sometimes rejects GUI sends while a previous agent run is still finishing. The IPC fallback waits for agent-done then sends directly.
 
 HEAD: 3244205
+
+## M5 Hardening — 8 minor review fixes (tri-model re-review 3/3 ACCEPT)
+
+### Fixes (commit b850171, 7 files, +331/-48)
+
+| # | Fix | Files | New tests |
+|---|---|---|---|
+| 1 | Pin multi-line/whitespace validation (trim + reject empty/newline) | pins.go, pins_test.go | TestPinRejectsMultiLine, TestPinTrimsWhitespace |
+| 2 | Write-failure journal (memory_update{curator,failed} on write error) | curator.go | TestCurateWriteFailureJournals |
+| 3 | Citation jump cross-workstream (only jump when exactly 1 match) | WikiBrowser.tsx | — |
+| 4 | Duplicate slug dedup (first wins; index lists only written topics) | curator.go | TestCurateDuplicateSlugs |
+| 5 | Empty topics guard (error without clearing existing pages) | curator.go | TestCurateEmptyTopicsGuard |
+| 6 | Curate chat bubble ("Curated N topics" instead of "curate diff #?") | MessageBubble.tsx | — |
+| 7 | read_pins wired into MemoryReviewPanel files tab | MemoryReviewPanel.tsx | — |
+| 8 | TopicLine citation trim (no double space before citation) | WikiBrowser.tsx | — |
+
+### Review (tri-model blind, 3/3 ACCEPT)
+
+| Model | Verdict |
+|---|---|
+| K3 | ACCEPT |
+| GLM-5.2 | ACCEPT |
+| DeepSeek | ACCEPT |
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| go build/vet/test (17 M5 tests + all M0-M4) | ✅ (ipc 70s) |
+| npx tsc --noEmit + npm run build | ✅ |
+| cargo check | ✅ |
+| Tri-model hardening review | ✅ 3/3 ACCEPT |
+
+HEAD: b850171
