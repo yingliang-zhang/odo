@@ -87,6 +87,31 @@ func (s *Store) ListPendingDiffs(ctx context.Context, conversationID int64) ([]D
 	return diffs, rows.Err()
 }
 
+// PendingDiffCountsByWorkstream returns the count of pending diffs per
+// workstream of a project (read-only; feeds the sidebar badge IPC).
+func (s *Store) PendingDiffCountsByWorkstream(ctx context.Context, projectID int64) (map[int64]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT c.workstream_id, COUNT(*) FROM diffs d
+		 JOIN conversations c ON d.conversation_id = c.id
+		 JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE d.status = ? AND w.project_id = ?
+		 GROUP BY c.workstream_id`, DiffPending, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: pending diff counts: %w", err)
+	}
+	defer rows.Close()
+	counts := map[int64]int{}
+	for rows.Next() {
+		var wsID int64
+		var n int
+		if err := rows.Scan(&wsID, &n); err != nil {
+			return nil, fmt.Errorf("store: pending diff counts: scan: %w", err)
+		}
+		counts[wsID] = n
+	}
+	return counts, rows.Err()
+}
+
 func (s *Store) scanDiff(row interface{ Scan(...interface{}) error }) (Diff, error) {
 	var d Diff
 	err := row.Scan(&d.ID, &d.ConversationID, &d.PathOnDisk, &d.BaseSHA, &d.Status, &d.CreatedAt)

@@ -6,7 +6,9 @@ import {
   distill,
   errorMessage,
   fanoutSend,
+  listWiki,
   listWorkstreams,
+  pendingCounts as fetchPendingCounts,
   pollEvents,
   rejectDiff,
   sendMessage,
@@ -15,6 +17,7 @@ import {
 import ChatSurface from "./components/ChatSurface";
 import DiffViewer from "./components/DiffViewer";
 import Sidebar from "./components/Sidebar";
+import { notifyRunDone } from "./notify";
 import type { BootstrapResponse, Conversation, Diff, OdoEvent, Project, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket).
@@ -40,9 +43,20 @@ export default function App() {
   const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // M3: wiki note count for the sidebar Memory section (null = unknown).
+  const [wikiNoteCount, setWikiNoteCount] = useState<number | null>(null);
+  // M3 visibility (spec §3c): project-wide pending-diff counts and running
+  // workstreams, refreshed every few poll ticks via pending_counts.
+  const [pendingCounts, setPendingCounts] = useState<Record<number, number>>({});
+  const [runningWorkstreams, setRunningWorkstreams] = useState<number[]>([]);
 
   const lastSeqRef = useRef(0);
   const conversationRef = useRef<number | null>(null);
+  // Read inside callbacks that must stay referentially stable (recordEvents
+  // is a poll-effect dependency; a state dep would rebuild the interval).
+  const workstreamNameRef = useRef<string | null>(null);
+  const projectRootRef = useRef<string | null>(null);
+  const pollTickRef = useRef(0);
   // The daemon serves one connection at a time and distill can block for
   // minutes; polling is paused for the duration instead of queueing up
   // certain timeout failures.
@@ -52,22 +66,52 @@ export default function App() {
     if (incoming.length === 0) return;
     setEvents((prev) => mergeEvents(prev, incoming));
     lastSeqRef.current = Math.max(lastSeqRef.current, ...incoming.map((e) => e.seq));
+    // M3 (spec §3b): finished runs notify when the window is hidden. Only
+    // freshly polled events land here — bootstrap replaces wholesale — so
+    // history replay cannot re-notify. notifyRunDone swallows its errors.
+    for (const e of incoming) {
+      if (e.type === "agent_done") {
+        void notifyRunDone(workstreamNameRef.current ?? "?", e.payload?.summary ?? "");
+      }
+    }
+  }, []);
+
+  // Wiki note count for the sidebar. Failures degrade to "unknown" (the
+  // line is omitted); they never surface in the error banner.
+  const refreshWikiCount = useCallback(async (conversationId: number) => {
+    try {
+      const resp = await listWiki(conversationId);
+      if (conversationRef.current !== conversationId) return; // switched mid-flight
+      setWikiNoteCount(resp.ok ? (resp.wiki_notes?.length ?? 0) : null);
+    } catch {
+      if (conversationRef.current === conversationId) setWikiNoteCount(null);
+    }
   }, []);
 
   // Whole-context replacement: bootstrap (initial or workstream switch)
   // returns the target conversation's full journal, which supersedes any
   // events accumulated under the previous workstream.
-  const applyBootstrap = useCallback((resp: BootstrapResponse) => {
-    setWorkstream(resp.workstream ?? null);
-    setConversation(resp.conversation ?? null);
-    conversationRef.current = resp.conversation?.id ?? null;
-    const evs = resp.events ?? [];
-    lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
-    setEvents(evs);
-    setAgentRunning(resp.agent_running ?? false);
-    setDiff(resp.diff ?? null);
-    setLastDistillPath(null);
-  }, []);
+  const applyBootstrap = useCallback(
+    (resp: BootstrapResponse) => {
+      setWorkstream(resp.workstream ?? null);
+      workstreamNameRef.current = resp.workstream?.name ?? null;
+      setConversation(resp.conversation ?? null);
+      conversationRef.current = resp.conversation?.id ?? null;
+      const evs = resp.events ?? [];
+      lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
+      setEvents(evs);
+      setAgentRunning(resp.agent_running ?? false);
+      setDiff(resp.diff ?? null);
+      setLastDistillPath(null);
+      const cid = resp.conversation?.id;
+      if (cid != null) {
+        void refreshWikiCount(cid);
+      } else {
+        setWikiNoteCount(null);
+      }
+    },
+    [refreshWikiCount],
+  );
 
   // Session restore: bootstrap returns project/workstream/conversation plus
   // the full journaled event history and the latest diff.
@@ -78,6 +122,7 @@ export default function App() {
         const resp = unwrap(await bootstrap());
         if (cancelled) return;
         setProject(resp.project ?? null);
+        projectRootRef.current = resp.project?.root_path ?? null;
         applyBootstrap(resp);
         if (resp.project) {
           const list = unwrap(await listWorkstreams(resp.project.root_path));
@@ -99,6 +144,7 @@ export default function App() {
     let inFlight = false;
     const tick = async () => {
       if (distillingRef.current) return;
+      pollTickRef.current += 1;
       const cid = conversationRef.current;
       if (cid == null || inFlight) return;
       inFlight = true;
@@ -110,6 +156,25 @@ export default function App() {
         // The daemon always reports the latest diff (any status); only a
         // pending one is actionable in the UI.
         if (resp.diff) setDiff(resp.diff);
+        // M3 (spec §3c): project-wide visibility every ~4th tick (~6s).
+        // Guarded: a daemon without the command (or any failure) leaves the
+        // previous badge state untouched.
+        if (pollTickRef.current % 4 === 0 && projectRootRef.current != null) {
+          try {
+            const counts = await fetchPendingCounts(projectRootRef.current);
+            if (counts.ok) {
+              const pending: Record<number, number> = {};
+              for (const [k, v] of Object.entries(counts.pending_counts ?? {})) {
+                const id = Number(k);
+                if (Number.isFinite(id)) pending[id] = v;
+              }
+              setPendingCounts(pending);
+              setRunningWorkstreams(counts.running_workstreams ?? []);
+            }
+          } catch {
+            // Stale badges are fine; never disturb the poll loop.
+          }
+        }
         setError(null);
       } catch (e) {
         if (!distillingRef.current) {
@@ -210,6 +275,8 @@ export default function App() {
         setConversation((prev) => (prev ? { ...prev, epoch } : prev));
       }
       setLastDistillPath(resp.wiki_path ?? null);
+      // The distill just wrote a new note; the sidebar count follows.
+      void refreshWikiCount(cid);
       setError(null);
       return resp.wiki_path ?? "";
     } catch (e) {
@@ -218,7 +285,7 @@ export default function App() {
     } finally {
       distillingRef.current = false;
     }
-  }, []);
+  }, [refreshWikiCount]);
 
   const handleAccept = useCallback(async (diffId: number) => {
     try {
@@ -242,6 +309,13 @@ export default function App() {
     }
   }, []);
 
+  // The browser is read-only; closing it still re-fetches the count so a
+  // note written by another client (or cleanup done by hand) shows up.
+  const handleWikiBrowserClosed = useCallback(() => {
+    const cid = conversationRef.current;
+    if (cid != null) void refreshWikiCount(cid);
+  }, [refreshWikiCount]);
+
   if (!booted && !error) {
     return <div className="app-loading">Connecting to the Odo daemon…</div>;
   }
@@ -259,6 +333,10 @@ export default function App() {
         onSwitchWorkstream={handleSwitchWorkstream}
         onCreateWorkstream={handleCreateWorkstream}
         onDistill={handleDistill}
+        wikiNoteCount={wikiNoteCount}
+        onWikiBrowserClosed={handleWikiBrowserClosed}
+        pendingCounts={pendingCounts}
+        runningWorkstreams={runningWorkstreams}
       />
       <main className="app-main">
         {error && <div className="error-banner">{error}</div>}

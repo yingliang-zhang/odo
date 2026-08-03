@@ -6,6 +6,19 @@ const REVIEW_LABEL: Record<string, string> = {
   reject: "Rejected",
 };
 
+// M3 recall: the daemon journals injected memory paths on user_message, with
+// ~/.odo/user.md first when present.
+const USER_MD_PATH = "~/.odo/user.md";
+
+// Tooltip lists the injected sources with wiki paths shortened to
+// "wiki/<basename>" (spec §1b); the user.md marker stays literal.
+function shortRecallPath(path: string): string {
+  if (path === USER_MD_PATH) return "user.md";
+  const marker = "/wiki/";
+  const at = path.indexOf(marker);
+  return at >= 0 ? path.slice(at + 1) : basename(path);
+}
+
 // Renders one journaled event. Payloads come from the daemon verbatim; every
 // field is optional in the type, so render defensively.
 export default function MessageBubble({ event }: { event: OdoEvent }) {
@@ -23,6 +36,13 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
                   <code>{basename(a)}</code>
                 </span>
               ))}
+            </div>
+          )}
+          {p.recall != null && p.recall.length > 0 && (
+            <div className="recall-chip" title={p.recall.map(shortRecallPath).join("\n")}>
+              {p.recall.includes(USER_MD_PATH)
+                ? `memory: user.md + ${p.recall.length - 1} note(s) recalled`
+                : `memory: ${p.recall.length} note(s) recalled`}
             </div>
           )}
         </div>

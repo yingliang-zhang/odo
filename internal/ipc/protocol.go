@@ -25,6 +25,9 @@ const (
 	CmdGetSettings      = "get_settings"
 	CmdUpdateSettings   = "update_settings"
 	CmdFanoutSend       = "fanout_send"
+	CmdPendingCounts    = "pending_counts"
+	CmdListWiki         = "list_wiki"
+	CmdReadWiki         = "read_wiki"
 )
 
 // Request is one command line on the socket.
@@ -42,6 +45,7 @@ type Request struct {
 	Adapter        string    `json:"adapter,omitempty"`
 	N              int       `json:"n,omitempty"`
 	Settings       *Settings `json:"settings,omitempty"`
+	Path           string    `json:"path,omitempty"` // read_wiki: wiki note path
 }
 
 // ReviewResult is one model's verdict on a diff (MoA review fan-out).
@@ -65,6 +69,14 @@ type DiffInfo struct {
 	Content string `json:"content"`
 }
 
+// WikiNoteInfo describes one distilled wiki note for the browser list.
+type WikiNoteInfo struct {
+	Path       string `json:"path"`
+	Name       string `json:"name"` // e.g. "main-epoch-1"
+	Epoch      int    `json:"epoch"`
+	ModifiedAt string `json:"modified_at"`
+}
+
 // Response is one result line on the socket. Fields are present only when
 // relevant to the command (see docs/milestones for the shapes).
 type Response struct {
@@ -85,4 +97,10 @@ type Response struct {
 	Reviews      []ReviewResult      `json:"reviews,omitempty"`
 	Runs         []RunInfo           `json:"runs,omitempty"`
 	Settings     *Settings           `json:"settings,omitempty"`
+	WikiNotes    []WikiNoteInfo      `json:"wiki_notes,omitempty"`
+	WikiContent  string              `json:"wiki_content,omitempty"`
+	// pending_counts: Go map keys serialize as JSON strings — that is the
+	// contract the frontend implements.
+	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`
+	RunningWorkstreams []int64       `json:"running_workstreams,omitempty"`
 }

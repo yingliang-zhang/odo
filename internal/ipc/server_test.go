@@ -1096,3 +1096,504 @@ func TestFanoutSend(t *testing.T) {
 		t.Errorf("sibling diff status = %q, want rejected (auto-reject)", d.Status)
 	}
 }
+
+// --- M3: memory recall (~/.odo/user.md + wiki notes) + wiki browser IPC ---
+//
+// The stub wrapper copies the prompt file into hello.txt in the worktree,
+// so the diff content after a run IS the prompt buildPrompt produced. Every
+// test pins HOME to a temp dir for hermeticity (the dev machine may have a
+// real ~/.odo/user.md one day).
+
+// writeUserMD writes ~/.odo/user.md under the test home directory.
+func writeUserMD(t *testing.T, home, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".odo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".odo", "user.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recallPathsFromEvent extracts the journaled recall paths from a
+// user_message event payload (nil when the key is absent).
+func recallPathsFromEvent(t *testing.T, ev *store.Event) []string {
+	t.Helper()
+	if ev == nil {
+		t.Fatal("missing user_message event")
+	}
+	var p map[string]interface{}
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	raw, ok := p["recall"].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("recall entry not a string: %v", v)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestRecallInjectsWikiNote verifies the M3 distill-loop closure: a note
+// under wiki/ is injected into the next run's prompt and journaled in the
+// user_message payload's recall list.
+func TestRecallInjectsWikiNote(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sentinel := "PRIOR DECISION SENTINEL: refresh tokens live at /auth/refresh"
+	notePath := filepath.Join(root, "wiki", "main-epoch-1.md")
+	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notePath, []byte("# Epoch 1\n\n"+sentinel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Continue the auth refactor"})
+	if recall := recallPathsFromEvent(t, sent.Event); len(recall) != 1 || recall[0] != notePath {
+		t.Fatalf("recall = %v, want [%s]", recall, notePath)
+	}
+
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+	if !strings.Contains(done.Diff.Content, sentinel) {
+		t.Error("diff content (agent prompt) is missing the wiki note sentinel")
+	}
+}
+
+// TestUserMDInjected verifies the global user memory: ~/.odo/user.md is
+// injected into the prompt and listed first in the recall payload (before
+// wiki paths). With an empty HOME the payload has no recall key at all
+// (backward compatible).
+func TestUserMDInjected(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sentinel := "USER PRINCIPLE SENTINEL: first-principles reasoning, concise output"
+	writeUserMD(t, home, sentinel+"\n")
+	notePath := filepath.Join(root, "wiki", "main-epoch-1.md")
+	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notePath, []byte("# Epoch 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Build the next piece"})
+	if recall := recallPathsFromEvent(t, sent.Event); len(recall) != 2 || recall[0] != "~/.odo/user.md" || recall[1] != notePath {
+		t.Fatalf("recall = %v, want [~/.odo/user.md %s]", recall, notePath)
+	}
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+	if !strings.Contains(done.Diff.Content, sentinel) {
+		t.Error("diff content (agent prompt) is missing the user.md sentinel")
+	}
+
+	// Second part: a fresh rig with an empty HOME recalls nothing.
+	t.Setenv("HOME", t.TempDir())
+	rig2 := startRig(t, initRepo(t))
+	defer rig2.stop(t)
+	boot2 := rig2.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig2.root})
+	sent2 := rig2.call(t, Request{Cmd: CmdSendMessage, ConversationID: boot2.Conversation.ID, Text: "plain"})
+	var p map[string]interface{}
+	if err := json.Unmarshal(sent2.Event.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p["recall"]; ok {
+		t.Errorf("recall key present without any memory: %v", p["recall"])
+	}
+	rig2.pollUntilDone(t, boot2.Conversation.ID)
+}
+
+// TestUserMDCap verifies readUserMemory caps ~/.odo/user.md at
+// userMemoryCap with a line-boundary cut (no half line).
+func TestUserMDCap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// ~8 KB of user memory: 300 lines of 28 bytes each (27 chars + newline).
+	line := strings.Repeat("p", 27)
+	lines := make([]string, 300)
+	for i := range lines {
+		lines[i] = line
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	writeUserMD(t, home, content)
+
+	got := readUserMemory()
+	if len(got) == 0 || len(got) > userMemoryCap {
+		t.Fatalf("len(readUserMemory()) = %d, want (0, %d]", len(got), userMemoryCap)
+	}
+	if !strings.HasPrefix(content, got) {
+		t.Fatal("capped memory is not a prefix of the file's lines")
+	}
+	if rest := content[len(got):]; !strings.HasPrefix(rest, "\n") {
+		t.Errorf("cut lands mid-line: byte after the cut starts %q", rest[:1])
+	}
+}
+
+// TestRecallEmptyWhenNoWiki is the backward-compatibility case: no wiki
+// notes and no user.md → no recall key in the payload and the prompt is
+// exactly what the current buildPrompt produces from the text alone.
+func TestRecallEmptyWhenNoWiki(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	text := "Create hello.txt (no memory)"
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: text})
+	var p map[string]interface{}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p["recall"]; ok {
+		t.Errorf("recall key present without any memory: %v", p["recall"])
+	}
+
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+	want := buildPrompt(text, nil, "", "")
+	if want != text {
+		t.Fatalf("buildPrompt(%q, nil, \"\", \"\") = %q, want the text unchanged", text, want)
+	}
+	if !strings.Contains(done.Diff.Content, "+"+want) {
+		t.Errorf("diff content does not contain the plain prompt")
+	}
+	if strings.Contains(done.Diff.Content, "memory (") {
+		t.Error("diff content contains injected memory headers on a no-memory prompt")
+	}
+}
+
+// TestRecallCapsSize verifies the wiki recall budget: five ~4 KB notes
+// exceed recallMemoryCap, so only the newest epochs are recalled and the
+// cut lands on a note boundary.
+func TestRecallCapsSize(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	// Five notes, ~4 KB each: epoch N is a single line of letter 'a'+N-1,
+	// uniquely identifiable inside the prompt/diff.
+	wikiDir := filepath.Join(root, "wiki")
+	if err := os.MkdirAll(wikiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for n := 1; n <= 5; n++ {
+		body := strings.Repeat(string(rune('a'+n-1)), 4000)
+		p := filepath.Join(wikiDir, fmt.Sprintf("main-epoch-%d.md", n))
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Direct contract: the injected memory block never exceeds the cap.
+	memory, paths := recallWikiNotes(root, "main")
+	if len(memory) > recallMemoryCap {
+		t.Errorf("len(memory) = %d, exceeds recallMemoryCap %d", len(memory), recallMemoryCap)
+	}
+	if len(paths) == 0 || len(paths) > 3 {
+		t.Errorf("recalled %d notes, want 1..3", len(paths))
+	}
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "big recall"})
+	recall := recallPathsFromEvent(t, sent.Event)
+	if len(recall) > 3 {
+		t.Errorf("journaled recall = %d paths, want ≤ 3", len(recall))
+	}
+	joined := strings.Join(recall, " ")
+	for _, want := range []string{"epoch-5", "epoch-4", "epoch-3"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("recall %v is missing %s (newest epochs win)", recall, want)
+		}
+	}
+	for _, unwanted := range []string{"epoch-2", "epoch-1"} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("recall %v unexpectedly includes %s", recall, unwanted)
+		}
+	}
+
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+	// The injected memory block in the prompt fits the cap plus the fixed
+	// header overhead ("## <basename>" + separator per note).
+	for n, ch := range map[int]string{5: "e", 4: "d", 3: "c"} {
+		if !strings.Contains(done.Diff.Content, strings.Repeat(ch, 100)) {
+			t.Errorf("diff content is missing the epoch %d note body", n)
+		}
+	}
+	for n, ch := range map[int]string{2: "b", 1: "a"} {
+		if strings.Contains(done.Diff.Content, strings.Repeat(ch, 100)) {
+			t.Errorf("diff content contains the epoch %d note body; cap did not cut the oldest notes", n)
+		}
+	}
+}
+
+// TestFanoutRecall verifies the shared buildPrompt call site serves
+// fanout_send: every run's prompt carries the recalled wiki note.
+func TestFanoutRecall(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sentinel := "FANOUT RECALL SENTINEL: distilled epoch knowledge"
+	notePath := filepath.Join(root, "wiki", "main-epoch-1.md")
+	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notePath, []byte("# Epoch 1\n\n"+sentinel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := rig.call(t, Request{Cmd: CmdFanoutSend, ConversationID: convID, Text: "compete on this", N: 2})
+	if len(sent.Runs) != 2 {
+		t.Fatalf("fanout runs = %d, want 2", len(sent.Runs))
+	}
+	if recall := recallPathsFromEvent(t, sent.Event); len(recall) != 1 || recall[0] != notePath {
+		t.Fatalf("fanout recall = %v, want [%s]", recall, notePath)
+	}
+	rig.pollUntilDone(t, convID)
+
+	// Every fan-out run's diff (i.e. its prompt) contains the sentinel.
+	rows, err := rig.store.DB().QueryContext(context.Background(),
+		`SELECT path_on_disk FROM diffs WHERE conversation_id = ?`, convID)
+	if err != nil {
+		t.Fatalf("list diffs: %v", err)
+	}
+	var diffPaths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		diffPaths = append(diffPaths, p)
+	}
+	rows.Close()
+	if len(diffPaths) != 2 {
+		t.Fatalf("diffs = %d, want 2", len(diffPaths))
+	}
+	for _, p := range diffPaths {
+		b, err := os.ReadFile(p)
+		if err != nil || !strings.Contains(string(b), sentinel) {
+			t.Errorf("fanout diff %s is missing the recall sentinel (err=%v)", p, err)
+		}
+	}
+}
+
+// TestListWiki verifies the list_wiki IPC: notes come back newest-epoch
+// first with parsed name/epoch and a non-empty modified_at; a fresh
+// workstream returns an empty list.
+func TestListWiki(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	wikiDir := filepath.Join(root, "wiki")
+	if err := os.MkdirAll(wikiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{1, 2} {
+		p := filepath.Join(wikiDir, fmt.Sprintf("main-epoch-%d.md", n))
+		if err := os.WriteFile(p, []byte(fmt.Sprintf("# epoch %d\n", n)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := rig.call(t, Request{Cmd: CmdListWiki, ConversationID: convID})
+	if len(list.WikiNotes) != 2 {
+		t.Fatalf("list_wiki = %d notes, want 2", len(list.WikiNotes))
+	}
+	if first := list.WikiNotes[0]; first.Name != "main-epoch-2" || first.Epoch != 2 {
+		t.Errorf("first note = %+v, want main-epoch-2 (newest first)", first)
+	}
+	if second := list.WikiNotes[1]; second.Name != "main-epoch-1" || second.Epoch != 1 {
+		t.Errorf("second note = %+v, want main-epoch-1", second)
+	}
+	for _, note := range list.WikiNotes {
+		if wantPath := filepath.Join(wikiDir, note.Name+".md"); note.Path != wantPath {
+			t.Errorf("note path = %q, want %q", note.Path, wantPath)
+		}
+		if note.ModifiedAt == "" {
+			t.Errorf("note %s: modified_at is empty", note.Name)
+		} else if _, err := time.Parse(time.RFC3339, note.ModifiedAt); err != nil {
+			t.Errorf("note %s: modified_at %q is not RFC3339: %v", note.Name, note.ModifiedAt, err)
+		}
+	}
+
+	// A fresh second workstream returns an empty list.
+	created := rig.call(t, Request{Cmd: CmdCreateWorkstream, ProjectRoot: root, Name: "feature-wiki"})
+	boot2 := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: created.Workstream.ID})
+	empty := rig.call(t, Request{Cmd: CmdListWiki, ConversationID: boot2.Conversation.ID})
+	if len(empty.WikiNotes) != 0 {
+		t.Errorf("list_wiki on a fresh workstream = %v, want empty", empty.WikiNotes)
+	}
+}
+
+// TestReadWiki verifies the read_wiki path classes: wiki notes round-trip
+// with exact content, ~/.odo/user.md is readable via its literal tilde
+// path, a missing user.md is OK with empty content, a missing wiki note is
+// an error, and anything outside those two classes is rejected.
+func TestReadWiki(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	content := "# Epoch 1\n\nexact content with unicode — 你好\n"
+	notePath := filepath.Join(root, "wiki", "main-epoch-1.md")
+	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The listed path round-trips to the exact content.
+	list := rig.call(t, Request{Cmd: CmdListWiki, ConversationID: convID})
+	if len(list.WikiNotes) != 1 {
+		t.Fatalf("list_wiki = %d notes, want 1", len(list.WikiNotes))
+	}
+	got := rig.call(t, Request{Cmd: CmdReadWiki, Path: list.WikiNotes[0].Path})
+	if got.WikiContent != content {
+		t.Errorf("read_wiki content = %q, want %q", got.WikiContent, content)
+	}
+
+	// The global user.md is readable via the literal tilde path.
+	userContent := "durable principle: concise output\n"
+	writeUserMD(t, home, userContent)
+	if got = rig.call(t, Request{Cmd: CmdReadWiki, Path: "~/.odo/user.md"}); got.WikiContent != userContent {
+		t.Errorf("read_wiki user.md = %q, want %q", got.WikiContent, userContent)
+	}
+
+	// A missing user.md is OK with empty content (frontend create-hint).
+	if err := os.Remove(filepath.Join(home, ".odo", "user.md")); err != nil {
+		t.Fatal(err)
+	}
+	if got = rig.call(t, Request{Cmd: CmdReadWiki, Path: "~/.odo/user.md"}); got.WikiContent != "" {
+		t.Errorf("read_wiki missing user.md = %q, want empty", got.WikiContent)
+	}
+
+	// A missing wiki note is an error.
+	rig.callExpectErr(t, Request{Cmd: CmdReadWiki, Path: filepath.Join(root, "wiki", "main-epoch-99.md")})
+
+	// Paths outside wiki/ and ~/.odo/user.md are rejected — including ../
+	// traversal that stays inside the project root.
+	for _, p := range []string{
+		filepath.Join(root, "README.md"),
+		"/etc/hosts",
+		filepath.Join(root, "wiki", "..", "README.md"),
+		filepath.Join(root, "wiki", "..", "..", "secret"),
+	} {
+		resp := rig.callExpectErr(t, Request{Cmd: CmdReadWiki, Path: p})
+		if !strings.Contains(resp.Error, "only files under wiki/ or ~/.odo/user.md are readable") {
+			t.Errorf("read_wiki %s: error = %q", p, resp.Error)
+		}
+	}
+}
+
+// TestPendingCounts covers the M3 §3c sidebar-badge fallback: pending diff
+// counts keyed by workstream, the in-memory list of workstreams with a live
+// run, and project-root validation. The slow wrapper keeps the run alive
+// long enough to observe running_workstreams mid-run.
+func TestPendingCounts(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	wsID := boot.Workstream.ID
+
+	// Fresh project: no pending diffs, nothing running.
+	pc := rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
+	if len(pc.PendingCounts) != 0 {
+		t.Errorf("fresh pending_counts = %v, want empty", pc.PendingCounts)
+	}
+	if len(pc.RunningWorkstreams) != 0 {
+		t.Errorf("fresh running_workstreams = %v, want empty", pc.RunningWorkstreams)
+	}
+
+	// Send a run and check mid-flight: workstream listed as running.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	mid := rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
+	if got, want := fmt.Sprint(mid.RunningWorkstreams), fmt.Sprint([]int64{wsID}); got != want {
+		t.Errorf("mid-run running_workstreams = %s, want %s", got, want)
+	}
+
+	// After the run: one pending diff on the workstream, nothing running.
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("poll_events: no diff after agent_done")
+	}
+	pc = rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
+	if pc.PendingCounts[wsID] != 1 {
+		t.Errorf("pending_counts[%d] = %d, want 1 (all = %v)", wsID, pc.PendingCounts[wsID], pc.PendingCounts)
+	}
+	if len(pc.RunningWorkstreams) != 0 {
+		t.Errorf("post-run running_workstreams = %v, want empty", pc.RunningWorkstreams)
+	}
+
+	// Accepting the diff drops the count to zero.
+	rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done.Diff.ID})
+	pc = rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
+	if len(pc.PendingCounts) != 0 {
+		t.Errorf("post-accept pending_counts = %v, want empty", pc.PendingCounts)
+	}
+
+	// A foreign project root is refused.
+	rig.callExpectErr(t, Request{Cmd: CmdPendingCounts, ProjectRoot: filepath.Join(root, "elsewhere")})
+}

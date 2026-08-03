@@ -57,6 +57,9 @@ export interface EventPayload {
   action?: string;
   diff_id?: number;
   attachments?: string[];
+  // M3: memory recall — user_message journals the paths injected into the
+  // prompt (~/.odo/user.md first when present, then wiki note paths).
+  recall?: string[];
   // review_action when action == "distill" (M1 memory distiller).
   epoch?: number;
   wiki_path?: string;
@@ -114,6 +117,7 @@ export interface PollEventsResponse {
   events?: OdoEvent[];
   agent_running?: boolean;
   diff?: Diff | null;
+  runs?: RunInfo[];
 }
 
 export interface AcceptDiffResponse {
@@ -211,4 +215,36 @@ export interface FanoutSendResponse {
   ok: boolean;
   error?: string;
   runs?: RunInfo[];
+}
+
+// ---------- M3: wiki browser + visibility ----------
+
+// One distilled wiki note, listed by the daemon's `list_wiki` command.
+export interface WikiNoteInfo {
+  path: string;
+  name: string;
+  epoch: number;
+  modified_at: string;
+}
+
+export interface ListWikiResponse {
+  ok: boolean;
+  error?: string;
+  wiki_notes?: WikiNoteInfo[];
+}
+
+export interface ReadWikiResponse {
+  ok: boolean;
+  error?: string;
+  wiki_content?: string;
+}
+
+// Daemon `pending_counts` (spec §3c fallback): per-workstream pending-diff
+// counts plus the workstreams with a live run. JSON object keys arrive as
+// strings; the caller converts to number keys.
+export interface PendingCountsResponse {
+  ok: boolean;
+  error?: string;
+  pending_counts?: Record<string, number>;
+  running_workstreams?: number[];
 }

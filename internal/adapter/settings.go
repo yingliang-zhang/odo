@@ -57,6 +57,20 @@ func LoadPrefsRaw(key string) string {
 	return ""
 }
 
+// ResolveAdapter returns the adapter name a run should use when the request
+// left the adapter field empty: the prefs.md `default_adapter` value, or the
+// compiled-in default ("omp") when the key is absent. A non-empty name is
+// returned unchanged.
+func ResolveAdapter(name string) string {
+	if name != "" {
+		return name
+	}
+	if v := LoadPrefsRaw("default_adapter"); v != "" {
+		return v
+	}
+	return defaultAdapterName
+}
+
 // ParseModelProvider splits a `model@provider` value at the last `@` (model
 // names may themselves contain `@`). Returns empty strings for malformed
 // values.

@@ -3,6 +3,7 @@ import { errorMessage } from "../api";
 import { basename } from "../files";
 import type { Conversation, Project, Workstream } from "../types";
 import SettingsPanel from "./SettingsPanel";
+import WikiBrowser from "./WikiBrowser";
 
 const DISTILL_TOAST_MS = 5000;
 
@@ -18,6 +19,14 @@ interface Props {
   onCreateWorkstream: (name: string) => Promise<void>;
   // Resolves to the wiki path of the distilled note; rejects on failure.
   onDistill: () => Promise<string>;
+  // M3: wiki note count for the Memory section (null = unknown; the line is
+  // then omitted) and a refresh hook fired when the browser closes.
+  wikiNoteCount: number | null;
+  onWikiBrowserClosed: () => void;
+  // M3 visibility (spec §3c): per-workstream pending-diff counts and the
+  // workstreams with a live run, from the daemon's pending_counts poll.
+  pendingCounts: Record<number, number>;
+  runningWorkstreams: number[];
 }
 
 // Shorten an absolute wiki path to "wiki/<note>.md" for display.
@@ -43,6 +52,10 @@ export default function Sidebar({
   onSwitchWorkstream,
   onCreateWorkstream,
   onDistill,
+  wikiNoteCount,
+  onWikiBrowserClosed,
+  pendingCounts,
+  runningWorkstreams,
 }: Props) {
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -51,6 +64,7 @@ export default function Sidebar({
   const [distillBusy, setDistillBusy] = useState(false);
   const [distillToast, setDistillToast] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showWiki, setShowWiki] = useState(false);
   const toastTimer = useRef<ToastTimer | null>(null);
 
   useEffect(() => {
@@ -150,7 +164,10 @@ export default function Sidebar({
         <ul className="ws-list">
           {workstreams.map((w) => {
             const active = w.id === workstream?.id;
-            const running = active && agentRunning;
+            // M3: the daemon's running set covers other workstreams; the
+            // active one also reports through the poll loop directly.
+            const running = runningWorkstreams.includes(w.id) || (active && agentRunning);
+            const pending = pendingCounts[w.id] ?? 0;
             return (
               <li key={w.id}>
                 <button
@@ -161,8 +178,12 @@ export default function Sidebar({
                   <span className="ws-name" title={w.name}>
                     {w.name}
                   </span>
-                  <span className={`ws-status${running ? " running" : ""}`}>
-                    {running ? "running" : "idle"}
+                  <span className="ws-meta">
+                    {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
+                    {running && <span className="ws-running-dot" />}
+                    <span className={`ws-status${running ? " running" : ""}`}>
+                      {running ? "running" : "idle"}
+                    </span>
                   </span>
                 </button>
               </li>
@@ -182,7 +203,26 @@ export default function Sidebar({
         >
           {distillBusy ? "Distilling…" : "Distill"}
         </button>
+        {wikiNoteCount != null && <div className="wiki-count">{wikiNoteCount} wiki notes</div>}
+        <button
+          type="button"
+          className="distill-btn"
+          disabled={conversationId == null}
+          title="Browse this workstream's distilled wiki notes"
+          onClick={() => setShowWiki(true)}
+        >
+          Browse
+        </button>
         {distillToast && <div className="distill-toast">{distillToast}</div>}
+        {showWiki && conversationId != null && (
+          <WikiBrowser
+            conversationId={conversationId}
+            onClose={() => {
+              setShowWiki(false);
+              onWikiBrowserClosed();
+            }}
+          />
+        )}
       </div>
 
       <div className="sidebar-section">

@@ -11,8 +11,11 @@ import type {
   FanoutSendRequest,
   FanoutSendResponse,
   GetSettingsResponse,
+  ListWikiResponse,
   ListWorkstreamsResponse,
+  PendingCountsResponse,
   PollEventsResponse,
+  ReadWikiResponse,
   RejectDiffResponse,
   ReviewDiffResponse,
   SendMessageRequest,
@@ -107,6 +110,21 @@ export function updateSettings(settings: Partial<Settings>): Promise<UpdateSetti
 export function fanoutSend(conversationId: number, text: string, n: number): Promise<FanoutSendResponse> {
   const req: FanoutSendRequest = { conversationId, text, n };
   return invoke<FanoutSendResponse>("fanout_send", req);
+}
+
+// M3 wiki browser: read-only, served from the daemon's project root.
+export function listWiki(conversationId: number): Promise<ListWikiResponse> {
+  return invoke<ListWikiResponse>("list_wiki", { conversationId });
+}
+
+export function readWiki(path: string): Promise<ReadWikiResponse> {
+  return invoke<ReadWikiResponse>("read_wiki", { path });
+}
+
+// M3 visibility (spec §3c): the sidebar's only view into OTHER workstreams'
+// runs and pending diffs — poll_events is per-conversation.
+export function pendingCounts(projectRoot: string): Promise<PendingCountsResponse> {
+  return invoke<PendingCountsResponse>("pending_counts", { projectRoot });
 }
 
 // Daemon-level failures arrive with ok:false; transport failures (invoke

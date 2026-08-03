@@ -340,6 +340,33 @@ async fn fanout_send(conversation_id: i64, text: String, n: i64) -> Result<Value
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M3 wiki browser: list the workstream's distilled notes (read-only).
+#[tauri::command]
+async fn list_wiki(conversation_id: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "list_wiki", "conversation_id": conversation_id});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M3 wiki browser: read one note (or ~/.odo/user.md) through the daemon,
+// which enforces the wiki/-only path guard.
+#[tauri::command]
+async fn read_wiki(path: String) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "read_wiki", "path": path});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M3 visibility (spec §3c): project-wide pending-diff counts and running
+// workstreams. poll_events is per-conversation, so this read-only fallback
+// is the sidebar's only view into other workstreams.
+#[tauri::command]
+async fn pending_counts(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "pending_counts", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +577,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             send_message,
@@ -562,7 +590,10 @@ pub fn run() {
             review_diff,
             get_settings,
             update_settings,
-            fanout_send
+            fanout_send,
+            list_wiki,
+            read_wiki,
+            pending_counts
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the main window: core APIs plus app commands.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }

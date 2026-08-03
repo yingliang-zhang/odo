@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -156,6 +157,12 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleFanoutSend(ctx, req)
 	case CmdDistill:
 		resp, err = s.handleDistill(ctx, req)
+	case CmdListWiki:
+		resp, err = s.handleListWiki(ctx, req)
+	case CmdPendingCounts:
+		resp, err = s.handlePendingCounts(ctx, req)
+	case CmdReadWiki:
+		resp, err = s.handleReadWiki(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -300,9 +307,15 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if req.Steer {
 		return s.handleSteering(ctx, c, req)
 	}
-	ad, ok := s.adapters[req.Adapter]
-	if req.Adapter != "" && !ok {
-		return Response{}, fmt.Errorf("send_message: unknown adapter %q", req.Adapter)
+	adName := adapter.ResolveAdapter(req.Adapter)
+	ad, ok := s.adapters[adName]
+	if !ok {
+		if req.Adapter != "" {
+			return Response{}, fmt.Errorf("send_message: unknown adapter %q", req.Adapter)
+		}
+		// The name came from prefs resolution; a prefs typo must never wedge
+		// the daemon, so fall back to the compiled-in default.
+		adName, ad = "", s.adapters[""]
 	}
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
@@ -313,17 +326,30 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 	}
 
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		return Response{}, err
+	}
+	userMem := readUserMemory()
+	memory, recallPaths := recallWikiNotes(s.projectRoot, w.Name)
+	if userMem != "" {
+		recallPaths = append([]string{"~/.odo/user.md"}, recallPaths...)
+	}
+
 	// Journal the user message with attachments (spec item 5).
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
+	}
+	if len(recallPaths) > 0 {
+		msgPayload["recall"] = recallPaths
 	}
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments)
+	prompt := buildPrompt(req.Text, req.Attachments, userMem, memory)
 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
@@ -347,7 +373,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	meta := &runMeta{
 		runID:          runID,
 		runDirID:       runDirID,
-		adapter:        req.Adapter,
+		adapter:        adName,
 		conversationID: c.ID,
 		workstreamID:   c.WorkstreamID,
 		worktreePath:   wtPath,
@@ -357,15 +383,27 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	return Response{Event: &ev}, nil
 }
 
-// buildPrompt renders the agent prompt for a user message. If attachments
-// are present, the file paths are injected so the agent reads them before
-// proceeding.
-func buildPrompt(text string, attachments []string) string {
-	if len(attachments) == 0 {
-		return text
+// buildPrompt renders the agent prompt. userMem (global, durable user
+// principles) is injected first, then project memory (distilled wiki
+// notes), then attachment hints, then the user's text.
+func buildPrompt(text string, attachments []string, userMem, memory string) string {
+	var b strings.Builder
+	if userMem != "" {
+		b.WriteString("## User memory (durable cross-project principles)\n\n")
+		b.WriteString(userMem)
+		b.WriteString("\n\n---\n\n")
 	}
-	return fmt.Sprintf("Attached files: %s. Read them before proceeding.\n\n%s",
-		strings.Join(attachments, ", "), text)
+	if memory != "" {
+		b.WriteString("## Project memory (from prior distilled epochs)\n\n")
+		b.WriteString(memory)
+		b.WriteString("\n\n---\n\n")
+	}
+	if len(attachments) > 0 {
+		fmt.Fprintf(&b, "Attached files: %s. Read them before proceeding.\n\n",
+			strings.Join(attachments, ", "))
+	}
+	b.WriteString(text)
+	return b.String()
 }
 
 // handleFanoutSend journals the user message once and starts N parallel
@@ -386,9 +424,15 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 	if err != nil {
 		return Response{}, err
 	}
-	ad, ok := s.adapters[req.Adapter]
-	if req.Adapter != "" && !ok {
-		return Response{}, fmt.Errorf("fanout_send: unknown adapter %q", req.Adapter)
+	adName := adapter.ResolveAdapter(req.Adapter)
+	ad, ok := s.adapters[adName]
+	if !ok {
+		if req.Adapter != "" {
+			return Response{}, fmt.Errorf("fanout_send: unknown adapter %q", req.Adapter)
+		}
+		// The name came from prefs resolution; a prefs typo must never wedge
+		// the daemon, so fall back to the compiled-in default.
+		adName, ad = "", s.adapters[""]
 	}
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
@@ -399,16 +443,29 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 		return Response{}, fmt.Errorf("fanout_send: agent already running for conversation %d", c.ID)
 	}
 
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		return Response{}, err
+	}
+	userMem := readUserMemory()
+	memory, recallPaths := recallWikiNotes(s.projectRoot, w.Name)
+	if userMem != "" {
+		recallPaths = append([]string{"~/.odo/user.md"}, recallPaths...)
+	}
+
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
+	}
+	if len(recallPaths) > 0 {
+		msgPayload["recall"] = recallPaths
 	}
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments)
+	prompt := buildPrompt(req.Text, req.Attachments, userMem, memory)
 
 	// All-or-nothing: a failed setup cancels every run started so far so no
 	// orphan agent process or worktree is left behind.
@@ -430,7 +487,7 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 		meta := &runMeta{
 			runID:          runID,
 			runDirID:       runDirID,
-			adapter:        req.Adapter,
+			adapter:        adName,
 			conversationID: c.ID,
 			workstreamID:   c.WorkstreamID,
 			worktreePath:   wtPath,
@@ -1006,6 +1063,104 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		return Response{}, err
 	}
 	return Response{WikiPath: wikiPath, Epoch: newEpoch}, nil
+}
+
+// handlePendingCounts reports, per workstream, the number of pending diffs
+// plus which workstreams have a live agent run (M3 §3c sidebar badges).
+// Read-only: SQL over diffs + a scan of the in-memory run table.
+func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response, error) {
+	p, err := s.resolveProject(ctx, req.ProjectRoot)
+	if err != nil {
+		return Response{}, fmt.Errorf("pending_counts: %w", err)
+	}
+	counts, err := s.store.PendingDiffCountsByWorkstream(ctx, p.ID)
+	if err != nil {
+		return Response{}, err
+	}
+	var running []int64
+	for _, meta := range s.runs {
+		if !meta.finished {
+			running = append(running, meta.workstreamID)
+		}
+	}
+	return Response{PendingCounts: counts, RunningWorkstreams: running}, nil
+}
+
+// handleListWiki lists the distilled wiki notes for the conversation's
+// workstream, newest epoch first. Read-only: no journal writes.
+func (s *Server) handleListWiki(ctx context.Context, req Request) (Response, error) {
+	c, err := s.checkConversation(ctx, req.ConversationID)
+	if err != nil {
+		return Response{}, err
+	}
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		return Response{}, err
+	}
+	matches, err := filepath.Glob(filepath.Join(s.projectRoot, "wiki", w.Name+"-epoch-*.md"))
+	if err != nil {
+		return Response{}, fmt.Errorf("list_wiki: %w", err)
+	}
+	var notes []WikiNoteInfo
+	for _, m := range matches {
+		epoch, ok := wikiNoteEpoch(m)
+		if !ok {
+			continue // skip unparseable names defensively
+		}
+		fi, err := os.Stat(m)
+		if err != nil {
+			continue // vanished between glob and stat
+		}
+		notes = append(notes, WikiNoteInfo{
+			Path:       m,
+			Name:       strings.TrimSuffix(filepath.Base(m), ".md"),
+			Epoch:      epoch,
+			ModifiedAt: fi.ModTime().UTC().Format(time.RFC3339),
+		})
+	}
+	sort.Slice(notes, func(i, j int) bool { return notes[i].Epoch > notes[j].Epoch })
+	return Response{WikiNotes: notes}, nil
+}
+
+// handleReadWiki returns the content of one memory file: a note under
+// <projectRoot>/wiki/ or the global ~/.odo/user.md — anything else is
+// rejected (path-traversal guard). A missing wiki note is an error; a
+// missing user.md is OK with empty content so the frontend can render a
+// create-hint. Read-only: no journal writes.
+func (s *Server) handleReadWiki(_ context.Context, req Request) (Response, error) {
+	// Class 2: exactly ~/.odo/user.md (the one global file), accepted as the
+	// expanded absolute path or as the literal "~/.odo/user.md".
+	if home, err := os.UserHomeDir(); err == nil {
+		userMemPath := filepath.Join(home, ".odo", "user.md")
+		expanded := req.Path
+		if strings.HasPrefix(expanded, "~/") {
+			expanded = filepath.Join(home, expanded[len("~/"):])
+		}
+		if filepath.Clean(expanded) == userMemPath {
+			b, err := os.ReadFile(userMemPath)
+			switch {
+			case err == nil:
+				return Response{WikiContent: string(b)}, nil
+			case os.IsNotExist(err):
+				return Response{WikiContent: ""}, nil // frontend renders a create-hint
+			default:
+				return Response{}, fmt.Errorf("read_wiki: %w", err)
+			}
+		}
+	}
+
+	// Class 1: a file under <projectRoot>/wiki/, no escaping the project.
+	clean := filepath.Clean(req.Path)
+	rel, relErr := filepath.Rel(s.projectRoot, clean)
+	if relErr == nil && !strings.HasPrefix(rel, "..") &&
+		(rel == "wiki" || strings.HasPrefix(rel, "wiki"+string(filepath.Separator))) {
+		b, err := os.ReadFile(clean)
+		if err != nil {
+			return Response{}, fmt.Errorf("read_wiki: %s: %w", clean, err)
+		}
+		return Response{WikiContent: string(b)}, nil
+	}
+	return Response{}, fmt.Errorf("read_wiki: only files under wiki/ or ~/.odo/user.md are readable, got %q", req.Path)
 }
 
 // runDistillAgent runs the summary prompt through the orchestrator adapter

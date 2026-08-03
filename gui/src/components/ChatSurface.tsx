@@ -5,6 +5,15 @@ import type { OdoEvent } from "../types";
 import MessageBubble from "./MessageBubble";
 import ToolTicker from "./ToolTicker";
 
+// M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
+// minute ("35s").
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
 interface Props {
   events: OdoEvent[];
   agentRunning: boolean;
@@ -160,6 +169,39 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
 
   const visibleEvents = events.filter((e) => e.seq > lastDistillSeq);
 
+  // M3 run status (spec §3a): the run window starts at the most recent
+  // user_message in the current epoch; the first agent_tool_call in that
+  // window marks the true start (else the message itself). Last tool and
+  // call count come from the same window.
+  const run = useMemo(() => {
+    if (!agentRunning) return null;
+    const evs = events.filter((e) => e.seq > lastDistillSeq);
+    let startIdx = -1;
+    for (let i = evs.length - 1; i >= 0; i--) {
+      if (evs[i].type === "user_message") {
+        startIdx = i;
+        break;
+      }
+    }
+    const window = startIdx >= 0 ? evs.slice(startIdx) : evs;
+    const toolCalls = window.filter((e) => e.type === "agent_tool_call");
+    // Elapsed anchors to the run's user_message (spec §3a); the first tool
+    // call is only a fallback when the window has no message.
+    const startEvent = (startIdx >= 0 ? evs[startIdx] : undefined) ?? toolCalls[0];
+    const startMs = startEvent ? Date.parse(startEvent.created_at) : NaN;
+    const lastTool =
+      toolCalls.length > 0 ? (toolCalls[toolCalls.length - 1].payload?.tool ?? "tool") : null;
+    return { startMs, lastTool, calls: toolCalls.length };
+  }, [agentRunning, events, lastDistillSeq]);
+
+  // 1s heartbeat to keep the elapsed display ticking while a run is live.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!agentRunning) return;
+    const timer = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [agentRunning]);
+
   return (
     <section className="chat-surface">
       <div className="message-list" ref={listRef}>
@@ -187,6 +229,12 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
         ))}
         <ToolTicker running={agentRunning} events={events} />
       </div>
+      {run && (
+        <div className="run-status">
+          {`running — ${formatElapsed(Number.isNaN(run.startMs) ? 0 : Date.now() - run.startMs)}`}
+          {run.lastTool != null ? ` — tool: ${run.lastTool} (call ${run.calls})` : ""}
+        </div>
+      )}
       <div
         className={`chat-composer${dragOver ? " drag-over" : ""}`}
         ref={composerRef}
