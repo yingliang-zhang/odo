@@ -99,9 +99,9 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 │       │     └──────────────┘                       │
 │       ▼                                            │
 │  ┌──────────────┐                                  │
-│  │ memory/      │ (per-project markdown wiki)      │
-│  │ index.md     │                                  │
-│  │ *.md         │                                  │
+│  │ wiki/        │ (per-workstream epoch notes)     │
+│  │ topics/ (M5) │                                  │
+│  │ index.md (M5)│                                  │
 │  └──────────────┘                                  │
 └──────────────────────────────────────────────────┘
         │
@@ -114,8 +114,9 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 1. **One durable Go authority owns all state.** Tauri's Rust layer is a thin
    shell; it never holds durable truth.
 
-2. **Schema-first wire types.** All daemon↔GUI IPC types are generated from a
-   single schema source. No hand-synced Go/TS type definitions.
+2. **Hand-synced IPC types.** Daemon↔GUI IPC types are defined in Go
+   (`internal/ipc/protocol.go`) and TypeScript (`gui/src/types.ts`) and kept
+   in sync by hand. The Tauri Rust layer forwards JSON verbatim. No codegen.
 
 3. **Append-only SQLite journal.** Typed queries, no ORM. Every state
    transition is an append to the journal, not an in-place update.
@@ -125,7 +126,7 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 - No cryptographic attestation (deferred to M1+)
 - No sandbox containment (agents run in user's environment)
 - No frozen contract pipelines
-- No multi-model MoA as a built-in runtime feature (M2+)
+- No multi-model MoA review — **shipped in M2** (`review_diff` IPC + DiffViewer panel)
 - No grill/adversarial review system
 
 ## Repository and session design
@@ -167,7 +168,7 @@ When a Hermes session compresses or switches, the project repo is the
 authority for resuming work:
 
 1. Read `docs/milestones/` for the current milestone spec
-2. Read `memory/decisions/` for accepted decisions
+2. Read `docs/adr/` for accepted architecture decisions
 3. Read `memory/log.md` tail for recent progress
 4. Run `git log --oneline -5` for current HEAD
 
