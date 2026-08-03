@@ -1,0 +1,23 @@
+## User memory (durable cross-project principles)
+
+- Always state the invariant before the fix. — seen: odo, ananke
+
+
+---
+
+## Prior notes (recalled)
+
+## main-epoch-1.md
+
+# Epoch 1
+
+Decision: hash the exact injected block, not the file.
+
+
+---
+
+
+
+---
+
+Create hello.txt
