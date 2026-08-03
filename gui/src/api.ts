@@ -8,6 +8,7 @@ import type {
   ApplyMemoryRequest,
   ApplyMemoryResponse,
   BootstrapResponse,
+  CancelResponse,
   CreateWorkstreamResponse,
   CurateResponse,
   DistillResponse,
@@ -67,6 +68,13 @@ export function sendMessage(
     req.adapter = opts.adapter;
   }
   return invoke<SendMessageResponse>("send_message", req);
+}
+
+// Belt A: abort the conversation's active run (adapter SIGKILL). The
+// daemon journals agent_error{cancelled by user}; ok:false means the run
+// ended before the cancel landed — a benign race, so callers may ignore it.
+export function cancel(conversationId: number): Promise<CancelResponse> {
+  return invoke<CancelResponse>("cancel", { conversationId });
 }
 
 export function listWorkstreams(projectRoot: string): Promise<ListWorkstreamsResponse> {

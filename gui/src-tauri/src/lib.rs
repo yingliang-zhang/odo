@@ -267,6 +267,16 @@ async fn send_message(
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// Belt A: abort the conversation's active run (adapter SIGKILLs the
+// process group); the daemon journals agent_error{cancelled by user} and
+// the drain path settles the run on the next poll.
+#[tauri::command]
+async fn cancel(conversation_id: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "cancel", "conversation_id": conversation_id});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 #[tauri::command]
 async fn create_workstream(project_root: Option<String>, name: String) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
@@ -656,6 +666,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             send_message,
+            cancel,
             poll_events,
             accept_diff,
             reject_diff,

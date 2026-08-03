@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   acceptDiff,
   bootstrap,
+  cancel,
   createWorkstream,
   curate,
   distill,
@@ -20,6 +21,7 @@ import {
 } from "./api";
 import ChatSurface from "./components/ChatSurface";
 import DiffViewer from "./components/DiffViewer";
+import SettingsPanel from "./components/SettingsPanel";
 import Sidebar from "./components/Sidebar";
 import { notifyRunDone } from "./notify";
 import type { BootstrapResponse, Conversation, Diff, OdoEvent, Project, Workstream } from "./types";
@@ -47,6 +49,10 @@ export default function App() {
   const [agentRunning, setAgentRunning] = useState(false);
   const [diff, setDiff] = useState<Diff | null>(null);
   const [adapter, setAdapter] = useState("omp");
+  // Belt A: sidebar collapse (⌘B) and the settings modal, lifted out of the
+  // Sidebar so ⌘, opens it regardless of sidebar visibility.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +74,9 @@ export default function App() {
 
   const lastSeqRef = useRef(0);
   const conversationRef = useRef<number | null>(null);
+  // Belt A: the forever-installed global shortcut listener reads the current
+  // run state through this ref instead of re-registering every flip.
+  const agentRunningRef = useRef(false);
   // Read inside callbacks that must stay referentially stable (recordEvents
   // is a poll-effect dependency; a state dep would rebuild the interval).
   const workstreamNameRef = useRef<string | null>(null);
@@ -280,6 +289,61 @@ export default function App() {
     }
   }, []);
 
+  // Belt A: stop the running agent. ok:false ("no active run") is the
+  // expected race against a run that finished on its own — the next poll
+  // tick reconciles the UI, so only transport failures reach the banner.
+  // The daemon-side kill lands asynchronously; agentRunning flips when the
+  // drain path journals the terminal event.
+  const handleCancel = useCallback(async () => {
+    const cid = conversationRef.current;
+    if (cid == null) return;
+    try {
+      await cancel(cid);
+      setError(null);
+    } catch (e) {
+      setError(`cancel failed: ${errorMessage(e)}`);
+    }
+  }, []);
+
+  // Keep the shortcut listener's view of run state current.
+  useEffect(() => {
+    agentRunningRef.current = agentRunning;
+  }, [agentRunning]);
+
+  // Belt A global shortcuts. Modals close themselves on Escape through
+  // their own window listeners; the .settings-overlay check keeps a bare
+  // Escape from also acting on the composer while a dialog is up. ⌘K is
+  // reserved for the Belt B command palette — swallowed here for now.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (agentRunningRef.current) {
+          void handleCancel();
+          return;
+        }
+        if (document.querySelector(".settings-overlay") != null) return;
+        (document.activeElement as HTMLElement | null)?.blur();
+        return;
+      }
+      if (!(e.metaKey || e.ctrlKey)) return;
+      switch (e.key.toLowerCase()) {
+        case "b":
+          e.preventDefault();
+          setSidebarCollapsed((v) => !v);
+          break;
+        case ",":
+          e.preventDefault();
+          setSettingsOpen(true);
+          break;
+        case "k":
+          e.preventDefault();
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleCancel]);
+
   const handleSwitchWorkstream = useCallback(
     async (workstreamId: number) => {
       if (workstreamId === workstream?.id) return;
@@ -459,7 +523,11 @@ export default function App() {
         lastMemoryUpdate={lastMemoryUpdate}
         onMemoryChipDismiss={handleMemoryChipDismiss}
         onMemoryReviewClosed={handleMemoryReviewClosed}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
+      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
       <main className="app-main">
         {error && <div className="error-banner">{error}</div>}
         <ChatSurface
@@ -468,6 +536,7 @@ export default function App() {
           sendDisabled={!booted}
           onSend={handleSend}
           onFanout={handleFanout}
+          onCancel={handleCancel}
           epoch={conversation?.epoch ?? 1}
           distilledTo={lastDistillPath}
         />

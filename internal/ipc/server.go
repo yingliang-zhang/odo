@@ -150,6 +150,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleListWorkstreams(ctx, req)
 	case CmdSendMessage:
 		resp, err = s.handleSendMessage(ctx, req)
+	case CmdCancel:
+		resp, err = s.handleCancel(ctx, req)
 	case CmdPollEvents:
 		resp, err = s.handlePollEvents(ctx, req)
 	case CmdAcceptDiff:
@@ -644,6 +646,32 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 		}))
 	}
 	return Response{Event: &ev}, nil
+}
+
+// handleCancel SIGKILLs the conversation's active run through its adapter
+// and journals agent_error{cancelled by user} so the chat history records
+// the user's stop. The run is deliberately left unfinished: the normal
+// drain path observes the dead process on the next poll, journals the
+// adapter's own terminal event, and extracts whatever partial diff exists
+// (ADR-0001: partial changes stay reviewable).
+func (s *Server) handleCancel(ctx context.Context, req Request) (Response, error) {
+	c, err := s.checkConversation(ctx, req.ConversationID)
+	if err != nil {
+		return Response{}, err
+	}
+	runID, ok := s.byConv[c.ID]
+	meta := s.runs[runID]
+	if !ok || meta == nil || meta.finished {
+		return Response{}, fmt.Errorf("cancel: no active run for conversation %d", c.ID)
+	}
+	if err := s.adapterFor(meta.adapter).Cancel(ctx, runID); err != nil {
+		return Response{}, fmt.Errorf("cancel: %w", err)
+	}
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentError,
+		mustJSON(map[string]interface{}{"error": "cancelled by user"})); err != nil {
+		return Response{}, err
+	}
+	return Response{}, nil
 }
 
 // handlePollEvents drains finished-run adapter events into the journal,

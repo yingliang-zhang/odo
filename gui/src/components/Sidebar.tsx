@@ -39,6 +39,11 @@ interface Props {
   lastMemoryUpdate: { layer: string; detail?: string } | null;
   onMemoryChipDismiss: () => void;
   onMemoryReviewClosed: () => void;
+  // Belt A: sidebar collapse (Cmd+B toggle)
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  // Belt A: settings shortcut (Cmd+,)
+  onOpenSettings: () => void;
 }
 
 // Shorten an absolute wiki path to "wiki/<note>.md" for display.
@@ -75,6 +80,9 @@ export default function Sidebar({
   lastMemoryUpdate,
   onMemoryChipDismiss,
   onMemoryReviewClosed,
+  collapsed,
+  onToggleCollapsed,
+  onOpenSettings,
 }: Props) {
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -197,15 +205,24 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${collapsed ? " sidebar-collapsed" : ""}`}>
       <div className="sidebar-head">
         <h1 className="sidebar-app">Odo</h1>
+        <button
+          type="button"
+          className="collapse-btn"
+          title={collapsed ? "Expand (⌘B)" : "Collapse (⌘B)"}
+          aria-label="Toggle sidebar"
+          onClick={onToggleCollapsed}
+        >
+          {collapsed ? "›" : "‹"}
+        </button>
         <button
           type="button"
           className="gear-btn"
           title="Settings"
           aria-label="Settings"
-          onClick={() => setShowSettings(true)}
+          onClick={() => { setShowSettings(true); onOpenSettings(); }}
         >
           ⚙
         </button>

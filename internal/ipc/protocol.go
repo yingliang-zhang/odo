@@ -15,6 +15,7 @@ type Settings = adapter.Settings
 const (
 	CmdBootstrap        = "bootstrap"
 	CmdSendMessage      = "send_message"
+	CmdCancel           = "cancel"
 	CmdPollEvents       = "poll_events"
 	CmdAcceptDiff       = "accept_diff"
 	CmdRejectDiff       = "reject_diff"

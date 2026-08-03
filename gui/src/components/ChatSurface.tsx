@@ -1,4 +1,14 @@
-import { ClipboardEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ClipboardEvent,
+  DragEvent,
+  FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
 import type { OdoEvent } from "../types";
@@ -22,6 +32,8 @@ interface Props {
   // M2 fan-out: run the prompt through N parallel runs; resolves to the
   // number of runs the daemon started. Rejects on failure.
   onFanout: (text: string, n: number) => Promise<number>;
+  // Belt A: abort the running agent (Stop button / Esc).
+  onCancel: () => void;
   // M1 memory distiller: current epoch (banner shown when > 1) and the wiki
   // path of the most recent distill, when known this session.
   epoch: number;
@@ -33,7 +45,16 @@ interface Props {
 // clipboard paste. HTML5 drag events are kept as a fallback; they only fire
 // if `dragDropEnabled` is ever disabled in tauri.conf.json, so the two paths
 // never double-fire.
-export default function ChatSurface({ events, agentRunning, sendDisabled, onSend, onFanout, epoch, distilledTo }: Props) {
+// Belt A: the composer auto-grows from one row up to six, then scrolls
+// internally. 6 rows * 21px (14px/1.5) + padding/border ≈ 148px; this cap
+// must match .chat-input textarea's max-height in app.css.
+const COMPOSER_MAX_HEIGHT = 148;
+
+// Auto-follow engages only while the user is within this many px of the
+// scroll bottom (Belt A stick-to-bottom).
+const NEAR_BOTTOM_PX = 80;
+
+export default function ChatSurface({ events, agentRunning, sendDisabled, onSend, onFanout, onCancel, epoch, distilledTo }: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -45,6 +66,11 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
   const [fanoutActive, setFanoutActive] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Belt A stick-to-bottom: true while the user is pinned to the newest
+  // output; scrolling up disengages, the "↓ new output" pill re-engages.
+  const stickRef = useRef(true);
+  const [newOutput, setNewOutput] = useState(false);
 
   // Fan-out runs report through the same agent_running signal; when the
   // daemon goes quiet the indicator has served its purpose.
@@ -52,11 +78,42 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
     if (!agentRunning) setFanoutActive(null);
   }, [agentRunning]);
 
-  // Keep the newest event in view as the journal grows.
+  // Belt A stick-to-bottom (spec §Fix 2): track whether the user is pinned
+  // to the newest output. Programmatic scrolls fire this handler too; they
+  // land at the bottom, so sticking survives our own auto-scroll.
+  const handleListScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    stickRef.current = nearBottom;
+    if (nearBottom) setNewOutput(false);
+  };
+
+  // Auto-follow only while stuck; otherwise surface the pill. New events
+  // while scrolled up are exactly the case the pill exists for.
   useEffect(() => {
     const el = listRef.current;
+    if (!el) return;
+    if (stickRef.current) {
+      el.scrollTop = el.scrollHeight;
+    } else {
+      setNewOutput(true);
+    }
+  }, [events.length]);
+
+  // A run flipping state (done banner appearing, ticker hiding) also nudges
+  // the view, but never yanks a reader back down.
+  useEffect(() => {
+    const el = listRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [agentRunning]);
+
+  const scrollToBottom = () => {
+    stickRef.current = true;
+    setNewOutput(false);
+    const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [events.length, agentRunning]);
+  };
 
   const addAttachments = (paths: string[]) => {
     const clean = paths.filter((p) => p.trim() !== "");
@@ -105,7 +162,7 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
 
   // Clipboard paste: file objects expose only a name in the webview, so the
   // chip carries that name; the daemon resolves paths against the project.
-  const handlePaste = (e: ClipboardEvent<HTMLInputElement>) => {
+  const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(e.clipboardData?.files ?? []);
     if (files.length === 0) return; // plain text paste: let it through
     e.preventDefault();
@@ -118,14 +175,13 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
 
   const canSend = draft.trim() !== "" || attachments.length > 0;
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const submitDraft = useCallback(async () => {
     const text = draft.trim();
     if (!canSend || sending || sendDisabled) return;
     setSending(true);
     try {
-      // M1 steering: while the agent runs, the button is a Steer button and
-      // the same message journals with steer=true instead of a new run.
+      // M1 steering: while the agent runs, submitting journals the message
+      // with steer=true instead of starting a new run.
       await onSend(text, attachments, agentRunning);
       setDraft("");
       setAttachments([]);
@@ -133,6 +189,57 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
       // onSend already surfaced the error; keep the draft for retry.
     } finally {
       setSending(false);
+    }
+  }, [draft, attachments, canSend, sending, sendDisabled, onSend, agentRunning]);
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    void submitDraft();
+  };
+
+  // Belt A: ⌘/Ctrl+Enter sends from anywhere (Fix 4), including focus
+  // outside the textarea; the textarea's own keydown leaves the
+  // modifier-Enter alone so this listener fires exactly once.
+  const submitRef = useRef(submitDraft);
+  useEffect(() => {
+    submitRef.current = submitDraft;
+  }, [submitDraft]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        void submitRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Belt A: auto-grow the composer with the draft up to the 6-row cap.
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+  }, [draft]);
+
+  // Belt A composer keys (Fix 3): Enter sends, Shift+Enter newlines (the
+  // default), Esc stops a run or clears the draft. Escape is swallowed here
+  // so App's global handler (blur/cancel for focus elsewhere) doesn't
+  // double-fire.
+  const handleComposerKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      void submitDraft();
+      return;
+    }
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      if (agentRunning) {
+        onCancel();
+      } else {
+        setDraft("");
+      }
     }
   };
 
@@ -204,7 +311,8 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
 
   return (
     <section className="chat-surface">
-      <div className="message-list" ref={listRef}>
+      <div className="message-list-wrap">
+        <div className="message-list" ref={listRef} onScroll={handleListScroll}>
         {epoch > 1 && (
           <div className="epoch-banner">
             Epoch {epoch}
@@ -224,10 +332,16 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
             and its diff lands here for review.
           </div>
         )}
-        {visibleEvents.map((ev) => (
-          <MessageBubble key={ev.seq} event={ev} />
-        ))}
-        <ToolTicker running={agentRunning} events={events} />
+          {visibleEvents.map((ev) => (
+            <MessageBubble key={ev.seq} event={ev} />
+          ))}
+          <ToolTicker running={agentRunning} events={events} />
+        </div>
+        {newOutput && (
+          <button type="button" className="new-output-pill" onClick={scrollToBottom}>
+            ↓ new output
+          </button>
+        )}
       </div>
       {run && (
         <div className="run-status">
@@ -273,16 +387,18 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
           </div>
         )}
         <form className="chat-input" onSubmit={handleSubmit}>
-          <input
-            type="text"
+          <textarea
+            ref={textareaRef}
+            rows={1}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleComposerKeyDown}
             onPaste={handlePaste}
             placeholder={
               dragOver
                 ? "Drop files to attach them…"
                 : agentRunning
-                  ? "Steer the running agent…"
+                  ? "Steer the running agent… (Esc stops)"
                   : "Describe the change you want…"
             }
             disabled={sendDisabled || sending}

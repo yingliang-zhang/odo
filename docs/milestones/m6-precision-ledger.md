@@ -94,18 +94,19 @@
    user opens `.odo/ledger.md`. It contains daemon-written rows like:
    ```
    ## epoch 5 — 2026-08-15T14:32:01Z
-   - distill duration: 187s (review_action seq 42)
-   - proposals: 3 (memory_propose seq 43)
-   - accepted: 2, rejected: 1 (memory_apply seq 45)
+   - distill duration: 187s (review_action/distill seq 42)
+   - proposals: 3 (review_action/memory_propose seq 43)
    - recall notes: 4 (user_message seq 41)
+   ## epoch 5 (apply) — 2026-08-15T14:47:12Z
+   - accepted: 2, rejected: 1 (review_action/memory_apply seq 45)
    ```
-2. Every number is verifiable: the daemon wrote each row by reading the
-   cited journal event's payload and extracting the metric verbatim — e.g.,
-   the `187s` duration is computed from the `review_action{action:"distill"}`
-   event's `created_at` minus the preceding `user_message` event's
-   `created_at` (both journaled timestamps), and the `4` recall count is the
-   length of the `recall` array in that `user_message`'s payload. No LLM
-   touched the metric data path (inv 4). A future LLM may *select* which rows
+2. Every number is verifiable: the daemon wrote each row from a journaled
+   event's payload — e.g., the `187s` duration is the daemon-measured
+   `duration_ms` key it journaled on the `review_action{action:"distill"}`
+   payload itself (wall time from distill start to note write, NOT a
+   timestamp delta — the last user message may be hours old), and the `4`
+   recall count is the length of the `recall` array in the last
+   `user_message`'s payload. No LLM touched the metric data path (inv 4). A future LLM may *select* which rows
    to surface, but every quote is substring-verified against the referenced
    payload — a fabricated number is rejected with a `memory_update{layer:
    "ledger", cause: "verify_failed"}` event.
@@ -117,9 +118,10 @@
 ### Demo D: Contradiction report — retract with a record
 
 1. Epoch 6's distill note says "Auth switched from JWT to session cookies."
-   The distiller's contradiction pass (runs inside distill, after the note is
-   written) compares the new note against recalled older notes. It finds
-   that epoch 1's note says "Authentication uses JWT" — a contradiction.
+   The distiller's contradiction pass (runs inside distill, after the note
+   is written, before the learner) compares the new note against all older
+   epoch notes of the workstream. It finds that epoch 1's note says
+   "Authentication uses JWT" — a contradiction.
 2. The daemon does NOT modify epoch 1's note file (epoch notes are
    append-only records — inv 2: rebuildable from the journal). Instead it
    journals a `memory_update{layer:"note", cause:"retract", detail:"epoch-1
@@ -189,17 +191,17 @@
 | odo wiki read: daemon access | **None.** The CLI reads files directly from the project root (cwd). It does not connect to the daemon socket. Rationale: wiki notes, topic pages, index.md, and ledger.md are all plain files on disk; the daemon process is not needed for a read-only operation. The journal is the source of truth for *events*, but the wiki/ledger files are the derived artifacts the CLI serves. This keeps the CLI zero-dependency and usable in any worktree (the daemon is bound to one root; an agent's worktree is a different path) |
 | odo wiki read: path guarding | **Prefix check on the resolved path.** `filepath.Rel(cwd, resolved)` must not start with `..` and must be under `wiki/` or be `.odo/ledger.md`. The `topics/` prefix is allowed (resolves to `wiki/topics/`). The `ledger` friendly name resolves to `.odo/ledger.md` (outside `wiki/` but inside `.odo/`). Same guard as `handleReadWiki`'s class-1 check, extended for the `.odo/ledger.md` exception. A missing file is an error (exit 1), not empty stdout — so a shell `test -n "$(odo wiki read …)"` check is reliable |
 | ledger.md format | **Daemon-written Markdown, one section per epoch.** Path: `.odo/ledger.md` (gitignored, same dir as memory.md). Format: a `## epoch <N> — <RFC3339 timestamp>` header followed by `- <metric>: <value> (<event type> seq <S>)` bullets. Each bullet cites the journal event the metric was computed from (the `seq` is the event's seq in its conversation). The file is append-only across epochs (the daemon appends a new `## epoch N` section at each distill; it never rewrites old sections). No cap (the ledger grows with the project; the user can truncate old sections manually — it is a record, not an injected layer) |
-| ledger.md: metrics | **Distill duration, proposal counts, accept/reject counts, recall note count.** All computed from journaled events: (1) distill duration = `review_action{action:"distill"}`.created_at − preceding `user_message`.created_at; (2) proposals = count of `memory_propose`'s `proposals` array; (3) accepted/rejected = `memory_apply`'s `metrics.accepted`/`metrics.rejected`; (4) recall notes = length of the `user_message`'s `recall` array (pre-M6: path count; M6: item count). These are all daemon-computed from journal payloads — no LLM in the data path (inv 4) |
-| ledger.md: when rows are written | **At distill and at apply_memory.** The daemon appends a `## epoch N` section to `.odo/ledger.md` at the end of `handleDistill` (after the learner pass, before the epoch increment) and appends accept/reject metrics at the end of `handleApplyMemory`. A distill section is written even when the learner proposes nothing (the duration + recall count are still metrics). The append is best-effort: a write failure journals a `memory_update{layer:"ledger", cause:"write_failed"}` event but does not fail the distill (the ledger is a record, not a gate) |
+| ledger.md: metrics | **Distill duration, proposal counts, accept/reject counts, recall note count.** All quoted from journaled payloads: (1) distill duration = the `duration_ms` key the daemon measures (`time.Since(start)`) and journals on `review_action{action:"distill"}` — a timestamp delta would count the user's idle time before clicking Distill; (2) proposals = count of the `proposals` array on `review_action{action:"memory_propose"}`; (3) accepted/rejected = `metrics.accepted`/`metrics.rejected` on `review_action{action:"memory_apply"}` (`memory_propose`/`memory_apply` are `review_action` actions, not event types — the citation format is `review_action/<action> seq <S>`); (4) recall notes = length of the `recall` array on the last `user_message` that carries one (steering messages journal no recall key). These are all daemon-computed from journal payloads — no LLM in the data path (inv 4) |
+| ledger.md: when rows are written | **At distill and at apply_memory.** The daemon appends a `## epoch N` section to `.odo/ledger.md` at the end of `handleDistill` (after the distill `review_action` is journaled, so the row can cite its seq), and appends a **separate** `## epoch N (apply)` section at the end of `handleApplyMemory` — the file is append-only and an apply may be journaled after a later epoch's distill section, so bullets are never spliced into an older section. A distill section is written even when the learner proposes nothing (the duration + recall count are still metrics; `proposals: 0 (no memory_propose event)` records the absence). The append is best-effort: a write failure journals a `memory_update{layer:"ledger", cause:"write_failed"}` event but does not fail the distill (the ledger is a record, not a gate) |
 | ledger.md: substring verification | **Daemon-side `quote ∈ referenced payload` check.** When an LLM (future: a `ledger_select` command) proposes a metric row, the daemon verifies the quote is a verbatim substring of the referenced event's payload (normalized: trim + collapse whitespace, case-sensitive on the payload's JSON string value). The verification function is `verifyLedgerQuote(quote string, event store.Event) bool`: it unmarshals the event's payload, stringifies it, and checks `strings.Contains(haystack, quote)`. A failed verification journals `memory_update{layer:"ledger", cause:"verify_failed", detail:"<quote>"}` and rejects the row. M6 ships the verification function + the daemon-computed rows (no LLM selection yet — the LLM selection path is a future extension that the verification function already supports) |
-| Contradiction detection: when it runs | **Inside distill, after the note is written, before the learner.** The contradiction pass runs as a daemon-side text comparison (no LLM — inv 4 discipline extended to contradiction detection). It compares the just-written note's content against the recalled older notes (the same set `recallWikiNotes` would inject) using the same normalize-and-substring approach the learner's evidence veto uses. Running it inside distill means it adds latency to the already-blocking distill call — but it is a string comparison, not an LLM one-shot, so it adds milliseconds, not minutes |
-| Contradiction detection: mechanism | **Daemon-side normalized substring heuristic.** The new note is split into sentences. Each sentence is normalized (`normalizeRule`: trim, lower, collapse whitespace) and compared against each older note's normalized content. A contradiction is flagged when a new-note sentence and an old-note sentence share ≥3 normalized words AND contain a negation/contrast signal (`not`, `no longer`, `switched`, `replaced`, `removed`, `instead of`, `changed from`) in the new-note sentence. This is a conservative heuristic — it errs toward NOT flagging (false negatives are safe; false positives would retract a valid note). The detected pairs are journaled as contradiction reports |
+| Contradiction detection: when it runs | **Inside distill, after the note is written, before the learner.** The contradiction pass runs as a daemon-side text comparison (no LLM — inv 4 discipline extended to contradiction detection). It compares the just-written note against ALL older epoch notes of the workstream (via `allEpochNotes`, capped at `contradictionScanCap = 50` newest) — not the 12 KB keyword-recall window, which after M6 is query-selected and would miss the contradiction by construction. Running it inside distill adds latency to the already-blocking distill call — but it is a string comparison, not an LLM one-shot, so it adds milliseconds, not minutes |
+| Contradiction detection: mechanism | **Daemon-side token heuristic: signal + shared salient token.** The new note is split into sentences; each sentence is normalized (`normalizeRule`). A sentence is a *contradiction candidate* when it contains a change/negation signal (`not`, `no longer`, `switched`, `replaced`, `removed`, `instead of`, `changed from`, `migrated from`, `deprecated`) as a token. It flags a contradiction with an older note when the sentence shares ≥1 **salient token** (a non-stopword from the same `stopWords` set as keyword recall, so `jwt` counts, `the`/`to` do not) with any sentence of that older note. (A `shared ≥ 3 words` threshold was considered and rejected: it fails the workflow's own example — "Auth switched from JWT to session cookies" vs "Authentication uses JWT" shares only `jwt` — and real notes are short, so the threshold would almost never fire.) The signal requirement keeps false positives rare: affirmative additions ("Added a JWT refresh endpoint") never flag. Detected pairs are journaled as contradiction reports |
 | Contradiction detection: surfacing | **Journal event + UI chip + recall exclusion.** A detected contradiction journals `memory_update{layer:"note", cause:"retract", detail:"<old>-epoch-<N> contradicted by <new>-epoch-<M>: <snippet>", before_sha, after_sha}` (before_sha = after_sha = the old note's sha16 — the file is not modified). The recall function reads retraction events and excludes retracted `<ws>-epoch-<N>` pairs. The sidebar shows a chip ("⚠ epoch-N retracted (contradicts epoch-M)"); the wiki browser flags the retracted note's row with a "⚠ retracted" badge. The contradiction report is NOT a memory_update to memory.md (it is a note-layer retraction, not a rule-layer retraction — the learner's `contradicts` field handles rule-layer retraction at apply time) |
 | Contradiction: old note handling | **Retract with a journal record, no file mutation (inv 3).** The old note file is never edited — it is an append-only record (inv 2: rebuildable from the journal). "Retract with a record" means: (1) a `memory_update{cause:"retract"}` event is journaled naming the old note; (2) the recall function excludes the retracted note from the recall set; (3) the browser flags the note as retracted. The note is still readable (`odo wiki read`, `read_wiki` IPC) — it is a record. A retraction is reversible via a future `unretract` command (not in M6); for M6 the retraction persists until the next distill's contradiction pass re-evaluates |
 | IPC commands | `CmdLedger = "ledger"` (read `.odo/ledger.md` content for the UI — same shape as `read_pins`); `CmdContradictions = "contradictions"` (return the conversation's retraction events for the browser's retraction badges). No new commands for keyword recall (it is internal to `recallWikiNotes`) or the CLI (it is a `main.go` subcommand, not an IPC command). `send_message`/`fanout_send` payloads are extended (matched_terms) |
 | Frontend surfaces | Recall chip: `(keyword: …)` suffix + tooltip with per-note matched terms; ledger viewer (a new tab in the Memory Review panel or a new panel — reads via `ledger` IPC); retraction chip in sidebar ("⚠ epoch-N retracted"); retraction badge in wiki browser note list. The recall chip tooltip renders per-note matched terms |
 | Tauri glue | Two new passthrough commands: `ledger`, `contradictions`. Both use `READ_TIMEOUT` (read-only). No timeout bumps (keyword recall + contradiction detection add milliseconds, not minutes; the CLI is not a Tauri command — it is a shell binary the agent runs) |
-| Schema impact | **None — no new tables, no new event types.** The `recall` field on `user_message` changes shape from `[]string` to `[]object` (payload-key extension, ADR-0002 preserved — the `payload_json` column is a TEXT blob). Retraction events reuse `memory_update` with `layer:"note"`, `cause:"retract"`. Ledger write failures reuse `memory_update` with `layer:"ledger"`. The `review_action` event's existing `action:"distill"` carries the new contradiction count as a payload key. No migrations, no schema version bump |
+| Schema impact | **None — no new tables, no new event types.** The `recall` field on `user_message` changes shape from `[]string` to `[]object` (payload-key extension, ADR-0002 preserved — the `payload_json` column is a TEXT blob). Retraction events reuse `memory_update` with `layer:"note"`, `cause:"retract"`. Ledger write failures reuse `memory_update` with `layer:"ledger"`. The distill `review_action` gains `duration_ms` and `contradictions` payload keys (both daemon-computed). No migrations, no schema version bump |
 | Review weight | Fresh-context dual-model review — touches `recallWikiNotes` (keyword tiering + retraction filter), `memoryLayers` (recall payload shape), `buildPrompt` (unchanged signature — the recall block is already a string), `handleDistill` (contradiction pass + ledger append), `handleApplyMemory` (ledger append), `main.go` (subcommand dispatch), new IPC (2 commands) + frontend (ledger viewer, retraction chip/badge): per dev principle #4 |
 
 ## Backend
@@ -355,53 +357,58 @@ string).
 ### 4. Contradiction pass (new file `internal/ipc/contradiction.go`)
 
 Runs inside `handleDistill`, after the note is written, before the learner.
-Daemon-side string heuristic — no LLM.
+Daemon-side token heuristic — no LLM.
 
 ```go
-// contradictionTimeout is informational only — the pass is a string
-// comparison, not an LLM call. It exists to bound a pathological note set.
+// contradictionScanCap bounds the older notes scanned (newest-first, same
+// ordering as the curator's allEpochNotes). It exists to bound the scan on
+// a pathological note set; at normal scale it never trips.
 const contradictionScanCap = 50 // max older notes scanned
 
-// contradictionSignal is a negation/contrast token in a new-note sentence
-// that, combined with ≥3 shared words with an older note, flags a
-// contradiction.
-var contradictionSignals = []string{
-    "not", "no longer", "switched", "replaced", "removed",
-    "instead of", "changed from", "migrated from", "deprecated",
+// contradictionSignals is a change/negation token set. A new-note sentence
+// containing one of these as a token AND sharing ≥1 salient token with an
+// older note's sentence flags a contradiction. ("not" is a stop-word for
+// keyword recall but a signal here — the two paths never mix token sets.)
+var contradictionSignals = map[string]bool{
+    "not": true, "no": true, "longer": true, "switched": true,
+    "replaced": true, "removed": true, "instead": true, "changed": true,
+    "migrated": true, "deprecated": true,
 }
 ```
-Note: `contradictionSignals` are checked as raw substrings of the new-note
-sentence (which is `normalizeRule`-normalized, not `tokenizeQuery`-tokenized).
-The stop-words in `tokenizeQuery` (§1) apply only to keyword-recall query
-tokenization, a separate code path — "not" being both a stop-word and a
-contradiction signal is intentional and non-conflicting.
 
 **`splitSentences(text string) []string`** — splits on `. `, `!\n`, `?\n`,
-and bare newlines that start a bullet (`-\s`). Returns trimmed sentences.
+and bare newlines. Returns trimmed sentences.
+
+**`salientTokens(sentence string) map[string]bool`** — splits a
+`normalizeRule`-normalized sentence on whitespace and drops tokens in
+`stopWords` (§1). `jwt` survives; `the`/`to` do not.
 
 **`detectContradictions(newNote string, oldNotes []epochNote) []contradiction`**:
 
 ```go
 type contradiction struct {
-    oldNote  string // "<ws>-epoch-<N>"
-    newNote  string
-    snippet  string // the contradicting sentence (truncated to 120 chars)
+    oldNote string // "<ws>-epoch-<N>"
+    newNote string
+    snippet string // the contradicting sentence (truncated to 120 chars)
 }
 ```
 
-1. Tokenize `newNote` into sentences.
-2. For each sentence, normalize it (`normalizeRule`).
-3. For each older note (up to `contradictionScanCap`, newest-first):
-   a. Normalize the older note's full content.
-   b. For each new-note sentence: split both into word-sets; compute
-      `shared = |intersection|`; if `shared >= 3` AND the new-note sentence
-      contains a `contradictionSignal`, flag a contradiction.
+1. Split `newNote` into sentences.
+2. For each new sentence: compute `salientTokens`. If no token is in
+   `contradictionSignals`, skip the sentence (affirmative additions never
+   flag).
+3. For each older note (up to `contradictionScanCap`, newest-first): split
+   into sentences, and for each old sentence compute `salientTokens`. Flag
+   when the new sentence shares ≥1 salient token with any old sentence.
+   One contradiction per (old note, new sentence) pair; the first matching
+   old sentence wins (keeps reports bounded).
 4. Return the list (may be empty).
 
 **`runContradictionPass(ctx, conversationID, noteName, noteContent, epoch)`**:
-1. Read the recalled older notes for the workstream (reuse
-   `recallWikiNotes` with `query=""` to get the newest-first set, excluding
-   the just-written note).
+1. `allEpochNotes(s.projectRoot)` (curator.go), filtered to the current
+   workstream, excluding the just-written note by name. This reuses the
+   curator's reader — no re-read plumbing, and the scan covers the FULL note
+   set, not the query-selected 12 KB recall window.
 2. `detectContradictions(noteContent, oldNotes)`.
 3. For each contradiction: journal `memory_update{layer:"note",
    cause:"retract", detail:"<oldNote> contradicted by <newNote>: <snippet>",
@@ -411,18 +418,12 @@ type contradiction struct {
 4. Return the count (journaled in the distill `review_action`'s payload as
    `contradictions: <count>`).
 
-**`itemsToEpochNotes(items []recallItem, projectRoot string) []epochNote`** —
-re-reads each item's file from disk to recover the full content (recallWikiNotes
-returns paths + matched terms, not content; the contradiction pass needs content).
-Reuses the `epochNote` type from curator.go. The just-written note is excluded
-by the caller (its name is known, so it is filtered from the items before this
-call, or excluded here by name).
-
 **`lastRecallCount(events []store.Event) int`** — scans the conversation's
-events newest-first for the last `user_message` and returns the length of its
-`recall` array (M6: the item count; pre-M6 rows: the path count). Used by the
-ledger writer for the "recall notes" metric. Returns 0 when no user_message
-exists (first distill).
+events newest-first for the last `user_message` that carries a `recall` key
+(steering messages journal no recall key) and returns the array's length
+(M6 rows: item count; pre-M6 rows: path count). Used by the ledger writer
+for the "recall notes" metric. Returns 0 when no such event exists (first
+distill).
 
 ### 5. Ledger writer (new file `internal/ipc/ledger.go`)
 
@@ -430,88 +431,129 @@ exists (first distill).
 const ledgerFileName = "ledger.md"
 
 // ledgerMetric is one daemon-computed metric row, written to ledger.md as
-// `- <label>: <value> (<event type> seq <S>)`.
+// `- <label>: <value> (<event citation> seq <S>)`. The citation is
+// `<type>` for plain events (user_message) or `<type>/<action>` for
+// review_action rows (review_action/distill, review_action/memory_propose,
+// review_action/memory_apply).
 type ledgerMetric struct {
     label string
     value string
-    event string // the journal event type the metric was derived from
-    seq   int    // the event's seq (0 when the metric spans two events)
+    event string // event citation, e.g. "review_action/memory_apply"
+    seq   int    // the cited event's seq (0 + value "(no … event)" when absent)
 }
 ```
 
-**`appendLedger(projectRoot string, epoch int, metrics []ledgerMetric) error`**:
+**`appendLedger(projectRoot string, header string, metrics []ledgerMetric) error`**:
 1. Build the section:
    ```
-   ## epoch <N> — <RFC3339 UTC>
+   ## <header> — <RFC3339 UTC>
    - <label>: <value> (<event> seq <S>)
    …
    ```
+   The header is `epoch <N>` for distill sections and `epoch <N> (apply)`
+   for apply sections (append-only: never splice bullets into an older
+   section).
 2. Append to `.odo/ledger.md` (create if absent, mode 0644). If the file
    exists, append a `\n` separator + the section.
 3. Return an error on I/O failure (the caller journals
    `memory_update{layer:"ledger", cause:"write_failed"}` but does not fail
    the distill).
 
-**`distillLedgerMetrics(events []store.Event, epoch int, recallCount int) []ledgerMetric`**:
-- `distill duration`: the distill `review_action` event's `created_at`
-  minus the preceding `user_message` event's `created_at`. Both timestamps
-  are journaled; the daemon parses them (`time.Parse(time.RFC3339, …)`).
-- `recall notes`: `recallCount` (the length of the `recall` array on the
-  last `user_message` before distill).
-- `proposals`: the count of the `memory_propose` event's `proposals` array
-  (0 if no propose was journaled — the learner failed or proposed nothing).
+**`distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCount int) []ledgerMetric`**
+(kwargs are the just-journaled events, not re-scans — the caller has them):
+- `distill duration`: from the `duration_ms` key the daemon measured and
+  journaled on `distillEv` (`review_action{action:"distill"}` payload).
+  Citation: `review_action/distill seq <distillEv.Seq>`.
+- `recall notes`: `recallCount` (from `lastRecallCount`). Citation:
+  `user_message seq <seq of the event that carried the recall array>`.
+- `proposals`: the count of the `proposals` array on the
+  `review_action{action:"memory_propose"}` event journaled by the learner
+  pass (re-found from `ListEvents` after the learner runs — `runLearner`
+  returns only the count, not the seq). When no propose event exists
+  (zero proposals or learner failure), the row is
+  `proposals: 0 (no memory_propose event)` — the absence is the record.
 
-**`applyLedgerMetrics(batch pendingBatch, accepted, rejected int) []ledgerMetric`**:
-- `accepted`: `accepted` count, from the `memory_apply` `review_action`.
-- `rejected`: `rejected` count.
+**`applyLedgerMetrics(applyEv store.Event) []ledgerMetric`**:
+- `accepted` / `rejected`: read from `applyEv`'s own
+  `metrics.accepted`/`metrics.rejected` payload keys (the daemon-computed
+  counts already journaled). Citation: `review_action/memory_apply seq <applyEv.Seq>`.
 
 **`verifyLedgerQuote(quote string, event store.Event) bool`** — the inv-4
-substring verification. Unmarshals the event's payload to a string
-haystack (JSON marshal → string), normalizes (trim, collapse whitespace),
-and checks `strings.Contains(haystack, quote)`. Returns false if the
-payload is not a string or the quote is absent. This function is the
-mechanical gate: any future LLM-selected ledger row must pass it before
-being written.
+substring verification. `event.Payload` is `json.RawMessage`; the haystack
+is `string(event.Payload)` verbatim, normalized (trim, collapse whitespace)
+alongside the quote, and checked with `strings.Contains(haystack, quote)`.
+This function is the mechanical gate: any future LLM-selected ledger row
+must pass it before being written.
 
 ### 6. handleDistill extension (`server.go`)
 
-After the note is written, before the learner:
+`handleDistill` gains a start timestamp at entry, the contradiction pass
+between the note write and the learner, and a ledger append at the very end:
 
 ```go
-// M6: contradiction pass (daemon-side, no LLM). Read the recalled older
-// notes (newest-first, excluding the just-written note) with no keyword
-// query — we want the full recall set, not a keyword-filtered one.
-_, oldItems, _ := recallWikiNotes(s.projectRoot, w.Name, "", nil)
-oldNotes := itemsToEpochNotes(oldItems, s.projectRoot) // read content from disk
-count := s.runContradictionPass(ctx, c.ID, noteName, note, c.Epoch, oldNotes)
+start := time.Now() // M6: distill duration metric (ledger)
+// ... existing: checkConversation → runDistillAgent → write wiki note ...
 
-// M6: ledger append (best-effort).
+// M6: contradiction pass (daemon-side, no LLM). Runs between the note
+// write and the learner, before the epoch moves. (The existing noteName
+// assignment moves up from the learner call to just after the note write.)
+noteName := fmt.Sprintf("%s-epoch-%d", w.Name, c.Epoch)
+count := s.runContradictionPass(ctx, c.ID, noteName, note, c.Epoch)
+
+// ... existing: proposals := s.runLearner(...) ...
+// ... existing: newEpoch := IncrementEpoch ...
+
+distillEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+    "action":        "distill",
+    "epoch":         newEpoch,
+    "wiki_path":     wikiPath,
+    "duration_ms":   time.Since(start).Milliseconds(), // M6: ledger metric
+    "contradictions": count,                           // M6: contradiction report count
+}))
+if err != nil { return Response{}, err }
+
+// M6: ledger append (best-effort, after the distill event so its seq is
+// citable). Section header uses c.Epoch — the distilled note's epoch, not
+// newEpoch (the counter after increment).
 recallCount := lastRecallCount(events)
-if err := appendLedger(s.projectRoot, c.Epoch, distillLedgerMetrics(events, c.Epoch, recallCount)); err != nil {
+if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d", c.Epoch), distillLedgerMetrics(events, distillEv, recallCount)); err != nil {
     _, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
         "layer":  "ledger",
         "cause":  "write_failed",
         "detail": err.Error(),
     }))
 }
+return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: proposals}, nil
 ```
-
-The `review_action{action:"distill"}` event gains a `contradictions: <count>`
-payload key. The learner pass runs after (unchanged).
 
 ### 7. handleApplyMemory extension (`server.go`)
 
-After the `memory_apply` `review_action` is journaled:
+The existing batch-consumed marker already journals the counts; capture its
+returned event and append a separate `(apply)` section after it:
 
 ```go
-// M6: ledger append for accept/reject metrics (best-effort).
-if err := appendLedger(s.projectRoot, batch.epoch, applyLedgerMetrics(batch, len(req.Accepted), len(rejected))); err != nil {
+// Existing: batch-consumed marker (daemon-computed counts, ADR inv 4) —
+// capture the event so the ledger row can cite its seq.
+applyEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+    "action":   "memory_apply",
+    "epoch":    batch.epoch,
+    "accepted": req.Accepted,
+    "rejected": rejected,
+    "metrics":  map[string]int{"accepted": len(req.Accepted), "rejected": len(rejected)},
+}))
+if err != nil { return Response{}, err }
+
+// M6: ledger append (best-effort). Separate "(apply)" section: the file is
+// append-only and a later epoch's distill section may already follow the
+// epoch this apply belongs to.
+if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d (apply)", batch.epoch), applyLedgerMetrics(applyEv)); err != nil {
     _, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
         "layer":  "ledger",
         "cause":  "write_failed",
         "detail": err.Error(),
     }))
 }
+return Response{Applied: true}, nil
 ```
 
 ### 8. IPC commands (`protocol.go`)
@@ -538,38 +580,48 @@ cause:"retract"}`, return them as `Events`.
 ### 8b. Explicit `.odo` diff guard (`server.go` — `handleDiffAction`)
 
 ADR-0003 invariant 1 says "the daemon rejects accepted diffs that touch
-them" (memory.md, memory-archive.md, pins.md). M4/M5 enforced this only
-via gitignore (soft enforcement). M6 adds an explicit daemon-side guard.
+them" (memory.md, memory-archive.md, pins.md, ledger.md). M4/M5 enforced
+this only via gitignore — and only `.odo/` IS gitignored; `wiki/` is not,
+so the daemon-side guard is the sole enforcement for wiki content. M6 adds
+the explicit guard.
 
-**`handleDiffAction`** gains a path-prefix check before `git.ApplyDiff`:
+`store.Diff` has no file list (only `PathOnDisk`, a unified-diff patch
+file) — the guard parses target paths out of the patch text:
 
 ```go
-// rejectDiffsUnder checks whether the diff touches any protected path.
-// Protected: .odo/ (memory.md, memory-archive.md, pins.md, ledger.md,
-// journal.db, worktrees) and wiki/ (epoch notes, topics, index.md —
-// derived artifacts owned by the daemon, not the agent).
-func (s *Server) rejectProtectedPaths(diff *store.Diff) error {
-    protectedPrefixes := []string{".odo/", "wiki/"}
-    // The diff's files are in diff.Files (a []string of changed paths).
-    for _, f := range diff.Files {
-        for _, p := range protectedPrefixes {
-            if strings.HasPrefix(f, p) {
-                return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
-            }
+// diffTargetPaths reads the unified diff at diff.PathOnDisk and returns
+// the target (b-side) path of each file header: from "+++ b/<path>"
+// lines, or the b-side of "diff --git a/<x> b/<y>" when +++ is absent
+// (mode-only changes). Malformed headers are skipped — git apply is the
+// authority on the patch format; this is an overlay check, not a parser.
+func diffTargetPaths(pathOnDisk string) ([]string, error)
+
+// rejectProtectedPaths errs when any target path lives under a protected
+// prefix. Protected: .odo/ (memory.md, memory-archive.md, pins.md,
+// ledger.md, journal.sqlite, worktrees) and wiki/ (epoch notes, topics,
+// index.md — derived artifacts owned by the daemon, not the agent).
+func rejectProtectedPaths(paths []string) error {
+    for _, f := range paths {
+        if strings.HasPrefix(f, ".odo/") || strings.HasPrefix(f, "wiki/") {
+            return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
         }
     }
     return nil
 }
 ```
 
-Called at the top of `handleDiffAction` (both accept and reject paths
-check — reject also logs, but only accept can write). On violation:
-journal `agent_error{detail: "diff rejected: protected path touched"}`
-and return the error to the caller (the diff stays `pending`).
+Called in `handleDiffAction` before `git.ApplyDiff`, on the ACCEPT path
+only (rejection writes nothing). On violation: journal
+`agent_error{detail: "accept_diff: protected path <p> touched"}` and
+return the error to the caller (the diff stays `pending` — the user can
+still reject it).
 
-This guard is belt-and-suspenders with the existing gitignore — if the
-gitignore is ever removed or misconfigured, the daemon still rejects the
-diff. It also protects `wiki/` (derived artifacts) from agent edits.
+Normal agent diffs are unaffected: a diff's target paths are relative to
+the worktree root (`hello.txt`), never `.odo/worktrees/<run-id>/…` — the
+worktree location does not appear in patch headers. **Behavior change for
+`wiki/`:** an agent can no longer land a diff that edits `wiki/` —
+correct for odo-managed projects (wiki is daemon-owned), but a project
+that keeps hand-written docs in `wiki/` must move them.
 
 ### 9. main.go subcommand dispatch
 
@@ -594,14 +646,21 @@ func runWikiCLI(args []string) int {
 ```
 
 **`wikiRead(page string) int`** (new file `cmd_wiki.go` in package main):
-1. Resolve `cwd` (`os.Getwd`).
-2. Map `page` to a path:
-   - `page == "index"` → `wiki/index.md`
+1. Resolve `cwd` (`os.Getwd`). The CLI is location-relative — agents cd
+   into the project first (their normal mode). Running it inside an odo
+   worktree (`.odo/worktrees/<run-id>`) sees only committed files;
+   uncommitted wiki notes are not there — that is expected, odo's own
+   agents use recall + the journal, the CLI targets external coding CLIs
+   running in the project directory.
+2. Map `page` to a path — two rules only:
    - `page == "ledger"` → `.odo/ledger.md`
-   - `strings.HasPrefix(page, "topics/")` → `wiki/<page>.md`
-   - otherwise → `wiki/<page>.md`
-3. Guard: `filepath.Rel(cwd, resolved)` must not start with `..` and must
-   be under `wiki/` or be `.odo/ledger.md`.
+   - otherwise → `wiki/<page>.md` (so `index` → `wiki/index.md` and
+     `topics/<slug>` → `wiki/topics/<slug>.md` with no special cases)
+3. Guard: `clean := filepath.Clean(resolved)`; `filepath.Rel(cwd, clean)`
+   must not start with `..`, must be under `wiki/`, or must equal exactly
+   `.odo/ledger.md`. Traversal (`../../etc/passwd` maps to
+   `wiki/../../etc/passwd.md`, which Cleans out of `wiki/`) is rejected
+   with "only files under wiki/ (or .odo/ledger.md) are readable".
 4. Read the file. On error: print to stderr, return 1.
 5. Write content to stdout. Return 0.
 
@@ -734,21 +793,27 @@ cd src-tauri && cargo check
    contradicted by main-epoch-2: …"}`. `recallWikiNotes` with the
    retracted set → epoch 1 is excluded; only epoch 2 is injected.
 6. `TestContradictionPassFlagsConflict` — new note: "Auth switched from
-   JWT to session cookies." Old note: "Authentication uses JWT." →
-   `detectContradictions` returns one contradiction (oldNote=epoch-1,
+   JWT to session cookies." Old note: "Authentication uses JWT." → the new
+   sentence carries signal token `switched` + shares salient token `jwt`
+   → `detectContradictions` returns one contradiction (oldNote=epoch-1,
    snippet="Auth switched…"); the distill journals a
    `memory_update{layer:"note", cause:"retract"}` event.
 7. `TestContradictionPassNoFalsePositive` — new note: "Added a JWT refresh
-   endpoint." Old note: "Authentication uses JWT." → no contradiction
-   (shared words but no negation/contrast signal in the new sentence) →
-   `detectContradictions` returns empty.
+   endpoint." Old note: "Authentication uses JWT." → shares salient token
+   `jwt` but carries no contradiction signal → `detectContradictions`
+   returns empty → no retraction event journaled.
 8. `TestLedgerAppendedAtDistill` — distill epoch 1 → `.odo/ledger.md`
-   contains a `## epoch 1` section with `distill duration: …s
-   (review_action seq …)` and `recall notes: …` bullets → the `seq`
-   values reference real journaled events.
+   contains a `## epoch 1` section with `distill duration: <N>ms or <N>s
+   (review_action/distill seq <S>)` and `recall notes: <K> (user_message
+   seq <T>)` bullets where S is the real seq of the distill
+   `review_action` (whose payload ALSO carries `duration_ms` and
+   `contradictions` keys) and T is the last recall-carrying user_message.
+   When the stubbed learner proposes nothing, the row is
+   `proposals: 0 (no memory_propose event)`.
 9. `TestLedgerAppendedAtApply` — distill + apply_memory (accept 2, reject
-   1) → `.odo/ledger.md` has an epoch section with `accepted: 2, rejected:
-   1 (memory_apply seq …)`.
+   1) → `.odo/ledger.md` gains a separate `## epoch 1 (apply)` section
+   with `accepted: 2, rejected: 1 (review_action/memory_apply seq <S>)`
+   where S is the memory_apply marker's real seq.
 10. `TestLedgerWriteFailureJournalsNotFails` — make `.odo/` read-only →
     `appendLedger` fails → `memory_update{layer:"ledger",
     cause:"write_failed"}` journaled → distill still succeeds (returns
@@ -761,11 +826,14 @@ cd src-tauri && cargo check
     `wiki/main-epoch-1.md` → stdout is the file content, exit 0; `odo wiki
     read ../../etc/passwd` → exit 1, stderr has "only files under wiki/".
     Tests the subcommand dispatch + path guard without a running daemon.
-13. `TestDiffGuardRejectsProtectedPaths` — seed a diff whose file list
-    includes `.odo/memory.md` or `wiki/topics/auth.md` → `accept_diff`
+13. `TestDiffGuardRejectsProtectedPaths` — write a unified-diff fixture
+    at the diff's `PathOnDisk` with a `+++ b/.odo/memory.md` header (and
+    a second fixture with `+++ b/wiki/main-epoch-1.md`) → `accept_diff`
     returns an error naming the protected path, the diff stays `pending`,
-    no `git apply` is called. A diff with only normal files (e.g.,
-    `hello.txt`) is accepted normally.
+    `agent_error` is journaled, no `git apply` happens. A fixture touching
+    only `hello.txt` is accepted normally. A mode-only fixture
+    (`diff --git a/.odo/pins.md b/.odo/pins.md`, no `+++` line) is also
+    caught via the b-side of the `diff --git` header.
 
 GUI E2E (cua-host AX tree, M3/M4/M5 pattern): Demo A/B/C/D as described;
 assert recall chip `(keyword: …)` suffix + tooltip, ledger tab content,
@@ -797,12 +865,13 @@ suffix): fresh-context dual-model review (GLM-5.2 + K3 audit) before close
 
 2. **Contradiction false positives.** The negation/contrast heuristic
    could flag a non-contradiction (e.g., "we did NOT remove JWT" shares
-   words with "uses JWT" and contains "not"). **Mitigation:** the
-   heuristic requires `shared >= 3` words AND a signal token; "not" alone
-   in an affirmative sentence ("did not remove") is a weak signal. The
-   recall exclusion is reversible (a future `unretract` command). The
-   retraction chip lets the user see and correct false positives. The
-   heuristic errs conservative (fewer flags, not more).
+   `jwt` with "uses JWT" and carries signal `not`). **Mitigation:** the
+   recall exclusion is reversible (a future `unretract` command) and the
+   note file is never touched — the chip + browser badge let the user see
+   and audit every retraction, and the journaled `detail` carries the
+   exact sentence that triggered it. The signal-token requirement keeps
+   the rate low (affirmative additions never flag), and a false positive
+   is recoverable by design (inv 3).
 
 3. **Ledger growth.** `.odo/ledger.md` is append-only with no cap. A
    100-epoch project accumulates 100 sections. **Mitigation:** the file is

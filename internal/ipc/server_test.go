@@ -548,6 +548,105 @@ func TestSteering(t *testing.T) {
 	})
 }
 
+// TestCancelRun covers the cancel command: with a run in flight it kills
+// the agent process, journals agent_error{cancelled by user} immediately,
+// and the normal drain path finishes the run on the next poll; with no
+// active run it refuses cleanly.
+func TestCancelRun(t *testing.T) {
+	t.Run("active run is killed and journaled", func(t *testing.T) {
+		root := initRepo(t)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+
+		// The slow stub sleeps 3s, so the run is still active when cancel
+		// lands; the command itself answers ok with no event payload.
+		cancelled := rig.call(t, Request{Cmd: CmdCancel, ConversationID: convID})
+		if cancelled.Event != nil {
+			t.Fatalf("cancel event = %+v, want none (error is journaled, not returned)", cancelled.Event)
+		}
+
+		// Drain until the killed process reports terminal. The cancelled-by-
+		// user error is already in the journal; the adapter's own terminal
+		// agent_error (process killed) follows on a later poll.
+		var sawCancel bool
+		afterSeq := 0
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			resp := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: afterSeq})
+			for _, ev := range resp.Events {
+				afterSeq = ev.Seq
+				if ev.Type == store.EventAgentError {
+					var payload map[string]interface{}
+					if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+						t.Fatalf("agent_error payload: %v", err)
+					}
+					if payload["error"] == "cancelled by user" {
+						sawCancel = true
+					}
+				}
+			}
+			if resp.AgentRunning == nil {
+				t.Fatal("poll_events: agent_running missing")
+			}
+			if !*resp.AgentRunning {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("cancelled run did not finish within 20s")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !sawCancel {
+			t.Error("agent_error{cancelled by user} was not journaled")
+		}
+		if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
+			"[user_message agent_error agent_error]"; got != want {
+			t.Errorf("events = %s, want %s", got, want)
+		}
+
+		// A cancel settles the run: a fresh send is accepted immediately and
+		// that run completes normally (proving byConv released the slot).
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt again"})
+		rig.pollUntilDone(t, convID)
+	})
+
+	t.Run("no active run refuses cleanly", func(t *testing.T) {
+		root := initRepo(t)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		resp := rig.callExpectErr(t, Request{Cmd: CmdCancel, ConversationID: convID})
+		if !strings.Contains(resp.Error, "no active run") {
+			t.Errorf("cancel error = %q, want no active run", resp.Error)
+		}
+	})
+
+	t.Run("finished run refuses cleanly", func(t *testing.T) {
+		root := initRepo(t)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+		rig.pollUntilDone(t, convID)
+
+		resp := rig.callExpectErr(t, Request{Cmd: CmdCancel, ConversationID: convID})
+		if !strings.Contains(resp.Error, "no active run") {
+			t.Errorf("cancel after finish error = %q, want no active run", resp.Error)
+		}
+	})
+}
+
 // TestDistill covers the distill command: it refuses while a run is active,
 // writes the wiki note for the distilled epoch, increments the epoch, and
 // journals a review_action (ADR-0002 event types stay fixed).

@@ -136,6 +136,13 @@ export interface SendMessageResponse {
   event?: OdoEvent;
 }
 
+// Belt A: cancel carries no payload; ok:false ("no active run") is the
+// normal race against a run that finished just before the click.
+export interface CancelResponse {
+  ok: boolean;
+  error?: string;
+}
+
 export interface PollEventsResponse {
   ok: boolean;
   error?: string;
