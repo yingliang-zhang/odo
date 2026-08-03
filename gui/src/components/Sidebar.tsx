@@ -3,7 +3,6 @@ import { errorMessage, listTopics } from "../api";
 import { basename } from "../files";
 import type { Conversation, Project, Workstream } from "../types";
 import MemoryReviewPanel from "./MemoryReviewPanel";
-import SettingsPanel from "./SettingsPanel";
 import WikiBrowser from "./WikiBrowser";
 
 const DISTILL_TOAST_MS = 5000;
@@ -98,7 +97,6 @@ export default function Sidebar({
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
   const [pinToast, setPinToast] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [showWiki, setShowWiki] = useState(false);
   const [showMemoryReview, setShowMemoryReview] = useState(false);
   // Review opens the proposal tab; the memory-updated chip opens the reader.
@@ -222,12 +220,12 @@ export default function Sidebar({
           className="gear-btn"
           title="Settings"
           aria-label="Settings"
-          onClick={() => { setShowSettings(true); onOpenSettings(); }}
+          onClick={onOpenSettings}
         >
           ⚙
         </button>
       </div>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+
 
       <div className="sidebar-section">
         <div className="sidebar-section-head">

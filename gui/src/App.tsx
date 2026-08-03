@@ -317,11 +317,12 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // Modal/overlay takes priority — don't cancel the agent when closing a dialog
+        if (document.querySelector(".settings-overlay") != null) return;
         if (agentRunningRef.current) {
           void handleCancel();
           return;
         }
-        if (document.querySelector(".settings-overlay") != null) return;
         (document.activeElement as HTMLElement | null)?.blur();
         return;
       }
@@ -500,7 +501,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <Sidebar
         project={project}
         workstream={workstream}

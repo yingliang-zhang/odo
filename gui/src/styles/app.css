@@ -63,6 +63,10 @@ body {
   height: 100%;
 }
 
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 0 1fr;
+}
+
 .app-main {
   display: flex;
   flex-direction: column;
@@ -84,6 +88,28 @@ body {
   border-right: 1px solid var(--border);
   padding: 16px;
   overflow-y: auto;
+  overflow: hidden;
+}
+
+.sidebar-collapsed {
+  padding: 0;
+  border-right: none;
+}
+
+.collapse-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: auto;
+}
+
+.collapse-btn:hover {
+  color: var(--text);
+  background: var(--bg-input);
 }
 
 .sidebar-app {
@@ -284,6 +310,14 @@ body {
   min-height: 0;
 }
 
+.message-list-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
 .message-list {
   flex: 1;
   overflow-y: auto;
@@ -291,6 +325,26 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.new-output-pill {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent-user);
+  color: #fff;
+  border: none;
+  border-radius: 16px;
+  padding: 4px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.new-output-pill:hover {
+  opacity: 0.9;
 }
 
 .empty-hint {
@@ -348,7 +402,8 @@ body {
   color: var(--err);
 }
 
-.chat-input input {
+.chat-input input,
+.chat-input textarea {
   flex: 1;
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -358,12 +413,22 @@ body {
   font: inherit;
 }
 
-.chat-input input:focus {
+.chat-input textarea {
+  resize: none;
+  overflow-y: auto;
+  max-height: 148px;
+  min-height: 38px;
+  line-height: 1.4;
+}
+
+.chat-input input:focus,
+.chat-input textarea:focus {
   outline: none;
   border-color: var(--accent-user);
 }
 
-.chat-input input:disabled {
+.chat-input input:disabled,
+.chat-input textarea:disabled {
   opacity: 0.6;
 }
 
@@ -380,6 +445,20 @@ body {
 .chat-input button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.stop-btn {
+  background: var(--err);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  padding: 8px 18px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.stop-btn:hover {
+  opacity: 0.9;
 }
 
 .bubble .attachment-chips {

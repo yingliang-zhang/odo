@@ -442,6 +442,16 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
           >
             {fanoutBusy ? "Starting…" : fanoutOpen ? "Start" : "Fan-out"}
           </button>
+          {agentRunning && (
+            <button
+              type="button"
+              className="stop-btn"
+              title="Stop the running agent (Esc)"
+              onClick={onCancel}
+            >
+              Stop
+            </button>
+          )}
           <button type="submit" disabled={sendDisabled || sending || !canSend}>
             {agentRunning ? "Steer" : "Send"}
           </button>
