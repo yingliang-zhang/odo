@@ -89,6 +89,29 @@ func formatLedgerDuration(ms int64) string {
 
 // lastReviewAction scans events newest-first for the last review_action
 // with the given action. nil when absent.
+// lastReviewActionByEpoch finds the last review_action event with the given
+// action AND epoch field. This prevents cross-epoch misattribution in the
+// ledger (e.g., a zero-proposal distill inheriting the previous epoch's
+// memory_propose count).
+func lastReviewActionByEpoch(events []store.Event, action string, epoch int) *store.Event {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action string `json:"action"`
+			Epoch  int    `json:"epoch"`
+		}
+		if err := json.Unmarshal(events[i].Payload, &p); err != nil {
+			continue
+		}
+		if p.Action == action && p.Epoch == epoch {
+			return &events[i]
+		}
+	}
+	return nil
+}
+
 func lastReviewAction(events []store.Event, action string) *store.Event {
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Type != store.EventReviewAction {
@@ -119,7 +142,7 @@ func lastReviewAction(events []store.Event, action string) *store.Event {
 //     proposed nothing (the absence is the record).
 //   - recall notes: recallCount (from lastRecallCount), citing the
 //     user_message whose recall array was measured.
-func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCount int) []ledgerMetric {
+func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCount int, distillEpoch int) []ledgerMetric {
 	var p struct {
 		DurationMs int64 `json:"duration_ms"`
 	}
@@ -131,7 +154,10 @@ func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCou
 		seq:   distillEv.Seq,
 	}}
 
-	if pe := lastReviewAction(events, "memory_propose"); pe != nil {
+	// M6 fix: filter by epoch to prevent cross-epoch misattribution.
+	// A zero-proposal distill must show "0", not inherit the previous
+	// epoch's memory_propose count.
+	if pe := lastReviewActionByEpoch(events, "memory_propose", distillEpoch); pe != nil {
 		var pp struct {
 			Proposals []json.RawMessage `json:"proposals"`
 		}

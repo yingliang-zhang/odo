@@ -1250,7 +1250,7 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	// the distill.
 	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
 		if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d", c.Epoch),
-			distillLedgerMetrics(events, distillEv, lastRecallCount(events))); err != nil {
+			distillLedgerMetrics(events, distillEv, lastRecallCount(events), c.Epoch)); err != nil {
 			_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 				"layer":  "ledger",
 				"cause":  "write_failed",

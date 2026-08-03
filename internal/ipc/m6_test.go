@@ -561,6 +561,62 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 	}
 }
 
+// TestLedgerZeroProposalsNoCrossEpoch (K3 review fix): a zero-proposal
+// distill following a proposing distill must show "proposals: 0", NOT
+// inherit the previous epoch's memory_propose count.
+func TestLedgerZeroProposalsNoCrossEpoch(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	// First distill: learner proposes 1 rule
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 1\n\nDecided: use JWT.\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[{"rule":"Use JWT for auth","evidence":"JWT mentioned"}],"user":[],"reaffirm":[]}`)
+	writeEpochNote(t, root, "main-epoch-1", "Seeded notes.\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	// First distill — should produce a memory_propose with proposals
+	convID, resp := runToDistill(t, rig, root)
+	_ = convID
+	if resp.WikiPath == "" {
+		t.Fatalf("first distill failed: %+v", resp)
+	}
+
+	// Second distill: learner proposes nothing
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 2\n\nMore notes.\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[],"user":[],"reaffirm":[]}`)
+	_, resp2 := runToDistill(t, rig, root)
+	if resp2.WikiPath == "" {
+		t.Fatalf("second distill failed: %+v", resp2)
+	}
+
+	// Read ledger
+	ledger := readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
+
+	// Epoch 1 section should have "proposals: 1"
+	if !strings.Contains(ledger, "## epoch 1 — ") {
+		t.Errorf("ledger missing epoch 1 section:\n%s", ledger)
+	}
+
+	// Epoch 2 section should have "proposals: 0 (no memory_propose event)"
+	// NOT "proposals: 1" — that would be cross-epoch misattribution
+	if !strings.Contains(ledger, "## epoch 2 — ") {
+		t.Errorf("ledger missing epoch 2 section:\n%s", ledger)
+	}
+	// Find the epoch 2 section and check its proposals line
+	epoch2Start := strings.Index(ledger, "## epoch 2 — ")
+	if epoch2Start < 0 {
+		t.Fatal("no epoch 2 section")
+	}
+	epoch2Section := ledger[epoch2Start:]
+	if !strings.Contains(epoch2Section, "proposals: 0") {
+		t.Errorf("epoch 2 should show proposals: 0, but got:\n%s", epoch2Section)
+	}
+	if strings.Contains(epoch2Section, "proposals: 1") {
+		t.Errorf("epoch 2 inherited epoch 1's proposals (cross-epoch misattribution):\n%s", epoch2Section)
+	}
+}
+
 // eventsTypes returns the conversation's journaled event types in order.
 func eventsTypes(t *testing.T, rig *testRig, convID int64) []string {
 	t.Helper()
