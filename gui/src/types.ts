@@ -37,6 +37,7 @@ export type EventType =
   | "agent_done"
   | "agent_error"
   | "review_action"
+  | "memory_update"
   | (string & {});
 
 // Payload keys by event type (ADR-0002):
@@ -47,6 +48,7 @@ export type EventType =
 //   agent_done        { summary }
 //   agent_error       { error }
 //   review_action     { action: "accept" | "reject", diff_id }
+//   memory_update     { layer, cause, before_sha?, after_sha?, detail? }
 export interface EventPayload {
   text?: string;
   summary?: string;
@@ -60,6 +62,14 @@ export interface EventPayload {
   // M3: memory recall — user_message journals the paths injected into the
   // prompt (~/.odo/user.md first when present, then wiki note paths).
   recall?: string[];
+  // M4: injection receipt — content hashes (sha256[:16]) of the exact
+  // blocks injected, keyed by the same path strings used in `recall`.
+  receipt?: Record<string, string>;
+  // memory_update payload fields (M4): which layer changed, why
+  // (apply | rotate | retract | failed), and a human-readable summary.
+  layer?: string;
+  cause?: string;
+  detail?: string;
   // review_action when action == "distill" (M1 memory distiller).
   epoch?: number;
   wiki_path?: string;
@@ -247,4 +257,67 @@ export interface PendingCountsResponse {
   error?: string;
   pending_counts?: Record<string, number>;
   running_workstreams?: number[];
+}
+
+// ---------- M4: learning (memory.md / user.md proposals + apply) ----------
+
+// The daemon tags every proposal with the file it targets.
+export type MemoryTarget = "memory.md" | "user.md";
+
+// One learner-proposed rule from the pending memory_propose batch. evidence
+// is optional — user-target proposals have no note evidence; projects is the
+// daemon-verified recurrence set (display-only, never the LLM's own tags).
+export interface MemoryProposal {
+  target: MemoryTarget;
+  rule: string;
+  evidence?: string;
+  contradicts?: string;
+  projects?: string[];
+}
+
+// One pending proposal batch (journal-only daemon storage: the
+// memory_propose review_action whose epoch matches the latest distill).
+export interface PendingMemoryBatch {
+  epoch: number;
+  seq: number;
+  proposals: MemoryProposal[];
+  reaffirm?: string[]; // daemon-internal, echoed for transparency
+}
+
+// memory_proposals: ok with no batch fields (epoch absent/0) = nothing
+// pending; a new distill supersedes an older unconsumed batch.
+export interface MemoryProposalsResponse {
+  ok: boolean;
+  error?: string;
+  epoch?: number;
+  seq?: number;
+  proposals?: MemoryProposal[];
+  reaffirm?: string[];
+}
+
+// Type alias (not interface) so it is assignable to Tauri's InvokeArgs.
+// `index` addresses a proposal by its position in the batch's proposals
+// array (across both targets), exactly as the daemon validates it.
+export type ApplyMemoryRequest = {
+  conversationId: number;
+  epoch: number;
+  accepted: { target: MemoryTarget; index: number }[];
+};
+
+// apply_memory is all-or-nothing: ok:true + applied means every target was
+// written and journaled; ok:false leaves the batch pending for retry.
+export interface ApplyMemoryResponse {
+  ok: boolean;
+  error?: string;
+  applied?: boolean;
+}
+
+// read_memory: the daemon constructs the three canonical paths itself;
+// missing files come back as "".
+export interface ReadMemoryResponse {
+  ok: boolean;
+  error?: string;
+  memory_content?: string;
+  archive_content?: string;
+  user_content?: string;
 }

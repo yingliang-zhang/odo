@@ -8,6 +8,7 @@ import {
   fanoutSend,
   listWiki,
   listWorkstreams,
+  memoryProposals,
   pendingCounts as fetchPendingCounts,
   pollEvents,
   rejectDiff,
@@ -22,6 +23,9 @@ import type { BootstrapResponse, Conversation, Diff, OdoEvent, Project, Workstre
 
 // Polling is the declared transport for M0 (no SSE/WebSocket).
 const POLL_INTERVAL_MS = 1500;
+
+// M4 (spec §8): the "memory updated" chip auto-dismisses after 30 s.
+const MEMORY_CHIP_MS = 30_000;
 
 function mergeEvents(prev: OdoEvent[], next: OdoEvent[]): OdoEvent[] {
   if (next.length === 0) return prev;
@@ -45,6 +49,13 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   // M3: wiki note count for the sidebar Memory section (null = unknown).
   const [wikiNoteCount, setWikiNoteCount] = useState<number | null>(null);
+  // M4: pending learner-proposal count (sidebar badge) and the ephemeral
+  // "memory updated" chip state. Both live beside wikiNoteCount.
+  const [pendingMemoryProposals, setPendingMemoryProposals] = useState(0);
+  const [lastMemoryUpdate, setLastMemoryUpdate] = useState<{
+    layer: string;
+    detail?: string;
+  } | null>(null);
   // M3 visibility (spec §3c): project-wide pending-diff counts and running
   // workstreams, refreshed every few poll ticks via pending_counts.
   const [pendingCounts, setPendingCounts] = useState<Record<number, number>>({});
@@ -61,6 +72,8 @@ export default function App() {
   // minutes; polling is paused for the duration instead of queueing up
   // certain timeout failures.
   const distillingRef = useRef(false);
+  // Auto-dismiss timer for the memory_update chip.
+  const memoryChipTimer = useRef<number | undefined>(undefined);
 
   const recordEvents = useCallback((incoming: OdoEvent[]) => {
     if (incoming.length === 0) return;
@@ -72,6 +85,15 @@ export default function App() {
     for (const e of incoming) {
       if (e.type === "agent_done") {
         void notifyRunDone(workstreamNameRef.current ?? "?", e.payload?.summary ?? "");
+      }
+      // M4 (spec §8): memory_update chips the sidebar. Deliberately NOT
+      // handled in applyBootstrap — bootstrap replays history wholesale and
+      // a stale memory_update must not re-chip. This callback only ever
+      // sees freshly polled events.
+      if (e.type === "memory_update") {
+        setLastMemoryUpdate({ layer: e.payload?.layer ?? "memory", detail: e.payload?.detail });
+        clearTimeout(memoryChipTimer.current);
+        memoryChipTimer.current = window.setTimeout(() => setLastMemoryUpdate(null), MEMORY_CHIP_MS);
       }
     }
   }, []);
@@ -85,6 +107,21 @@ export default function App() {
       setWikiNoteCount(resp.ok ? (resp.wiki_notes?.length ?? 0) : null);
     } catch {
       if (conversationRef.current === conversationId) setWikiNoteCount(null);
+    }
+  }, []);
+
+  // M4: refresh the pending learner-proposal count (sidebar badge).
+  // Failures degrade to hidden (0), mirroring refreshWikiCount; they never
+  // surface in the error banner.
+  const refreshMemoryProposals = useCallback(async (conversationId: number) => {
+    try {
+      const resp = await memoryProposals(conversationId);
+      if (conversationRef.current !== conversationId) return; // switched mid-flight
+      setPendingMemoryProposals(
+        (resp.epoch ?? 0) > 0 && resp.proposals ? resp.proposals.length : 0,
+      );
+    } catch {
+      if (conversationRef.current === conversationId) setPendingMemoryProposals(0);
     }
   }, []);
 
@@ -106,11 +143,13 @@ export default function App() {
       const cid = resp.conversation?.id;
       if (cid != null) {
         void refreshWikiCount(cid);
+        void refreshMemoryProposals(cid);
       } else {
         setWikiNoteCount(null);
+        setPendingMemoryProposals(0);
       }
     },
-    [refreshWikiCount],
+    [refreshWikiCount, refreshMemoryProposals],
   );
 
   // Session restore: bootstrap returns project/workstream/conversation plus
@@ -277,6 +316,10 @@ export default function App() {
       setLastDistillPath(resp.wiki_path ?? null);
       // The distill just wrote a new note; the sidebar count follows.
       void refreshWikiCount(cid);
+      // M4: the learner ran synchronously inside the same distill call, so
+      // the proposal batch (if any) is already journaled — re-read it for
+      // the sidebar badge.
+      void refreshMemoryProposals(cid);
       setError(null);
       return resp.wiki_path ?? "";
     } catch (e) {
@@ -285,7 +328,7 @@ export default function App() {
     } finally {
       distillingRef.current = false;
     }
-  }, [refreshWikiCount]);
+  }, [refreshWikiCount, refreshMemoryProposals]);
 
   const handleAccept = useCallback(async (diffId: number) => {
     try {
@@ -316,6 +359,26 @@ export default function App() {
     if (cid != null) void refreshWikiCount(cid);
   }, [refreshWikiCount]);
 
+  // M4: clicking the chip dismisses it (the auto-dismiss also runs on a
+  // 30 s timer); closing/applying in the review panel re-reads the badge.
+  const handleMemoryChipDismiss = useCallback(() => {
+    if (memoryChipTimer.current !== undefined) {
+      clearTimeout(memoryChipTimer.current);
+      memoryChipTimer.current = undefined;
+    }
+    setLastMemoryUpdate(null);
+  }, []);
+
+  const handleMemoryReviewClosed = useCallback(() => {
+    const cid = conversationRef.current;
+    if (cid != null) void refreshMemoryProposals(cid);
+  }, [refreshMemoryProposals]);
+
+  // Drop the chip's dismiss timer on unmount.
+  useEffect(() => {
+    return () => clearTimeout(memoryChipTimer.current);
+  }, []);
+
   if (!booted && !error) {
     return <div className="app-loading">Connecting to the Odo daemon…</div>;
   }
@@ -337,6 +400,10 @@ export default function App() {
         onWikiBrowserClosed={handleWikiBrowserClosed}
         pendingCounts={pendingCounts}
         runningWorkstreams={runningWorkstreams}
+        pendingMemoryProposals={pendingMemoryProposals}
+        lastMemoryUpdate={lastMemoryUpdate}
+        onMemoryChipDismiss={handleMemoryChipDismiss}
+        onMemoryReviewClosed={handleMemoryReviewClosed}
       />
       <main className="app-main">
         {error && <div className="error-banner">{error}</div>}

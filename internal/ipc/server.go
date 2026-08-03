@@ -44,6 +44,7 @@ type runMeta struct {
 type Server struct {
 	store          *store.Store
 	projectRoot    string
+	resolvedRoot   string                     // projectRoot after EvalSymlinks (registry exclusion compares resolved forms)
 	adapters       map[string]adapter.Adapter // "" and "omp" = default adapter
 	distillAdapter adapter.Adapter            // uses orchestrator model from prefs.md
 	mgr            *worktree.Manager
@@ -54,19 +55,27 @@ type Server struct {
 }
 
 // NewServer builds a Server bound to one project root. ad becomes the default
-// adapter ("omp").
+// adapter ("omp"). Binding a project also registers it in the global
+// ~/.odo/projects.json registry (best-effort) so the learner can find sibling
+// projects for user.md recurrence checks (M4 §1).
 func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *worktree.Manager) *Server {
+	resolved, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		resolved = projectRoot
+	}
 	s := &Server{
-		store:       st,
-		projectRoot: projectRoot,
-		adapters:    make(map[string]adapter.Adapter),
-		mgr:         mgr,
-		runs:        make(map[string]*runMeta),
-		byConv:      make(map[int64]string),
-		fanoutRuns:  make(map[int64][]string),
+		store:        st,
+		projectRoot:  projectRoot,
+		resolvedRoot: resolved,
+		adapters:     make(map[string]adapter.Adapter),
+		mgr:          mgr,
+		runs:         make(map[string]*runMeta),
+		byConv:       make(map[int64]string),
+		fanoutRuns:   make(map[int64][]string),
 	}
 	s.adapters[""] = ad
 	s.adapters["omp"] = ad
+	ensureProjectRegistered(projectRoot)
 	return s
 }
 
@@ -163,6 +172,12 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handlePendingCounts(ctx, req)
 	case CmdReadWiki:
 		resp, err = s.handleReadWiki(ctx, req)
+	case CmdReadMemory:
+		resp, err = s.handleReadMemory(ctx, req)
+	case CmdMemoryProposals:
+		resp, err = s.handleMemoryProposals(ctx, req)
+	case CmdApplyMemory:
+		resp, err = s.handleApplyMemory(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -330,26 +345,25 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
-	userMem := readUserMemory()
-	memory, recallPaths := recallWikiNotes(s.projectRoot, w.Name)
-	if userMem != "" {
-		recallPaths = append([]string{"~/.odo/user.md"}, recallPaths...)
-	}
+	ml := s.memoryLayers(w.Name)
 
 	// Journal the user message with attachments (spec item 5).
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
 	}
-	if len(recallPaths) > 0 {
-		msgPayload["recall"] = recallPaths
+	if len(ml.recall) > 0 {
+		msgPayload["recall"] = ml.recall
+	}
+	if len(ml.receipt) > 0 {
+		msgPayload["receipt"] = ml.receipt
 	}
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments, userMem, memory)
+	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.wiki)
 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
@@ -383,18 +397,62 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	return Response{Event: &ev}, nil
 }
 
-// buildPrompt renders the agent prompt. userMem (global, durable user
-// principles) is injected first, then project memory (distilled wiki
-// notes), then attachment hints, then the user's text.
-func buildPrompt(text string, attachments []string, userMem, memory string) string {
+// memoryLayers bundles everything a prompt-building send path needs: the
+// injected layer bodies, the recall path list, and the injection receipt
+// (ADR-0003 inv 5: content hashes of exactly what was injected).
+type memoryLayers struct {
+	user    string // ~/.odo/user.md (global principles)
+	project string // .odo/memory.md (project behavior rules)
+	wiki    string // recalled epoch notes block
+	recall  []string
+	receipt map[string]string
+}
+
+// memoryLayers reads the current memory layers for the workstream and builds
+// the recall list (user.md → memory.md → note paths) plus the sha16 receipt
+// for every non-empty layer (per-note hashes cover the exact injected block,
+// header and separator included). Layers absent/empty appear in neither.
+func (s *Server) memoryLayers(wsName string) memoryLayers {
+	ml := memoryLayers{
+		user:    readUserMemory(),
+		project: readProjectMemory(s.projectRoot),
+		receipt: map[string]string{},
+	}
+	m, notePaths, noteBytes := recallWikiNotes(s.projectRoot, wsName)
+	ml.wiki = m
+	if ml.user != "" {
+		ml.receipt["~/.odo/user.md"] = sha16([]byte(ml.user))
+		ml.recall = append(ml.recall, "~/.odo/user.md")
+	}
+	if ml.project != "" {
+		ml.receipt[".odo/memory.md"] = sha16([]byte(ml.project))
+		ml.recall = append(ml.recall, ".odo/memory.md")
+	}
+	for i, p := range notePaths {
+		ml.receipt[p] = sha16(noteBytes[i])
+	}
+	ml.recall = append(ml.recall, notePaths...)
+	return ml
+}
+
+// buildPrompt renders the agent prompt. Layers inject in ADR-0003's stable
+// order: userMem (global, durable user principles), projectMem (.odo/memory.md
+// behavior rules), then recalled wiki notes, attachment hints, and the user's
+// text last (cache-friendly stable prefix, inv 6).
+func buildPrompt(text string, attachments []string, userMem, projectMem, memory string) string {
 	var b strings.Builder
 	if userMem != "" {
 		b.WriteString("## User memory (durable cross-project principles)\n\n")
 		b.WriteString(userMem)
 		b.WriteString("\n\n---\n\n")
 	}
+	if projectMem != "" {
+		b.WriteString("## Project memory (behavior rules)\n\n")
+		b.WriteString(projectMem)
+		b.WriteString("\n\n---\n\n")
+	}
 	if memory != "" {
-		b.WriteString("## Project memory (from prior distilled epochs)\n\n")
+		b.WriteString("## Prior notes (recalled)\n\n")
 		b.WriteString(memory)
 		b.WriteString("\n\n---\n\n")
 	}
@@ -447,25 +505,24 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 	if err != nil {
 		return Response{}, err
 	}
-	userMem := readUserMemory()
-	memory, recallPaths := recallWikiNotes(s.projectRoot, w.Name)
-	if userMem != "" {
-		recallPaths = append([]string{"~/.odo/user.md"}, recallPaths...)
-	}
+	ml := s.memoryLayers(w.Name)
 
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
 	}
-	if len(recallPaths) > 0 {
-		msgPayload["recall"] = recallPaths
+	if len(ml.recall) > 0 {
+		msgPayload["recall"] = ml.recall
+	}
+	if len(ml.receipt) > 0 {
+		msgPayload["receipt"] = ml.receipt
 	}
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments, userMem, memory)
+	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.wiki)
 
 	// All-or-nothing: a failed setup cancels every run started so far so no
 	// orphan agent process or worktree is left behind.
@@ -1051,6 +1108,14 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		return Response{}, fmt.Errorf("distill: write wiki note: %w", err)
 	}
 
+	// Learner pass (M4 §2): propose behavior rules from the note just
+	// written, journaled before the epoch moves so the propose event's epoch
+	// is the distilled note's epoch (c.Epoch pre-increment, not newEpoch).
+	// A learner failure degrades to a journaled memory_update and never
+	// fails the distill.
+	noteName := fmt.Sprintf("%s-epoch-%d", w.Name, c.Epoch)
+	proposals := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
+
 	newEpoch, err := s.store.IncrementEpoch(ctx, c.ID)
 	if err != nil {
 		return Response{}, err
@@ -1062,7 +1127,7 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	})); err != nil {
 		return Response{}, err
 	}
-	return Response{WikiPath: wikiPath, Epoch: newEpoch}, nil
+	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: proposals}, nil
 }
 
 // handlePendingCounts reports, per workstream, the number of pending diffs
@@ -1161,6 +1226,222 @@ func (s *Server) handleReadWiki(_ context.Context, req Request) (Response, error
 		return Response{WikiContent: string(b)}, nil
 	}
 	return Response{}, fmt.Errorf("read_wiki: only files under wiki/ or ~/.odo/user.md are readable, got %q", req.Path)
+}
+
+// handleReadMemory returns the contents of the three canonical memory files
+// (project memory.md, append-only archive, global user.md) as
+// memory_content/archive_content/user_content. The daemon constructs the
+// paths itself; req.ProjectRoot must be the bound root (same guard as
+// resolveProject). Missing files come back "" — the archive is returned
+// uncapped (append-only, never injected). Read-only: no journal writes.
+func (s *Server) handleReadMemory(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("read_memory: %w", err)
+	}
+	resp := Response{
+		MemoryContent:  readFileFull(filepath.Join(s.projectRoot, ".odo", memoryFileName)),
+		ArchiveContent: readArchive(s.projectRoot),
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		resp.UserContent = readFileFull(filepath.Join(home, ".odo", "user.md"))
+	}
+	return resp, nil
+}
+
+// handleMemoryProposals returns the pending propose batch for review: the
+// memory_propose journaled at the latest distill, unless already consumed by
+// a memory_apply (spec §5). Nothing pending → empty response (epoch 0).
+func (s *Server) handleMemoryProposals(ctx context.Context, req Request) (Response, error) {
+	c, err := s.checkConversation(ctx, req.ConversationID)
+	if err != nil {
+		return Response{}, err
+	}
+	events, err := s.store.ListEvents(ctx, c.ID, 0)
+	if err != nil {
+		return Response{}, err
+	}
+	batch := findPendingBatch(events)
+	if !batch.exists || batch.consumed {
+		return Response{}, nil
+	}
+	return Response{
+		Epoch:     batch.epoch,
+		Seq:       batch.seq,
+		Proposals: batch.proposals,
+		Reaffirm:  batch.reaffirm,
+	}, nil
+}
+
+// handleApplyMemory consumes the pending batch all-or-nothing (spec §5):
+// every target is pre-computed in memory before anything hits disk or the
+// journal; a user.md overflow refusal writes nothing and leaves the batch
+// pending for retry. Per changed layer one memory_update event is journaled,
+// then the review_action apply marker; a second apply errors "already
+// applied".
+func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, error) {
+	c, err := s.checkConversation(ctx, req.ConversationID)
+	if err != nil {
+		return Response{}, err
+	}
+	events, err := s.store.ListEvents(ctx, c.ID, 0)
+	if err != nil {
+		return Response{}, err
+	}
+	batch := findPendingBatch(events)
+	if !batch.exists {
+		return Response{}, errors.New("apply_memory: no pending batch")
+	}
+	if batch.consumed {
+		return Response{}, fmt.Errorf("apply_memory: epoch %d already applied", req.Epoch)
+	}
+	if req.Epoch != batch.epoch {
+		return Response{}, fmt.Errorf("apply_memory: no pending batch for epoch %d (pending epoch is %d)", req.Epoch, batch.epoch)
+	}
+
+	// Resolve + validate every accepted ref against the batch proposals.
+	accepted := make([]bool, len(batch.proposals))
+	var memAccepted []acceptedRule
+	var userAccepted []acceptedUserRule
+	for _, a := range req.Accepted {
+		if a.Index < 0 || a.Index >= len(batch.proposals) {
+			return Response{}, fmt.Errorf("apply_memory: proposal index %d out of range (%d proposals)", a.Index, len(batch.proposals))
+		}
+		p := batch.proposals[a.Index]
+		if a.Target != p.Target {
+			return Response{}, fmt.Errorf("apply_memory: proposal %d is target %q, not %q", a.Index, p.Target, a.Target)
+		}
+		if accepted[a.Index] {
+			return Response{}, fmt.Errorf("apply_memory: proposal %d accepted twice", a.Index)
+		}
+		accepted[a.Index] = true
+		switch p.Target {
+		case "memory.md":
+			memAccepted = append(memAccepted, acceptedRule{
+				rule: p.Rule, evidence: p.Evidence, contradicts: p.Contradicts,
+			})
+		case "user.md":
+			// Projects on the proposal are the daemon-verified recurrence set
+			// (the LLM's self-tagged list was replaced at vet time).
+			userAccepted = append(userAccepted, acceptedUserRule{
+				rule: p.Rule, projects: p.Projects,
+			})
+		default:
+			return Response{}, fmt.Errorf("apply_memory: unknown proposal target %q", p.Target)
+		}
+	}
+	// Rejected refs are daemon-computed (every proposal not accepted).
+	var rejected []MemoryAccept
+	for i, ok := range accepted {
+		if !ok {
+			rejected = append(rejected, MemoryAccept{Target: batch.proposals[i].Target, Index: i})
+		}
+	}
+
+	// Pre-compute EVERY target before any write (all-or-nothing).
+	memPath := filepath.Join(s.projectRoot, ".odo", memoryFileName)
+	oldMem := readFileFull(memPath) // FULL uncapped: the write basis (inv 3)
+	memPlan := memoryApplyPlan{content: oldMem}
+	memChanged := false
+	if len(memAccepted) > 0 || len(batch.reaffirm) > 0 {
+		memPlan = planMemoryApply(oldMem, memAccepted, batch.reaffirm, batch.epoch)
+		memChanged = memPlan.content != oldMem || memPlan.archiveAppend != ""
+	}
+
+	var userPath, oldUser, newUser string
+	userChanged := false
+	if len(userAccepted) > 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Response{}, fmt.Errorf("apply_memory: resolve home: %w", err)
+		}
+		userPath = filepath.Join(home, ".odo", "user.md")
+		oldUser = readFileFull(userPath)
+		newUser, err = planUserApply(oldUser, userAccepted)
+		if err != nil {
+			// Refused: nothing written, nothing journaled, the batch
+			// stays pending (a retry recomputes from the same proposes).
+			return Response{}, fmt.Errorf("apply_memory: %w", err)
+		}
+		userChanged = newUser != oldUser
+	}
+
+	// Writes.
+	if memChanged {
+		if err := writeFileAtomic(memPath, memPlan.content, 0o644); err != nil {
+			return Response{}, fmt.Errorf("apply_memory: write memory.md: %w", err)
+		}
+		if memPlan.archiveAppend != "" {
+			arcPath := filepath.Join(s.projectRoot, ".odo", archiveFileName)
+			if err := writeFileAtomic(arcPath, readArchive(s.projectRoot)+memPlan.archiveAppend, 0o644); err != nil {
+				return Response{}, fmt.Errorf("apply_memory: append archive: %w", err)
+			}
+		}
+	}
+	if userChanged {
+		if err := writeFileAtomic(userPath, newUser, 0o600); err != nil {
+			return Response{}, fmt.Errorf("apply_memory: write user.md: %w", err)
+		}
+	}
+
+	// Journal per changed layer.
+	if memChanged {
+		detail := fmt.Sprintf("accepted %d rule(s)", len(memAccepted))
+		if memPlan.reaffirmed > 0 {
+			detail += fmt.Sprintf("; reaffirmed %d", memPlan.reaffirmed)
+		}
+		if len(memPlan.rotated) > 0 {
+			detail += fmt.Sprintf("; rotated %d to memory-archive.md (overflow): %s",
+				len(memPlan.rotated), strings.Join(memPlan.rotated, " | "))
+		}
+		if len(memPlan.retracted) > 0 {
+			detail += fmt.Sprintf("; retracted %d (conflict): %s",
+				len(memPlan.retracted), strings.Join(memPlan.retracted, " | "))
+		}
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":      "memory",
+			"cause":      "apply",
+			"before_sha": sha16([]byte(oldMem)),
+			"after_sha":  sha16([]byte(memPlan.content)),
+			"detail":     detail,
+		})); err != nil {
+			return Response{}, err
+		}
+	}
+	for _, unmatched := range memPlan.unmatchedContradicts {
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "memory",
+			"cause":  "retract",
+			"detail": fmt.Sprintf("no match for contradicts: %q", unmatched),
+		})); err != nil {
+			return Response{}, err
+		}
+	}
+	if userChanged {
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":      "user",
+			"cause":      "apply",
+			"before_sha": sha16([]byte(oldUser)),
+			"after_sha":  sha16([]byte(newUser)),
+			"detail":     fmt.Sprintf("accepted %d rule(s)", len(userAccepted)),
+		})); err != nil {
+			return Response{}, err
+		}
+	}
+
+	// Batch-consumed marker (daemon-computed counts, ADR inv 4).
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action":   "memory_apply",
+		"epoch":    batch.epoch,
+		"accepted": req.Accepted,
+		"rejected": rejected,
+		"metrics": map[string]int{
+			"accepted": len(req.Accepted),
+			"rejected": len(rejected),
+		},
+	})); err != nil {
+		return Response{}, err
+	}
+	return Response{Applied: true}, nil
 }
 
 // runDistillAgent runs the summary prompt through the orchestrator adapter

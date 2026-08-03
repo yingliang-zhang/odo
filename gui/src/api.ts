@@ -5,6 +5,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AcceptDiffResponse,
+  ApplyMemoryRequest,
+  ApplyMemoryResponse,
   BootstrapResponse,
   CreateWorkstreamResponse,
   DistillResponse,
@@ -13,8 +15,10 @@ import type {
   GetSettingsResponse,
   ListWikiResponse,
   ListWorkstreamsResponse,
+  MemoryProposalsResponse,
   PendingCountsResponse,
   PollEventsResponse,
+  ReadMemoryResponse,
   ReadWikiResponse,
   RejectDiffResponse,
   ReviewDiffResponse,
@@ -125,6 +129,33 @@ export function readWiki(path: string): Promise<ReadWikiResponse> {
 // runs and pending diffs — poll_events is per-conversation.
 export function pendingCounts(projectRoot: string): Promise<PendingCountsResponse> {
   return invoke<PendingCountsResponse>("pending_counts", { projectRoot });
+}
+
+// M4 learning: read the three canonical memory files (project memory.md,
+// memory-archive.md, global user.md) through the daemon; a project root is
+// never sent — the daemon uses its bound root.
+export async function readMemory(): Promise<ReadMemoryResponse> {
+  return unwrap(await invoke<ReadMemoryResponse>("read_memory", { projectRoot: null }));
+}
+
+// M4 learning: the conversation's pending proposal batch. ok:true with no
+// epoch means nothing is pending (no batch, or the latest distill emitted
+// none); unwrap turns daemon failures into thrown Errors.
+export async function memoryProposals(conversationId: number): Promise<MemoryProposalsResponse> {
+  return unwrap(await invoke<MemoryProposalsResponse>("memory_proposals", { conversationId }));
+}
+
+// M4 learning: apply the accepted subset of the pending batch
+// (all-or-nothing daemon-side). A refusal (e.g. user.md overflow) throws via
+// unwrap and leaves the batch pending for retry.
+export async function applyMemory(req: ApplyMemoryRequest): Promise<ApplyMemoryResponse> {
+  return unwrap(
+    await invoke<ApplyMemoryResponse>("apply_memory", {
+      conversationId: req.conversationId,
+      epoch: req.epoch,
+      accepted: req.accepted,
+    }),
+  );
 }
 
 // Daemon-level failures arrive with ok:false; transport failures (invoke

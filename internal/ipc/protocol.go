@@ -28,24 +28,48 @@ const (
 	CmdPendingCounts    = "pending_counts"
 	CmdListWiki         = "list_wiki"
 	CmdReadWiki         = "read_wiki"
+	CmdReadMemory       = "read_memory"
+	CmdMemoryProposals  = "memory_proposals"
+	CmdApplyMemory      = "apply_memory"
 )
 
 // Request is one command line on the socket.
 type Request struct {
-	Cmd            string    `json:"cmd"`
-	ProjectRoot    string    `json:"project_root,omitempty"`
-	ConversationID int64     `json:"conversation_id,omitempty"`
-	WorkstreamID   int64     `json:"workstream_id,omitempty"`
-	Name           string    `json:"name,omitempty"`
-	Text           string    `json:"text,omitempty"`
-	Attachments    []string  `json:"attachments,omitempty"`
-	AfterSeq       int       `json:"after_seq,omitempty"`
-	DiffID         int64     `json:"diff_id,omitempty"`
-	Steer          bool      `json:"steer,omitempty"`
-	Adapter        string    `json:"adapter,omitempty"`
-	N              int       `json:"n,omitempty"`
-	Settings       *Settings `json:"settings,omitempty"`
-	Path           string    `json:"path,omitempty"` // read_wiki: wiki note path
+	Cmd            string         `json:"cmd"`
+	ProjectRoot    string         `json:"project_root,omitempty"`
+	ConversationID int64          `json:"conversation_id,omitempty"`
+	WorkstreamID   int64          `json:"workstream_id,omitempty"`
+	Name           string         `json:"name,omitempty"`
+	Text           string         `json:"text,omitempty"`
+	Attachments    []string       `json:"attachments,omitempty"`
+	AfterSeq       int            `json:"after_seq,omitempty"`
+	DiffID         int64          `json:"diff_id,omitempty"`
+	Steer          bool           `json:"steer,omitempty"`
+	Adapter        string         `json:"adapter,omitempty"`
+	N              int            `json:"n,omitempty"`
+	Settings       *Settings      `json:"settings,omitempty"`
+	Path           string         `json:"path,omitempty"` // read_wiki: wiki note path
+	Epoch          int            `json:"epoch,omitempty"`
+	Accepted       []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
+}
+
+// MemoryAccept references one proposal out of a pending memory_propose batch:
+// the proposal's target plus its index in the batch's proposals array.
+type MemoryAccept struct {
+	Target string `json:"target"` // "memory.md" | "user.md"
+	Index  int    `json:"index"`
+}
+
+// MemoryProposal is one learner-proposed behavior rule after daemon-side
+// evidence vetting. Projects carries the daemon-verified project names whose
+// staged inputs contained the rule (user.md target only) — never the LLM's
+// self-tagged list.
+type MemoryProposal struct {
+	Target      string   `json:"target"` // "memory.md" | "user.md"
+	Rule        string   `json:"rule"`
+	Evidence    string   `json:"evidence,omitempty"`
+	Contradicts string   `json:"contradicts,omitempty"`
+	Projects    []string `json:"projects,omitempty"`
 }
 
 // ReviewResult is one model's verdict on a diff (MoA review fan-out).
@@ -99,6 +123,17 @@ type Response struct {
 	Settings     *Settings           `json:"settings,omitempty"`
 	WikiNotes    []WikiNoteInfo      `json:"wiki_notes,omitempty"`
 	WikiContent  string              `json:"wiki_content,omitempty"`
+	// read_memory: contents of the daemon-constructed canonical files
+	// (missing files come back as "").
+	MemoryContent  string `json:"memory_content,omitempty"`
+	ArchiveContent string `json:"archive_content,omitempty"`
+	UserContent    string `json:"user_content,omitempty"`
+	// memory_proposals: the pending batch (absent/epoch 0 = nothing pending).
+	Seq       int              `json:"seq,omitempty"`
+	Proposals []MemoryProposal `json:"proposals,omitempty"`
+	Reaffirm  []string         `json:"reaffirm,omitempty"`
+	// distill: count of pending memory+user proposals in the new batch.
+	MemoryProposals int `json:"memory_proposals,omitempty"`
 	// pending_counts: Go map keys serialize as JSON strings — that is the
 	// contract the frontend implements.
 	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`

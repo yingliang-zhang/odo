@@ -34,12 +34,14 @@ func wikiNoteEpoch(path string) (int, bool) {
 // recallWikiNotes reads all wiki/<workstreamName>-epoch-*.md files for the
 // workstream, ordered newest-epoch first, concatenates them under headers,
 // and truncates to recallMemoryCap on a note boundary. Returns the memory
-// block ("" when no notes exist) and the paths of the notes actually
-// included (for journaling).
-func recallWikiNotes(projectRoot, workstreamName string) (memory string, paths []string) {
+// block ("" when no notes exist), the paths of the notes actually included
+// (for journaling), and noteBytes — the exact block string injected per note
+// (`## <basename>\n\n<content>\n\n---\n\n`) so the injection receipt can hash
+// precisely what the prompt carried.
+func recallWikiNotes(projectRoot, workstreamName string) (memory string, paths []string, noteBytes [][]byte) {
 	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", workstreamName+"-epoch-*.md"))
 	if err != nil {
-		return "", nil
+		return "", nil, nil
 	}
 	type note struct {
 		path  string
@@ -65,11 +67,12 @@ func recallWikiNotes(projectRoot, workstreamName string) (memory string, paths [
 		}
 		b.WriteString(block)
 		paths = append(paths, n.path)
+		noteBytes = append(noteBytes, []byte(block))
 	}
 	if b.Len() == 0 {
-		return "", nil
+		return "", nil, nil
 	}
-	return b.String(), paths
+	return b.String(), paths, noteBytes
 }
 
 // userMemoryCap bounds the global user memory injected into every prompt.
@@ -90,12 +93,18 @@ func readUserMemory() string {
 	if err != nil {
 		return ""
 	}
-	s := string(b)
+	return capAtLineBoundary(string(b), userMemoryCap)
+}
+
+// capAtLineBoundary trims s to cap bytes, cutting at the last newline so no
+// line is half-kept; returns "" when the content is blank or no complete
+// line fits under the cap.
+func capAtLineBoundary(s string, cap int) string {
 	if strings.TrimSpace(s) == "" {
 		return ""
 	}
-	if len(s) > userMemoryCap {
-		cut := strings.LastIndex(s[:userMemoryCap], "\n")
+	if len(s) > cap {
+		cut := strings.LastIndex(s[:cap], "\n")
 		if cut < 0 {
 			return "" // no complete line fits under the cap
 		}

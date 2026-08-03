@@ -24,10 +24,12 @@ use std::time::Duration;
 /// first call while the OS warms caches.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// `distill` runs a full summary-agent turn daemon-side (bounded by the
-/// daemon's 10-minute `distillTimeout`) and serves one connection at a time,
-/// so its read timeout must cover the worst case plus margin.
-const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(660);
+/// `distill` runs a full summary-agent turn (bounded by the daemon's
+/// 10-minute `distillTimeout`) followed by the M4 learner one-shot (bounded
+/// by the 5-minute `learnerTimeout`) — both synchronously before the daemon
+/// answers, and the daemon serves one connection at a time, so the read
+/// timeout covers both plus margin (10m + 5m + margin).
+const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(960);
 
 /// M2: `review_diff` waits on every configured review model daemon-side
 /// (sequentially in the worst case). Five minutes plus margin covers the
@@ -367,6 +369,36 @@ async fn pending_counts(project_root: Option<String>) -> Result<Value, String> {
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M4 learning: read the three canonical memory files (project memory.md,
+// memory-archive.md, global user.md) through the daemon, which constructs
+// the paths itself and equality-checks the root against its bound root.
+#[tauri::command]
+async fn read_memory(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "read_memory", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M4 learning: the conversation's pending learner-proposal batch
+// (journal-only storage; no batch fields in the response = nothing pending).
+#[tauri::command]
+async fn memory_proposals(conversation_id: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "memory_proposals", "conversation_id": conversation_id});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M4 learning: apply the accepted subset of the pending batch. Blocks on
+// daemon-side atomic file writes (memory.md/user.md rewrites + archive
+// append) plus journal appends, so it gets a review-length timeout rather
+// than the generic 120 s. `accepted` is forwarded verbatim, like settings.
+#[tauri::command]
+async fn apply_memory(conversation_id: i64, epoch: i64, accepted: Value) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "apply_memory", "conversation_id": conversation_id, "epoch": epoch, "accepted": accepted});
+    run_command(root, req, REVIEW_READ_TIMEOUT).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,7 +625,10 @@ pub fn run() {
             fanout_send,
             list_wiki,
             read_wiki,
-            pending_counts
+            pending_counts,
+            read_memory,
+            memory_proposals,
+            apply_memory
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

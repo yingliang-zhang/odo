@@ -22,6 +22,7 @@ const (
 	EventAgentDone       = "agent_done"
 	EventAgentError      = "agent_error"
 	EventReviewAction    = "review_action"
+	EventMemoryUpdate    = "memory_update"
 )
 
 // Diff statuses.

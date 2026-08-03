@@ -1150,3 +1150,189 @@ body {
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* ---------- M4: learning (spec §7/§8) ---------- */
+
+/* Sidebar badge-button for pending learner proposals ("N memory proposed —
+   Review"). Quieter than the distill button: an invitation, not an action. */
+.mem-propose-btn {
+  width: 100%;
+  margin-top: 6px;
+  background: rgba(43, 94, 167, 0.15);
+  border: 1px solid var(--accent-user);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mem-propose-btn:hover {
+  background: rgba(43, 94, 167, 0.3);
+}
+
+/* Ephemeral green chip after a memory layer changed; click opens the
+   review panel's reader tab and dismisses it. */
+.mem-chip {
+  display: inline-block;
+  margin-top: 8px;
+  background: rgba(63, 163, 95, 0.15);
+  border: 1px solid var(--ok);
+  border-radius: 12px;
+  color: var(--ok);
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mem-chip:hover {
+  background: rgba(63, 163, 95, 0.28);
+}
+
+.mem-chip-detail {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Review panel: wiki-panel sizing and chrome, single-column body. */
+.mem-panel {
+  width: 640px;
+  max-width: calc(100vw - 48px);
+  height: 480px;
+  max-height: calc(100vh - 64px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.mem-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.mem-tab {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mem-tab.active {
+  color: var(--text);
+  border-color: var(--accent-user);
+}
+
+.mem-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.mem-section-title {
+  padding: 10px 12px 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mem-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.mem-row-main {
+  min-width: 0;
+}
+
+.mem-rule {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mem-meta {
+  margin-top: 3px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.mem-meta-warn {
+  color: #cca742;
+}
+
+.mem-decisions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.mem-decision {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mem-decision.accept.selected {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: rgba(63, 163, 95, 0.15);
+}
+
+.mem-decision.reject.selected {
+  color: var(--err);
+  border-color: var(--err);
+  background: rgba(195, 74, 74, 0.12);
+}
+
+.mem-reaffirm {
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.mem-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.mem-result {
+  color: var(--ok);
+  font-size: 12px;
+}
+
+.mem-file {
+  margin: 4px 0;
+  padding: 0 12px;
+}

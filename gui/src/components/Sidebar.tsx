@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../api";
 import { basename } from "../files";
 import type { Conversation, Project, Workstream } from "../types";
+import MemoryReviewPanel from "./MemoryReviewPanel";
 import SettingsPanel from "./SettingsPanel";
 import WikiBrowser from "./WikiBrowser";
 
@@ -27,6 +28,12 @@ interface Props {
   // workstreams with a live run, from the daemon's pending_counts poll.
   pendingCounts: Record<number, number>;
   runningWorkstreams: number[];
+  // M4 learning (spec §7/§8): pending learner proposals badge, the ephemeral
+  // memory_update chip state, and their handlers. All owned by App.
+  pendingMemoryProposals: number;
+  lastMemoryUpdate: { layer: string; detail?: string } | null;
+  onMemoryChipDismiss: () => void;
+  onMemoryReviewClosed: () => void;
 }
 
 // Shorten an absolute wiki path to "wiki/<note>.md" for display.
@@ -56,6 +63,10 @@ export default function Sidebar({
   onWikiBrowserClosed,
   pendingCounts,
   runningWorkstreams,
+  pendingMemoryProposals,
+  lastMemoryUpdate,
+  onMemoryChipDismiss,
+  onMemoryReviewClosed,
 }: Props) {
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -65,6 +76,9 @@ export default function Sidebar({
   const [distillToast, setDistillToast] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showWiki, setShowWiki] = useState(false);
+  const [showMemoryReview, setShowMemoryReview] = useState(false);
+  // Review opens the proposal tab; the memory-updated chip opens the reader.
+  const [memoryReviewTab, setMemoryReviewTab] = useState<"proposals" | "files">("proposals");
   const toastTimer = useRef<ToastTimer | null>(null);
 
   useEffect(() => {
@@ -93,6 +107,14 @@ export default function Sidebar({
       setCreateError(errorMessage(err));
       setCreateBusy(false);
     }
+  };
+
+  // M4: the chip is ephemeral (App clears its state); it doubles as a
+  // shortcut into the review panel's reader tab.
+  const handleMemoryChipClick = () => {
+    onMemoryChipDismiss();
+    setMemoryReviewTab("files");
+    setShowMemoryReview(true);
   };
 
   const handleDistill = async () => {
@@ -204,6 +226,36 @@ export default function Sidebar({
           {distillBusy ? "Distilling…" : "Distill"}
         </button>
         {wikiNoteCount != null && <div className="wiki-count">{wikiNoteCount} wiki notes</div>}
+        {pendingMemoryProposals > 0 && (
+          <button
+            type="button"
+            className="mem-propose-btn"
+            title="Review the learner's proposed memory rules"
+            onClick={() => {
+              setMemoryReviewTab("proposals");
+              setShowMemoryReview(true);
+            }}
+          >
+            {pendingMemoryProposals} memory proposed — Review
+          </button>
+        )}
+        {lastMemoryUpdate && (
+          <>
+            <button
+              type="button"
+              className="mem-chip"
+              title={lastMemoryUpdate.detail ?? `${lastMemoryUpdate.layer} memory changed`}
+              onClick={handleMemoryChipClick}
+            >
+              memory updated
+            </button>
+            {lastMemoryUpdate.detail && (
+              <div className="mem-chip-detail" title={lastMemoryUpdate.detail}>
+                {lastMemoryUpdate.detail}
+              </div>
+            )}
+          </>
+        )}
         <button
           type="button"
           className="distill-btn"
@@ -221,6 +273,18 @@ export default function Sidebar({
               setShowWiki(false);
               onWikiBrowserClosed();
             }}
+          />
+        )}
+        {showMemoryReview && conversationId != null && (
+          <MemoryReviewPanel
+            conversationId={conversationId}
+            workstreamName={workstream?.name}
+            initialTab={memoryReviewTab}
+            onClose={() => {
+              setShowMemoryReview(false);
+              onMemoryReviewClosed();
+            }}
+            onApplied={onMemoryReviewClosed}
           />
         )}
       </div>

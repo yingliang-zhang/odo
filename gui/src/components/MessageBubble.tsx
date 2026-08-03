@@ -6,17 +6,35 @@ const REVIEW_LABEL: Record<string, string> = {
   reject: "Rejected",
 };
 
-// M3 recall: the daemon journals injected memory paths on user_message, with
-// ~/.odo/user.md first when present.
+// M3 recall: the daemon journals injected memory paths on user_message;
+// M4 adds .odo/memory.md between user.md and the note paths. These two are
+// fixed markers — everything else is a recalled wiki note.
 const USER_MD_PATH = "~/.odo/user.md";
+const PROJECT_MEM_PATH = ".odo/memory.md";
 
 // Tooltip lists the injected sources with wiki paths shortened to
-// "wiki/<basename>" (spec §1b); the user.md marker stays literal.
+// "wiki/<basename>" (spec §1b); the fixed markers render as their literal
+// labels.
 function shortRecallPath(path: string): string {
   if (path === USER_MD_PATH) return "user.md";
+  if (path === PROJECT_MEM_PATH) return "memory.md";
   const marker = "/wiki/";
   const at = path.indexOf(marker);
   return at >= 0 ? path.slice(at + 1) : basename(path);
+}
+
+// M4 (spec §8): the chip label is presence-conditioned — only layers
+// actually in `recall` render, e.g. "memory: user.md + memory.md + 1
+// note(s)", "memory: memory.md + 2 note(s)", "memory: 2 note(s)".
+function recallChipLabel(recall: string[]): string {
+  const hasUser = recall.includes(USER_MD_PATH);
+  const hasMem = recall.includes(PROJECT_MEM_PATH);
+  const notes = recall.length - (hasUser ? 1 : 0) - (hasMem ? 1 : 0);
+  const parts: string[] = [];
+  if (hasUser) parts.push("user.md");
+  if (hasMem) parts.push("memory.md");
+  if (notes > 0) parts.push(`${notes} note(s)`);
+  return `memory: ${parts.join(" + ")}`;
 }
 
 // Renders one journaled event. Payloads come from the daemon verbatim; every
@@ -40,9 +58,7 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
           )}
           {p.recall != null && p.recall.length > 0 && (
             <div className="recall-chip" title={p.recall.map(shortRecallPath).join("\n")}>
-              {p.recall.includes(USER_MD_PATH)
-                ? `memory: user.md + ${p.recall.length - 1} note(s) recalled`
-                : `memory: ${p.recall.length} note(s) recalled`}
+              {recallChipLabel(p.recall)}
             </div>
           )}
         </div>

@@ -98,6 +98,12 @@ func gitIn(t *testing.T, dir string, args ...string) {
 // startRig builds a project repo and a live daemon bound to it.
 func startRig(t *testing.T, root string) *testRig {
 	t.Helper()
+	// NewServer registers the bound project in the global registry; without
+	// an override that write lands in the real user's ~/.odo. Tests pre-set
+	// ODO_REGISTRY_PATH to seed siblings (bound registration appends to it).
+	if os.Getenv("ODO_REGISTRY_PATH") == "" {
+		t.Setenv("ODO_REGISTRY_PATH", filepath.Join(t.TempDir(), "projects.json"))
+	}
 	mgr := worktree.NewManager(root)
 	if err := mgr.EnsureDirs(); err != nil {
 		t.Fatalf("EnsureDirs: %v", err)
@@ -587,11 +593,22 @@ func TestDistill(t *testing.T) {
 	if conv.Epoch != 2 {
 		t.Errorf("stored epoch = %d, want 2", conv.Epoch)
 	}
+	// M4: every distill is followed by the learner pass. The stub returns
+	// plain text (not the learner's JSON contract), so the learner degrades
+	// to a journaled memory_update{layer:learner,cause:failed} — never a
+	// distill failure (spec §2).
 	if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
-		"[user_message agent_text agent_done review_action]"; got != want {
+		"[user_message agent_text agent_done memory_update review_action]"; got != want {
 		t.Errorf("events = %s, want %s", got, want)
 	}
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	var muPayload map[string]interface{}
+	if err := json.Unmarshal(events[len(events)-2].Payload, &muPayload); err != nil {
+		t.Fatalf("memory_update payload: %v", err)
+	}
+	if muPayload["layer"] != "learner" || muPayload["cause"] != "failed" {
+		t.Errorf("memory_update payload = %v, want learner/failed", muPayload)
+	}
 	var payload map[string]interface{}
 	last := events[len(events)-1]
 	if err := json.Unmarshal(last.Payload, &payload); err != nil {
@@ -603,7 +620,7 @@ func TestDistill(t *testing.T) {
 
 	// The distill prompt carried the conversation events to the agent.
 	matches, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
-	if err != nil || len(matches) != 2 { // user prompt + distill prompt
+	if err != nil || len(matches) != 3 { // user prompt + distill prompt + learner prompt (M4)
 		t.Fatalf("prompt files = %v, err = %v", matches, err)
 	}
 	found := false
@@ -1284,9 +1301,9 @@ func TestRecallEmptyWhenNoWiki(t *testing.T) {
 	if done.Diff == nil {
 		t.Fatal("no diff")
 	}
-	want := buildPrompt(text, nil, "", "")
+	want := buildPrompt(text, nil, "", "", "")
 	if want != text {
-		t.Fatalf("buildPrompt(%q, nil, \"\", \"\") = %q, want the text unchanged", text, want)
+		t.Fatalf("buildPrompt(%q, nil, \"\", \"\", \"\") = %q, want the text unchanged", text, want)
 	}
 	if !strings.Contains(done.Diff.Content, "+"+want) {
 		t.Errorf("diff content does not contain the plain prompt")
@@ -1321,7 +1338,10 @@ func TestRecallCapsSize(t *testing.T) {
 	}
 
 	// Direct contract: the injected memory block never exceeds the cap.
-	memory, paths := recallWikiNotes(root, "main")
+	memory, paths, noteBlocks := recallWikiNotes(root, "main")
+	if len(noteBlocks) != len(paths) {
+		t.Errorf("noteBlocks = %d, want %d (one injected block per path)", len(noteBlocks), len(paths))
+	}
 	if len(memory) > recallMemoryCap {
 		t.Errorf("len(memory) = %d, exceeds recallMemoryCap %d", len(memory), recallMemoryCap)
 	}
