@@ -40,8 +40,16 @@ func readPins(projectRoot string) string {
 // truncate a user file — mirrors planUserApply) and the refusal names the
 // pin text with nothing written.
 func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
-	if req.Text == "" {
-		return Response{}, fmt.Errorf("pin: text is required")
+	// M5-hardening: pins are single-line statements — the file is
+	// one `- <text>` line per pin, so whitespace is trimmed, empty-after-
+	// trim is refused, and a newline (which would break the one-line
+	// format) is refused before anything is written.
+	text := strings.TrimSpace(req.Text)
+	if text == "" {
+		return Response{}, fmt.Errorf("pin text is empty")
+	}
+	if strings.ContainsAny(text, "\r\n") {
+		return Response{}, fmt.Errorf("pin text must be single-line")
 	}
 	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
 		return Response{}, fmt.Errorf("pin: %w", err)
@@ -57,9 +65,9 @@ func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
 	if out != "" {
 		join = "\n"
 	}
-	content := out + join + "- " + req.Text + "\n"
+	content := out + join + "- " + text + "\n"
 	if len(content) > pinsCap {
-		return Response{}, fmt.Errorf("pins.md would exceed %d bytes: pin %q", pinsCap, req.Text)
+		return Response{}, fmt.Errorf("pins.md would exceed %d bytes: pin %q", pinsCap, text)
 	}
 	if err := writeFileAtomic(pinsPath(s.projectRoot), content, 0o644); err != nil {
 		return Response{}, fmt.Errorf("pin: write pins.md: %w", err)
@@ -67,7 +75,7 @@ func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
 	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 		"layer":  "pins",
 		"cause":  "pin",
-		"detail": req.Text,
+		"detail": text,
 	})); err != nil {
 		return Response{}, err
 	}

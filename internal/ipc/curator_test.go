@@ -648,3 +648,136 @@ func TestUncitedBulletDetection(t *testing.T) {
 		t.Errorf("bullet classification = %d bullets (%d cited, %d uncited), want 2 (1 cited, 1 uncited)", bullets, cited, uncited)
 	}
 }
+
+// TestCurateWriteFailureJournals: a write failure AFTER the parse (here a
+// FILE sits at wiki/topics, so creating the topics dir fails) journals
+// memory_update{layer:"curator", cause:"failed", detail:"write error: …"}
+// — closing the asymmetry where only run/parse failures reached the
+// journal — and still returns the error.
+func TestCurateWriteFailureJournals(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	setOneShotEnv(t, "ODO_CURATOR_OUTPUT", curatorStubJSON)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nAuthentication uses JWT with refresh tokens.\n")
+	// A FILE at wiki/topics makes the topics-dir creation fail.
+	if err := os.WriteFile(filepath.Join(root, "wiki", "topics"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := rig.callExpectErr(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+	if !strings.Contains(resp.Error, "create topics dir") {
+		t.Errorf("curate write failure: error = %q, want the topics-dir creation failure", resp.Error)
+	}
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	failed := memoryUpdatesByCause(t, events, "failed")
+	if len(failed) != 1 {
+		t.Fatalf("memory_update{cause:failed} count = %d, want 1", len(failed))
+	}
+	if failed[0]["layer"] != "curator" {
+		t.Errorf("failed memory_update layer = %v, want curator", failed[0]["layer"])
+	}
+	detail, _ := failed[0]["detail"].(string)
+	if !strings.Contains(detail, "write error:") {
+		t.Errorf("failed memory_update detail = %q, want \"write error: …\"", detail)
+	}
+}
+
+// TestCurateDuplicateSlugs: two topics sharing one slug write ONE page —
+// the first occurrence wins, the duplicate is skipped (never a silent
+// overwrite) — and the index lists the slug exactly once. The journaled
+// review_action reports the WRITTEN topic count, not the raw list length.
+func TestCurateDuplicateSlugs(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	setOneShotEnv(t, "ODO_CURATOR_OUTPUT", `{"topics":[
+	  {"title":"Authentication","slug":"authentication","bullets":["- first page wins (epoch-1)"]},
+	  {"title":"Authentication Again","slug":"authentication","bullets":["- duplicate must be skipped (epoch-2)"]},
+	  {"title":"Build System","slug":"build-system","bullets":["- boring build (epoch-1)"]}
+	]}`)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nAuth and build notes.\n")
+
+	rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+
+	got := readFileStr(t, filepath.Join(root, "wiki", "topics", "authentication.md"))
+	if !strings.Contains(got, "first page wins (epoch-1)") {
+		t.Errorf("authentication.md = %q, want the first occurrence's page", got)
+	}
+	if strings.Contains(got, "duplicate must be skipped") {
+		t.Errorf("authentication.md = %q, the duplicate slug overwrote the first page", got)
+	}
+	indexContent := readFileStr(t, filepath.Join(root, "wiki", "index.md"))
+	if n := strings.Count(indexContent, "→ topics/authentication.md"); n != 1 {
+		t.Errorf("index lists the duplicate slug %d times, want exactly 1: %q", n, indexContent)
+	}
+	if !strings.Contains(indexContent, "→ topics/build-system.md") {
+		t.Errorf("index is missing the surviving second topic: %q", indexContent)
+	}
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	curates := payloadsByAction(t, events, "curate")
+	if len(curates) != 1 || curates[0]["topics"] != float64(2) {
+		t.Errorf("review_action{action:curate} = %v, want 1 event with topics 2 (written count, not raw 3)", curates)
+	}
+}
+
+// TestCurateEmptyTopicsGuard: a {"topics":[]} curator answer refuses BEFORE
+// the stale-clear — existing topic pages and the index survive — and the
+// refusal is journaled like any other curator failure
+// (memory_update{layer:"curator", cause:"failed", detail:"empty topics"}).
+func TestCurateEmptyTopicsGuard(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	setOneShotEnv(t, "ODO_CURATOR_OUTPUT", `{"topics":[]}`)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nAuthentication uses JWT with refresh tokens.\n")
+	existingTopic := "# Authentication\n\n- pre-existing page (epoch-1)\n"
+	topicPath := filepath.Join(root, "wiki", "topics", "authentication.md")
+	if err := os.MkdirAll(filepath.Dir(topicPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(topicPath, []byte(existingTopic), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	existingIndex := "# Project Wiki Index\n\n## Topics\n- Authentication → topics/authentication.md\n"
+	indexPath := filepath.Join(root, "wiki", "index.md")
+	if err := os.WriteFile(indexPath, []byte(existingIndex), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := rig.callExpectErr(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+	if !strings.Contains(resp.Error, "0 topics") {
+		t.Errorf("empty-topics refusal: error = %q, want mention of 0 topics", resp.Error)
+	}
+	if got := readFileStr(t, topicPath); got != existingTopic {
+		t.Errorf("existing topic page = %q after the refusal, want it preserved %q", got, existingTopic)
+	}
+	if got := readFileStr(t, indexPath); got != existingIndex {
+		t.Errorf("existing index = %q after the refusal, want it preserved %q", got, existingIndex)
+	}
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	failed := memoryUpdatesByCause(t, events, "failed")
+	if len(failed) != 1 {
+		t.Fatalf("memory_update{cause:failed} count = %d, want 1", len(failed))
+	}
+	if failed[0]["layer"] != "curator" || failed[0]["detail"] != "empty topics" {
+		t.Errorf("failed memory_update = %v, want layer curator + detail \"empty topics\"", failed[0])
+	}
+}

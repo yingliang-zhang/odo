@@ -133,6 +133,17 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
           </div>
         );
       }
+      // M5: the curator journals its pass the same way (ADR-0002) — render
+      // it as a memory event, not the diff-style "curate diff #?".
+      if (p.action === "curate") {
+        return (
+          <div className="bubble bubble-review">
+            <span className="badge badge-other" title="curator rewrote wiki topics + index.md">
+              Curated {p.topics ?? "?"} topics
+            </span>
+          </div>
+        );
+      }
       return (
         <div className="bubble bubble-review">
           <span className={`badge badge-${REVIEW_LABEL[p.action ?? ""] ? p.action : "other"}`}>

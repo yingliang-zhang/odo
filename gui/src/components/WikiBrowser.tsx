@@ -127,12 +127,15 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
   }, [onClose]);
 
   // M5 (spec §9): a citation click jumps to the source epoch note in the
-  // Notes tab, when the current workstream's list contains it.
+  // Notes tab ONLY when exactly one note in the current workstream matches
+  // — curation is project-wide, so a citation can name an epoch no note
+  // here carries, or an epoch several workstreams share; both degrade to a
+  // no-op (spec risk #3) rather than jumping to the wrong note.
   const jumpToEpoch = (epoch: number) => {
-    const note = notes?.find((n) => n.epoch === epoch);
-    if (!note) return;
+    const matches = notes?.filter((n) => n.epoch === epoch) ?? [];
+    if (matches.length !== 1) return;
     setTab("notes");
-    setSelected(note.path);
+    setSelected(matches[0].path);
   };
 
   const isTopicPage = selected.includes(TOPICS_MARKER);
@@ -280,7 +283,10 @@ function TopicLine({
     );
   }
   const epoch = Number(match[1]);
-  const text = line.slice(0, match.index);
+  // trimEnd drops the spacer before "(epoch-N)" — otherwise the bullet
+  // text ends with a space AND the JSX renders one between text and the
+  // citation button (a visible double space).
+  const text = line.slice(0, match.index).trimEnd();
   return (
     <div className="wiki-topic-line">
       {text}

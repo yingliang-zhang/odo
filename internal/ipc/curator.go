@@ -141,13 +141,40 @@ Rules:
 	return b.String()
 }
 
+// topic is one curator topic page as the one-shot emits it.
+type topic struct {
+	Title   string   `json:"title"`
+	Slug    string   `json:"slug"`
+	Bullets []string `json:"bullets"`
+}
+
 // curatorResult is the JSON object the curator one-shot must emit.
 type curatorResult struct {
-	Topics []struct {
-		Title   string   `json:"title"`
-		Slug    string   `json:"slug"`
-		Bullets []string `json:"bullets"`
-	} `json:"topics"`
+	Topics []topic `json:"topics"`
+}
+
+// validTopics filters the curator's topic list to the pages that actually
+// get written: non-empty slugs resolving inside wiki/topics/, deduplicated
+// by slug with the first occurrence winning — a repeat slug would
+// otherwise silently overwrite the earlier page and double-list the index.
+func validTopics(projectRoot string, res *curatorResult) []topic {
+	dir := filepath.Join(projectRoot, "wiki", "topics")
+	seen := make(map[string]struct{}, len(res.Topics))
+	out := make([]topic, 0, len(res.Topics))
+	for _, t := range res.Topics {
+		if t.Slug == "" {
+			continue
+		}
+		if filepath.Dir(filepath.Join(dir, t.Slug+".md")) != dir {
+			continue // defensive: the slug must name a file inside wiki/topics/
+		}
+		if _, dup := seen[t.Slug]; dup {
+			continue
+		}
+		seen[t.Slug] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 // parseCuratorOutput decodes the curator one-shot's raw text — the same
@@ -181,10 +208,11 @@ func renderTopicPage(title string, bullets []string) string {
 }
 
 // writeTopicPages clears wiki/topics/*.md (the curator rewrites from scratch
-// — generation-2 rule) and writes one page per topic, returning the written
-// paths. Removing a single stale file is best-effort (logged, not fatal); a
-// write failure is fatal so the on-disk set never mixes generations.
-func writeTopicPages(projectRoot string, res *curatorResult) ([]string, error) {
+// — generation-2 rule) and writes one page per valid topic, returning the
+// written paths. Removing a single stale file is best-effort (logged, not
+// fatal); a write failure is fatal so the on-disk set never mixes
+// generations.
+func writeTopicPages(projectRoot string, topics []topic) ([]string, error) {
 	dir := filepath.Join(projectRoot, "wiki", "topics")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create topics dir: %w", err)
@@ -199,28 +227,27 @@ func writeTopicPages(projectRoot string, res *curatorResult) ([]string, error) {
 		}
 	}
 	var paths []string
-	for _, topic := range res.Topics {
-		path := filepath.Join(dir, topic.Slug+".md")
-		if topic.Slug == "" || filepath.Dir(path) != dir {
-			continue // defensive: the slug must name a file inside wiki/topics/
-		}
-		if err := writeFileAtomic(path, renderTopicPage(topic.Title, topic.Bullets), 0o644); err != nil {
-			return paths, fmt.Errorf("write topic %s: %w", topic.Slug, err)
+	for _, t := range topics {
+		path := filepath.Join(dir, t.Slug+".md")
+		if err := writeFileAtomic(path, renderTopicPage(t.Title, t.Bullets), 0o644); err != nil {
+			return paths, fmt.Errorf("write topic %s: %w", t.Slug, err)
 		}
 		paths = append(paths, path)
 	}
 	return paths, nil
 }
 
-// writeIndex regenerates wiki/index.md: one line per topic. The list is
-// capped at indexCap (2 KB) with a line-boundary cut from the end — a topic
-// that falls off the index still has its page on disk. The content is
-// written atomically (0644) and returned for the injection receipt.
-func writeIndex(projectRoot string, res *curatorResult) (string, error) {
+// writeIndex regenerates wiki/index.md: one line per WRITTEN topic (the
+// same filtered list writeTopicPages consumed — duplicates and invalid
+// slugs never reach the index). The list is capped at indexCap (2 KB) with
+// a line-boundary cut from the end — a topic that falls off the index
+// still has its page on disk. The content is written atomically (0644) and
+// returned for the injection receipt.
+func writeIndex(projectRoot string, topics []topic) (string, error) {
 	var b strings.Builder
 	b.WriteString("# Project Wiki Index\n\n## Topics\n")
-	for _, topic := range res.Topics {
-		fmt.Fprintf(&b, "- %s → topics/%s.md\n", topic.Title, topic.Slug)
+	for _, t := range topics {
+		fmt.Fprintf(&b, "- %s → topics/%s.md\n", t.Title, t.Slug)
 	}
 	content := b.String()
 	if len(content) > indexCap {
@@ -265,11 +292,17 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 		return Response{}, fmt.Errorf("curate: no epoch notes to curate — distill first")
 	}
 
-	fail := func(err error) (Response, error) {
+	// fail journals memory_update{layer:curator, cause:failed} before
+	// returning the error. The detail is explicit: run/parse failures pass
+	// the error text; write failures pass "write error: …" (any write
+	// failure after the stale-clear must land in the journal — the same
+	// asymmetry the parse path never had) and the empty-topics refusal
+	// passes "empty topics".
+	fail := func(err error, detail string) (Response, error) {
 		_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":  "curator",
 			"cause":  "failed",
-			"detail": err.Error(),
+			"detail": detail,
 		}))
 		return Response{}, err
 	}
@@ -280,27 +313,38 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 	}
 	raw, err := runOneShot(ctx, ad, curatorPrompt(notes), curatorTimeout)
 	if err != nil {
-		return fail(fmt.Errorf("curate: curator run: %w", err))
+		werr := fmt.Errorf("curate: curator run: %w", err)
+		return fail(werr, werr.Error())
 	}
 	res, err := parseCuratorOutput(raw)
 	if err != nil {
-		return fail(err)
+		return fail(err, err.Error())
+	}
+
+	// Refuse BEFORE the stale-clear when the curator gave us nothing
+	// writable: an empty (or entirely invalid) topic list must not erase
+	// the existing topic pages.
+	topics := validTopics(s.projectRoot, res)
+	if len(topics) == 0 {
+		return fail(fmt.Errorf("curate: curator returned 0 topics — nothing to write"), "empty topics")
 	}
 
 	// before_sha covers the pre-curate index ("" when absent) — the M4
 	// before/after convention for injected layers.
 	oldIndex := readFileFull(filepath.Join(s.projectRoot, "wiki", "index.md"))
-	if _, err := writeTopicPages(s.projectRoot, res); err != nil {
-		return Response{}, fmt.Errorf("curate: %w", err)
+	if _, err := writeTopicPages(s.projectRoot, topics); err != nil {
+		werr := fmt.Errorf("curate: %w", err)
+		return fail(werr, "write error: "+err.Error())
 	}
-	indexContent, err := writeIndex(s.projectRoot, res)
+	indexContent, err := writeIndex(s.projectRoot, topics)
 	if err != nil {
-		return Response{}, fmt.Errorf("curate: %w", err)
+		werr := fmt.Errorf("curate: %w", err)
+		return fail(werr, "write error: "+err.Error())
 	}
 
 	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":     "curate",
-		"topics":     len(res.Topics),
+		"topics":     len(topics),
 		"notes_read": len(notes),
 	})); err != nil {
 		return Response{}, err
@@ -310,7 +354,7 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 		"cause":      "curate",
 		"before_sha": sha16([]byte(oldIndex)),
 		"after_sha":  sha16([]byte(indexContent)),
-		"detail":     fmt.Sprintf("rewrote %d topics + index", len(res.Topics)),
+		"detail":     fmt.Sprintf("rewrote %d topics + index", len(topics)),
 	})); err != nil {
 		return Response{}, err
 	}

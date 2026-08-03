@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { applyMemory, errorMessage, memoryProposals, readMemory } from "../api";
+import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse } from "../types";
 
 // M4 memory review (spec §7): the learner proposes rules at distill time
@@ -85,6 +85,9 @@ export default function MemoryReviewPanel({
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyResult, setApplyResult] = useState<string | null>(null);
   const [files, setFiles] = useState<ReadMemoryResponse | null>(null);
+  // M5: pins.md reads come from read_pins (separate daemon command) so the
+  // files tab can show them beside memory.md and user.md.
+  const [pins, setPins] = useState<string | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
 
@@ -118,13 +121,15 @@ export default function MemoryReviewPanel({
     void refreshBatch();
   }, [refreshBatch]);
 
-  // Reader tab: the daemon constructs all three canonical paths itself
-  // (read_memory takes no user-supplied path). Refetched on activation and
-  // after an apply.
+  // Reader tab: the daemon constructs all canonical paths itself
+  // (read_memory/read_pins take no user-supplied path). Refetched on
+  // activation and after an apply.
   const loadFiles = useCallback(async () => {
     setFilesLoading(true);
     try {
-      setFiles(await readMemory());
+      const [mem, pinsResp] = await Promise.all([readMemory(), readPins()]);
+      setFiles(mem);
+      setPins(pinsResp.memory_content ?? "");
       setFilesError(null);
     } catch (e) {
       setFilesError(errorMessage(e));
@@ -315,6 +320,8 @@ export default function MemoryReviewPanel({
                 <pre className="wiki-content mem-file">{files.archive_content || "(empty)"}</pre>
                 <div className="mem-section-title">user.md (global)</div>
                 <pre className="wiki-content mem-file">{files.user_content || "(empty)"}</pre>
+                <div className="mem-section-title">pins.md (user-authored, verbatim)</div>
+                <pre className="wiki-content mem-file">{pins || "(empty)"}</pre>
               </>
             )}
           </div>
