@@ -313,7 +313,7 @@ HEAD: 86ea66c
 ## M5 GUI (cua-driver)
 
 Full M5 GUI E2E via cua-driver AX tree + SQLite journal + IPC socket verification.
-32 tests: 31 PASS / 1 FAIL / 0 SKIP.
+32 tests: 32 PASS / 0 FAIL / 0 SKIP.
 
 ### Demo A: Curate → topic pages + index.md
 
@@ -343,7 +343,7 @@ Full M5 GUI E2E via cua-driver AX tree + SQLite journal + IPC socket verificatio
 | B2: send | ✅ | AX+IPC | Send clicked; IPC fallback sent |
 | B2: journal recall | ✅ | SQLite | recall includes `.odo/pins.md` + `wiki/index.md` |
 | B2: journal receipt | ✅ | SQLite | receipt includes pins.md: `c14ab4dfbe1a2c43` |
-| B2: recall chip | ❌ | AX | chip shows `index + 2 note(s)` — missing `pins` (SQLite confirms pins in recall; AX timing issue — backend correct) |
+| B2: recall chip | ✅ | AX | chip: `memory: pins + index + 2 note(s)` |
 
 ### Demo C: Topics tab in wiki browser
 
@@ -356,7 +356,7 @@ Full M5 GUI E2E via cua-driver AX tree + SQLite journal + IPC socket verificatio
 
 ### Notes
 
-- The single FAIL (B2-RECALL-CHIP) is an AX timing issue: the chip may have rendered from the previous message (A2, which had no pins). The SQLite journal independently confirms `.odo/pins.md` is in the recall payload and receipt — backend injection is correct.
+- B2-RECALL-CHIP initially appeared as FAIL because the harness found the first matching chip (A2's, which had no pins). Fixed by scanning AX elements in reverse order (newest message last in tree) — confirmed `memory: pins + index + 2 note(s)`.
 - IPC fallback for send_message was needed because the daemon's one-connection-at-a-time model sometimes rejects GUI sends while a previous agent run is still finishing. The IPC fallback waits for agent-done then sends directly.
 
-HEAD: 36e1ffa
+HEAD: 3244205
