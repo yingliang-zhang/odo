@@ -1,3 +1,3 @@
 # Epoch 1
 
-Decision: hash the exact injected block, not the file.
+Decided to always run go test before claiming done. Also prefer compact output.
