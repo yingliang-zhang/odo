@@ -617,8 +617,18 @@ func TestMemoryCapRotationArchive(t *testing.T) {
 	if len(applyUpdates) != 1 {
 		t.Fatalf("memory_update(apply) events = %d, want 1", len(applyUpdates))
 	}
-	if d, _ := applyUpdates[0]["detail"].(string); !strings.Contains(d, "rotated 1 to memory-archive.md (overflow)") {
-		t.Errorf("memory_update detail = %v, want the rotated-to-archive summary", d)
+	if d, _ := applyUpdates[0]["detail"].(string); strings.Contains(d, "rotated") {
+		t.Errorf("apply detail = %v, the rotation is its own cause:rotate event", d)
+	}
+	rotates := memoryUpdatesByCause(t, events, "rotate")
+	if len(rotates) != 1 {
+		t.Fatalf("memory_update(rotate) events = %d, want 1", len(rotates))
+	}
+	if rotates[0]["layer"] != "memory" {
+		t.Errorf("rotate layer = %v, want memory", rotates[0]["layer"])
+	}
+	if d, _ := rotates[0]["detail"].(string); !strings.Contains(d, "rotated 1 to memory-archive.md (overflow)") {
+		t.Errorf("rotate detail = %v, want the rotated-to-archive summary", d)
 	}
 }
 
@@ -698,19 +708,24 @@ func TestMemoryRetractionToArchive(t *testing.T) {
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
 	applyUpdates := memoryUpdatesByCause(t, events, "apply")
 	if len(applyUpdates) != 1 {
-		t.Fatalf("memory_update(apply) events = %d, want 1", len(applyUpdates))
+		t.Fatalf("memory_update(apply) events = %d, want 1 (the appended rules)", len(applyUpdates))
 	}
-	if d, _ := applyUpdates[0]["detail"].(string); !strings.Contains(d, "retracted 1 (conflict)") {
-		t.Errorf("apply detail = %v, want the retracted summary", d)
+	if d, _ := applyUpdates[0]["detail"].(string); strings.Contains(d, "retracted") {
+		t.Errorf("apply detail = %v, the retraction is its own cause:retract event", d)
 	}
+	// Two retract records, both cause:"retract" distinguished by detail:
+	// the matched conflict move, then the no-match surfacing.
 	retracts := memoryUpdatesByCause(t, events, "retract")
-	if len(retracts) != 1 {
-		t.Fatalf("memory_update(retract) events = %d, want 1 (the no-match)", len(retracts))
+	if len(retracts) != 2 {
+		t.Fatalf("memory_update(retract) events = %d, want 2 (the match + the no-match)", len(retracts))
 	}
-	if retracts[0]["layer"] != "memory" {
-		t.Errorf("retract layer = %v, want memory", retracts[0]["layer"])
+	if retracts[0]["layer"] != "memory" || retracts[1]["layer"] != "memory" {
+		t.Errorf("retract layers = %v/%v, want memory/memory", retracts[0]["layer"], retracts[1]["layer"])
 	}
-	if d, _ := retracts[0]["detail"].(string); !strings.Contains(d, `no match for contradicts: "Prefer hand-rolled shell scripts."`) {
+	if d, _ := retracts[0]["detail"].(string); !strings.Contains(d, "retracted 1 (conflict):") {
+		t.Errorf("retract detail = %v, want the conflict-move summary", d)
+	}
+	if d, _ := retracts[1]["detail"].(string); !strings.Contains(d, `no match for contradicts: "Prefer hand-rolled shell scripts."`) {
 		t.Errorf("retract detail = %v, want the no-match surfacing", d)
 	}
 }

@@ -1275,8 +1275,9 @@ func (s *Server) handleMemoryProposals(ctx context.Context, req Request) (Respon
 // handleApplyMemory consumes the pending batch all-or-nothing (spec §5):
 // every target is pre-computed in memory before anything hits disk or the
 // journal; a user.md overflow refusal writes nothing and leaves the batch
-// pending for retry. Per changed layer one memory_update event is journaled,
-// then the review_action apply marker; a second apply errors "already
+// pending for retry. Per changed layer a memory_update event is journaled
+// (rotation and successful retraction are their own causes, spec §6), then
+// the review_action apply marker; a second apply errors "already
 // applied".
 func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, error) {
 	c, err := s.checkConversation(ctx, req.ConversationID)
@@ -1365,16 +1366,15 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 		userChanged = newUser != oldUser
 	}
 
-	// Writes.
-	if memChanged {
-		if err := writeFileAtomic(memPath, memPlan.content, 0o644); err != nil {
-			return Response{}, fmt.Errorf("apply_memory: write memory.md: %w", err)
-		}
-		if memPlan.archiveAppend != "" {
-			arcPath := filepath.Join(s.projectRoot, ".odo", archiveFileName)
-			if err := writeFileAtomic(arcPath, readArchive(s.projectRoot)+memPlan.archiveAppend, 0o644); err != nil {
-				return Response{}, fmt.Errorf("apply_memory: append archive: %w", err)
-			}
+	// Writes: archive first, then user.md, memory.md LAST. A mid-sequence
+	// failure then leaves the previous memory.md intact, so a retry replans
+	// against the ORIGINAL rules — no duplicate appends and no
+	// evicted-but-unarchived loss (archive append re-running on retry is a
+	// harmless duplicate append-only line, never a loss).
+	if memChanged && memPlan.archiveAppend != "" {
+		arcPath := filepath.Join(s.projectRoot, ".odo", archiveFileName)
+		if err := writeFileAtomic(arcPath, readArchive(s.projectRoot)+memPlan.archiveAppend, 0o644); err != nil {
+			return Response{}, fmt.Errorf("apply_memory: append archive: %w", err)
 		}
 	}
 	if userChanged {
@@ -1382,29 +1382,53 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 			return Response{}, fmt.Errorf("apply_memory: write user.md: %w", err)
 		}
 	}
+	if memChanged {
+		if err := writeFileAtomic(memPath, memPlan.content, 0o644); err != nil {
+			return Response{}, fmt.Errorf("apply_memory: write memory.md: %w", err)
+		}
+	}
 
-	// Journal per changed layer.
+	// Journal per changed layer. Rotation and successful retraction are
+	// DISTINCT memory_update causes (spec §6: the UI switch is exhaustive),
+	// not clauses folded into the apply detail.
 	if memChanged {
 		detail := fmt.Sprintf("accepted %d rule(s)", len(memAccepted))
 		if memPlan.reaffirmed > 0 {
 			detail += fmt.Sprintf("; reaffirmed %d", memPlan.reaffirmed)
 		}
-		if len(memPlan.rotated) > 0 {
-			detail += fmt.Sprintf("; rotated %d to memory-archive.md (overflow): %s",
-				len(memPlan.rotated), strings.Join(memPlan.rotated, " | "))
-		}
-		if len(memPlan.retracted) > 0 {
-			detail += fmt.Sprintf("; retracted %d (conflict): %s",
-				len(memPlan.retracted), strings.Join(memPlan.retracted, " | "))
-		}
+		beforeSHA, afterSHA := sha16([]byte(oldMem)), sha16([]byte(memPlan.content))
 		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":      "memory",
 			"cause":      "apply",
-			"before_sha": sha16([]byte(oldMem)),
-			"after_sha":  sha16([]byte(memPlan.content)),
+			"before_sha": beforeSHA,
+			"after_sha":  afterSHA,
 			"detail":     detail,
 		})); err != nil {
 			return Response{}, err
+		}
+		if len(memPlan.rotated) > 0 {
+			if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+				"layer":      "memory",
+				"cause":      "rotate",
+				"before_sha": beforeSHA,
+				"after_sha":  afterSHA,
+				"detail": fmt.Sprintf("rotated %d to memory-archive.md (overflow): %s",
+					len(memPlan.rotated), strings.Join(memPlan.rotated, " | ")),
+			})); err != nil {
+				return Response{}, err
+			}
+		}
+		if len(memPlan.retracted) > 0 {
+			if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+				"layer":      "memory",
+				"cause":      "retract",
+				"before_sha": beforeSHA,
+				"after_sha":  afterSHA,
+				"detail": fmt.Sprintf("retracted %d (conflict): %s",
+					len(memPlan.retracted), strings.Join(memPlan.retracted, " | ")),
+			})); err != nil {
+				return Response{}, err
+			}
 		}
 	}
 	for _, unmatched := range memPlan.unmatchedContradicts {

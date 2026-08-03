@@ -426,7 +426,24 @@ func planMemoryApply(old string, accepted []acceptedRule, reaffirm []string, epo
 	}
 
 	// (1) Append accepted rules; each is influx (newest ⇒ never evictable).
+	// A rule whose normalized text is already stored is skipped: the apply
+	// is journaled only after every write succeeds, so a mid-write I/O
+	// failure leaves the batch pending and the retry replans against an
+	// already-applied memory.md — the skip makes that retry converge
+	// instead of double-appending.
 	for _, a := range accepted {
+		if na := normalizeRule(a.rule); na != "" {
+			dup := false
+			for i := range rules {
+				if normalizeRule(rules[i].text) == na {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+		}
 		line := fmt.Sprintf("- %s — cites: %s; reaffirmed: %d", a.rule, a.evidence, epoch)
 		rules = append(rules, memoryRule{
 			text: a.rule, cites: a.evidence, reaffirmed: epoch, influx: true, raw: line,
