@@ -1248,11 +1248,18 @@ func recallPathsFromEvent(t *testing.T, ev *store.Event) []string {
 	}
 	out := make([]string, 0, len(raw))
 	for _, v := range raw {
-		s, ok := v.(string)
-		if !ok {
-			t.Fatalf("recall entry not a string: %v", v)
+		switch item := v.(type) {
+		case string: // pre-M6 shape: bare paths
+			out = append(out, item)
+		case map[string]interface{}: // M6: {"path": …, "matched_terms"?}
+			s, ok := item["path"].(string)
+			if !ok {
+				t.Fatalf("recall entry missing path: %v", v)
+			}
+			out = append(out, s)
+		default:
+			t.Fatalf("recall entry not a string/object: %v", v)
 		}
-		out = append(out, s)
 	}
 	return out
 }
@@ -1437,15 +1444,15 @@ func TestRecallCapsSize(t *testing.T) {
 	}
 
 	// Direct contract: the injected memory block never exceeds the cap.
-	memory, paths, noteBlocks := recallWikiNotes(root, "main")
-	if len(noteBlocks) != len(paths) {
-		t.Errorf("noteBlocks = %d, want %d (one injected block per path)", len(noteBlocks), len(paths))
+	memory, items, noteBlocks := recallWikiNotes(root, "main", "", nil)
+	if len(noteBlocks) != len(items) {
+		t.Errorf("noteBlocks = %d, want %d (one injected block per item)", len(noteBlocks), len(items))
 	}
 	if len(memory) > recallMemoryCap {
 		t.Errorf("len(memory) = %d, exceeds recallMemoryCap %d", len(memory), recallMemoryCap)
 	}
-	if len(paths) == 0 || len(paths) > 3 {
-		t.Errorf("recalled %d notes, want 1..3", len(paths))
+	if len(items) == 0 || len(items) > 3 {
+		t.Errorf("recalled %d notes, want 1..3", len(items))
 	}
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})

@@ -52,9 +52,19 @@ export type EventType =
 //                       "curate" { action, topics, notes_read } (M5).
 //   memory_update     { layer, cause, before_sha?, after_sha?, detail? }
 //                       layer: "memory" | "user" | "learner" (M4) |
-//                       "curator" | "index" | "pins" (M5); cause:
+//                       "curator" | "index" | "pins" (M5) |
+//                       "note" | "ledger" (M6); cause:
 //                       "apply" | "rotate" | "retract" | "failed" (M4) |
-//                       "curate" | "pin" (M5).
+//                       "curate" | "pin" (M5) |
+//                       "write_failed" | "verify_failed" (M6).
+// M6: one recall payload entry. Fixed markers (user.md/memory.md/pins.md/
+// index.md) carry path only; keyword-selected notes carry matched_terms
+// (omitted when the note ranked in purely by newest-first fallback).
+export interface RecallItem {
+  path: string;
+  matched_terms?: string[];
+}
+
 export interface EventPayload {
   text?: string;
   summary?: string;
@@ -65,11 +75,13 @@ export interface EventPayload {
   action?: string;
   diff_id?: number;
   attachments?: string[];
-  // M3: memory recall — user_message journals the paths injected into the
+  // M3: memory recall — user_message journals what was injected into the
   // prompt. Fixed markers come first in daemon order: ~/.odo/user.md →
   // .odo/memory.md (M4) → .odo/pins.md (M5) → wiki/index.md (M5), then the
-  // recalled wiki note paths.
-  recall?: string[];
+  // recalled wiki notes. M6 shape change: string[] → RecallItem[]; pre-M6
+  // events still carry bare strings, so consumers normalize both shapes
+  // (spec risk #4).
+  recall?: RecallItem[];
   // M4: injection receipt — content hashes (sha256[:16]) of the exact
   // blocks injected, keyed by the same path strings used in `recall` (M5
   // adds the .odo/pins.md and wiki/index.md fixed markers).
@@ -379,4 +391,23 @@ export interface ListTopicsResponse {
   ok: boolean;
   error?: string;
   wiki_notes?: WikiNoteInfo[];
+}
+
+// ---------- M6: precision + ledger ----------
+
+// ledger: .odo/ledger.md content ("" when absent) — same shape as read_pins.
+// The daemon is the only writer; the UI renders it read-only.
+export interface LedgerResponse {
+  ok: boolean;
+  error?: string;
+  memory_content?: string;
+}
+
+// contradictions: the conversation's note-retraction events
+// (memory_update{layer:"note", cause:"retract"}) for the wiki browser's
+// retracted badges.
+export interface ContradictionsResponse {
+  ok: boolean;
+  error?: string;
+  events?: OdoEvent[];
 }

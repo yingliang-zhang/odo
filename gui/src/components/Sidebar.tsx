@@ -7,6 +7,12 @@ import WikiBrowser from "./WikiBrowser";
 
 const DISTILL_TOAST_MS = 5000;
 
+interface RetractionChip {
+  oldNote: string;
+  newNote: string;
+  snippet: string;
+}
+
 interface Props {
   project: Project | null;
   workstream: Workstream | null;
@@ -37,6 +43,12 @@ interface Props {
   pendingMemoryProposals: number;
   lastMemoryUpdate: { layer: string; detail?: string } | null;
   onMemoryChipDismiss: () => void;
+  // M6 (spec §12/§13): the contradiction pass's retraction chip and the
+  // ledger write-failure toast, both ephemeral and dismissable.
+  lastRetraction: RetractionChip | null;
+  onRetractionDismiss: () => void;
+  lastLedgerFailure: string | null;
+  onLedgerFailureDismiss: () => void;
   onMemoryReviewClosed: () => void;
   // Belt A: sidebar collapse (Cmd+B toggle)
   collapsed: boolean;
@@ -78,6 +90,10 @@ export default function Sidebar({
   pendingMemoryProposals,
   lastMemoryUpdate,
   onMemoryChipDismiss,
+  lastRetraction,
+  onRetractionDismiss,
+  lastLedgerFailure,
+  onLedgerFailureDismiss,
   onMemoryReviewClosed,
   collapsed,
   onToggleCollapsed,
@@ -99,8 +115,9 @@ export default function Sidebar({
   const [pinToast, setPinToast] = useState<string | null>(null);
   const [showWiki, setShowWiki] = useState(false);
   const [showMemoryReview, setShowMemoryReview] = useState(false);
-  // Review opens the proposal tab; the memory-updated chip opens the reader.
-  const [memoryReviewTab, setMemoryReviewTab] = useState<"proposals" | "files">("proposals");
+  // Review opens the proposal tab; the memory-updated chip opens the reader;
+  // M6's Ledger button opens the ledger tab (§11: daemon-verified metrics).
+  const [memoryReviewTab, setMemoryReviewTab] = useState<"proposals" | "files" | "ledger">("proposals");
   const toastTimer = useRef<ToastTimer | null>(null);
   const curateToastTimer = useRef<ToastTimer | null>(null);
   const pinToastTimer = useRef<ToastTimer | null>(null);
@@ -140,6 +157,13 @@ export default function Sidebar({
   const handleMemoryChipClick = () => {
     onMemoryChipDismiss();
     setMemoryReviewTab("files");
+    setShowMemoryReview(true);
+  };
+
+  // M6 (§13): open the review panel straight on the Ledger tab
+  // (.odo/ledger.md — daemon-written verified metrics, pull-only).
+  const handleLedgerTab = () => {
+    setMemoryReviewTab("ledger");
     setShowMemoryReview(true);
   };
 
@@ -331,6 +355,36 @@ export default function Sidebar({
               </div>
             )}
           </>
+        )}
+        {lastRetraction && (
+          <button
+            type="button"
+            className="mem-chip"
+            title={`${lastRetraction.oldNote} contradicted by ${lastRetraction.newNote}: ${lastRetraction.snippet}`}
+            onClick={onRetractionDismiss}
+          >
+            ⚠ {lastRetraction.oldNote} retracted (contradicts {lastRetraction.newNote})
+          </button>
+        )}
+        {lastLedgerFailure && (
+          <button
+            type="button"
+            className="mem-chip"
+            title={lastLedgerFailure}
+            onClick={onLedgerFailureDismiss}
+          >
+            ⚠ ledger write failed
+          </button>
+        )}
+        {conversationId != null && (
+          <button
+            type="button"
+            className="mem-propose-btn"
+            title="Open .odo/ledger.md — daemon-written verified metrics (durations, proposals, accept/reject)"
+            onClick={handleLedgerTab}
+          >
+            Ledger
+          </button>
         )}
         <button
           type="button"

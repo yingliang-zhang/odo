@@ -1,12 +1,16 @@
 package ipc
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // recallMemoryCap bounds the total recalled memory injected into a prompt.
@@ -31,48 +35,175 @@ func wikiNoteEpoch(path string) (int, bool) {
 	return n, err == nil
 }
 
+// recallItem is one recalled note with the query terms that matched it (M6).
+// matchedTerms is empty for notes included purely by newest-first fallback
+// (the unmatched tier). The journal's user_message recall payload serializes
+// this as {"path":"…","matched_terms":[…]} (matched_terms omitted when empty).
+type recallItem struct {
+	path         string
+	matchedTerms []string
+}
+
+// stopWords are filtered from the query — they appear in nearly every note
+// and carry no topical signal. The list is small and fixed (no i18n, no
+// config) to keep recall deterministic and dependency-free.
+var stopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "is": true, "are": true, "was": true,
+	"were": true, "be": true, "been": true, "being": true, "have": true,
+	"has": true, "had": true, "do": true, "does": true, "did": true,
+	"will": true, "would": true, "should": true, "could": true, "can": true,
+	"this": true, "that": true, "these": true, "those": true, "it": true,
+	"its": true, "in": true, "on": true, "at": true, "to": true, "for": true,
+	"of": true, "with": true, "and": true, "or": true, "but": true, "not": true,
+	"how": true, "what": true, "why": true, "when": true, "who": true,
+	"i": true, "you": true, "we": true, "they": true, "me": true, "my": true,
+}
+
+// queryTokenRe splits the lowercased query on non-alphanumeric runs.
+var queryTokenRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+// tokenizeQuery lowercases text, splits it on non-alphanumeric runs, drops
+// stop-words, and de-duplicates preserving first-seen order.
+func tokenizeQuery(text string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, tok := range queryTokenRe.Split(strings.ToLower(text), -1) {
+		if tok == "" || stopWords[tok] || seen[tok] {
+			continue
+		}
+		seen[tok] = true
+		out = append(out, tok)
+	}
+	return out
+}
+
+// noteMatches returns the subset of terms found as case-insensitive
+// substrings in the note's filename plus content (de-duplicated,
+// order-stable). Empty when nothing matched.
+func noteMatches(content, name string, terms []string) []string {
+	if len(terms) == 0 {
+		return nil
+	}
+	haystack := strings.ToLower(name + " " + content)
+	var out []string
+	for _, term := range terms {
+		if strings.Contains(haystack, term) {
+			out = append(out, term)
+		}
+	}
+	return out
+}
+
 // recallWikiNotes reads all wiki/<workstreamName>-epoch-*.md files for the
-// workstream, ordered newest-epoch first, concatenates them under headers,
-// and truncates to recallMemoryCap on a note boundary. Returns the memory
-// block ("" when no notes exist), the paths of the notes actually included
-// (for journaling), and noteBytes — the exact block string injected per note
-// (`## <basename>\n\n<content>\n\n---\n\n`) so the injection receipt can hash
-// precisely what the prompt carried.
-func recallWikiNotes(projectRoot, workstreamName string) (memory string, paths []string, noteBytes [][]byte) {
+// workstream and selects the injection set by keyword tiering (M6): notes
+// matching ≥1 query token rank first (match-count DESC, then epoch DESC),
+// unmatched notes follow (epoch DESC). The result is concatenated under
+// headers and truncated to recallMemoryCap on a note boundary — the cap and
+// the boundary cut are unchanged; only the ORDER changed. Notes named in
+// retracted (the journal's `<ws>-epoch-<N>` retraction set) are skipped.
+// Returns the memory block ("" when no notes exist), the included items
+// (paths + matched terms, for journaling), and noteBytes — the exact block
+// string injected per note (`## <basename>\n\n<content>\n\n---\n\n`) so the
+// injection receipt can hash precisely what the prompt carried. An empty
+// query degrades to pure newest-first (the pre-M6 behavior).
+func recallWikiNotes(projectRoot, workstreamName, query string, retracted map[string]bool) (memory string, items []recallItem, noteBytes [][]byte) {
 	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", workstreamName+"-epoch-*.md"))
 	if err != nil {
 		return "", nil, nil
 	}
 	type note struct {
-		path  string
-		epoch int
+		path    string
+		name    string // <ws>-epoch-<N> (basename without .md)
+		epoch   int
+		content string
+		matched []string
 	}
+	terms := tokenizeQuery(query)
 	notes := make([]note, 0, len(matches))
 	for _, m := range matches {
-		if epoch, ok := wikiNoteEpoch(m); ok {
-			notes = append(notes, note{path: m, epoch: epoch})
+		epoch, ok := wikiNoteEpoch(m)
+		if !ok {
+			continue
 		}
-	}
-	sort.Slice(notes, func(i, j int) bool { return notes[i].epoch > notes[j].epoch })
-
-	var b strings.Builder
-	for _, n := range notes {
-		content, err := os.ReadFile(n.path)
+		name := strings.TrimSuffix(filepath.Base(m), ".md")
+		if retracted[name] {
+			continue // retracted by the contradiction pass: record stays, injection stops
+		}
+		content, err := os.ReadFile(m)
 		if err != nil {
 			continue // note vanished between glob and read: skip it
 		}
-		block := "## " + filepath.Base(n.path) + "\n\n" + string(content) + "\n\n---\n\n"
+		notes = append(notes, note{
+			path: m, name: name, epoch: epoch,
+			content: string(content),
+			matched: noteMatches(string(content), name, terms),
+		})
+	}
+	// Two tiers: matched (match-count DESC, epoch DESC) then unmatched
+	// (epoch DESC). sort.SliceStable keeps the comparator total.
+	sort.SliceStable(notes, func(i, j int) bool {
+		mi, mj := len(notes[i].matched) > 0, len(notes[j].matched) > 0
+		if mi != mj {
+			return mi // matched tier first
+		}
+		if mi && len(notes[i].matched) != len(notes[j].matched) {
+			return len(notes[i].matched) > len(notes[j].matched)
+		}
+		return notes[i].epoch > notes[j].epoch
+	})
+
+	var b strings.Builder
+	for _, n := range notes {
+		block := "## " + filepath.Base(n.path) + "\n\n" + n.content + "\n\n---\n\n"
 		if b.Len()+len(block) > recallMemoryCap {
 			break // cut on a note boundary: no note is half-included
 		}
 		b.WriteString(block)
-		paths = append(paths, n.path)
+		items = append(items, recallItem{path: n.path, matchedTerms: n.matched})
 		noteBytes = append(noteBytes, []byte(block))
 	}
 	if b.Len() == 0 {
 		return "", nil, nil
 	}
-	return b.String(), paths, noteBytes
+	return b.String(), items, noteBytes
+}
+
+// retractedNotes reads the conversation's memory_update{layer:"note"} events
+// and returns the set of `<ws>-epoch-<N>` note names currently retracted.
+// The detail format is `<oldNote> contradicted by <newNote>: <snippet>` — the
+// first token is the retracted note name. Events apply in journal order: a
+// retract adds, an unretract removes (forward-compatible; M6 never emits
+// unretract, so a retraction stands for the milestone).
+func (s *Server) retractedNotes(ctx context.Context, conversationID int64) map[string]bool {
+	out := map[string]bool{}
+	events, err := s.store.ListEvents(ctx, conversationID, 0)
+	if err != nil {
+		return out
+	}
+	for _, ev := range events {
+		if ev.Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Layer  string `json:"layer"`
+			Cause  string `json:"cause"`
+			Detail string `json:"detail"`
+		}
+		if err := json.Unmarshal(ev.Payload, &p); err != nil || p.Layer != "note" {
+			continue
+		}
+		name, _, _ := strings.Cut(p.Detail, " ")
+		if name == "" {
+			continue
+		}
+		switch p.Cause {
+		case "retract":
+			out[name] = true
+		case "unretract":
+			delete(out, name)
+		}
+	}
+	return out
 }
 
 // userMemoryCap bounds the global user memory injected into every prompt.

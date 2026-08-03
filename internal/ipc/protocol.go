@@ -39,6 +39,11 @@ const (
 	CmdPin        = "pin"
 	CmdReadPins   = "read_pins"
 	CmdListTopics = "list_topics"
+	// M6 (Precision + Ledger): ledger reads .odo/ledger.md (same shape as
+	// read_pins); contradictions returns the conversation's note-retraction
+	// events for the wiki browser's retracted badges.
+	CmdLedger         = "ledger"
+	CmdContradictions = "contradictions"
 )
 
 // Request is one command line on the socket.

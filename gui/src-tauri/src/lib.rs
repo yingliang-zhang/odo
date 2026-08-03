@@ -452,6 +452,26 @@ async fn list_topics(project_root: Option<String>) -> Result<Value, String> {
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M6 precision+ledger: read .odo/ledger.md through the daemon (same shape
+// and memory_content field as read_pins; "" when the file is absent).
+// Read-only, generic READ_TIMEOUT.
+#[tauri::command]
+async fn ledger(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "ledger", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M6 precision+ledger: the conversation's note-retraction events
+// (memory_update{layer:"note", cause:"retract"}) for the wiki browser's
+// retracted badges. Read-only, generic READ_TIMEOUT.
+#[tauri::command]
+async fn contradictions(conversation_id: i64) -> Result<Value, String> {
+    let root = default_project_root()?;
+    let req = json!({"cmd": "contradictions", "conversation_id": conversation_id});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,7 +706,9 @@ pub fn run() {
             curate,
             pin,
             read_pins,
-            list_topics
+            list_topics,
+            ledger,
+            contradictions
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

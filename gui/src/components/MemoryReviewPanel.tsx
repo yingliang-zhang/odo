@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
+import { applyMemory, errorMessage, ledger, memoryProposals, readMemory, readPins } from "../api";
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse } from "../types";
 
 // M4 memory review (spec §7): the learner proposes rules at distill time
@@ -7,7 +7,7 @@ import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse } from "../
 // gate — nothing is written until Apply. The batch is fetched here, not
 // threaded from App: App only tracks its size for the sidebar badge.
 
-type Tab = "proposals" | "files";
+type Tab = "proposals" | "files" | "ledger";
 
 interface Props {
   conversationId: number;
@@ -90,6 +90,11 @@ export default function MemoryReviewPanel({
   const [pins, setPins] = useState<string | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
+  // M6: the ledger tab reads .odo/ledger.md (daemon-written verified
+  // metrics) via the ledger command — read-only, never injected.
+  const [ledgerContent, setLedgerContent] = useState<string | null>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
 
   // (Re-)load the pending batch. Nothing pending (epoch absent/0 or no
   // proposals after the daemon's evidence veto) reads as the empty state —
@@ -141,6 +146,25 @@ export default function MemoryReviewPanel({
   useEffect(() => {
     if (tab === "files") void loadFiles();
   }, [tab, loadFiles]);
+
+  // M6 ledger tab: fetched on activation (the daemon is the only writer;
+  // the tab re-reads on each visit so a new distill/apply section shows).
+  const loadLedger = useCallback(async () => {
+    setLedgerLoading(true);
+    try {
+      const resp = await ledger();
+      setLedgerContent(resp.memory_content ?? "");
+      setLedgerError(null);
+    } catch (e) {
+      setLedgerError(errorMessage(e));
+    } finally {
+      setLedgerLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "ledger") void loadLedger();
+  }, [tab, loadLedger]);
 
   // Escape closes, like every other modal affordance.
   useEffect(() => {
@@ -239,6 +263,13 @@ export default function MemoryReviewPanel({
           >
             Current files
           </button>
+          <button
+            type="button"
+            className={`mem-tab${tab === "ledger" ? " active" : ""}`}
+            onClick={() => setTab("ledger")}
+          >
+            Ledger
+          </button>
         </div>
 
         {error && <div className="settings-error">{error}</div>}
@@ -322,6 +353,19 @@ export default function MemoryReviewPanel({
                 <pre className="wiki-content mem-file">{files.user_content || "(empty)"}</pre>
                 <div className="mem-section-title">pins.md (user-authored, verbatim)</div>
                 <pre className="wiki-content mem-file">{pins || "(empty)"}</pre>
+              </>
+            )}
+          </div>
+        )}
+
+        {tab === "ledger" && (
+          <div className="mem-body">
+            {ledgerLoading && <div className="wiki-hint">Loading…</div>}
+            {ledgerError && <div className="wiki-hint">read failed: {ledgerError}</div>}
+            {!ledgerLoading && ledgerContent !== null && (
+              <>
+                <div className="mem-section-title">ledger.md (daemon-written, verified metrics)</div>
+                <pre className="wiki-content mem-file">{ledgerContent || "(empty — distill to write the first section)"}</pre>
               </>
             )}
           </div>

@@ -40,6 +40,20 @@ function mergeEvents(prev: OdoEvent[], next: OdoEvent[]): OdoEvent[] {
   return [...prev, ...fresh].sort((a, b) => a.seq - b.seq);
 }
 
+// M6: a note retraction rides memory_update{layer:"note", cause:"retract"}
+// with detail "<oldNote> contradicted by <newNote>: <snippet>".
+export interface RetractionInfo {
+  oldNote: string;
+  newNote: string;
+  snippet: string;
+}
+
+function parseRetraction(detail: string): RetractionInfo | null {
+  const m = detail.match(/^(\S+) contradicted by (\S+): ([\s\S]*)$/);
+  if (!m) return null;
+  return { oldNote: m[1], newNote: m[2], snippet: m[3] };
+}
+
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [workstream, setWorkstream] = useState<Workstream | null>(null);
@@ -67,6 +81,10 @@ export default function App() {
     layer: string;
     detail?: string;
   } | null>(null);
+  // M6: the contradiction pass chips the sidebar when it retracts a stale
+  // note; a ledger write failure chips as a toast (rare, journaled).
+  const [lastRetraction, setLastRetraction] = useState<RetractionInfo | null>(null);
+  const [lastLedgerFailure, setLastLedgerFailure] = useState<string | null>(null);
   // M3 visibility (spec §3c): project-wide pending-diff counts and running
   // workstreams, refreshed every few poll ticks via pending_counts.
   const [pendingCounts, setPendingCounts] = useState<Record<number, number>>({});
@@ -91,6 +109,9 @@ export default function App() {
   const curatingRef = useRef(false);
   // Auto-dismiss timer for the memory_update chip.
   const memoryChipTimer = useRef<number | undefined>(undefined);
+  // M6: same ephemeral-chip pattern for the retraction + ledger chips.
+  const retractionChipTimer = useRef<number | undefined>(undefined);
+  const ledgerChipTimer = useRef<number | undefined>(undefined);
 
   const recordEvents = useCallback((incoming: OdoEvent[]) => {
     if (incoming.length === 0) return;
@@ -108,7 +129,31 @@ export default function App() {
       // a stale memory_update must not re-chip. This callback only ever
       // sees freshly polled events.
       if (e.type === "memory_update") {
-        setLastMemoryUpdate({ layer: e.payload?.layer ?? "memory", detail: e.payload?.detail });
+        const layer = e.payload?.layer ?? "memory";
+        // M6 (§12/§13): note-layer retractions and ledger write failures
+        // get their own chips; everything else keeps the generic chip.
+        if (layer === "note" && e.payload?.cause === "retract") {
+          const r = parseRetraction(e.payload?.detail ?? "");
+          if (r) {
+            setLastRetraction(r);
+            clearTimeout(retractionChipTimer.current);
+            retractionChipTimer.current = window.setTimeout(
+              () => setLastRetraction(null),
+              MEMORY_CHIP_MS,
+            );
+          }
+          continue;
+        }
+        if (layer === "ledger") {
+          setLastLedgerFailure(e.payload?.detail ?? "ledger write failed");
+          clearTimeout(ledgerChipTimer.current);
+          ledgerChipTimer.current = window.setTimeout(
+            () => setLastLedgerFailure(null),
+            MEMORY_CHIP_MS,
+          );
+          continue;
+        }
+        setLastMemoryUpdate({ layer, detail: e.payload?.detail });
         clearTimeout(memoryChipTimer.current);
         memoryChipTimer.current = window.setTimeout(() => setLastMemoryUpdate(null), MEMORY_CHIP_MS);
       }
@@ -486,14 +531,31 @@ export default function App() {
     setLastMemoryUpdate(null);
   }, []);
 
+  // M6: same dismiss pattern for the retraction + ledger chips.
+  const handleRetractionDismiss = useCallback(() => {
+    clearTimeout(retractionChipTimer.current);
+    retractionChipTimer.current = undefined;
+    setLastRetraction(null);
+  }, []);
+
+  const handleLedgerFailureDismiss = useCallback(() => {
+    clearTimeout(ledgerChipTimer.current);
+    ledgerChipTimer.current = undefined;
+    setLastLedgerFailure(null);
+  }, []);
+
   const handleMemoryReviewClosed = useCallback(() => {
     const cid = conversationRef.current;
     if (cid != null) void refreshMemoryProposals(cid);
   }, [refreshMemoryProposals]);
 
-  // Drop the chip's dismiss timer on unmount.
+  // Drop the chips' dismiss timers on unmount.
   useEffect(() => {
-    return () => clearTimeout(memoryChipTimer.current);
+    return () => {
+      clearTimeout(memoryChipTimer.current);
+      clearTimeout(retractionChipTimer.current);
+      clearTimeout(ledgerChipTimer.current);
+    };
   }, []);
 
   if (!booted && !error) {
@@ -523,6 +585,10 @@ export default function App() {
         pendingMemoryProposals={pendingMemoryProposals}
         lastMemoryUpdate={lastMemoryUpdate}
         onMemoryChipDismiss={handleMemoryChipDismiss}
+        lastRetraction={lastRetraction}
+        onRetractionDismiss={handleRetractionDismiss}
+        lastLedgerFailure={lastLedgerFailure}
+        onLedgerFailureDismiss={handleLedgerFailureDismiss}
         onMemoryReviewClosed={handleMemoryReviewClosed}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}

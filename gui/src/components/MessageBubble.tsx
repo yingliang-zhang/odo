@@ -1,5 +1,5 @@
 import { basename } from "../files";
-import type { OdoEvent } from "../types";
+import type { OdoEvent, RecallItem } from "../types";
 
 const REVIEW_LABEL: Record<string, string> = {
   accept: "Accepted",
@@ -28,28 +28,62 @@ function shortRecallPath(path: string): string {
   return at >= 0 ? path.slice(at + 1) : basename(path);
 }
 
+// M6 (spec risk #4): the recall payload changed from string[] to
+// RecallItem[]; pre-M6 journal events still carry bare strings. Normalize
+// both shapes to RecallItem before rendering.
+function normalizeRecall(recall: readonly unknown[]): RecallItem[] {
+  const out: RecallItem[] = [];
+  for (const item of recall) {
+    if (typeof item === "string") {
+      out.push({ path: item });
+    } else if (item != null && typeof item === "object" && typeof (item as RecallItem).path === "string") {
+      out.push(item as RecallItem);
+    }
+  }
+  return out;
+}
+
 // M4/M5 (spec §8/§10): the chip label is presence-conditioned — only layers
 // actually in `recall` render, e.g. "memory: user.md + memory.md + pins +
 // index + 2 note(s)", "memory: memory.md + index + 1 note(s)", "memory:
-// 2 note(s)".
-function recallChipLabel(recall: string[]): string {
-  const hasUser = recall.includes(USER_MD_PATH);
-  const hasMem = recall.includes(PROJECT_MEM_PATH);
-  const hasPins = recall.includes(PINS_PATH);
-  const hasIndex = recall.includes(INDEX_PATH);
-  const notes =
-    recall.length -
-    (hasUser ? 1 : 0) -
-    (hasMem ? 1 : 0) -
-    (hasPins ? 1 : 0) -
-    (hasIndex ? 1 : 0);
+// 2 note(s)". M6 (§10): when any recalled note has matched_terms, the
+// unique terms suffix the label as "(keyword: auth, authentication)".
+function recallChipLabel(recall: RecallItem[]): string {
+  const paths = new Set(recall.map((it) => it.path));
+  const hasUser = paths.has(USER_MD_PATH);
+  const hasMem = paths.has(PROJECT_MEM_PATH);
+  const hasPins = paths.has(PINS_PATH);
+  const hasIndex = paths.has(INDEX_PATH);
+  const notes = recall.filter(
+    (it) =>
+      it.path !== USER_MD_PATH && it.path !== PROJECT_MEM_PATH && it.path !== PINS_PATH && it.path !== INDEX_PATH,
+  );
   const parts: string[] = [];
   if (hasUser) parts.push("user.md");
   if (hasMem) parts.push("memory.md");
   if (hasPins) parts.push("pins");
   if (hasIndex) parts.push("index");
-  if (notes > 0) parts.push(`${notes} note(s)`);
-  return `memory: ${parts.join(" + ")}`;
+  if (notes.length > 0) parts.push(`${notes.length} note(s)`);
+  const terms: string[] = [];
+  for (const it of notes) {
+    for (const term of it.matched_terms ?? []) {
+      if (!terms.includes(term)) terms.push(term);
+    }
+  }
+  const suffix = terms.length > 0 ? ` (keyword: ${terms.join(", ")})` : "";
+  return `memory: ${parts.join(" + ")}${suffix}`;
+}
+
+// M6 (§10): the tooltip lists each injected source on its own line, with
+// the note's matched terms in brackets when non-empty:
+//   wiki/main-epoch-1.md [auth, authentication]
+function recallTooltip(recall: RecallItem[]): string {
+  return recall
+    .map((it) => {
+      const terms = it.matched_terms ?? [];
+      return shortRecallPath(it.path) + (terms.length > 0 ? ` [${terms.join(", ")}]` : "");
+    })
+    .join("\n");
 }
 
 // Renders one journaled event. Payloads come from the daemon verbatim; every
@@ -72,8 +106,8 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
             </div>
           )}
           {p.recall != null && p.recall.length > 0 && (
-            <div className="recall-chip" title={p.recall.map(shortRecallPath).join("\n")}>
-              {recallChipLabel(p.recall)}
+            <div className="recall-chip" title={recallTooltip(normalizeRecall(p.recall))}>
+              {recallChipLabel(normalizeRecall(p.recall))}
             </div>
           )}
         </div>

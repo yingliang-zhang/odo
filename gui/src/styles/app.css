@@ -1328,6 +1328,15 @@ body {
   font-family: inherit;
 }
 
+/* M6: a note retracted by the contradiction pass stays readable (a record)
+   but is flagged as no longer injected. */
+.wiki-retracted-badge {
+  color: var(--err);
+  font-size: 11px;
+  margin-left: 8px;
+  font-family: inherit;
+}
+
 .wiki-epoch-link {
   background: none;
   border: none;

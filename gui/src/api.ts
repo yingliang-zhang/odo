@@ -9,12 +9,14 @@ import type {
   ApplyMemoryResponse,
   BootstrapResponse,
   CancelResponse,
+  ContradictionsResponse,
   CreateWorkstreamResponse,
   CurateResponse,
   DistillResponse,
   FanoutSendRequest,
   FanoutSendResponse,
   GetSettingsResponse,
+  LedgerResponse,
   ListTopicsResponse,
   ListWikiResponse,
   ListWorkstreamsResponse,
@@ -194,6 +196,19 @@ export async function readPins(): Promise<ReadPinsResponse> {
 // uses its bound project root (a project root is never sent).
 export async function listTopics(): Promise<ListTopicsResponse> {
   return unwrap(await invoke<ListTopicsResponse>("list_topics", { projectRoot: null }));
+}
+
+// M6 precision+ledger: .odo/ledger.md content for the review panel's Ledger
+// tab; same shape and unwrap semantics as readMemory/readPins. The daemon
+// is the only writer; the file is never injected into prompts (pull-only).
+export async function ledger(): Promise<LedgerResponse> {
+  return unwrap(await invoke<LedgerResponse>("ledger", { projectRoot: null }));
+}
+
+// M6 precision+ledger: the conversation's note-retraction events for the
+// wiki browser's "⚠ retracted" badges and the sidebar retraction chip.
+export async function contradictions(conversationId: number): Promise<ContradictionsResponse> {
+  return unwrap(await invoke<ContradictionsResponse>("contradictions", { conversationId }));
 }
 
 // Daemon-level failures arrive with ok:false; transport failures (invoke

@@ -1,6 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { errorMessage, listTopics, listWiki, readWiki } from "../api";
+import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
 import type { WikiNoteInfo } from "../types";
+
+// M6: the retracted-note set names notes filtered out of recall by the
+// contradiction pass — parsed from each retraction event's detail (the
+// first token, per the daemon's "<old> contradicted by <new>: …" format).
+function retractedNames(events: { payload: { detail?: string } }[]): Set<string> {
+  const out = new Set<string>();
+  for (const e of events) {
+    const first = (e.payload?.detail ?? "").split(" ", 1)[0];
+    if (first) out.add(first);
+  }
+  return out;
+}
 
 // The daemon allows exactly one path outside <project>/wiki/: the pinned
 // global user memory, shown as the always-present first row of the Notes
@@ -43,6 +55,9 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
   const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  // M6 (§12): names of notes retracted by the contradiction pass — they
+  // stay readable (records) but get a "⚠ retracted" badge.
+  const [retracted, setRetracted] = useState<Set<string>>(new Set());
   const [topics, setTopics] = useState<WikiNoteInfo[] | null>(null);
   const [topicsError, setTopicsError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string>(USER_MD_PATH);
@@ -63,6 +78,16 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
         }
       } catch (e) {
         if (!cancelled) setListError(errorMessage(e));
+      }
+    })();
+    // M6: retraction badges ride the same fetch wave; a failure degrades
+    // to no badges (the note list is still fully usable).
+    (async () => {
+      try {
+        const resp = await contradictions(conversationId);
+        if (!cancelled) setRetracted(retractedNames(resp.events ?? []));
+      } catch {
+        // Badges are optional surface; never disturb the browser.
       }
     })();
     return () => {
@@ -201,7 +226,17 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
                     title={n.path}
                     onClick={() => setSelected(n.path)}
                   >
-                    <span className="wiki-row-name">{n.name}</span>
+                    <span className="wiki-row-name">
+                      {n.name}
+                      {retracted.has(n.name) && (
+                        <span
+                          className="wiki-retracted-badge"
+                          title="Retracted by the contradiction pass — still readable, no longer injected"
+                        >
+                          ⚠ retracted
+                        </span>
+                      )}
+                    </span>
                     <span className="wiki-row-meta">
                       epoch {n.epoch}
                       {relativeTime(n.modified_at) !== "" ? ` · ${relativeTime(n.modified_at)}` : ""}

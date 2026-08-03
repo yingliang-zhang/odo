@@ -28,6 +28,18 @@ func main() {
 	flag.StringVar(&socketFlag, "socket", "", "IPC socket path (default: <project>/.odo/odo.sock)")
 	flag.Parse()
 
+	// M6: subcommand dispatch. `odo wiki read <page>` / `odo ledger [tail N]`
+	// are pull-based recall CLIs that read files directly (no daemon); any
+	// other invocation without a subcommand runs the daemon below.
+	if args := flag.Args(); len(args) > 0 {
+		switch args[0] {
+		case "wiki":
+			os.Exit(runWikiCLI(args[1:]))
+		case "ledger":
+			os.Exit(runLedgerCLI(args[1:]))
+		}
+	}
+
 	root := projectFlag
 	if root == "" {
 		var err error

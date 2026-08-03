@@ -188,6 +188,10 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleReadPins(ctx, req)
 	case CmdListTopics:
 		resp, err = s.handleListTopics(ctx, req)
+	case CmdLedger:
+		resp, err = s.handleLedger(ctx, req)
+	case CmdContradictions:
+		resp, err = s.handleContradictions(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -355,15 +359,15 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
-	ml := s.memoryLayers(w.Name)
+	ml := s.memoryLayers(ctx, w.Name, c.ID, req.Text)
 
 	// Journal the user message with attachments (spec item 5).
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
 	}
-	if len(ml.recall) > 0 {
-		msgPayload["recall"] = ml.recall
+	if jr := ml.journalRecall(); len(jr) > 0 {
+		msgPayload["recall"] = jr
 	}
 	if len(ml.receipt) > 0 {
 		msgPayload["receipt"] = ml.receipt
@@ -416,16 +420,17 @@ type memoryLayers struct {
 	pins    string // .odo/pins.md (M5: user-authored, verbatim)
 	index   string // wiki/index.md (M5: always-injected)
 	wiki    string // recalled epoch notes block
-	recall  []string
+	recall  []recallItem // M6: was []string, now per-note with matched terms
 	receipt map[string]string
 }
 
 // memoryLayers reads the current memory layers for the workstream and builds
-// the recall list (user.md → memory.md → pins.md → index.md → note paths)
-// plus the sha16 receipt for every non-empty layer (per-note hashes cover
-// the exact injected block, header and separator included). Layers
-// absent/empty appear in neither.
-func (s *Server) memoryLayers(wsName string) memoryLayers {
+// the recall items plus the sha16 receipt for every non-empty layer
+// (per-note hashes cover the exact injected block, header and separator
+// included). The query is the user's message text (M6 keyword recall);
+// retracted notes (the journal's note-layer retraction set) are excluded.
+// Layers absent/empty appear in neither.
+func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID int64, query string) memoryLayers {
 	ml := memoryLayers{
 		user:    readUserMemory(),
 		project: readProjectMemory(s.projectRoot),
@@ -433,29 +438,58 @@ func (s *Server) memoryLayers(wsName string) memoryLayers {
 		index:   readIndex(s.projectRoot),
 		receipt: map[string]string{},
 	}
-	m, notePaths, noteBytes := recallWikiNotes(s.projectRoot, wsName)
+	retracted := s.retractedNotes(ctx, conversationID)
+	m, items, noteBytes := recallWikiNotes(s.projectRoot, wsName, query, retracted)
 	ml.wiki = m
 	if ml.user != "" {
 		ml.receipt["~/.odo/user.md"] = sha16([]byte(ml.user))
-		ml.recall = append(ml.recall, "~/.odo/user.md")
 	}
 	if ml.project != "" {
 		ml.receipt[".odo/memory.md"] = sha16([]byte(ml.project))
-		ml.recall = append(ml.recall, ".odo/memory.md")
 	}
 	if ml.pins != "" {
 		ml.receipt[".odo/pins.md"] = sha16([]byte(ml.pins))
-		ml.recall = append(ml.recall, ".odo/pins.md")
 	}
 	if ml.index != "" {
 		ml.receipt["wiki/index.md"] = sha16([]byte(ml.index))
-		ml.recall = append(ml.recall, "wiki/index.md")
 	}
-	for i, p := range notePaths {
-		ml.receipt[p] = sha16(noteBytes[i])
+	for i, it := range items {
+		ml.receipt[it.path] = sha16(noteBytes[i])
 	}
-	ml.recall = append(ml.recall, notePaths...)
+	ml.recall = items
 	return ml
+}
+
+// journalRecall serializes the recall payload for the user_message event
+// (M6): fixed-marker layers first in daemon order as {"path": …} objects
+// (matched_terms omitted — they are always-injected, not keyword-selected),
+// then the recalled notes with optional matched_terms. M6 shape change:
+// []string → []object (payload-key extension, ADR-0002 preserved).
+func (ml *memoryLayers) journalRecall() []interface{} {
+	var out []interface{}
+	add := func(path string) {
+		out = append(out, map[string]interface{}{"path": path})
+	}
+	if ml.user != "" {
+		add("~/.odo/user.md")
+	}
+	if ml.project != "" {
+		add(".odo/memory.md")
+	}
+	if ml.pins != "" {
+		add(".odo/pins.md")
+	}
+	if ml.index != "" {
+		add("wiki/index.md")
+	}
+	for _, it := range ml.recall {
+		item := map[string]interface{}{"path": it.path}
+		if len(it.matchedTerms) > 0 {
+			item["matched_terms"] = it.matchedTerms
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // buildPrompt renders the agent prompt. Layers inject in ADR-0003's stable
@@ -539,14 +573,14 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 	if err != nil {
 		return Response{}, err
 	}
-	ml := s.memoryLayers(w.Name)
+	ml := s.memoryLayers(ctx, w.Name, c.ID, req.Text)
 
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
 	}
-	if len(ml.recall) > 0 {
-		msgPayload["recall"] = ml.recall
+	if jr := ml.journalRecall(); len(jr) > 0 {
+		msgPayload["recall"] = jr
 	}
 	if len(ml.receipt) > 0 {
 		msgPayload["receipt"] = ml.receipt
@@ -814,6 +848,19 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 
 	applied := false
 	if action == "accept" {
+		// M6 (§8b): explicit guarded-path check — gitignore is not the
+		// enforcement point (wiki/ is NOT gitignored, so this daemon-side
+		// guard is the sole protection for daemon-owned content). The diff
+		// stays pending on a violation; the user can still reject it.
+		if paths, gerr := diffTargetPaths(d.PathOnDisk); gerr == nil {
+			if perr := rejectProtectedPaths(paths); perr != nil {
+				_, _ = s.store.AppendEvent(ctx, d.ConversationID, store.EventAgentError,
+					mustJSON(map[string]interface{}{"error": "accept_diff: " + perr.Error()}))
+				return Response{}, perr
+			}
+		}
+		// An unreadable patch file falls through to git apply, the authority
+		// on the patch format (its error names the file problem).
 		if err := git.ApplyDiff(s.projectRoot, d.PathOnDisk); err != nil {
 			// Stay pending: review didn't conclude. The git error text says why.
 			return Response{}, fmt.Errorf("accept_diff: apply: %w", err)
@@ -1133,6 +1180,7 @@ const distillTimeout = 10 * time.Minute
 // daemon but never touches the user's working tree. Old events stay in the
 // append-only journal; only the epoch counter moves (ADR-0002).
 func (s *Server) handleDistill(ctx context.Context, req Request) (Response, error) {
+	start := time.Now() // M6: distill duration metric (ledger)
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
@@ -1168,24 +1216,47 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		return Response{}, fmt.Errorf("distill: write wiki note: %w", err)
 	}
 
+	// M6: contradiction pass (daemon-side, no LLM). Runs between the note
+	// write and the learner, before the epoch moves.
+	noteName := fmt.Sprintf("%s-epoch-%d", w.Name, c.Epoch)
+	contradictions := s.runContradictionPass(ctx, c.ID, noteName, note, c.Epoch)
+
 	// Learner pass (M4 §2): propose behavior rules from the note just
 	// written, journaled before the epoch moves so the propose event's epoch
 	// is the distilled note's epoch (c.Epoch pre-increment, not newEpoch).
 	// A learner failure degrades to a journaled memory_update and never
 	// fails the distill.
-	noteName := fmt.Sprintf("%s-epoch-%d", w.Name, c.Epoch)
 	proposals := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
 
 	newEpoch, err := s.store.IncrementEpoch(ctx, c.ID)
 	if err != nil {
 		return Response{}, err
 	}
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
-		"action":    "distill",
-		"epoch":     newEpoch,
-		"wiki_path": wikiPath,
-	})); err != nil {
+	distillEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action":         "distill",
+		"epoch":          newEpoch,
+		"wiki_path":      wikiPath,
+		"duration_ms":    time.Since(start).Milliseconds(), // M6: ledger metric
+		"contradictions": contradictions,                    // M6: contradiction report count
+	}))
+	if err != nil {
 		return Response{}, err
+	}
+
+	// M6: ledger append (best-effort, after the distill event so its seq is
+	// citable). Section header uses c.Epoch — the distilled note's epoch,
+	// not newEpoch (the counter after increment). A write failure journals
+	// memory_update{layer:"ledger", cause:"write_failed"} but never fails
+	// the distill.
+	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
+		if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d", c.Epoch),
+			distillLedgerMetrics(events, distillEv, lastRecallCount(events))); err != nil {
+			_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+				"layer":  "ledger",
+				"cause":  "write_failed",
+				"detail": err.Error(),
+			}))
+		}
 	}
 	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: proposals}, nil
 }
@@ -1209,6 +1280,103 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 		}
 	}
 	return Response{PendingCounts: counts, RunningWorkstreams: running}, nil
+}
+
+// handleLedger returns the .odo/ledger.md content as memory_content (same
+// shape as read_pins; "" when the file is absent). The ledger is read-only
+// in the UI — the daemon is the only writer. Read-only: no journal writes.
+func (s *Server) handleLedger(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("ledger: %w", err)
+	}
+	return Response{MemoryContent: readFileFull(ledgerPath(s.projectRoot))}, nil
+}
+
+// handleContradictions returns the conversation's note-retraction events
+// (memory_update{layer:"note", cause:"retract"}) for the wiki browser's
+// "⚠ retracted" badges. Read-only: no journal writes.
+func (s *Server) handleContradictions(ctx context.Context, req Request) (Response, error) {
+	c, err := s.checkConversation(ctx, req.ConversationID)
+	if err != nil {
+		return Response{}, err
+	}
+	events, err := s.store.ListEvents(ctx, c.ID, 0)
+	if err != nil {
+		return Response{}, err
+	}
+	var out []store.Event
+	for _, ev := range events {
+		if ev.Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Layer string `json:"layer"`
+			Cause string `json:"cause"`
+		}
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			continue
+		}
+		if p.Layer == "note" && p.Cause == "retract" {
+			out = append(out, ev)
+		}
+	}
+	return Response{Events: out}, nil
+}
+
+// diffTargetPaths reads the unified diff at pathOnDisk and returns the
+// target (b-side) path of each file header: from "+++ b/<path>" lines, or
+// the b-side of "diff --git a/<x> b/<y>" when +++ is absent (mode-only
+// changes). Malformed headers are skipped — git apply is the authority on
+// the patch format; this is an overlay check, not a parser.
+func diffTargetPaths(pathOnDisk string) ([]string, error) {
+	b, err := os.ReadFile(pathOnDisk)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	pendingB := "" // b-side of a diff --git header with no +++ line yet
+	for _, line := range strings.Split(string(b), "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			if pendingB != "" {
+				paths = append(paths, pendingB)
+			}
+			pendingB = ""
+			// `diff --git a/<x> b/<y>` — the b-side follows the last " b/".
+			rest := strings.TrimPrefix(line, "diff --git ")
+			if i := strings.LastIndex(rest, " b/"); i >= 0 {
+				pendingB = rest[i+len(" b/"):]
+			}
+		case strings.HasPrefix(line, "+++ "):
+			pendingB = "" // resolved by this +++ line (even /dev/null)
+			target := strings.TrimPrefix(line, "+++ ")
+			if i := strings.IndexByte(target, '\t'); i >= 0 {
+				target = target[:i] // strip an optional trailing timestamp
+			}
+			target = strings.TrimSpace(target)
+			if strings.HasPrefix(target, "b/") {
+				paths = append(paths, strings.TrimPrefix(target, "b/"))
+			}
+		}
+	}
+	if pendingB != "" {
+		paths = append(paths, pendingB)
+	}
+	return paths, nil
+}
+
+// rejectProtectedPaths errs when any target path lives under a protected
+// prefix (ADR-0003 invariant 1: agents never write memory). Protected:
+// .odo/ (memory.md, memory-archive.md, pins.md, ledger.md, journal.sqlite,
+// worktrees) and wiki/ (epoch notes, topics, index.md — derived artifacts
+// owned by the daemon, not the agent).
+func rejectProtectedPaths(paths []string) error {
+	for _, f := range paths {
+		if strings.HasPrefix(f, ".odo/") || strings.HasPrefix(f, "wiki/") {
+			return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
+		}
+	}
+	return nil
 }
 
 // handleListWiki lists the distilled wiki notes for the conversation's
@@ -1512,8 +1680,9 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 		}
 	}
 
-	// Batch-consumed marker (daemon-computed counts, ADR inv 4).
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	// Batch-consumed marker (daemon-computed counts, ADR inv 4) — captured
+	// so the M6 ledger row can cite its seq.
+	applyEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":   "memory_apply",
 		"epoch":    batch.epoch,
 		"accepted": req.Accepted,
@@ -1522,8 +1691,20 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 			"accepted": len(req.Accepted),
 			"rejected": len(rejected),
 		},
-	})); err != nil {
+	}))
+	if err != nil {
 		return Response{}, err
+	}
+
+	// M6: ledger append (best-effort). Separate "(apply)" section: the file
+	// is append-only and a later epoch's distill section may already follow
+	// the epoch this apply belongs to.
+	if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d (apply)", batch.epoch), applyLedgerMetrics(applyEv)); err != nil {
+		_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "ledger",
+			"cause":  "write_failed",
+			"detail": err.Error(),
+		}))
 	}
 	return Response{Applied: true}, nil
 }
