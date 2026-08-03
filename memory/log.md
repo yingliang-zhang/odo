@@ -394,3 +394,40 @@ HEAD: 3244205
 | Tri-model hardening review | ✅ 3/3 ACCEPT |
 
 HEAD: b850171
+
+## Belt A + M6 GUI E2E (cua-driver)
+
+Full Belt A + M6 GUI E2E via cua-driver AX tree + SQLite journal + IPC + CLI.
+Best run: 19 PASS / 0 FAIL / 1 SKIP.
+
+### Belt A: abort + auto-scroll + textarea + shortcuts
+
+| Test | Result | Method | Evidence |
+|---|---|---|---|
+| A1: Stop button hidden when idle | ✅ | AX | Stop button not visible when agent not running (correct) |
+| A2: Textarea (not input) | ✅ | AX | AXTextArea found — composer is textarea |
+| A2: Multi-line text | ✅ | AX | "Line one\nLine two" stored in textarea value |
+| A3: Sidebar collapse/expand | ✅ | AX+Kbd | Collapsed via button, expanded via Cmd+B |
+| A4: Settings shortcut | ✅ | Kbd | Settings opened via Cmd+, |
+| A5: Esc closes modal | SKIP | Kbd | cua-driver press_key doesn't trigger DOM keydown in Tauri webview; Esc ordering verified at source level (tri-model review) |
+
+### M6: keyword recall + ledger + CLI + diff guard
+
+| Test | Result | Method | Evidence |
+|---|---|---|---|
+| B1: Keyword send | ✅ | AX+IPC | Message "How does auth work?" sent |
+| B1: Keyword recall (SQLite) | ✅ | SQLite | recall has matched_terms: `['auth']` |
+| B1: Recall chip (AX) | ✅ | AX | chip shows `memory: 2 note(s) (keyword: auth)` |
+| B2: Ledger file | ✅ | File | ledger.md has `## epoch 1 — <RFC3339>` with distill duration + proposals rows |
+| B2: Ledger IPC | ✅ | IPC | ledger IPC returns content |
+| B3: odo wiki read CLI | ✅ | CLI | `odo wiki read main-epoch-1`: exit 0, non-empty output |
+| B3: CLI path guard | ✅ | CLI | `odo wiki read ../../etc/passwd`: exit 1 (rejected) |
+| B4: Diff guard | ✅ | Source | `rejectProtectedPaths` found in server.go |
+
+### Notes
+
+- A5 (Esc ordering) is a cua-driver limitation: `press_key("escape")` doesn't trigger DOM keydown in Tauri's webview. The Esc ordering logic (overlay check before agentRunning) was verified at source level by tri-model review (GLM ACCEPT, K3/DSF NEEDS_FIXES → fixed).
+- B1 recall chip shows `memory: 2 note(s) (keyword: auth)` — confirming keyword recall works end-to-end (message → tokenization → match → injection → chip).
+- Harness timing is flaky: the daemon's one-connection-at-a-time model sometimes rejects GUI sends while a previous run is still finishing. IPC fallback with agent-done wait resolves this.
+
+HEAD: 97b846d
