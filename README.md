@@ -18,7 +18,35 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-Pre-v0.1. Auto-development in progress.
+M0–M7 complete. 76 commits, ~21K lines (12.5K Go + 8.1K TS/CSS/Rust).
+
+| Milestone | What it delivers | Tests |
+|---|---|---|
+| M0 Bootstrap | Go daemon, SQLite journal, OMP adapter, worktree plumbing, Tauri shell | 10 Go |
+| M1 Visible Loop | Send message → agent runs → diff lands → Accept/Reject → git apply | 14 Go |
+| M2 Diff Review | Split diff viewer, settings panel, MoA fan-out, model/adapter selector | 14 Go + GUI |
+| M3 Memory Layers | Recall chip on user message, per-workstream wiki, pending-diff counts | 17 Go + AX |
+| M4 Distiller + Learner | Epoch distill → wiki note, learner proposes memory rules | 17 Go + AX |
+| M5 Curation | Topic pages + index.md rewrite, pin memory, curator pass | 17 Go + 32 E2E |
+| M6 Precision + Ledger | Contradiction detection, note retraction, verified metrics ledger | 14 Go + 19 E2E |
+| M7 Live Streaming | Block-level streaming via OMP `--mode json`, preview bubble, adaptive poll | 7 adapter + 1 E2E + integration |
+| Sidebar Redesign | 48px icon rail, 4 sections, toast viewport, collapse (⌘B) | computer-use E2E |
+| GUI Belt A–D | Abort, scroll, textarea, shortcuts, markdown, search, palette, split diff, theme, empty state, a11y | 58 E2E |
+| Hardening | 8 tri-model review items (path guard, retraction dedup, CSS var, palette trap) | 3 Go |
+
+### Features
+
+- **Conversation-centric**: every run journals typed events (`user_message`, `agent_text`, `agent_tool_call`, `agent_tool_result`, `agent_done`, `agent_error`, `review_action`, `memory_update`) to an append-only SQLite store
+- **Live streaming**: OMP `--mode json` JSONL stream tailed with byte-offset cursor; preview bubble shows in-flight block with pulsing caret; adaptive poll (350ms running / 1500ms idle)
+- **Memory architecture**: 6-layer (journal → epoch notes → topic pages → memory.md → user.md → ledger.md), one-way promotion, contradiction detection + retraction
+- **Diff review**: unified + split view, Accept applies the diff to the project repo and commits, Reject discards the worktree
+- **Sidebar**: 48px collapsed icon rail, 4 sections (Workstreams, Capture, Knowledge, System), ⌘B toggle
+- **Command palette** (⌘K): distill, curate, pin, open wiki, settings, switch workstream
+- **Chat search** (⌘F): in-conversation text search with jump-to-match
+- **Markdown rendering**: agent text renders as markdown with syntax-highlighted code blocks
+- **MoA fan-out**: run a prompt through N parallel agents, results journal independently
+- **Theme**: dark/light, persisted to localStorage
+- **Keyboard shortcuts**: ⌘↵ send, ⌘B sidebar, ⌘F search, ⌘K palette, ⌘, settings, Esc stop/clear
 
 ## License
 
@@ -80,16 +108,20 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 ```
 ┌──────────────────────────────────────────────────┐
 │  Tauri 2 shell (React + Vite in native WebView)  │
-│  Chat surface + tool ticker + stuck indicator     │
-│  Diff viewer + model/adapter selector              │
+│  Sidebar (48px rail / 4 sections / ⌘B)            │
+│  Chat surface (run groups, preview bubble, search) │
+│  Diff viewer (unified + split) + Markdown renderer  │
+│  Command palette (⌘K) + Settings (⌘,)              │
 ├──────────────────────────────────────────────────┤
-│  Unix socket IPC (typed JSON)                      │
+│  Unix socket IPC (typed JSON, preview + streaming) │
 ├──────────────────────────────────────────────────┤
 │  Go daemon                                         │
 │  ┌──────────┐ ┌──────────┐ ┌────────────────────┐ │
 │  │ SQLite   │ │ Adapter  │ │ Memory Distiller   │ │
-│  │ Journal  │ │ Runner   │ │ (epoch → wiki)      │ │
-│  │ (events) │ │ (OMP/Pi) │ │                    │ │
+│  │ Journal  │ │ (OMP/Pi) │ │ (epoch → wiki)      │ │
+│  │ (events) │ │ --mode   │ │ Curator (M5)        │ │
+│  │          │ │  json    │ │ Learner (M4)        │ │
+│  │          │ │ ↗stream  │ │ Ledger (M6)         │ │
 │  └──────────┘ └──────────┘ └────────────────────┘ │
 │       │            │                               │
 │       │            ▼                               │
@@ -106,7 +138,8 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 └──────────────────────────────────────────────────┘
         │
         ▼
-  OMP / Pi / Claude Code (headless CLI agents)
+  OMP / Pi (headless CLI agents)
+  --mode json → JSONL event stream (M7)
 ```
 
 ### Design invariants
@@ -121,12 +154,34 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 3. **Append-only SQLite journal.** Typed queries, no ORM. Every state
    transition is an append to the journal, not an in-place update.
 
+4. **Streaming is non-blocking.** The adapter tails `output.txt` with a
+   byte-offset cursor per `Events()` call; the daemon strips the transient
+   preview before journaling. No background goroutine, no WebSocket.
+
+## Build and run
+
+```bash
+# Go daemon + tests
+go build ./... && go vet ./... && go test ./... -count=1
+
+# GUI (TypeScript + Vite)
+cd gui && PATH=~/.hermes/node/bin:$PATH npx tsc --noEmit && npm run build
+
+# Tauri Rust shell
+cd gui/src-tauri && PATH=~/.cargo/bin:$PATH cargo check
+
+# Run the app (starts daemon + Tauri dev server)
+cd gui && PATH=~/.hermes/node/bin:$PATH npm run tauri:dev
+
+# Real OMP streaming integration test (needs API keys + network)
+go test -tags=integration -v -timeout=120s ./internal/adapter/ -run TestRealOMPStreaming
+```
+
 ### What Odo does NOT have (deliberately)
 
 - No cryptographic attestation (deferred to M1+)
 - No sandbox containment (agents run in user's environment)
 - No frozen contract pipelines
-- No multi-model MoA review — **shipped in M2** (`review_diff` IPC + DiffViewer panel)
 - No grill/adversarial review system
 
 ## Repository and session design
@@ -146,7 +201,7 @@ Memory is layered, scoped, and journal-anchored (full rationale:
 
 | Layer | Path | Injected? | Holds |
 |---|---|---|---|
-| journal | `.odo/journal.db` | never (substrate) | everything, full fidelity |
+| journal | `.odo/journal.sqlite` | never (substrate) | everything, full fidelity |
 | epoch notes | `wiki/<ws>-epoch-N.md` | selected ≤12 KB | records — narratives, dated decisions |
 | topic pages + `index.md` | `wiki/` (M5) | index ≤2 KB always | curated project knowledge |
 | `memory.md` | `.odo/memory.md` (M4) | always ≤4 KB | project rules every run obeys |
