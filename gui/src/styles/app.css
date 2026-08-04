@@ -1105,6 +1105,14 @@ body {
 
 /* ---------- Belt C: run grouping (spec §Fix 1) ---------- */
 
+/* Run group: must be a flex column so child bubbles retain their
+   align-self (left/right) alignment from .message-list's flex context. */
+.run-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 /* Run separator: a thin line with the run metadata line sitting on top
    of each group. */
 .run-header {
