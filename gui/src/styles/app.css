@@ -75,11 +75,32 @@ body {
 }
 
 .error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: #4a2426;
   border-bottom: 1px solid var(--err);
   color: #f0b8b8;
   padding: 6px 12px;
   font-size: 13px;
+}
+
+/* Belt C (§Fix 2): banner dismiss button — collapse-btn pattern tuned
+   for the red background. */
+.error-banner .dismiss-btn {
+  background: none;
+  border: none;
+  color: #f0b8b8;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: auto;
+}
+
+.error-banner .dismiss-btn:hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.25);
 }
 
 /* ---------- Sidebar ---------- */
@@ -1082,6 +1103,67 @@ body {
   text-overflow: ellipsis;
 }
 
+/* ---------- Belt C: run grouping (spec §Fix 1) ---------- */
+
+/* Run separator: a thin line with the run metadata line sitting on top
+   of each group. */
+.run-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* The bare .run-status class belongs to the live-run bar under the
+   message list (M3); scoped overrides keep the header icon inline. */
+.run-header .run-status {
+  padding: 0;
+  border-top: none;
+  background: none;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.run-header .run-status.done {
+  color: var(--ok);
+}
+
+.run-header .run-status.error {
+  color: var(--err);
+}
+
+.run-header .run-status.running {
+  color: var(--accent-user);
+}
+
+/* Consecutive tool events collapse under one native <details> toggle. */
+.tool-group {
+  margin: 4px 0;
+}
+
+.tool-group summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  user-select: none;
+}
+
+.tool-group summary:hover {
+  color: var(--text);
+  background: var(--bg-input);
+}
+
+.tool-group[open] summary {
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
 /* ---------- M3: workstream badges (spec §3c) ---------- */
 
 .ws-meta {
@@ -1120,6 +1202,28 @@ body {
 }
 
 /* ---------- M3: wiki browser (spec §2b) ---------- */
+
+/* Belt C (§Fix 3): client-side filter input — same shape as the chat
+   composer textarea, sized down for the modal. */
+.wiki-search {
+  margin-bottom: 12px;
+}
+
+.wiki-search input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.wiki-search input:focus {
+  outline: none;
+  border-color: var(--accent-user);
+}
 
 .wiki-count {
   margin: 6px 0 2px;

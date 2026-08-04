@@ -71,6 +71,72 @@ function searchableText(e: OdoEvent): string {
   }
 }
 
+// Belt C (§Fix 1): a run starts at each user_message and ends at the
+// next user_message (or end of log). Events before the first user_message
+// in the epoch window (rare — a run spanning a distill boundary loses its
+// start message to the epoch filter) render as a headerless preamble
+// group.
+interface RunGroup {
+  start: OdoEvent | null;
+  events: OdoEvent[];
+}
+
+// One unit of rendered output inside a run: a plain bubble, or a bundle of
+// consecutive tool events collapsed under a "N tool calls" <details>
+// toggle. Bundling only consecutive tool events keeps the toggle at the
+// calls' position in the run's narrative.
+type RunRenderItem =
+  | { kind: "bubble"; event: OdoEvent }
+  | { kind: "tools"; events: OdoEvent[]; calls: number };
+
+function runRenderItems(events: OdoEvent[]): RunRenderItem[] {
+  const items: RunRenderItem[] = [];
+  let tools: OdoEvent[] = [];
+  const flush = () => {
+    if (tools.length > 0) {
+      const calls = tools.filter((e) => e.type === "agent_tool_call").length;
+      items.push({ kind: "tools", events: tools, calls });
+      tools = [];
+    }
+  };
+  for (const ev of events) {
+    if (ev.type === "agent_tool_call" || ev.type === "agent_tool_result") {
+      tools.push(ev);
+    } else {
+      flush();
+      items.push({ kind: "bubble", event: ev });
+    }
+  }
+  flush();
+  return items;
+}
+
+// Run header: timestamp, tool call count, duration when the run journaled
+// agent_done, and a status icon (✓ done / ✗ error / ⟳ running).
+function RunHeader({ group }: { group: RunGroup }) {
+  const start = group.start;
+  if (!start) return null;
+  const toolCalls = group.events.filter((e) => e.type === "agent_tool_call").length;
+  const done = group.events.find((e) => e.type === "agent_done");
+  const failed = group.events.find((e) => e.type === "agent_error");
+  const status = failed ? "error" : done ? "done" : "running";
+  const icon = failed ? "✗" : done ? "✓" : "⟳";
+  const startMs = Date.parse(start.created_at);
+  const clock = Number.isNaN(startMs)
+    ? "?"
+    : new Date(startMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const doneMs = done ? Date.parse(done.created_at) : NaN;
+  const showDuration = done !== undefined && !Number.isNaN(startMs) && !Number.isNaN(doneMs);
+  return (
+    <div className="run-header">
+      <span className={`run-status ${status}`}>{icon}</span>
+      <span>{clock}</span>
+      <span>{`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`}</span>
+      {showDuration && <span>{formatElapsed(doneMs - startMs)}</span>}
+    </div>
+  );
+}
+
 // Chat log plus composer. File attachments arrive via Tauri's drag-drop
 // events — the only source of real file paths in the webview — and via
 // clipboard paste. HTML5 drag events are kept as a fallback; they only fire
@@ -323,9 +389,28 @@ export default function ChatSurface({
     [events, lastDistillSeq],
   );
 
+  // Belt C (§Fix 1): group the visible events into runs — each
+  // user_message opens a new group; everything until the next one belongs
+  // to it.
+  const runGroups = useMemo<RunGroup[]>(() => {
+    const groups: RunGroup[] = [];
+    for (const ev of visibleEvents) {
+      if (ev.type === "user_message") {
+        groups.push({ start: ev, events: [ev] });
+      } else if (groups.length === 0) {
+        groups.push({ start: null, events: [ev] });
+      } else {
+        groups[groups.length - 1].events.push(ev);
+      }
+    }
+    return groups;
+  }, [visibleEvents]);
+
   // Belt B search: one entry per occurrence, in display order — the current
   // match index resolves to the seq of its bubble for scroll-into-view.
   const trimmedQuery = searchQuery.trim();
+  const searchActive = searchOpen && trimmedQuery !== "";
+  const activeHighlight = searchActive ? trimmedQuery : undefined;
   const matches = useMemo(() => {
     if (!searchOpen || trimmedQuery === "") return [];
     const needle = trimmedQuery.toLowerCase();
@@ -493,12 +578,31 @@ export default function ChatSurface({
             and its diff lands here for review.
           </div>
         )}
-          {visibleEvents.map((ev) => (
-            <MessageBubble
-              key={ev.seq}
-              event={ev}
-              highlight={searchOpen && trimmedQuery !== "" ? trimmedQuery : undefined}
-            />
+          {runGroups.map((group) => (
+            <div className="run-group" key={group.start?.seq ?? "preamble"}>
+              <RunHeader group={group} />
+              {runRenderItems(group.events).map((item) =>
+                item.kind === "bubble" ? (
+                  <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} />
+                ) : (
+                  // Tool calls default-collapsed; an active ⌘F search
+                  // forces them open so jump-to-match still reaches tool
+                  // bubbles (the <details> `open` attribute, no JS state).
+                  <details
+                    className="tool-group"
+                    key={`tools-${item.events[0].seq}`}
+                    open={searchActive}
+                  >
+                    <summary>
+                      {item.calls} tool call{item.calls === 1 ? "" : "s"}
+                    </summary>
+                    {item.events.map((ev) => (
+                      <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} />
+                    ))}
+                  </details>
+                ),
+              )}
+            </div>
           ))}
           <ToolTicker running={agentRunning} events={events} />
         </div>

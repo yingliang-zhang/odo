@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
 import type { WikiNoteInfo } from "../types";
-import Markdown from "./Markdown";
+import Markdown, { highlightText } from "./Markdown";
 
 // M6: the retracted-note set names notes filtered out of recall by the
 // contradiction pass — parsed from each retraction event's detail (the
@@ -65,6 +65,18 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [contentLoading, setContentLoading] = useState(true);
   const cache = useRef(new Map<string, string>());
+  // Belt C (§Fix 3): client-side list filter — matches title, plus the
+  // note's content when it has already been read into cache this session
+  // (no IPC; unread notes match by title only).
+  const [query, setQuery] = useState("");
+  const trimmed = query.trim();
+  const needle = trimmed === "" ? undefined : trimmed;
+  const matchesQuery = (name: string, path: string): boolean => {
+    if (needle === undefined) return true;
+    const lower = needle.toLowerCase();
+    if (name.toLowerCase().includes(lower)) return true;
+    return cache.current.get(path)?.toLowerCase().includes(lower) ?? false;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -203,23 +215,46 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
           </button>
         </div>
 
+        <div className="wiki-search">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              // Esc clears a non-empty query instead of closing the whole
+              // browser (the panel's own Esc handler owns the empty case).
+              if (e.key === "Escape" && query !== "") {
+                e.stopPropagation();
+                setQuery("");
+              }
+            }}
+            placeholder="Search wiki…"
+            aria-label="Search wiki"
+          />
+        </div>
+
         <div className="wiki-body">
           <div className="wiki-list">
             {tab === "notes" && (
               <>
-                <button
-                  type="button"
-                  className={`wiki-row${selected === USER_MD_PATH ? " selected" : ""}`}
-                  onClick={() => setSelected(USER_MD_PATH)}
-                >
-                  <span className="wiki-row-name">user.md (global)</span>
-                </button>
+                {matchesQuery("user.md (global)", USER_MD_PATH) && (
+                  <button
+                    type="button"
+                    className={`wiki-row${selected === USER_MD_PATH ? " selected" : ""}`}
+                    onClick={() => setSelected(USER_MD_PATH)}
+                  >
+                    <span className="wiki-row-name">{highlightText("user.md (global)", needle, "umd")}</span>
+                  </button>
+                )}
                 {notes === null && !listError && <div className="wiki-hint">Loading…</div>}
                 {listError && <div className="wiki-hint">list failed: {listError}</div>}
                 {notes !== null && notes.length === 0 && (
                   <div className="wiki-hint">No wiki notes yet — Distill writes the first one.</div>
                 )}
-                {notes?.map((n) => (
+                {notes !== null && needle !== undefined && notes.filter((n) => matchesQuery(n.name, n.path)).length === 0 && !matchesQuery("user.md (global)", USER_MD_PATH) && (
+                  <div className="wiki-hint">No notes match “{needle}”.</div>
+                )}
+                {notes?.filter((n) => matchesQuery(n.name, n.path)).map((n) => (
                   <button
                     type="button"
                     key={n.path}
@@ -228,7 +263,7 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
                     onClick={() => setSelected(n.path)}
                   >
                     <span className="wiki-row-name">
-                      {n.name}
+                      {highlightText(n.name, needle, `n-${n.path}`)}
                       {retracted.has(n.name) && (
                         <span
                           className="wiki-retracted-badge"
@@ -253,7 +288,10 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
                 {topics !== null && topics.length === 0 && (
                   <div className="wiki-hint">No topic pages yet — Curate writes the first set.</div>
                 )}
-                {topics?.map((topic) => (
+                {topics !== null && needle !== undefined && topics.filter((t) => matchesQuery(t.name, t.path)).length === 0 && (
+                  <div className="wiki-hint">No topics match “{needle}”.</div>
+                )}
+                {topics?.filter((t) => matchesQuery(t.name, t.path)).map((topic) => (
                   <button
                     type="button"
                     key={topic.path}
@@ -261,7 +299,7 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
                     title={topic.path}
                     onClick={() => setSelected(topic.path)}
                   >
-                    <span className="wiki-row-name">{topic.name}</span>
+                    <span className="wiki-row-name">{highlightText(topic.name, needle, `t-${topic.path}`)}</span>
                     <span className="wiki-row-meta">
                       {relativeTime(topic.modified_at) !== "" ? relativeTime(topic.modified_at) : ""}
                     </span>

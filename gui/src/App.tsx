@@ -33,6 +33,8 @@ const POLL_INTERVAL_MS = 1500;
 
 // M4 (spec §8): the "memory updated" chip auto-dismisses after 30 s.
 const MEMORY_CHIP_MS = 30_000;
+// Belt C (§Fix 2): the error banner auto-dismisses after 10 s.
+const ERROR_BANNER_MS = 10_000;
 
 function mergeEvents(prev: OdoEvent[], next: OdoEvent[]): OdoEvent[] {
   if (next.length === 0) return prev;
@@ -581,6 +583,15 @@ export default function App() {
     };
   }, []);
 
+  // Belt C (§Fix 2): the error banner auto-dismisses; a new error
+  // restarts the clock (effect cleanup drops the previous timer), and
+  // manual dismiss / unmount clear it the same way.
+  useEffect(() => {
+    if (error === null) return;
+    const timer = window.setTimeout(() => setError(null), ERROR_BANNER_MS);
+    return () => clearTimeout(timer);
+  }, [error]);
+
   if (!booted && !error) {
     return <div className="app-loading">Connecting to the Odo daemon…</div>;
   }
@@ -711,7 +722,19 @@ export default function App() {
         />
       )}
       <main className="app-main">
-        {error && <div className="error-banner">{error}</div>}
+        {error && (
+          <div className="error-banner" aria-live="assertive">
+            <span>{error}</span>
+            <button
+              type="button"
+              className="dismiss-btn"
+              aria-label="Dismiss error"
+              onClick={() => setError(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
         <ChatSurface
           events={events}
           agentRunning={agentRunning}
