@@ -38,6 +38,37 @@ interface Props {
   // path of the most recent distill, when known this session.
   epoch: number;
   distilledTo?: string | null;
+  // Belt B: conversation-local search (⌘F). State is owned by App so the
+  // command palette can open it too; matching happens here, over the events
+  // already in memory — no IPC.
+  searchOpen: boolean;
+  searchQuery: string;
+  onSearchQueryChange: (query: string) => void;
+  onSearchClose: () => void;
+}
+
+// Belt B: the text a search query is matched against per event. Kept in
+// sync with what MessageBubble renders — agent/user text, tool call names
+// and args, tool result summaries, run outcomes.
+function searchableText(e: OdoEvent): string {
+  const p = e.payload ?? {};
+  switch (e.type) {
+    case "user_message":
+    case "agent_text":
+      return p.text ?? "";
+    case "agent_tool_call":
+      return `${p.tool ?? ""} ${p.args != null ? JSON.stringify(p.args) : ""}`;
+    case "agent_tool_result": {
+      const body = typeof p.result === "string" ? p.result : JSON.stringify(p.result ?? "");
+      return `${p.tool ?? ""} ${body}`;
+    }
+    case "agent_done":
+      return p.summary ?? "";
+    case "agent_error":
+      return p.error ?? "";
+    default:
+      return "";
+  }
 }
 
 // Chat log plus composer. File attachments arrive via Tauri's drag-drop
@@ -54,7 +85,20 @@ const COMPOSER_MAX_HEIGHT = 148;
 // scroll bottom (Belt A stick-to-bottom).
 const NEAR_BOTTOM_PX = 80;
 
-export default function ChatSurface({ events, agentRunning, sendDisabled, onSend, onFanout, onCancel, epoch, distilledTo }: Props) {
+export default function ChatSurface({
+  events,
+  agentRunning,
+  sendDisabled,
+  onSend,
+  onFanout,
+  onCancel,
+  epoch,
+  distilledTo,
+  searchOpen,
+  searchQuery,
+  onSearchQueryChange,
+  onSearchClose,
+}: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -274,7 +318,83 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
     return 0;
   }, [events]);
 
-  const visibleEvents = events.filter((e) => e.seq > lastDistillSeq);
+  const visibleEvents = useMemo(
+    () => events.filter((e) => e.seq > lastDistillSeq),
+    [events, lastDistillSeq],
+  );
+
+  // Belt B search: one entry per occurrence, in display order — the current
+  // match index resolves to the seq of its bubble for scroll-into-view.
+  const trimmedQuery = searchQuery.trim();
+  const matches = useMemo(() => {
+    if (!searchOpen || trimmedQuery === "") return [];
+    const needle = trimmedQuery.toLowerCase();
+    const out: { seq: number }[] = [];
+    for (const ev of visibleEvents) {
+      const hay = searchableText(ev).toLowerCase();
+      let at = hay.indexOf(needle);
+      while (at !== -1) {
+        out.push({ seq: ev.seq });
+        at = hay.indexOf(needle, at + needle.length);
+      }
+    }
+    return out;
+  }, [searchOpen, trimmedQuery, visibleEvents]);
+  const [matchIdx, setMatchIdx] = useState(0);
+  // A new query restarts at the first match; clamp when the match count
+  // shrinks under the cursor (events arrive while searching).
+  useEffect(() => setMatchIdx(0), [trimmedQuery]);
+  const clampedIdx = matches.length === 0 ? 0 : Math.min(matchIdx, matches.length - 1);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the field when the bar opens; ⌘F while open refocuses instead
+  // of reopening (App's global handler owns the ⌘F open path).
+  useEffect(() => {
+    if (searchOpen) {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    }
+  }, [searchOpen]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f" && searchOpen) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [searchOpen]);
+
+  const stepMatch = useCallback(
+    (delta: number) => {
+      if (matches.length === 0) return;
+      setMatchIdx((i) => (Math.min(i, matches.length - 1) + delta + matches.length) % matches.length);
+    },
+    [matches.length],
+  );
+
+  // Jump-to-match: center the current match's bubble in the scroll view.
+  useEffect(() => {
+    if (!searchOpen || trimmedQuery === "") return;
+    if (matches.length === 0) return;
+    const target = listRef.current?.querySelector(`[data-seq="${matches[clampedIdx].seq}"]`);
+    target?.scrollIntoView({ block: "center" });
+  }, [searchOpen, trimmedQuery, matches, clampedIdx]);
+
+  const handleSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      // Swallow so App's global handler (blur/cancel) doesn't also fire.
+      e.stopPropagation();
+      onSearchClose();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      stepMatch(e.shiftKey ? -1 : 1);
+    }
+  };
 
   // M3 run status (spec §3a): the run window starts at the most recent
   // user_message in the current epoch; the first agent_tool_call in that
@@ -312,6 +432,47 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
   return (
     <section className="chat-surface">
       <div className="message-list-wrap">
+        {searchOpen && (
+          <div className="search-bar">
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => onSearchQueryChange(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="Find in conversation"
+              aria-label="Find in conversation"
+            />
+            <span className="search-count">
+              {trimmedQuery === ""
+                ? ""
+                : matches.length === 0
+                  ? "No matches"
+                  : `${clampedIdx + 1}/${matches.length}`}
+            </span>
+            <button
+              type="button"
+              aria-label="Previous match"
+              title="Previous match (Shift+Enter)"
+              disabled={matches.length === 0}
+              onClick={() => stepMatch(-1)}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              aria-label="Next match"
+              title="Next match (Enter)"
+              disabled={matches.length === 0}
+              onClick={() => stepMatch(1)}
+            >
+              ↓
+            </button>
+            <button type="button" aria-label="Close search" title="Close (Esc)" onClick={onSearchClose}>
+              ×
+            </button>
+          </div>
+        )}
         <div className="message-list" ref={listRef} onScroll={handleListScroll}>
         {epoch > 1 && (
           <div className="epoch-banner">
@@ -333,7 +494,11 @@ export default function ChatSurface({ events, agentRunning, sendDisabled, onSend
           </div>
         )}
           {visibleEvents.map((ev) => (
-            <MessageBubble key={ev.seq} event={ev} />
+            <MessageBubble
+              key={ev.seq}
+              event={ev}
+              highlight={searchOpen && trimmedQuery !== "" ? trimmedQuery : undefined}
+            />
           ))}
           <ToolTicker running={agentRunning} events={events} />
         </div>

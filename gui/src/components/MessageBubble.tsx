@@ -1,5 +1,7 @@
+import type { ReactNode } from "react";
 import { basename } from "../files";
 import type { OdoEvent, RecallItem } from "../types";
+import Markdown, { highlightText } from "./Markdown";
 
 const REVIEW_LABEL: Record<string, string> = {
   accept: "Accepted",
@@ -88,14 +90,18 @@ function recallTooltip(recall: RecallItem[]): string {
 
 // Renders one journaled event. Payloads come from the daemon verbatim; every
 // field is optional in the type, so render defensively.
-export default function MessageBubble({ event }: { event: OdoEvent }) {
+// Belt B: agent_text renders as markdown; `highlight` wraps occurrences of
+// the chat-search query in <mark>. The .bubble-mount wrapper carries the
+// data-seq jump anchor without disturbing the flex layout (display: contents).
+export default function MessageBubble({ event, highlight }: { event: OdoEvent; highlight?: string }) {
   const p = event.payload ?? {};
 
+  let body: ReactNode;
   switch (event.type) {
     case "user_message":
-      return (
+      body = (
         <div className="bubble bubble-user">
-          <div className="bubble-text">{p.text ?? ""}</div>
+          <div className="bubble-text">{highlightText(p.text ?? "", highlight, "u")}</div>
           {p.attachments != null && p.attachments.length > 0 && (
             <div className="attachment-chips">
               {p.attachments.map((a) => (
@@ -112,82 +118,98 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
           )}
         </div>
       );
+      break;
 
     case "agent_text":
-      return (
+      body = (
         <div className="bubble bubble-agent">
-          <div className="bubble-text">{p.text ?? ""}</div>
+          <div className="bubble-text">
+            <Markdown content={p.text ?? ""} highlight={highlight} />
+          </div>
         </div>
       );
+      break;
 
     case "agent_tool_call":
-      return (
+      body = (
         <div className="bubble bubble-tool">
           <code>
-            → {p.tool ?? "tool"} {p.args != null ? JSON.stringify(p.args) : ""}
+            → {highlightText(p.tool ?? "tool", highlight, "tc")}{" "}
+            {highlightText(p.args != null ? JSON.stringify(p.args) : "", highlight, "ta")}
           </code>
         </div>
       );
+      break;
 
     case "agent_tool_result":
-      return (
+      body = (
         <div className="bubble bubble-tool">
           <details>
             <summary>
-              <code>← {p.tool ?? "result"}</code>
+              <code>← {highlightText(p.tool ?? "result", highlight, "tr")}</code>
             </summary>
-            <pre>{typeof p.result === "string" ? p.result : JSON.stringify(p.result, null, 2)}</pre>
+            <pre>
+              {highlightText(
+                typeof p.result === "string" ? p.result : JSON.stringify(p.result, null, 2),
+                highlight,
+                "tb",
+              )}
+            </pre>
           </details>
         </div>
       );
+      break;
 
     case "agent_done":
-      return (
+      body = (
         <div className="bubble bubble-done">
-          <span className="bubble-icon">✓</span> {p.summary ?? "Agent finished"}
+          <span className="bubble-icon">✓</span> {highlightText(p.summary ?? "Agent finished", highlight, "d")}
         </div>
       );
+      break;
 
     case "agent_error":
-      return (
+      body = (
         <div className="bubble bubble-error">
-          <span className="bubble-icon">✗</span> {p.error ?? "Agent failed"}
+          <span className="bubble-icon">✗</span> {highlightText(p.error ?? "Agent failed", highlight, "e")}
         </div>
       );
+      break;
 
     case "review_action":
       // The memory distiller journals its epoch bump as a review_action with
       // action "distill" and no diff (ADR-0002); render it as a memory event.
       if (p.action === "distill") {
-        return (
+        body = (
           <div className="bubble bubble-review">
             <span className="badge badge-other" title={p.wiki_path ?? "distilled to wiki"}>
               Distilled · epoch {p.epoch ?? "?"}
             </span>
           </div>
         );
-      }
-      // M5: the curator journals its pass the same way (ADR-0002) — render
-      // it as a memory event, not the diff-style "curate diff #?".
-      if (p.action === "curate") {
-        return (
+      } else if (p.action === "curate") {
+        // M5: the curator journals its pass the same way (ADR-0002) — render
+        // it as a memory event, not the diff-style "curate diff #?".
+        body = (
           <div className="bubble bubble-review">
             <span className="badge badge-other" title="curator rewrote wiki topics + index.md">
               Curated {p.topics ?? "?"} topics
             </span>
           </div>
         );
+      } else {
+        body = (
+          <div className="bubble bubble-review">
+            <span className={`badge badge-${REVIEW_LABEL[p.action ?? ""] ? p.action : "other"}`}>
+              {REVIEW_LABEL[p.action ?? ""] ?? p.action ?? "reviewed"} diff #{p.diff_id ?? "?"}
+            </span>
+          </div>
+        );
       }
-      return (
-        <div className="bubble bubble-review">
-          <span className={`badge badge-${REVIEW_LABEL[p.action ?? ""] ? p.action : "other"}`}>
-            {REVIEW_LABEL[p.action ?? ""] ?? p.action ?? "reviewed"} diff #{p.diff_id ?? "?"}
-          </span>
-        </div>
-      );
+      break;
 
     default:
-      return (
+      body = (
         <div className="bubble bubble-unknown">
           <code>
             {event.type}: {JSON.stringify(p)}
@@ -195,4 +217,9 @@ export default function MessageBubble({ event }: { event: OdoEvent }) {
         </div>
       );
   }
+  return (
+    <div className="bubble-mount" data-seq={event.seq}>
+      {body}
+    </div>
+  );
 }

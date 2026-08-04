@@ -3,7 +3,6 @@ import { errorMessage, listTopics } from "../api";
 import { basename } from "../files";
 import type { Conversation, Project, Workstream } from "../types";
 import MemoryReviewPanel from "./MemoryReviewPanel";
-import WikiBrowser from "./WikiBrowser";
 
 const DISTILL_TOAST_MS = 5000;
 
@@ -26,9 +25,10 @@ interface Props {
   // Resolves to the wiki path of the distilled note; rejects on failure.
   onDistill: () => Promise<string>;
   // M3: wiki note count for the Memory section (null = unknown; the line is
-  // then omitted) and a refresh hook fired when the browser closes.
+  // then omitted). Belt B: the browser itself is owned by App (the command
+  // palette opens it too) — the Browse button just asks App to open it.
   wikiNoteCount: number | null;
-  onWikiBrowserClosed: () => void;
+  onOpenWiki: () => void;
   // M5 (spec §8): curator pass + pin affordance handlers, and the topic
   // page count (null = unknown; the line is then omitted). All owned by App.
   onCurate: () => Promise<void>;
@@ -81,7 +81,7 @@ export default function Sidebar({
   onCreateWorkstream,
   onDistill,
   wikiNoteCount,
-  onWikiBrowserClosed,
+  onOpenWiki,
   onCurate,
   onPin,
   topicCount,
@@ -113,7 +113,6 @@ export default function Sidebar({
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
   const [pinToast, setPinToast] = useState<string | null>(null);
-  const [showWiki, setShowWiki] = useState(false);
   const [showMemoryReview, setShowMemoryReview] = useState(false);
   // Review opens the proposal tab; the memory-updated chip opens the reader;
   // M6's Ledger button opens the ledger tab (§11: daemon-verified metrics).
@@ -391,7 +390,7 @@ export default function Sidebar({
           className="distill-btn"
           disabled={conversationId == null}
           title="Browse this workstream's distilled wiki notes"
-          onClick={() => setShowWiki(true)}
+          onClick={onOpenWiki}
         >
           Browse
         </button>
@@ -428,15 +427,6 @@ export default function Sidebar({
         {pinToast && <div className="distill-toast">{pinToast}</div>}
         {curateToast && <div className="distill-toast">{curateToast}</div>}
         {distillToast && <div className="distill-toast">{distillToast}</div>}
-        {showWiki && conversationId != null && (
-          <WikiBrowser
-            conversationId={conversationId}
-            onClose={() => {
-              setShowWiki(false);
-              onWikiBrowserClosed();
-            }}
-          />
-        )}
         {showMemoryReview && conversationId != null && (
           <MemoryReviewPanel
             conversationId={conversationId}

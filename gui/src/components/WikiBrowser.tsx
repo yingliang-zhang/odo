@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
 import type { WikiNoteInfo } from "../types";
+import Markdown from "./Markdown";
 
 // M6: the retracted-note set names notes filtered out of recall by the
 // contradiction pass — parsed from each retraction event's detail (the
@@ -273,7 +274,7 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
           <div className="wiki-reader">
             {contentLoading && <div className="wiki-hint">Loading…</div>}
             {!contentLoading && content !== null && content !== "" && !isTopicPage && (
-              <pre className="wiki-content">{content}</pre>
+              <Markdown content={content} className="wiki-content" />
             )}
             {!contentLoading && content !== null && content !== "" && isTopicPage && (
               <div className="wiki-content wiki-topic-content">

@@ -20,9 +20,11 @@ import {
   unwrap,
 } from "./api";
 import ChatSurface from "./components/ChatSurface";
+import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
 import DiffViewer from "./components/DiffViewer";
 import SettingsPanel from "./components/SettingsPanel";
 import Sidebar from "./components/Sidebar";
+import WikiBrowser from "./components/WikiBrowser";
 import { notifyRunDone } from "./notify";
 import type { BootstrapResponse, Conversation, Diff, OdoEvent, Project, Workstream } from "./types";
 
@@ -67,6 +69,12 @@ export default function App() {
   // Sidebar so ⌘, opens it regardless of sidebar visibility.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Belt B: chat search (⌘F) and the command palette (⌘K); the wiki
+  // browser is lifted out of the Sidebar so the palette can open it too.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [wikiOpen, setWikiOpen] = useState(false);
   const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,6 +103,8 @@ export default function App() {
   // Belt A: the forever-installed global shortcut listener reads the current
   // run state through this ref instead of re-registering every flip.
   const agentRunningRef = useRef(false);
+  // Belt B: same pattern for the search bar (Esc closes it).
+  const searchOpenRef = useRef(false);
   // Read inside callbacks that must stay referentially stable (recordEvents
   // is a poll-effect dependency; a state dep would rebuild the interval).
   const workstreamNameRef = useRef<string | null>(null);
@@ -354,16 +364,24 @@ export default function App() {
   useEffect(() => {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);
+  useEffect(() => {
+    searchOpenRef.current = searchOpen;
+  }, [searchOpen]);
 
   // Belt A global shortcuts. Modals close themselves on Escape through
-  // their own window listeners; the .settings-overlay check keeps a bare
-  // Escape from also acting on the composer while a dialog is up. ⌘K is
-  // reserved for the Belt B command palette — swallowed here for now.
+  // their own window listeners; the overlay check keeps a bare Escape from
+  // also acting on the composer while a dialog is up. Belt B adds ⌘F (chat
+  // search) and ⌘K (command palette); Esc closes the search bar before it
+  // reaches blur/cancel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         // Modal/overlay takes priority — don't cancel the agent when closing a dialog
-        if (document.querySelector(".settings-overlay") != null) return;
+        if (document.querySelector(".settings-overlay, .palette-overlay") != null) return;
+        if (searchOpenRef.current) {
+          setSearchOpen(false);
+          return;
+        }
         if (agentRunningRef.current) {
           void handleCancel();
           return;
@@ -381,8 +399,13 @@ export default function App() {
           e.preventDefault();
           setSettingsOpen(true);
           break;
+        case "f":
+          e.preventDefault();
+          setSearchOpen(true);
+          break;
         case "k":
           e.preventDefault();
+          setPaletteOpen(true);
           break;
       }
     };
@@ -562,6 +585,88 @@ export default function App() {
     return <div className="app-loading">Connecting to the Odo daemon…</div>;
   }
 
+  // Belt B (⌘K): every action rides a handler that already exists above,
+  // so the palette is pure UI. Conversation-bound actions are disabled
+  // (greyed, skipped by arrows) until a conversation exists; Cancel Run
+  // only appears mid-run. Prompt actions switch the palette into
+  // text-entry mode (workstream name, pin text).
+  const paletteActions: PaletteAction[] = [
+    {
+      id: "new-workstream",
+      name: "New Workstream",
+      icon: "＋",
+      prompt: "Workstream name…",
+      onRun: async (name) => {
+        try {
+          await handleCreateWorkstream(name);
+        } catch (e) {
+          setError(`create workstream failed: ${errorMessage(e)}`);
+        }
+      },
+    },
+    {
+      id: "distill",
+      name: "Distill to Wiki",
+      icon: "◈",
+      disabled: conversation == null,
+      onRun: () => handleDistill(),
+    },
+    {
+      id: "curate",
+      name: "Curate Topics",
+      icon: "✦",
+      disabled: conversation == null,
+      onRun: () => handleCurate(),
+    },
+    {
+      id: "pin",
+      name: "Pin Memory",
+      icon: "◉",
+      prompt: "remember: …",
+      disabled: conversation == null,
+      onRun: (text) => handlePin(text),
+    },
+    {
+      id: "open-wiki",
+      name: "Open Wiki",
+      icon: "❖",
+      disabled: conversation == null,
+      onRun: () => setWikiOpen(true),
+    },
+    {
+      id: "open-settings",
+      name: "Open Settings",
+      icon: "⚙",
+      shortcut: "⌘,",
+      onRun: () => setSettingsOpen(true),
+    },
+    ...(agentRunning
+      ? [
+          {
+            id: "cancel-run",
+            name: "Cancel Run",
+            icon: "■",
+            shortcut: "Esc",
+            onRun: () => handleCancel(),
+          } satisfies PaletteAction,
+        ]
+      : []),
+    {
+      id: "toggle-sidebar",
+      name: "Toggle Sidebar",
+      icon: "⇤",
+      shortcut: "⌘B",
+      onRun: () => setSidebarCollapsed((v) => !v),
+    },
+    {
+      id: "search-chat",
+      name: "Search Chat",
+      icon: "⌕",
+      shortcut: "⌘F",
+      onRun: () => setSearchOpen(true),
+    },
+  ];
+
   return (
     <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <Sidebar
@@ -576,7 +681,7 @@ export default function App() {
         onCreateWorkstream={handleCreateWorkstream}
         onDistill={handleDistill}
         wikiNoteCount={wikiNoteCount}
-        onWikiBrowserClosed={handleWikiBrowserClosed}
+        onOpenWiki={() => setWikiOpen(true)}
         onCurate={handleCurate}
         onPin={handlePin}
         topicCount={topicCount}
@@ -595,6 +700,16 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
       />
       {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
+      {wikiOpen && conversation?.id != null && (
+        <WikiBrowser
+          conversationId={conversation.id}
+          onClose={() => {
+            setWikiOpen(false);
+            handleWikiBrowserClosed();
+          }}
+        />
+      )}
       <main className="app-main">
         {error && <div className="error-banner">{error}</div>}
         <ChatSurface
@@ -606,6 +721,10 @@ export default function App() {
           onCancel={handleCancel}
           epoch={conversation?.epoch ?? 1}
           distilledTo={lastDistillPath}
+          searchOpen={searchOpen}
+          searchQuery={searchQuery}
+          onSearchQueryChange={setSearchQuery}
+          onSearchClose={() => setSearchOpen(false)}
         />
         {diff && <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />}
       </main>
