@@ -38,7 +38,8 @@ const POLL_INTERVAL_IDLE_MS = 1500;
 // Every transient toast — memory chips, retractions, ledger failures, and
 // sidebar confirmations (distill/curate/pin) — auto-dismisses after 10 s,
 // same cadence as the error banner.
-const TOAST_MS = 10_000;
+const TOAST_MS = 10_000;        // sidebar confirmations (distill/curate/pin)
+const DAEMON_CHIP_MS = 30_000;  // daemon-sourced chips (memory/retraction/ledger) — longer, per M4 spec
 // Belt C (§Fix 2): the error banner auto-dismisses after 10 s.
 const ERROR_BANNER_MS = 10_000;
 
@@ -207,7 +208,7 @@ export default function App() {
         }
         setLastMemoryUpdate({ layer, detail: e.payload?.detail });
         clearTimeout(memoryChipTimer.current);
-        memoryChipTimer.current = window.setTimeout(() => setLastMemoryUpdate(null), TOAST_MS);
+        memoryChipTimer.current = window.setTimeout(() => setLastMemoryUpdate(null), DAEMON_CHIP_MS);
       }
     }
   }, []);

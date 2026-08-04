@@ -228,7 +228,7 @@ export default function Sidebar({
         <button
           type="button"
           title={`Workstream: ${workstream?.name ?? "—"} (expand to switch)`}
-          aria-label="Workstreams"
+          aria-label="Expand sidebar"
           onClick={onToggleCollapsed}
         >
           ☰
@@ -419,6 +419,7 @@ export default function Sidebar({
         </details>
 
         <div className="sidebar-footer">
+          <h2 className="sidebar-section-header">System</h2>
           <MenuRow
             icon="⚙"
             label="Settings"
@@ -427,6 +428,7 @@ export default function Sidebar({
           />
           <select
             className="adapter-select"
+            aria-label="Adapter"
             value={adapter}
             onChange={(e) => onAdapterChange(e.target.value)}
           >
