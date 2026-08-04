@@ -275,7 +275,9 @@ body {
   display: none;
 }
 
-/* Rail buttons are icon-only; the label lives in the title tooltip. */
+/* Rail buttons are icon-only; the label lives in the title tooltip.
+   Contrast is higher than --text-dim because the collapsed rail is the
+   primary interaction surface — icons must be clearly visible. */
 .sidebar-rail button {
   display: grid;
   place-items: center;
@@ -284,7 +286,7 @@ body {
   background: none;
   border: 1px solid transparent;
   border-radius: 6px;
-  color: var(--text-dim);
+  color: var(--text);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
@@ -336,6 +338,9 @@ body {
 
 .sidebar-facts dd {
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- Sidebar: M1 sections ---------- */

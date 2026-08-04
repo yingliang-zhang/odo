@@ -249,7 +249,7 @@ export default function Sidebar({
           disabled={conversationId == null}
           onClick={onOpenWiki}
         >
-          📖
+          ❑
         </button>
         <button
           type="button"
@@ -371,7 +371,7 @@ export default function Sidebar({
             </span>
           </summary>
           <MenuRow
-            icon="📖"
+            icon="❑"
             label="Browse wiki"
             badge={wikiNoteCount}
             disabled={conversationId == null}
@@ -379,7 +379,7 @@ export default function Sidebar({
             onClick={onOpenWiki}
           />
           <MenuRow
-            icon="🏷"
+            icon="✣"
             label={curateBusy ? "Curating…" : "Curate topics"}
             badge={topicCount}
             disabled={curateBusy || conversationId == null}
@@ -387,7 +387,7 @@ export default function Sidebar({
             onClick={() => void handleCurate()}
           />
           <MenuRow
-            icon="📋"
+            icon="▤"
             label="Ledger"
             disabled={conversationId == null}
             title="Open .odo/ledger.md — daemon-written verified metrics (durations, proposals, accept/reject)"
@@ -395,7 +395,7 @@ export default function Sidebar({
           />
           <form className="pin-form" onSubmit={handlePin}>
             <span className="menu-row-icon" aria-hidden="true">
-              📌
+              ◈
             </span>
             <input
               type="text"
@@ -437,13 +437,15 @@ export default function Sidebar({
           </select>
           <dl className="sidebar-facts">
             <dt>Project</dt>
-            <dd>{project?.name ?? "—"}</dd>
+            <dd className="truncate" title={project?.name ?? ""}>{project?.name ?? "—"}</dd>
             <dt>Root</dt>
             <dd className="mono truncate" title={project?.root_path ?? ""}>
               {project?.root_path ?? "—"}
             </dd>
             <dt>Conversation</dt>
-            <dd>{conversationId != null ? `#${conversationId}` : "—"}</dd>
+            <dd className="truncate" title={conversationId != null ? `#${conversationId}` : ""}>
+              {conversationId != null ? `#${conversationId}` : "—"}
+            </dd>
           </dl>
         </div>
       </div>

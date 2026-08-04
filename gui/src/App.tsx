@@ -689,21 +689,21 @@ export default function App() {
     {
       id: "distill",
       name: "Distill to Wiki",
-      icon: "◈",
+      icon: "✦",
       disabled: conversation == null,
       onRun: () => handleDistill(),
     },
     {
       id: "curate",
       name: "Curate Topics",
-      icon: "✦",
+      icon: "✣",
       disabled: conversation == null,
       onRun: () => handleCurate(),
     },
     {
       id: "pin",
       name: "Pin Memory",
-      icon: "◉",
+      icon: "◈",
       prompt: "remember: …",
       disabled: conversation == null,
       onRun: (text) => handlePin(text),
@@ -711,7 +711,7 @@ export default function App() {
     {
       id: "open-wiki",
       name: "Open Wiki",
-      icon: "❖",
+      icon: "❑",
       disabled: conversation == null,
       onRun: () => setWikiOpen(true),
     },
