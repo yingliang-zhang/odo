@@ -24,7 +24,8 @@ import ChatSurface from "./components/ChatSurface";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
 import ContextPanel, { type PanelTab } from "./components/ContextPanel";
 import DiffViewer from "./components/DiffViewer";
-import MemoryReviewPanel, { type Tab as MemoryReviewTab } from "./components/MemoryReviewPanel";
+import LedgerPanel from "./components/LedgerPanel";
+import MemoryPanel from "./components/MemoryPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import Sidebar, { type SidebarToast } from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
@@ -103,16 +104,13 @@ export default function App() {
     const VALID: PanelTab[] = ["changes", "wiki", "memory", "ledger"];
     return stored && (VALID as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
   });
+  // M9 P3: memory sub-tab for toast click-throughs (files vs proposals).
+  const [memorySubTab, setMemorySubTab] = useState<"proposals" | "files">("proposals");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // The memory review modal lives here (not in the sidebar): toasts click
-  // through into it, and it must survive the sidebar collapsing to the rail.
-  const [memoryReviewTab, setMemoryReviewTab] = useState<MemoryReviewTab | null>(null);
-  // Belt B: chat search (⌘F) and the command palette (⌘K); the wiki
-  // browser is lifted out of the Sidebar so the palette can open it too.
+  // Belt B: chat search (⌘F) and the command palette (⌘K).
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [wikiOpen, setWikiOpen] = useState(false);
   const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -498,7 +496,13 @@ export default function App() {
     searchOpenRef.current = searchOpen;
   }, [searchOpen]);
 
-  // M9 P2: panelOpenRef must sync on panel toggle, not search toggle.
+  // M9 P3: refresh wiki count when the panel closes or leaves the wiki tab,
+  // so notes written while the panel was open don't leave a stale badge.
+  useEffect(() => {
+    if (!panelOpen || panelTab !== "wiki") {
+      if (conversation?.id != null) void refreshWikiCount(conversation.id);
+    }
+  }, [panelOpen, panelTab]);
   useEffect(() => {
     panelOpenRef.current = panelOpen;
   }, [panelOpen]);
@@ -515,6 +519,11 @@ export default function App() {
         if (document.querySelector(".settings-overlay, .palette-overlay") != null) return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
+          return;
+        }
+        // M9 P3: panel open takes priority over cancel — matches old modal UX.
+        if (panelOpenRef.current) {
+          setPanelOpen(false);
           return;
         }
         if (agentRunningRef.current) {
@@ -676,13 +685,6 @@ export default function App() {
     }
   }, []);
 
-  // The browser is read-only; closing it still re-fetches the count so a
-  // note written by another client (or cleanup done by hand) shows up.
-  const handleWikiBrowserClosed = useCallback(() => {
-    const cid = conversationRef.current;
-    if (cid != null) void refreshWikiCount(cid);
-  }, [refreshWikiCount]);
-
   // M4: clicking the toast dismisses it (the auto-dismiss also runs on a
   // 10 s timer); closing/applying in the review panel re-reads the badge.
   const handleMemoryChipDismiss = useCallback(() => {
@@ -711,7 +713,15 @@ export default function App() {
     if (cid != null) void refreshMemoryProposals(cid);
   }, [refreshMemoryProposals]);
 
-  const openMemoryReview = useCallback((tab: MemoryReviewTab) => setMemoryReviewTab(tab), []);
+  // M9 P3: every former modal affordance (Wiki, Review proposals, Ledger)
+  // now pivots to the right panel on the matching tab — one helper shared
+  // by the sidebar rows, the palette, and the toast click-throughs.
+  const openPanelTab = useCallback((tab: PanelTab, memSubTab?: "proposals" | "files") => {
+    setPanelOpen(true);
+    setPanelTab(tab);
+    // Toast click-throughs pass memSubTab="files"; default reset to "proposals".
+    setMemorySubTab(memSubTab ?? "proposals");
+  }, []);
 
   // Toast viewport lifecycle: push shows a confirmation for 10 s; either
   // the timer or a click (which also click-throughs to its panel) removes it.
@@ -799,7 +809,7 @@ export default function App() {
       name: "Open Wiki",
       icon: "❑",
       disabled: conversation == null,
-      onRun: () => setWikiOpen(true),
+      onRun: () => openPanelTab("wiki"),
     },
     {
       id: "open-settings",
@@ -862,7 +872,7 @@ export default function App() {
         onCreateWorkstream={handleCreateWorkstream}
         onDistill={handleDistill}
         wikiNoteCount={wikiNoteCount}
-        onOpenWiki={() => setWikiOpen(true)}
+        onOpenWiki={() => openPanelTab("wiki")}
         onCurate={handleCurate}
         onPin={handlePin}
         topicCount={topicCount}
@@ -870,34 +880,13 @@ export default function App() {
         runningWorkstreams={runningWorkstreams}
         pendingMemoryProposals={pendingMemoryProposals}
         onToast={pushToast}
-        onOpenMemoryReview={openMemoryReview}
+        onOpenMemoryReview={openPanelTab}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
-      {wikiOpen && conversation?.id != null && (
-        <WikiBrowser
-          conversationId={conversation.id}
-          onClose={() => {
-            setWikiOpen(false);
-            handleWikiBrowserClosed();
-          }}
-        />
-      )}
-      {memoryReviewTab != null && conversation?.id != null && (
-        <MemoryReviewPanel
-          conversationId={conversation.id}
-          workstreamName={workstream?.name}
-          initialTab={memoryReviewTab}
-          onClose={() => {
-            setMemoryReviewTab(null);
-            handleMemoryReviewClosed();
-          }}
-          onApplied={handleMemoryReviewClosed}
-        />
-      )}
       <main className="app-main">
         {/* Toast viewport: the transient chips the sidebar used to host,
             plus sidebar confirmations. Click-through opens the panel the
@@ -910,7 +899,7 @@ export default function App() {
               title={lastMemoryUpdate.detail ?? `${lastMemoryUpdate.layer} memory changed`}
               onClick={() => {
                 handleMemoryChipDismiss();
-                setMemoryReviewTab("files");
+                openPanelTab("memory", "files");
               }}
             >
               memory updated
@@ -926,7 +915,7 @@ export default function App() {
               title={`${lastRetraction.oldNote} contradicted by ${lastRetraction.newNote}: ${lastRetraction.snippet}`}
               onClick={() => {
                 handleRetractionDismiss();
-                setMemoryReviewTab("files");
+                openPanelTab("memory", "files");
               }}
             >
               ⚠ {lastRetraction.oldNote} retracted (contradicts {lastRetraction.newNote})
@@ -939,7 +928,7 @@ export default function App() {
               title={lastLedgerFailure}
               onClick={() => {
                 handleLedgerFailureDismiss();
-                setMemoryReviewTab("ledger");
+                openPanelTab("ledger");
               }}
             >
               ⚠ ledger write failed
@@ -1013,9 +1002,26 @@ export default function App() {
             ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />
             : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
         )}
-        {panelTab === "wiki" && <div className="panel-empty">Wiki browser will appear here (Phase 3).</div>}
-        {panelTab === "memory" && <div className="panel-empty">Memory proposals will appear here (Phase 3).</div>}
-        {panelTab === "ledger" && <div className="panel-empty">Ledger will appear here (Phase 3).</div>}
+        {panelTab === "wiki" && (conversation?.id != null ? (
+          <WikiBrowser conversationId={conversation.id} />
+        ) : (
+          <div className="panel-empty">No active conversation.</div>
+        ))}
+        {panelTab === "memory" && (conversation?.id != null ? (
+          <MemoryPanel
+            conversationId={conversation.id}
+            workstreamName={workstream?.name}
+            initialTab={memorySubTab}
+            onApplied={handleMemoryReviewClosed}
+          />
+        ) : (
+          <div className="panel-empty">No active conversation.</div>
+        ))}
+        {panelTab === "ledger" && (conversation?.id != null ? (
+          <LedgerPanel conversationId={conversation.id} />
+        ) : (
+          <div className="panel-empty">No active conversation.</div>
+        ))}
       </ContextPanel>
       </div>
       <StatusBar

@@ -1800,34 +1800,20 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-color: var(--accent-user);
 }
 
+/* M9 P3: the browser fills the right panel's .panel-body — plain content,
+   no modal chrome. Flex column so the list/reader scroll independently
+   below the pinned tabs + search. */
 .wiki-panel {
-  width: 720px;
-  max-width: calc(100vw - 48px);
-  height: 480px;
-  max-height: calc(100vh - 64px);
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 20px 24px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-.wiki-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.wiki-head .settings-title {
-  margin: 0;
-}
-
+/* M9 P3: stacked — the panel is 280–720px wide, so the modal's side-by-side
+   240px list column is replaced by list-over-reader rows (1:2 split). */
 .wiki-body {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 2fr);
   gap: 12px;
   flex: 1;
   min-height: 0;
@@ -2029,17 +2015,10 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 /* ---------- M4: learning (spec §7/§8) ---------- */
 
-/* Review panel: wiki-panel sizing and chrome, single-column body. */
+/* M9 P3: same treatment as .wiki-panel — plain content filling .panel-body;
+   flex column so .mem-body scrolls while tabs and footer stay pinned. */
 .mem-panel {
-  width: 640px;
-  max-width: calc(100vw - 48px);
-  height: 480px;
-  max-height: calc(100vh - 64px);
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 20px 24px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  height: 100%;
   display: flex;
   flex-direction: column;
 }

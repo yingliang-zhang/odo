@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
-import { useFocusTrap } from "../focusTrap";
 import type { WikiNoteInfo } from "../types";
 import Markdown, { highlightText } from "./Markdown";
 
@@ -32,7 +31,6 @@ const CITATION_RE = /\(epoch-(\d+)\)$/;
 
 interface Props {
   conversationId: number;
-  onClose: () => void;
 }
 
 // Compact relative timestamp for the note list ("45s ago", "3h ago", …).
@@ -48,12 +46,16 @@ function relativeTime(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-// M3 wiki browser (spec §2b) + M5 Topics tab (spec §9): modal with tabs on
-// top — "Notes" (the workstream's epoch notes, user.md pinned first) and
-// "Topics" (the curator's project-wide topic pages) — and a
-// dependency-free reader on the right. Topic pages render line-by-line so
-// uncited bullets are flagged and (epoch-N) citations are clickable.
-export default function WikiBrowser({ conversationId, onClose }: Props) {
+// M3 wiki browser (spec §2b) + M5 Topics tab (spec §9) — "Notes" (the
+// workstream's epoch notes, user.md pinned first) and "Topics" (the
+// curator's project-wide topic pages) — with a dependency-free reader.
+// Topic pages render line-by-line so uncited bullets are flagged and
+// (epoch-N) citations are clickable.
+//
+// M9 P3: the browser renders inline inside the right panel's Wiki tab; the
+// list and reader stack vertically and scroll independently while the tabs
+// and search stay pinned. Closing is the panel's job (⌘J).
+export default function WikiBrowser({ conversationId }: Props) {
   const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -70,9 +72,6 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
   // note's content when it has already been read into cache this session
   // (no IPC; unread notes match by title only).
   const [query, setQuery] = useState("");
-  // Belt D: modal focus trap (Tab cycles, focus restores on close).
-  const panelRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(panelRef);
   const trimmed = query.trim();
   const needle = trimmed === "" ? undefined : trimmed;
   const matchesQuery = (name: string, path: string): boolean => {
@@ -159,15 +158,6 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
     };
   }, [selected]);
 
-  // Escape closes, like every other modal affordance.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   // M5 (spec §9): a citation click jumps to the source epoch note in the
   // Notes tab ONLY when exactly one note in the current workstream matches
   // — curation is project-wide, so a citation can name an epoch no note
@@ -183,157 +173,145 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
   const isTopicPage = selected.includes(TOPICS_MARKER);
 
   return (
-    <div className="settings-overlay" onClick={onClose}>
-      <div
-        className="wiki-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Wiki browser"
-        ref={panelRef}
-        tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="wiki-head">
-          <h2 className="settings-title">Wiki</h2>
-          <button type="button" className="settings-close" onClick={onClose}>
-            Close
-          </button>
-        </div>
+    <div className="wiki-panel">
+      <div className="wiki-tabs" role="tablist" aria-label="Wiki sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "notes"}
+          className={`wiki-tab${tab === "notes" ? " active" : ""}`}
+          onClick={() => setTab("notes")}
+        >
+          Notes
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "topics"}
+          className={`wiki-tab${tab === "topics" ? " active" : ""}`}
+          onClick={() => setTab("topics")}
+        >
+          Topics
+        </button>
+      </div>
 
-        <div className="wiki-tabs" role="tablist" aria-label="Wiki sections">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "notes"}
-            className={`wiki-tab${tab === "notes" ? " active" : ""}`}
-            onClick={() => setTab("notes")}
-          >
-            Notes
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "topics"}
-            className={`wiki-tab${tab === "topics" ? " active" : ""}`}
-            onClick={() => setTab("topics")}
-          >
-            Topics
-          </button>
-        </div>
-
-        <div className="wiki-search">
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              // Esc clears a non-empty query instead of closing the whole
-              // browser (the panel's own Esc handler owns the empty case).
-              if (e.key === "Escape" && query !== "") {
-                e.stopPropagation();
+      <div className="wiki-search">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            // Esc never leaves this input's surface — clear a non-empty
+            // query, blur an empty one, but never let it reach the global
+            // handler (which cancels a running agent).
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              if (query !== "") {
                 setQuery("");
+              } else {
+                e.currentTarget.blur();
               }
-            }}
-            placeholder="Search wiki…"
-            aria-label="Search wiki"
-          />
+            }
+          }}
+          placeholder="Search wiki…"
+          aria-label="Search wiki"
+        />
+      </div>
+
+      <div className="wiki-body">
+        <div className="wiki-list">
+          {tab === "notes" && (
+            <>
+              {matchesQuery("user.md (global)", USER_MD_PATH) && (
+                <button
+                  type="button"
+                  className={`wiki-row${selected === USER_MD_PATH ? " selected" : ""}`}
+                  onClick={() => setSelected(USER_MD_PATH)}
+                >
+                  <span className="wiki-row-name">{highlightText("user.md (global)", needle, "umd")}</span>
+                </button>
+              )}
+              {notes === null && !listError && <div className="wiki-hint">Loading…</div>}
+              {listError && <div className="wiki-hint">list failed: {listError}</div>}
+              {notes !== null && notes.length === 0 && (
+                <div className="wiki-hint">No wiki notes yet — Distill writes the first one.</div>
+              )}
+              {notes !== null && needle !== undefined && notes.filter((n) => matchesQuery(n.name, n.path)).length === 0 && !matchesQuery("user.md (global)", USER_MD_PATH) && (
+                <div className="wiki-hint">No notes match “{needle}”.</div>
+              )}
+              {notes?.filter((n) => matchesQuery(n.name, n.path)).map((n) => (
+                <button
+                  type="button"
+                  key={n.path}
+                  className={`wiki-row${selected === n.path ? " selected" : ""}`}
+                  title={n.path}
+                  onClick={() => setSelected(n.path)}
+                >
+                  <span className="wiki-row-name">
+                    {highlightText(n.name, needle, `n-${n.path}`)}
+                    {retracted.has(n.name) && (
+                      <span
+                        className="wiki-retracted-badge"
+                        title="Retracted by the contradiction pass — still readable, no longer injected"
+                      >
+                        ⚠ retracted
+                      </span>
+                    )}
+                  </span>
+                  <span className="wiki-row-meta">
+                    epoch {n.epoch}
+                    {relativeTime(n.modified_at) !== "" ? ` · ${relativeTime(n.modified_at)}` : ""}
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
+          {tab === "topics" && (
+            <>
+              {topics === null && !topicsError && <div className="wiki-hint">Loading…</div>}
+              {topicsError && <div className="wiki-hint">list failed: {topicsError}</div>}
+              {topics !== null && topics.length === 0 && (
+                <div className="wiki-hint">No topic pages yet — Curate writes the first set.</div>
+              )}
+              {topics !== null && needle !== undefined && topics.filter((t) => matchesQuery(t.name, t.path)).length === 0 && (
+                <div className="wiki-hint">No topics match “{needle}”.</div>
+              )}
+              {topics?.filter((t) => matchesQuery(t.name, t.path)).map((topic) => (
+                <button
+                  type="button"
+                  key={topic.path}
+                  className={`wiki-row${selected === topic.path ? " selected" : ""}`}
+                  title={topic.path}
+                  onClick={() => setSelected(topic.path)}
+                >
+                  <span className="wiki-row-name">{highlightText(topic.name, needle, `t-${topic.path}`)}</span>
+                  <span className="wiki-row-meta">
+                    {relativeTime(topic.modified_at) !== "" ? relativeTime(topic.modified_at) : ""}
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
         </div>
 
-        <div className="wiki-body">
-          <div className="wiki-list">
-            {tab === "notes" && (
-              <>
-                {matchesQuery("user.md (global)", USER_MD_PATH) && (
-                  <button
-                    type="button"
-                    className={`wiki-row${selected === USER_MD_PATH ? " selected" : ""}`}
-                    onClick={() => setSelected(USER_MD_PATH)}
-                  >
-                    <span className="wiki-row-name">{highlightText("user.md (global)", needle, "umd")}</span>
-                  </button>
-                )}
-                {notes === null && !listError && <div className="wiki-hint">Loading…</div>}
-                {listError && <div className="wiki-hint">list failed: {listError}</div>}
-                {notes !== null && notes.length === 0 && (
-                  <div className="wiki-hint">No wiki notes yet — Distill writes the first one.</div>
-                )}
-                {notes !== null && needle !== undefined && notes.filter((n) => matchesQuery(n.name, n.path)).length === 0 && !matchesQuery("user.md (global)", USER_MD_PATH) && (
-                  <div className="wiki-hint">No notes match “{needle}”.</div>
-                )}
-                {notes?.filter((n) => matchesQuery(n.name, n.path)).map((n) => (
-                  <button
-                    type="button"
-                    key={n.path}
-                    className={`wiki-row${selected === n.path ? " selected" : ""}`}
-                    title={n.path}
-                    onClick={() => setSelected(n.path)}
-                  >
-                    <span className="wiki-row-name">
-                      {highlightText(n.name, needle, `n-${n.path}`)}
-                      {retracted.has(n.name) && (
-                        <span
-                          className="wiki-retracted-badge"
-                          title="Retracted by the contradiction pass — still readable, no longer injected"
-                        >
-                          ⚠ retracted
-                        </span>
-                      )}
-                    </span>
-                    <span className="wiki-row-meta">
-                      epoch {n.epoch}
-                      {relativeTime(n.modified_at) !== "" ? ` · ${relativeTime(n.modified_at)}` : ""}
-                    </span>
-                  </button>
-                ))}
-              </>
-            )}
-            {tab === "topics" && (
-              <>
-                {topics === null && !topicsError && <div className="wiki-hint">Loading…</div>}
-                {topicsError && <div className="wiki-hint">list failed: {topicsError}</div>}
-                {topics !== null && topics.length === 0 && (
-                  <div className="wiki-hint">No topic pages yet — Curate writes the first set.</div>
-                )}
-                {topics !== null && needle !== undefined && topics.filter((t) => matchesQuery(t.name, t.path)).length === 0 && (
-                  <div className="wiki-hint">No topics match “{needle}”.</div>
-                )}
-                {topics?.filter((t) => matchesQuery(t.name, t.path)).map((topic) => (
-                  <button
-                    type="button"
-                    key={topic.path}
-                    className={`wiki-row${selected === topic.path ? " selected" : ""}`}
-                    title={topic.path}
-                    onClick={() => setSelected(topic.path)}
-                  >
-                    <span className="wiki-row-name">{highlightText(topic.name, needle, `t-${topic.path}`)}</span>
-                    <span className="wiki-row-meta">
-                      {relativeTime(topic.modified_at) !== "" ? relativeTime(topic.modified_at) : ""}
-                    </span>
-                  </button>
-                ))}
-              </>
-            )}
-          </div>
-
-          <div className="wiki-reader">
-            {contentLoading && <div className="wiki-hint">Loading…</div>}
-            {!contentLoading && content !== null && content !== "" && !isTopicPage && (
-              <Markdown content={content} className="wiki-content" />
-            )}
-            {!contentLoading && content !== null && content !== "" && isTopicPage && (
-              <div className="wiki-content wiki-topic-content">
-                {content.split("\n").map((line, i) => (
-                  <TopicLine key={i} line={line} onJumpToEpoch={jumpToEpoch} />
-                ))}
-              </div>
-            )}
-            {!contentLoading && content === "" && selected === USER_MD_PATH && (
-              <div className="wiki-hint">{USER_MD_HINT}</div>
-            )}
-            {!contentLoading && content === "" && selected !== USER_MD_PATH && (
-              <div className="wiki-hint">(empty note)</div>
-            )}
-          </div>
+        <div className="wiki-reader">
+          {contentLoading && <div className="wiki-hint">Loading…</div>}
+          {!contentLoading && content !== null && content !== "" && !isTopicPage && (
+            <Markdown content={content} className="wiki-content" />
+          )}
+          {!contentLoading && content !== null && content !== "" && isTopicPage && (
+            <div className="wiki-content wiki-topic-content">
+              {content.split("\n").map((line, i) => (
+                <TopicLine key={i} line={line} onJumpToEpoch={jumpToEpoch} />
+              ))}
+            </div>
+          )}
+          {!contentLoading && content === "" && selected === USER_MD_PATH && (
+            <div className="wiki-hint">{USER_MD_HINT}</div>
+          )}
+          {!contentLoading && content === "" && selected !== USER_MD_PATH && (
+            <div className="wiki-hint">(empty note)</div>
+          )}
         </div>
       </div>
     </div>

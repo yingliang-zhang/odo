@@ -2,7 +2,7 @@ import { FormEvent, useState } from "react";
 import { errorMessage, listTopics } from "../api";
 import { basename } from "../files";
 import type { Conversation, Project, Workstream } from "../types";
-import type { Tab as MemoryReviewTab } from "./MemoryReviewPanel";
+import type { PanelTab } from "./ContextPanel";
 
 // A transient confirmation (distill/curate/pin result) for App's toast
 // viewport; the sidebar owns none of the toast lifecycle.
@@ -43,9 +43,10 @@ interface Props {
   // the Distill row, and the gate for the Review proposals row.
   pendingMemoryProposals: number;
   onToast: (toast: SidebarToast) => void;
-  // The memory review modal is owned by App (toasts click through to it,
-  // and it must survive the sidebar collapsing to the icon rail).
-  onOpenMemoryReview: (tab: MemoryReviewTab) => void;
+  // M9 P3: memory review is the right panel's Memory tab, owned by App
+  // (toasts click through to it, and it must survive the sidebar
+  // collapsing to the icon rail). The Ledger row passes "ledger".
+  onOpenMemoryReview: (tab: PanelTab) => void;
   // Belt A: sidebar collapse (Cmd+B toggle) — collapse is a 48px icon
   // rail, not a hidden 0px column.
   collapsed: boolean;
@@ -358,7 +359,7 @@ export default function Sidebar({
               icon="✓"
               label="Review proposals"
               title="Review the learner's proposed memory rules"
-              onClick={() => onOpenMemoryReview("proposals")}
+              onClick={() => onOpenMemoryReview("memory")}
             />
           )}
         </details>
