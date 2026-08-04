@@ -539,6 +539,35 @@ stubs don't validate flags. Fix: removed 3 lines, kept Hermes route flags.
 
 HEAD: 4ca78f9
 
+## M7 Live Streaming — tri-model spec + implementation + review
+
+### Spec (tri-model 3-way discussion)
+- K3+DSF (2/3): tail output.txt with `--mode json`, preview bubble, 3-layer change
+- GLM (1/3): tail session JSONL, poll interval only, 2-file change
+- User chose K3+DSF (first-principles: streaming source > faster polling)
+- DESIGN LOCK: `--mode json` + tail + preview + adaptive poll, no new event types, no schema change
+
+### Implementation (`273cafb`, 11 files, +1162 lines, 7 tests)
+- Adapter: `--mode json`, tail output.txt byte-offset cursor, auto-detect JSONL vs text
+- Parse: text_start/text_delta/text_end, tool_execution_start/end
+- Preview: transient `partial:true` event (not journaled, rebuilt per poll)
+- Daemon: drainRun passes preview through poll_events response
+- Frontend: adaptive poll 350ms running / 1500ms idle, dimmed preview bubble
+- 7 tests: StreamModeDetection, TextDelta, ToolExecution, LegacyFallback, PartialLineSkipped, MessageEndFallback, StreamingVisibleLoopPreview
+
+### Review: **3/3 ACCEPT** (clean pass, no fixes needed)
+
+| Milestone | Status | Tests | Review |
+|---|---|---|---|
+| M0-M5 | ✅ CLOSED | Go tests + E2E | 3/3 each |
+| M6 Precision + Ledger | ✅ CLOSED | 14 Go tests | 3/3 (K3 fix) |
+| Belt A-D | ✅ CLOSED | — | 3/3 each |
+| Real OMP E2E | ✅ CLOSED | 12 PASS / 2 harness / 1 SKIP | 3/3 app correct |
+| Hardening | ✅ CLOSED | 3 new Go tests | 3/3 clean ACCEPT |
+| **M7 Live Streaming** | ✅ CLOSED | **7 new Go tests** | **3/3 clean ACCEPT** |
+
+HEAD: 273cafb
+
 ## M7 Live Streaming — implementation (K3+DSF design lock)
 
 Block-level streaming: adapter passes `--mode json`, tails `output.txt` with
