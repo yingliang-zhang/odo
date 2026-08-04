@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
+import { useFocusTrap } from "../focusTrap";
 import type { WikiNoteInfo } from "../types";
 import Markdown, { highlightText } from "./Markdown";
 
@@ -69,6 +70,9 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
   // note's content when it has already been read into cache this session
   // (no IPC; unread notes match by title only).
   const [query, setQuery] = useState("");
+  // Belt D: modal focus trap (Tab cycles, focus restores on close).
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(panelRef);
   const trimmed = query.trim();
   const needle = trimmed === "" ? undefined : trimmed;
   const matchesQuery = (name: string, path: string): boolean => {
@@ -185,6 +189,8 @@ export default function WikiBrowser({ conversationId, onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-label="Wiki browser"
+        ref={panelRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="wiki-head">

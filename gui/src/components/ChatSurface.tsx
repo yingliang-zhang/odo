@@ -151,6 +151,13 @@ const COMPOSER_MAX_HEIGHT = 148;
 // scroll bottom (Belt A stick-to-bottom).
 const NEAR_BOTTOM_PX = 80;
 
+// Belt D: first-run empty-state examples — a click fills the composer.
+const EXAMPLE_PROMPTS = [
+  "Describe the change you want to make",
+  "Review the latest diff and suggest improvements",
+  "Distill a summary of recent decisions",
+];
+
 export default function ChatSurface({
   events,
   agentRunning,
@@ -558,7 +565,12 @@ export default function ChatSurface({
             </button>
           </div>
         )}
-        <div className="message-list" ref={listRef} onScroll={handleListScroll}>
+        <div
+          className="message-list"
+          ref={listRef}
+          onScroll={handleListScroll}
+          aria-live="polite"
+        >
         {epoch > 1 && (
           <div className="epoch-banner">
             Epoch {epoch}
@@ -573,9 +585,30 @@ export default function ChatSurface({
           </div>
         )}
         {visibleEvents.length === 0 && (
-          <div className="empty-hint">
-            No messages yet. Ask the agent to change something — every run is journaled
-            and its diff lands here for review.
+          <div className="empty-state">
+            <h2>Welcome to Odo</h2>
+            <p className="dim">
+              Every run is journaled, and its diff lands here for review.
+            </p>
+            {EXAMPLE_PROMPTS.map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                className="example-prompt"
+                onClick={() => {
+                  setDraft(prompt);
+                  textareaRef.current?.focus();
+                }}
+              >
+                {prompt}
+              </button>
+            ))}
+            <div className="shortcuts">
+              <span>⌘K Commands</span>
+              <span>⌘B Sidebar</span>
+              <span>⌘F Search</span>
+              <span>⌘, Settings</span>
+            </div>
           </div>
         )}
           {runGroups.map((group) => (

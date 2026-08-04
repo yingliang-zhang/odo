@@ -1,8 +1,13 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage, getSettings, unwrap, updateSettings } from "../api";
+import { useFocusTrap } from "../focusTrap";
 import type { Settings } from "../types";
 
 const SAVED_TOAST_MS = 3000;
+
+// Belt D: the theme persists in localStorage and is applied to <html> —
+// App reads the same key on mount, so the dialog never has to sync back.
+type Theme = "dark" | "light";
 
 interface Props {
   onClose: () => void;
@@ -18,7 +23,18 @@ export default function SettingsPanel({ onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedToast, setSavedToast] = useState(false);
+  const [theme, setTheme] = useState<Theme>(() =>
+    localStorage.getItem("odo-theme") === "light" ? "light" : "dark",
+  );
+  const switchTheme = (next: Theme) => {
+    setTheme(next);
+    localStorage.setItem("odo-theme", next);
+    document.documentElement.dataset.theme = next;
+  };
   const toastTimer = useRef<number | null>(null);
+  // Belt D: modal focus trap (Tab cycles, focus restores on close).
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(panelRef);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,9 +96,33 @@ export default function SettingsPanel({ onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
+        ref={panelRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="settings-title">Settings</h2>
+
+        <div className="settings-field">
+          <span id="theme-label">Theme</span>
+          <div className="theme-toggle" role="group" aria-labelledby="theme-label">
+            <button
+              type="button"
+              className={theme === "dark" ? "active" : ""}
+              aria-pressed={theme === "dark"}
+              onClick={() => switchTheme("dark")}
+            >
+              Dark
+            </button>
+            <button
+              type="button"
+              className={theme === "light" ? "active" : ""}
+              aria-pressed={theme === "light"}
+              onClick={() => switchTheme("light")}
+            >
+              Light
+            </button>
+          </div>
+        </div>
 
         {loading && <div className="settings-loading">Loading…</div>}
         {error && <div className="settings-error">{error}</div>}

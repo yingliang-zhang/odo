@@ -13,6 +13,94 @@
   --ok: #3fa35f;
   --err: #c34a4a;
   --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* Belt D: semantic colors lifted out of literals so the light theme can
+     re-theme every surface by overriding this block alone. Values below
+     are the previous hardcoded dark-theme colors. */
+  --link: #7aa2f7;
+  --warn: #cca742;
+  --err-text: #e08a8a;
+  --err-surface: #3a2022;
+  --err-surface-text: #f0b8b8;
+  --err-surface-hover-text: #fff;
+  --diff-add-bg: rgba(63, 163, 95, 0.12);
+  --diff-add-text: #7bd794;
+  --diff-del-bg: rgba(195, 74, 74, 0.12);
+  --diff-del-text: #e08a8a;
+  --agent-text: var(--text);
+  --code-chip-bg: rgba(0, 0, 0, 0.35);
+  --panel-float: rgba(28, 31, 37, 0.92);
+  --tok-keyword: #c08ae0;
+  --tok-string: #d8a657;
+  --tok-comment: #7a818c;
+  --tok-number: #6fd3d3;
+  --tok-fn: #7aa2f7;
+}
+
+/* Belt D: light theme. Every component rule consumes the variables, so
+   this block is the entire theme switch. --mono is inherited unchanged. */
+[data-theme="light"] {
+  --bg: #f5f5f5;
+  --bg-raised: #fff;
+  --bg-input: #fff;
+  --border: #ddd;
+  --text: #1a1a1a;
+  --text-dim: #666;
+  --accent-user: #2563eb;
+  --accent-agent: #7c3aed;
+  --err: #dc2626;
+  --ok: #16a34a;
+  --link: #2563eb;
+  --warn: #a16207;
+  --err-text: #dc2626;
+  --err-surface: #fee2e2;
+  --err-surface-text: #991b1b;
+  --err-surface-hover-text: #7f1d1d;
+  --diff-add-bg: rgba(22, 163, 74, 0.14);
+  --diff-add-text: #15803d;
+  --diff-del-bg: rgba(220, 38, 38, 0.1);
+  --diff-del-text: #b91c1c;
+  --agent-text: #fff;
+  --code-chip-bg: rgba(0, 0, 0, 0.07);
+  --panel-float: rgba(255, 255, 255, 0.94);
+  --tok-keyword: #9333ea;
+  --tok-string: #b45309;
+  --tok-comment: #6b7280;
+  --tok-number: #0e7490;
+  --tok-fn: #1d4ed8;
+}
+
+/* In the light theme the agent bubble is saturated purple; page-link blue
+   and dim gray sit poorly on it, so bubble content swaps to white-range
+   colors. Dark theme keeps --link / --text-dim (its bubble is a dark
+   surface where those read well). */
+[data-theme="light"] .bubble-agent a {
+  color: #fff;
+}
+
+[data-theme="light"] .bubble-agent blockquote {
+  color: rgba(255, 255, 255, 0.75);
+  border-left-color: rgba(255, 255, 255, 0.4);
+}
+
+/* Belt D: visible keyboard focus on every interactive element. Inputs keep
+   their border-color treatment (their :focus rules are more specific). */
+:focus-visible {
+  outline: 2px solid var(--accent-user);
+  outline-offset: 1px;
+}
+
+/* Screen-reader-only text: present in the a11y tree, invisible on screen. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 * {
@@ -78,9 +166,9 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: #4a2426;
+  background: var(--err-surface);
   border-bottom: 1px solid var(--err);
-  color: #f0b8b8;
+  color: var(--err-surface-text);
   padding: 6px 12px;
   font-size: 13px;
 }
@@ -90,7 +178,7 @@ body {
 .error-banner .dismiss-btn {
   background: none;
   border: none;
-  color: #f0b8b8;
+  color: var(--err-surface-text);
   cursor: pointer;
   font-size: 16px;
   padding: 2px 6px;
@@ -99,7 +187,7 @@ body {
 }
 
 .error-banner .dismiss-btn:hover {
-  color: #fff;
+  color: var(--err-surface-hover-text);
   background: rgba(0, 0, 0, 0.25);
 }
 
@@ -212,7 +300,7 @@ body {
 }
 
 .ws-error {
-  color: #e08a8a;
+  color: var(--err-text);
   font-size: 12px;
   margin-bottom: 6px;
 }
@@ -369,11 +457,54 @@ body {
   opacity: 0.9;
 }
 
-.empty-hint {
-  color: var(--text-dim);
+/* Belt D: first-run empty state — a guided card instead of a dim hint. */
+.empty-state {
   margin: auto;
-  max-width: 420px;
+  max-width: 480px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 32px;
   text-align: center;
+}
+
+.empty-state h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  color: var(--accent-user);
+}
+
+.empty-state p {
+  margin: 0 0 16px;
+  font-size: 13px;
+}
+
+.empty-state .example-prompt {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.empty-state .example-prompt:hover {
+  border-color: var(--accent-user);
+  color: var(--accent-user);
+}
+
+.empty-state .shortcuts {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 18px;
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .chat-composer {
@@ -507,6 +638,7 @@ body {
 .bubble-agent {
   align-self: flex-start;
   background: var(--accent-agent);
+  color: var(--agent-text);
   border-bottom-left-radius: 2px;
 }
 
@@ -538,9 +670,9 @@ body {
 
 .bubble-error {
   align-self: flex-start;
-  background: #3a2022;
+  background: var(--err-surface);
   border: 1px solid var(--err);
-  color: #f0b8b8;
+  color: var(--err-surface-text);
 }
 
 .bubble-review {
@@ -712,13 +844,13 @@ body {
 }
 
 .diff-add {
-  background: rgba(63, 163, 95, 0.12);
-  color: #7bd794;
+  background: var(--diff-add-bg);
+  color: var(--diff-add-text);
 }
 
 .diff-del {
-  background: rgba(195, 74, 74, 0.12);
-  color: #e08a8a;
+  background: var(--diff-del-bg);
+  color: var(--diff-del-text);
 }
 
 .diff-hunk {
@@ -728,6 +860,88 @@ body {
 
 .diff-gutter {
   user-select: none;
+}
+
+/* ---------- Belt D: diff view toggle + split view ---------- */
+
+/* Segmented control — also used by the settings theme toggle. */
+.diff-toggle,
+.theme-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.diff-toggle button,
+.theme-toggle button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.diff-toggle button + button,
+.theme-toggle button + button {
+  border-left: 1px solid var(--border);
+}
+
+.diff-toggle button.active,
+.theme-toggle button.active {
+  background: var(--bg-input);
+  color: var(--text);
+}
+
+.diff-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 0;
+  background: var(--bg);
+}
+
+/* Each column scrolls; DiffViewer syncs their scrollTop so both stay in
+   lockstep (the "scroll together" behavior). */
+.diff-split-col {
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 0;
+}
+
+.diff-split-col + .diff-split-col {
+  border-left: 1px solid var(--border);
+}
+
+/* Split lines must never wrap — a wrapped row would desynchronize the two
+   columns' heights. Horizontal scroll takes the overflow instead. */
+.diff-split .diff-line {
+  padding: 0 12px;
+  white-space: pre;
+  word-break: normal;
+}
+
+.diff-line-old {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-text);
+}
+
+.diff-line-new {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-text);
+}
+
+/* Context rows sit on the column background — explicitly no tint. */
+.diff-line-context {
+  background: transparent;
+}
+
+/* Padding rows where the other column had the change. */
+.diff-line-empty {
+  background: transparent;
 }
 
 .diff-truncated {
@@ -741,24 +955,24 @@ body {
    add/del backgrounds as well as plain context lines. */
 
 .tok-keyword {
-  color: #c08ae0;
+  color: var(--tok-keyword);
 }
 
 .tok-string {
-  color: #d8a657;
+  color: var(--tok-string);
 }
 
 .tok-comment {
-  color: #7a818c;
+  color: var(--tok-comment);
   font-style: italic;
 }
 
 .tok-number {
-  color: #6fd3d3;
+  color: var(--tok-number);
 }
 
 .tok-fn {
-  color: #7aa2f7;
+  color: var(--tok-fn);
 }
 
 /* ---------- M2: settings modal ---------- */
@@ -989,8 +1203,8 @@ body {
 
 .verdict-needs_fixes {
   background: rgba(204, 167, 66, 0.15);
-  color: #cca742;
-  border: 1px solid #cca742;
+  color: var(--warn);
+  border: 1px solid var(--warn);
 }
 
 .review-comments {
@@ -1595,7 +1809,7 @@ body {
 }
 
 .mem-meta-warn {
-  color: #cca742;
+  color: var(--warn);
 }
 
 .mem-decisions {
@@ -1712,7 +1926,7 @@ body {
 }
 
 .markdown a {
-  color: #7aa2f7;
+  color: var(--link);
 }
 
 .markdown table {
@@ -1739,7 +1953,7 @@ body {
 }
 
 .bubble-inline-code {
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--code-chip-bg);
   border-radius: 4px;
   padding: 0 4px;
   font-family: var(--mono);
@@ -1757,7 +1971,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: rgba(28, 31, 37, 0.92);
+  background: var(--panel-float);
   backdrop-filter: blur(6px);
   border: 1px solid var(--border);
   border-radius: 8px;

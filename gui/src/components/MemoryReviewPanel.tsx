@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { applyMemory, errorMessage, ledger, memoryProposals, readMemory, readPins } from "../api";
+import { useFocusTrap } from "../focusTrap";
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse } from "../types";
 
 // M4 memory review (spec §7): the learner proposes rules at distill time
@@ -95,6 +96,9 @@ export default function MemoryReviewPanel({
   const [ledgerContent, setLedgerContent] = useState<string | null>(null);
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [ledgerError, setLedgerError] = useState<string | null>(null);
+  // Belt D: modal focus trap (Tab cycles, focus restores on close).
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(panelRef);
 
   // (Re-)load the pending batch. Nothing pending (epoch absent/0 or no
   // proposals after the daemon's evidence veto) reads as the empty state —
@@ -237,6 +241,8 @@ export default function MemoryReviewPanel({
         role="dialog"
         aria-modal="true"
         aria-label="Memory review"
+        ref={panelRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="wiki-head">

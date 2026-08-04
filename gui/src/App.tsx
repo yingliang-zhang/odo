@@ -100,6 +100,16 @@ export default function App() {
   const [pendingCounts, setPendingCounts] = useState<Record<number, number>>({});
   const [runningWorkstreams, setRunningWorkstreams] = useState<number[]>([]);
 
+  // Belt D: persisted theme applies on mount regardless of which surface
+  // (settings dialog vs. fresh launch) wrote it. Absent/invalid values
+  // leave <html> untouched, which resolves to the dark :root defaults.
+  useEffect(() => {
+    const saved = localStorage.getItem("odo-theme");
+    if (saved === "dark" || saved === "light") {
+      document.documentElement.dataset.theme = saved;
+    }
+  }, []);
+
   const lastSeqRef = useRef(0);
   const conversationRef = useRef<number | null>(null);
   // Belt A: the forever-installed global shortcut listener reads the current
