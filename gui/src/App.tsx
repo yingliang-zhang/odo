@@ -22,10 +22,13 @@ import {
 } from "./api";
 import ChatSurface from "./components/ChatSurface";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
+import ContextPanel, { type PanelTab } from "./components/ContextPanel";
 import DiffViewer from "./components/DiffViewer";
 import MemoryReviewPanel, { type Tab as MemoryReviewTab } from "./components/MemoryReviewPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import Sidebar, { type SidebarToast } from "./components/Sidebar";
+import StatusBar from "./components/StatusBar";
+import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { notifyRunDone } from "./notify";
 import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, RunInfo, Workstream } from "./types";
@@ -91,6 +94,15 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("odo-sidebar-collapsed") === "true",
   );
+  // M9 Phase 1: right context panel — ⌘J toggle, persisted open/closed + active tab.
+  const [panelOpen, setPanelOpen] = useState(
+    () => localStorage.getItem("odo-panel-open") === "true",
+  );
+  const [panelTab, setPanelTab] = useState<PanelTab>(() => {
+    const stored = localStorage.getItem("odo-panel-tab");
+    const VALID: PanelTab[] = ["changes", "wiki", "memory", "ledger"];
+    return stored && (VALID as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The memory review modal lives here (not in the sidebar): toasts click
   // through into it, and it must survive the sidebar collapsing to the rail.
@@ -142,6 +154,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("odo-sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  // M9 Phase 1: panel open/closed + active tab persistence.
+  useEffect(() => {
+    localStorage.setItem("odo-panel-open", String(panelOpen));
+  }, [panelOpen]);
+  useEffect(() => {
+    localStorage.setItem("odo-panel-tab", panelTab);
+  }, [panelTab]);
 
   const lastSeqRef = useRef(0);
   const conversationRef = useRef<number | null>(null);
@@ -477,6 +497,10 @@ export default function App() {
           e.preventDefault();
           setSidebarCollapsed((v) => !v);
           break;
+        case "j":
+          e.preventDefault();
+          setPanelOpen((v) => !v);
+          break;
         case ",":
           e.preventDefault();
           setSettingsOpen(true);
@@ -770,6 +794,13 @@ export default function App() {
       onRun: () => setSidebarCollapsed((v) => !v),
     },
     {
+      id: "toggle-panel",
+      name: "Toggle Context Panel",
+      icon: "⫿",
+      shortcut: "⌘J",
+      onRun: () => setPanelOpen((v) => !v),
+    },
+    {
       id: "search-chat",
       name: "Search Chat",
       icon: "⌕",
@@ -780,6 +811,12 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <TopBar
+        workstreamName={workstream?.name ?? null}
+        onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+        sidebarCollapsed={sidebarCollapsed}
+      />
+      <div className="app-body">
       <Sidebar
         project={project}
         workstream={workstream}
@@ -931,6 +968,29 @@ export default function App() {
             ))
           : diff && <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />}
       </main>
+      <ContextPanel
+        open={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        activeTab={panelTab}
+        onTabChange={setPanelTab}
+        changesBadge={diffs.length > 0 ? diffs.length : undefined}
+        wikiBadge={wikiNoteCount ?? undefined}
+        memoryBadge={pendingMemoryProposals > 0 ? pendingMemoryProposals : undefined}
+      >
+        <div className="panel-empty">
+          {panelTab === "changes" && "No pending diffs — the next run's changes land here."}
+          {panelTab === "wiki" && "Wiki browser will appear here (Phase 3)."}
+          {panelTab === "memory" && "Memory proposals will appear here (Phase 3)."}
+          {panelTab === "ledger" && "Ledger will appear here (Phase 3)."}
+        </div>
+      </ContextPanel>
+      </div>
+      <StatusBar
+        workstreamName={workstream?.name ?? null}
+        conversationId={conversation?.id ?? null}
+        epoch={conversation?.epoch ?? 1}
+        agentRunning={agentRunning}
+      />
     </div>
   );
 }
