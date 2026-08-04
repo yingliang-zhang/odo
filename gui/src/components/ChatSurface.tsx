@@ -379,7 +379,7 @@ export default function ChatSurface({
   useEffect(() => {
     if (!searchOpen || trimmedQuery === "") return;
     if (matches.length === 0) return;
-    const target = listRef.current?.querySelector(`[data-seq="${matches[clampedIdx].seq}"]`);
+    const target = listRef.current?.querySelector(`[data-seq="${matches[clampedIdx].seq}"] .bubble`) || listRef.current?.querySelector(`[data-seq="${matches[clampedIdx].seq}"]`);
     target?.scrollIntoView({ block: "center" });
   }, [searchOpen, trimmedQuery, matches, clampedIdx]);
 
