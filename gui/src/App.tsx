@@ -170,6 +170,12 @@ export default function App() {
   const agentRunningRef = useRef(false);
   // Belt B: same pattern for the search bar (Esc closes it).
   const searchOpenRef = useRef(false);
+  const panelOpenRef = useRef(false);
+  // M9 P2: track previous pending-diff count for genuine 0→1 transition,
+  // and a bootstrap latch so the first poll after applyBootstrap doesn't
+  // auto-open the panel on pre-existing pending diffs.
+  const prevDiffsCountRef = useRef(0);
+  const bootstrappedRef = useRef(false);
   // Read inside callbacks that must stay referentially stable (recordEvents
   // is a poll-effect dependency; a state dep would rebuild the interval).
   const workstreamNameRef = useRef<string | null>(null);
@@ -290,6 +296,10 @@ export default function App() {
       setDiff(resp.diff ?? null);
       setRuns([]);
       setDiffs([]);
+      // M9 P2: reset the bootstrap latch so the first poll after a new
+      // bootstrap (switch workstream, session restore) doesn't auto-open.
+      bootstrappedRef.current = false;
+      prevDiffsCountRef.current = 0;
       setLastDistillPath(null);
       const cid = resp.conversation?.id;
       if (cid != null) {
@@ -371,7 +381,25 @@ export default function App() {
         if (resp.diff) setDiff(resp.diff);
         // M8: store per-run state from the daemon.
         setRuns(resp.runs ?? []);
-        setDiffs(resp.diffs ?? []);
+        const newDiffs = resp.diffs ?? [];
+        setDiffs(newDiffs);
+        // M9 P2: auto-open the panel on a genuine 0→1 pending-diff
+        // transition (not level-based), only when closed, and only after
+        // the first real poll (not bootstrap replay).
+        if (!bootstrappedRef.current) {
+          // First poll after bootstrap: latch the initial diff count
+          // without auto-opening, so session restore stays quiet.
+          prevDiffsCountRef.current = newDiffs.length;
+          bootstrappedRef.current = true;
+        } else if (
+          !panelOpenRef.current &&
+          prevDiffsCountRef.current === 0 &&
+          newDiffs.length > 0
+        ) {
+          setPanelOpen(true);
+          setPanelTab("changes");
+        }
+        prevDiffsCountRef.current = newDiffs.length;
         // M3 (spec §3c): project-wide visibility every ~4th tick (~6 s
         // idle, ~1.4 s while a run streams).
         // Guarded: a daemon without the command (or any failure) leaves the
@@ -469,6 +497,11 @@ export default function App() {
   useEffect(() => {
     searchOpenRef.current = searchOpen;
   }, [searchOpen]);
+
+  // M9 P2: panelOpenRef must sync on panel toggle, not search toggle.
+  useEffect(() => {
+    panelOpenRef.current = panelOpen;
+  }, [panelOpen]);
 
   // Belt A global shortcuts. Modals close themselves on Escape through
   // their own window listeners; the overlay check keeps a bare Escape from
@@ -956,17 +989,6 @@ export default function App() {
           onSearchQueryChange={setSearchQuery}
           onSearchClose={() => setSearchOpen(false)}
         />
-        {diffs.length > 0
-          ? diffs.map((d) => (
-              <DiffViewer
-                key={d.id}
-                diff={d}
-                runLabel={d.run_index != null ? `Run ${d.run_index + 1}` : undefined}
-                onAccept={handleAccept}
-                onReject={handleReject}
-              />
-            ))
-          : diff && <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />}
       </main>
       <ContextPanel
         open={panelOpen}
@@ -977,12 +999,23 @@ export default function App() {
         wikiBadge={wikiNoteCount ?? undefined}
         memoryBadge={pendingMemoryProposals > 0 ? pendingMemoryProposals : undefined}
       >
-        <div className="panel-empty">
-          {panelTab === "changes" && "No pending diffs — the next run's changes land here."}
-          {panelTab === "wiki" && "Wiki browser will appear here (Phase 3)."}
-          {panelTab === "memory" && "Memory proposals will appear here (Phase 3)."}
-          {panelTab === "ledger" && "Ledger will appear here (Phase 3)."}
-        </div>
+        {panelTab === "changes" && (diffs.length > 0
+          ? diffs.map((d) => (
+              <DiffViewer
+                key={d.id}
+                diff={d}
+                runLabel={d.run_index != null ? `Run ${d.run_index + 1}` : undefined}
+                onAccept={handleAccept}
+                onReject={handleReject}
+              />
+            ))
+          : diff
+            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />
+            : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
+        )}
+        {panelTab === "wiki" && <div className="panel-empty">Wiki browser will appear here (Phase 3).</div>}
+        {panelTab === "memory" && <div className="panel-empty">Memory proposals will appear here (Phase 3).</div>}
+        {panelTab === "ledger" && <div className="panel-empty">Ledger will appear here (Phase 3).</div>}
       </ContextPanel>
       </div>
       <StatusBar
