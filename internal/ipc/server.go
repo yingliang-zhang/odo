@@ -1769,10 +1769,10 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 		time.Sleep(200 * time.Millisecond)
 	}
 	out := strings.Join(texts, "\n\n")
+	if runErr != "" {
+		return "", errors.New(runErr)
+	}
 	if out == "" {
-		if runErr != "" {
-			return "", errors.New(runErr)
-		}
 		return "", fmt.Errorf("run produced no output")
 	}
 	return out, nil
