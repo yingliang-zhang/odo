@@ -586,11 +586,14 @@ export default function App() {
   // Belt C (§Fix 2): the error banner auto-dismisses; a new error
   // restarts the clock (effect cleanup drops the previous timer), and
   // manual dismiss / unmount clear it the same way.
+  // Guard: don't auto-dismiss bootstrap failures — if the daemon is
+  // unreachable, the error must persist so the user can retry.
   useEffect(() => {
     if (error === null) return;
+    if (!booted) return; // bootstrap error — keep it visible
     const timer = window.setTimeout(() => setError(null), ERROR_BANNER_MS);
     return () => clearTimeout(timer);
-  }, [error]);
+  }, [error, booted]);
 
   if (!booted && !error) {
     return <div className="app-loading">Connecting to the Odo daemon…</div>;
