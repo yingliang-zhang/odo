@@ -431,3 +431,38 @@ Best run: 19 PASS / 0 FAIL / 1 SKIP.
 - Harness timing is flaky: the daemon's one-connection-at-a-time model sometimes rejects GUI sends while a previous run is still finishing. IPC fallback with agent-done wait resolves this.
 
 HEAD: 97b846d
+
+## GUI Belt A-D — tri-model review results
+
+### Belt A (abort + auto-scroll + textarea + shortcuts) — `05c7a06`
+- Round 1: 3/3 NEEDS_FIXES (missing CSS, no Stop button, settings double-mount, Esc ordering, grid)
+- Fix: `82d3f44` — 5 fixes, +97 lines
+- Round 2: GLM ACCEPT, K3+DSF NEEDS_FIXES (overflow:hidden regression on .sidebar)
+- Fix: `05c7a06` — moved overflow:hidden to .sidebar-collapsed only
+- Status: ✅ CLOSED
+
+### Belt B (markdown + chat search + command palette) — `5373591`
+- Round 1: GLM ACCEPT, K3+DSF NEEDS_FIXES (jump-to-match display:contents no-op + .app-main min-height:0)
+- Fix: `27dc8ce` — query .bubble child for scrollIntoView + .app-main min-height:0
+- Status: ✅ CLOSED
+
+### Belt C (run grouping + error banner + wiki search) — `7eba63c`
+- Round 1: GLM NEEDS_FIXES (.run-group no CSS → bubbles lost align-self), DSF ACCEPT, K3 NEEDS_FIXES (bootstrap auto-dismiss hides errors)
+- Fix 1: `01edce1` — .run-group flex column CSS
+- Fix 2: `94b38ec` — guard auto-dismiss on bootstrap failure
+- Status: ✅ CLOSED
+
+### Belt D (split diff + theme + empty state + a11y) — `f188690`
+- Round 1: **3/3 ACCEPT** (no fixes needed — first belt to pass clean)
+- Status: ✅ CLOSED
+
+### Cumulative GUI belt stats
+| Belt | Files | Lines | New components |
+|---|---|---|---|
+| A | 10 | +589 | — |
+| B | 8 | +1081 | Markdown.tsx, CommandPalette.tsx |
+| C | 4 | +288 | — |
+| D | 8 | +555 | focusTrap.ts |
+| **Total** | **~30** | **+2513** | **3 new** |
+
+HEAD: f188690
