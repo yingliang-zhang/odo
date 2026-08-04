@@ -208,6 +208,19 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
       }
       break;
 
+    case "memory_update":
+      // M4–M6: the daemon journals memory layer changes (memory, user,
+      // learner, curator, index, pins, note, ledger). Render as a subtle
+      // system-event badge instead of raw JSON (K3 review P1 fix).
+      body = (
+        <div className="bubble bubble-review">
+          <span className="badge badge-other" title={p.detail ?? ""}>
+            memory · {p.layer ?? "unknown"}{p.cause ? ` · ${p.cause}` : ""}
+          </span>
+        </div>
+      );
+      break;
+
     default:
       body = (
         <div className="bubble bubble-unknown">

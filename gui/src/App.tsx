@@ -8,6 +8,7 @@ import {
   distill,
   errorMessage,
   fanoutSend,
+  getSettings,
   listTopics,
   listWiki,
   listWorkstreams,
@@ -301,6 +302,26 @@ export default function App() {
       cancelled = true;
     };
   }, [applyBootstrap]);
+
+  // K3 review P1: read the daemon's default_adapter on bootstrap so the
+  // sidebar select reflects the persisted setting instead of hardcoded "omp".
+  useEffect(() => {
+    if (!booted) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = unwrap(await getSettings());
+        if (!cancelled && resp.settings?.default_adapter) {
+          setAdapter(resp.settings.default_adapter);
+        }
+      } catch {
+        // Degrade silently — the hardcoded "omp" default stays.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [booted]);
 
   // Poll the daemon for new journal events after the last seen seq.
   useEffect(() => {

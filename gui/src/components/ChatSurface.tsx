@@ -642,6 +642,7 @@ export default function ChatSurface({
             ))}
             <div className="shortcuts">
               <span>⌘K Commands</span>
+              <span>⌘↵ Send</span>
               <span>⌘B Sidebar</span>
               <span>⌘F Search</span>
               <span>⌘, Settings</span>
@@ -796,6 +797,9 @@ export default function ChatSurface({
             {agentRunning ? "Steer" : "Send"}
           </button>
         </form>
+        <div className="composer-hint">
+          ⌘↵ send · Shift+↵ newline{agentRunning ? " · Esc stop" : ""}
+        </div>
       </div>
     </section>
   );
