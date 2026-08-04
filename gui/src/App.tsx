@@ -28,7 +28,7 @@ import SettingsPanel from "./components/SettingsPanel";
 import Sidebar, { type SidebarToast } from "./components/Sidebar";
 import WikiBrowser from "./components/WikiBrowser";
 import { notifyRunDone } from "./notify";
-import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, Workstream } from "./types";
+import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, RunInfo, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -81,6 +81,9 @@ export default function App() {
   // M7: transient streaming preview (never journaled), rebuilt every poll.
   const [preview, setPreview] = useState<PreviewEvent | null>(null);
   const [diff, setDiff] = useState<Diff | null>(null);
+  // M8: fan-out per-run state from the daemon (resp.runs + resp.diffs).
+  const [runs, setRuns] = useState<RunInfo[]>([]);
+  const [diffs, setDiffs] = useState<Diff[]>([]);
   const [adapter, setAdapter] = useState("omp");
   // Belt A: sidebar collapse (⌘B) and the settings modal, lifted out of the
   // Sidebar so ⌘, opens it regardless of sidebar visibility. The collapse
@@ -265,6 +268,8 @@ export default function App() {
       setAgentRunning(resp.agent_running ?? false);
       setPreview(null); // bootstrap carries no preview; the next poll restores it
       setDiff(resp.diff ?? null);
+      setRuns([]);
+      setDiffs([]);
       setLastDistillPath(null);
       const cid = resp.conversation?.id;
       if (cid != null) {
@@ -344,6 +349,9 @@ export default function App() {
         // The daemon always reports the latest diff (any status); only a
         // pending one is actionable in the UI.
         if (resp.diff) setDiff(resp.diff);
+        // M8: store per-run state from the daemon.
+        setRuns(resp.runs ?? []);
+        setDiffs(resp.diffs ?? []);
         // M3 (spec §3c): project-wide visibility every ~4th tick (~6 s
         // idle, ~1.4 s while a run streams).
         // Guarded: a daemon without the command (or any failure) leaves the
@@ -899,6 +907,7 @@ export default function App() {
           events={events}
           agentRunning={agentRunning}
           preview={preview}
+          runs={runs}
           sendDisabled={!booted}
           onSend={handleSend}
           onFanout={handleFanout}
@@ -910,7 +919,17 @@ export default function App() {
           onSearchQueryChange={setSearchQuery}
           onSearchClose={() => setSearchOpen(false)}
         />
-        {diff && <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />}
+        {diffs.length > 0
+          ? diffs.map((d) => (
+              <DiffViewer
+                key={d.id}
+                diff={d}
+                runLabel={d.run_index != null ? `Run ${d.run_index + 1}` : undefined}
+                onAccept={handleAccept}
+                onReject={handleReject}
+              />
+            ))
+          : diff && <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />}
       </main>
     </div>
   );

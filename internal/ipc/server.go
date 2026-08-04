@@ -41,6 +41,10 @@ type runMeta struct {
 	// partial:true), rebuilt by each drainRun while the run is live. Never
 	// journaled; handlePollEvents passes it through verbatim.
 	previewEvent *adapter.AgentEvent
+	// M8 multi-run: batch ordinal (0-based). -1 = not a fan-out run
+	// (single-run events stay unattributed, preserving byte-identical
+	// journals for the common case).
+	fanoutIndex int
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -337,6 +341,9 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
+	// M8: steering during fan-out broadcasts to all live lanes.
+	// When a fan-out is active, a non-steer send_message should error
+	// (below), but an explicit steer goes through handleSteering.
 	if req.Steer {
 		return s.handleSteering(ctx, c, req)
 	}
@@ -409,6 +416,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		conversationID: c.ID,
 		workstreamID:   c.WorkstreamID,
 		worktreePath:   wtPath,
+		fanoutIndex:    -1, // not a fan-out run
 	}
 	s.runs[runID] = meta
 	s.byConv[c.ID] = runID
@@ -620,11 +628,12 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 			conversationID: c.ID,
 			workstreamID:   c.WorkstreamID,
 			worktreePath:   wtPath,
+			fanoutIndex:    len(started), // 0-based batch ordinal
 		}
 		s.runs[runID] = meta
 		s.fanoutRuns[c.ID] = append(s.fanoutRuns[c.ID], runID)
 		started = append(started, meta)
-		runs = append(runs, RunInfo{RunID: runID, Status: "running"})
+		runs = append(runs, RunInfo{RunID: runDirID, Status: "running", Index: len(started) - 1})
 	}
 	return Response{Event: &ev, Runs: runs}, nil
 }
@@ -670,18 +679,34 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 	}
 	runID, ok := s.byConv[c.ID]
 	meta := s.runs[runID]
-	if !ok || meta == nil || meta.finished {
-		return Response{Event: &ev}, nil // no active run: journaled only
-	}
-	if err := s.adapterFor(meta.adapter).Send(ctx, runID, req.Text); err != nil {
-		log.Printf("steering: send to run %s: %v", runID, err)
-		msg := err.Error()
-		if strings.Contains(msg, "not supported") {
-			msg = "Steering not supported by current adapter."
+	if ok && meta != nil && !meta.finished {
+		if err := s.adapterFor(meta.adapter).Send(ctx, runID, req.Text); err != nil {
+			log.Printf("steering: send to run %s: %v", runID, err)
+			msg := err.Error()
+			if strings.Contains(msg, "not supported") {
+				msg = "Steering not supported by current adapter."
+			}
+			_, _ = s.store.AppendEvent(ctx, c.ID, store.EventAgentError, mustJSON(map[string]interface{}{
+				"error": msg,
+			}))
 		}
-		_, _ = s.store.AppendEvent(ctx, c.ID, store.EventAgentError, mustJSON(map[string]interface{}{
-			"error": msg,
-		}))
+		return Response{Event: &ev}, nil
+	}
+	// M8: fan-out — broadcast steering to all live lanes.
+	ids := s.fanoutRuns[c.ID]
+	steered := false
+	for _, id := range ids {
+		m := s.runs[id]
+		if m == nil || m.finished {
+			continue
+		}
+		if err := s.adapterFor(m.adapter).Send(ctx, id, req.Text); err != nil {
+			log.Printf("steering: send to fan-out lane %s: %v", id, err)
+		}
+		steered = true
+	}
+	if !steered {
+		return Response{Event: &ev}, nil // no active run: journaled only
 	}
 	return Response{Event: &ev}, nil
 }
@@ -697,17 +722,43 @@ func (s *Server) handleCancel(ctx context.Context, req Request) (Response, error
 	if err != nil {
 		return Response{}, err
 	}
+	// Primary single run.
 	runID, ok := s.byConv[c.ID]
 	meta := s.runs[runID]
-	if !ok || meta == nil || meta.finished {
+	if ok && meta != nil && !meta.finished {
+		if err := s.adapterFor(meta.adapter).Cancel(ctx, runID); err != nil {
+			return Response{}, fmt.Errorf("cancel: %w", err)
+		}
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentError,
+			mustJSON(map[string]interface{}{"error": "cancelled by user"})); err != nil {
+			return Response{}, err
+		}
+		return Response{}, nil
+	}
+	// M8: fan-out — cancel all live lanes. Each gets an attributed
+	// agent_error so the per-lane transcript records the stop.
+	ids := s.fanoutRuns[c.ID]
+	cancelled := false
+	for _, id := range ids {
+		m := s.runs[id]
+		if m == nil || m.finished {
+			continue
+		}
+		if err := s.adapterFor(m.adapter).Cancel(ctx, id); err != nil {
+			log.Printf("cancel: fan-out lane %s: %v", id, err)
+		}
+		payload := map[string]interface{}{"error": "cancelled by user"}
+		if m.fanoutIndex >= 0 {
+			payload["run_id"] = m.runDirID
+			payload["run_index"] = m.fanoutIndex
+		}
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentError, mustJSON(payload)); err != nil {
+			return Response{}, err
+		}
+		cancelled = true
+	}
+	if !cancelled {
 		return Response{}, fmt.Errorf("cancel: no active run for conversation %d", c.ID)
-	}
-	if err := s.adapterFor(meta.adapter).Cancel(ctx, runID); err != nil {
-		return Response{}, fmt.Errorf("cancel: %w", err)
-	}
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentError,
-		mustJSON(map[string]interface{}{"error": "cancelled by user"})); err != nil {
-		return Response{}, err
 	}
 	return Response{}, nil
 }
@@ -753,13 +804,15 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 			preview = meta.previewEvent
 		}
 	}
+	runs := s.runInfos(ctx, c.ID)
 	return Response{
 		Events:       events,
 		AgentRunning: new(agentRunning),
 		Preview:      preview,
 		Streaming:    preview != nil,
 		Diff:         s.latestDiffInfo(ctx, c.ID),
-		Runs:         s.runInfos(c.ID),
+		Diffs:        s.pendingDiffInfos(ctx, c.ID),
+		Runs:         runs,
 	}, nil
 }
 
@@ -776,15 +829,26 @@ func (s *Server) fanoutActive(conversationID int64) bool {
 
 // runInfos snapshots all tracked fan-out runs for the conversation — running,
 // done, and errored alike. A run leaves the list only when its diff is
-// reviewed (retireRunForDiff drops it).
-func (s *Server) runInfos(conversationID int64) []RunInfo {
+// reviewed (retireRunForDiff drops it). RunID is the runDirID (not the
+// adapter's internal ID) so it joins to event payloads and diff basenames.
+func (s *Server) runInfos(ctx context.Context, conversationID int64) []RunInfo {
 	ids := s.fanoutRuns[conversationID]
 	if len(ids) == 0 {
 		return nil
 	}
+	// One ListPendingDiffs call per poll — same cost class as latestDiffInfo.
+	pendingDiffs, _ := s.store.ListPendingDiffs(ctx, conversationID)
+	diffByRun := make(map[string]int64, len(pendingDiffs))
+	for _, d := range pendingDiffs {
+		runDir := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
+		diffByRun[runDir] = d.ID
+	}
 	infos := make([]RunInfo, 0, len(ids))
 	for _, id := range ids {
 		status := "done"
+		var idx int
+		var diffID *int64
+		var preview *adapter.AgentEvent
 		if meta := s.runs[id]; meta != nil {
 			switch {
 			case !meta.finished:
@@ -792,8 +856,23 @@ func (s *Server) runInfos(conversationID int64) []RunInfo {
 			case meta.errored:
 				status = "error"
 			}
+			idx = meta.fanoutIndex
+			if dID, ok := diffByRun[meta.runDirID]; ok {
+				diffID = &dID
+			}
+			preview = meta.previewEvent
 		}
-		infos = append(infos, RunInfo{RunID: id, Status: status})
+		runID := id
+		if meta := s.runs[id]; meta != nil {
+			runID = meta.runDirID
+		}
+		infos = append(infos, RunInfo{
+			RunID:   runID,
+			Status:  status,
+			Index:   idx,
+			DiffID:  diffID,
+			Preview: preview,
+		})
 	}
 	return infos
 }
@@ -816,6 +895,16 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		evs = evs[:n-1]
 	}
 	for _, ev := range evs {
+		// M8: stamp fan-out events with run_id + run_index for per-lane
+		// attribution. Single-run events (fanoutIndex == -1) stay
+		// byte-identical — the common case is unaffected.
+		if meta.fanoutIndex >= 0 {
+			if ev.Payload == nil {
+				ev.Payload = make(map[string]interface{})
+			}
+			ev.Payload["run_id"] = meta.runDirID
+			ev.Payload["run_index"] = meta.fanoutIndex
+		}
 		if _, err := s.store.AppendEvent(ctx, meta.conversationID, ev.Type, mustJSON(ev.Payload)); err != nil {
 			return err
 		}
@@ -1846,6 +1935,40 @@ func (s *Server) latestDiffInfo(ctx context.Context, conversationID int64) *Diff
 		info.Content = string(b)
 	}
 	return info
+}
+
+// pendingDiffInfos returns all pending diffs for the conversation, each
+// enriched with run_id/run_index when the diff was produced by a fan-out
+// run. The join key is the diff file basename (== runDirID, per
+// worktree.DiffPath). Newest-first ordering matches the review flow.
+func (s *Server) pendingDiffInfos(ctx context.Context, conversationID int64) []DiffInfo {
+	diffs, err := s.store.ListPendingDiffs(ctx, conversationID)
+	if err != nil || len(diffs) == 0 {
+		return nil
+	}
+	// Build a runDirID → {runID, index} lookup from fan-out runs.
+	runByDir := make(map[string]*runMeta, len(s.fanoutRuns[conversationID]))
+	for _, id := range s.fanoutRuns[conversationID] {
+		if meta := s.runs[id]; meta != nil {
+			runByDir[meta.runDirID] = meta
+		}
+	}
+	out := make([]DiffInfo, 0, len(diffs))
+	for _, d := range diffs {
+		info := DiffInfo{ID: d.ID, Status: d.Status, Path: d.PathOnDisk}
+		if b, err := os.ReadFile(d.PathOnDisk); err == nil {
+			info.Content = string(b)
+		}
+		// Join to fan-out run via basename.
+		runDir := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
+		if meta, ok := runByDir[runDir]; ok {
+			info.RunID = meta.runDirID
+			idx := meta.fanoutIndex
+			info.RunIndex = &idx
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // checkConversation validates that the conversation exists and belongs to

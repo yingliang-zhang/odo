@@ -11,7 +11,7 @@ import {
 } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
-import type { OdoEvent, PreviewEvent } from "../types";
+import type { OdoEvent, PreviewEvent, RunInfo } from "../types";
 import MessageBubble from "./MessageBubble";
 import ToolTicker from "./ToolTicker";
 
@@ -31,6 +31,9 @@ interface Props {
   // journaled). Rendered as the dimmed preview bubble; replaced wholesale
   // per poll, null when the stream is between blocks or done.
   preview?: PreviewEvent | null;
+  // M8: fan-out per-run state from the daemon. When non-empty, the run
+  // group shows per-lane tabs; selecting a lane filters the event stream.
+  runs?: RunInfo[];
   sendDisabled: boolean;
   onSend: (text: string, attachments: string[], steer: boolean) => Promise<void>;
   // M2 fan-out: run the prompt through N parallel runs; resolves to the
@@ -145,22 +148,71 @@ function PreviewBubble({ preview }: { preview: PreviewEvent }) {
   );
 }
 
+// M8: per-lane tabs for fan-out runs. Renders "All · Run 1 ✓ · Run 2 ⟳ · …"
+// with status icons and a ● badge for lanes with a pending diff. Clicking a
+// tab sets the selected lane; "All" shows the interleaved journal.
+function RunTabs({
+  runs,
+  selectedRunId,
+  onSelect,
+}: {
+  runs: RunInfo[];
+  selectedRunId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
+  return (
+    <div className="run-tabs" role="tablist">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={selectedRunId === null}
+        className={`run-tab${selectedRunId === null ? " is-active" : ""}`}
+        onClick={() => onSelect(null)}
+      >
+        All
+      </button>
+      {runs.map((r) => {
+        const icon = r.status === "error" ? "✗" : r.status === "done" ? "✓" : "⟳";
+        const isActive = selectedRunId === r.run_id;
+        const hasDiff = r.diff_id != null;
+        return (
+          <button
+            key={r.run_id}
+            type="button"
+            role="tab"
+            aria-selected={isActive}
+            className={`run-tab${isActive ? " is-active" : ""}${hasDiff ? " has-diff" : ""}`}
+            onClick={() => onSelect(r.run_id)}
+          >
+            {`Run ${r.index + 1}`} {icon}
+            {hasDiff && <span className="run-tab-dot" aria-label="pending diff" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Run header: timestamp, tool call count, duration when the run journaled
 // agent_done, and a status icon (✓ done / ✗ error / ⟳ running).
-function RunHeader({ group }: { group: RunGroup }) {
+// M8: when fan-out runs are provided, the group is running while ANY lane
+// runs (the first lane's agent_done no longer flips the group to done).
+function RunHeader({ group, runs }: { group: RunGroup; runs?: RunInfo[] }) {
   const start = group.start;
   if (!start) return null;
   const toolCalls = group.events.filter((e) => e.type === "agent_tool_call").length;
   const done = group.events.find((e) => e.type === "agent_done");
   const failed = group.events.find((e) => e.type === "agent_error");
-  const status = failed ? "error" : done ? "done" : "running";
-  const icon = failed ? "✗" : done ? "✓" : "⟳";
+  // M8: fan-out status — running while any lane is still live.
+  const fanoutRunning = runs && runs.some((r) => r.status === "running");
+  const status = fanoutRunning ? "running" : failed ? "error" : done ? "done" : "running";
+  const icon = fanoutRunning ? "⟳" : failed ? "✗" : done ? "✓" : "⟳";
   const startMs = Date.parse(start.created_at);
   const clock = Number.isNaN(startMs)
     ? "?"
     : new Date(startMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const doneMs = done ? Date.parse(done.created_at) : NaN;
-  const showDuration = done !== undefined && !Number.isNaN(startMs) && !Number.isNaN(doneMs);
+  const showDuration = !fanoutRunning && done !== undefined && !Number.isNaN(startMs) && !Number.isNaN(doneMs);
   return (
     <div className="run-header">
       <span className={`run-status ${status}`}>{icon}</span>
@@ -196,6 +248,7 @@ export default function ChatSurface({
   events,
   agentRunning,
   preview,
+  runs,
   sendDisabled,
   onSend,
   onFanout,
@@ -207,15 +260,25 @@ export default function ChatSurface({
   onSearchQueryChange,
   onSearchClose,
 }: Props) {
+  // M8: selected run lane for per-run filtering. null = "All" (interleaved).
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  // Reset stale selection when runs change or the selected lane disappears
+  // (accept/review clears fanoutRuns → runs becomes []).
+  useEffect(() => {
+    if (selectedRunId == null) return;
+    if (!runs || runs.length === 0 || !runs.some((r) => r.run_id === selectedRunId)) {
+      setSelectedRunId(null);
+    }
+  }, [runs, selectedRunId]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
-  // M2 fan-out composer state: N picker open, chosen N, active run count.
+  // M2 fan-out composer state: N picker open, chosen N.
   const [fanoutOpen, setFanoutOpen] = useState(false);
   const [fanoutN, setFanoutN] = useState(2);
   const [fanoutBusy, setFanoutBusy] = useState(false);
-  const [fanoutActive, setFanoutActive] = useState<number | null>(null);
+  const [, setFanoutActive] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -433,12 +496,23 @@ export default function ChatSurface({
     [events, lastDistillSeq],
   );
 
+  // M8: filter visible events by the selected run lane. Events without a
+  // run_id (the initial user_message, review_action, etc.) belong to all
+  // lanes and are always shown. When "All" is selected (null), no filter.
+  const laneFilteredEvents = useMemo(() => {
+    if (selectedRunId == null) return visibleEvents;
+    return visibleEvents.filter((e) => {
+      const rid = e.payload?.run_id;
+      return rid == null || rid === selectedRunId;
+    });
+  }, [visibleEvents, selectedRunId]);
+
   // Belt C (§Fix 1): group the visible events into runs — each
   // user_message opens a new group; everything until the next one belongs
   // to it.
   const runGroups = useMemo<RunGroup[]>(() => {
     const groups: RunGroup[] = [];
-    for (const ev of visibleEvents) {
+    for (const ev of laneFilteredEvents) {
       if (ev.type === "user_message") {
         groups.push({ start: ev, events: [ev] });
       } else if (groups.length === 0) {
@@ -448,7 +522,14 @@ export default function ChatSurface({
       }
     }
     return groups;
-  }, [visibleEvents]);
+  }, [laneFilteredEvents]);
+
+  // M8: effective preview — when a specific lane is selected, use that
+  // run's preview from RunInfo; otherwise the top-level poll preview.
+  const effectivePreview = useMemo(() => {
+    if (selectedRunId == null || !runs) return preview;
+    return runs.find((r) => r.run_id === selectedRunId)?.preview ?? null;
+  }, [preview, runs, selectedRunId]) as PreviewEvent | null;
 
   // Belt B search: one entry per occurrence, in display order — the current
   // match index resolves to the seq of its bubble for scroll-into-view.
@@ -651,7 +732,10 @@ export default function ChatSurface({
         )}
           {runGroups.map((group) => (
             <div className="run-group" key={group.start?.seq ?? "preamble"}>
-              <RunHeader group={group} />
+              <RunHeader group={group} runs={runs} />
+              {runs && runs.length > 0 && (
+                <RunTabs runs={runs} selectedRunId={selectedRunId} onSelect={setSelectedRunId} />
+              )}
               {runRenderItems(group.events).map((item) =>
                 item.kind === "bubble" ? (
                   <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} />
@@ -675,7 +759,7 @@ export default function ChatSurface({
               )}
             </div>
           ))}
-          {preview && <PreviewBubble preview={preview} />}
+          {effectivePreview && <PreviewBubble preview={effectivePreview} />}
           <ToolTicker running={agentRunning} events={events} />
         </div>
         {newOutput && (
@@ -714,19 +798,15 @@ export default function ChatSurface({
             ))}
           </div>
         )}
-        {fanoutActive != null && (
-          <div className="fanout-indicator">
-            {fanoutActive} runs active
-            <button
-              type="button"
-              className="fanout-dismiss"
-              aria-label="Dismiss fan-out indicator"
-              onClick={() => setFanoutActive(null)}
-            >
-              ×
-            </button>
-          </div>
-        )}
+        {(runs ?? []).length > 0 && (() => {
+          const allRuns = runs ?? [];
+          const running = allRuns.filter((r) => r.status === "running").length;
+          return running > 0 ? (
+            <div className="fanout-indicator">
+              {running} of {allRuns.length} runs still running
+            </div>
+          ) : null;
+        })()}
         <form className="chat-input" onSubmit={handleSubmit}>
           <textarea
             ref={textareaRef}

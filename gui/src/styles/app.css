@@ -1573,6 +1573,67 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--accent-user);
 }
 
+/* ---------- M8: multi-run per-lane tabs ---------- */
+
+.run-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  flex-wrap: wrap;
+}
+
+.run-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px 4px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+}
+
+.run-tab:hover {
+  color: var(--text);
+  background: var(--bg-input);
+}
+
+.run-tab.is-active {
+  color: var(--text);
+  border-color: var(--border);
+  border-bottom-color: var(--bg);
+  background: var(--bg);
+  font-weight: 600;
+}
+
+.run-tab.has-diff .run-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-user);
+  margin-left: 2px;
+}
+
+/* Per-run diff card label (DiffViewer header). */
+.diff-run-label {
+  display: inline-block;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 6px;
+  color: var(--text-dim);
+}
+
 /* Consecutive tool events collapse under one native <details> toggle. */
 .tool-group {
   margin: 4px 0;

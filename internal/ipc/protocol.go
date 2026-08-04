@@ -92,18 +92,31 @@ type ReviewResult struct {
 	Comments string `json:"comments"`
 }
 
-// RunInfo reports the status of one fan-out run.
+// RunInfo reports the status of one fan-out run. RunID is the daemon's
+// runDirID (not the adapter's internal ID), so it joins events → worktree →
+// diff. Index is the 0-based batch ordinal for display ("Run 1", "Run 2").
+// DiffID is non-nil when the run has produced a pending diff. Preview carries
+// the run's M7 streaming preview (partial:true, never journaled).
 type RunInfo struct {
-	RunID  string `json:"run_id"`
-	Status string `json:"status"` // "running" | "done" | "error"
+	RunID   string              `json:"run_id"`
+	Status  string              `json:"status"` // "running" | "done" | "error"
+	Index   int                 `json:"index"`
+	DiffID  *int64              `json:"diff_id,omitempty"`
+	Preview *adapter.AgentEvent `json:"preview,omitempty"`
 }
 
 // DiffInfo carries a diff record plus its file content to the client.
+// RunID/RunIndex are set when the diff was produced by a fan-out run,
+// allowing the frontend to associate a diff card with its lane. RunIndex
+// is a pointer (not int) so that index 0 ("Run 1") is not dropped by
+// omitempty — the most common lane.
 type DiffInfo struct {
-	ID      int64  `json:"id"`
-	Status  string `json:"status"`
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	ID       int64  `json:"id"`
+	Status   string `json:"status"`
+	Path     string `json:"path"`
+	Content  string `json:"content"`
+	RunID    string `json:"run_id,omitempty"`
+	RunIndex *int   `json:"run_index,omitempty"`
 }
 
 // WikiNoteInfo describes one distilled wiki note for the browser list.
@@ -132,6 +145,7 @@ type Response struct {
 	Preview     *adapter.AgentEvent `json:"preview,omitempty"`
 	Streaming   bool                `json:"streaming,omitempty"`
 	Diff        *DiffInfo           `json:"diff,omitempty"`
+	Diffs       []DiffInfo          `json:"diffs,omitempty"`
 	DiffID      int64               `json:"diff_id,omitempty"`
 	Applied     bool                `json:"applied,omitempty"`
 	WikiPath    string              `json:"wiki_path,omitempty"`

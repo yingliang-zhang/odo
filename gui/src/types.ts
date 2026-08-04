@@ -92,6 +92,11 @@ export interface EventPayload {
   // human-readable summary.
   layer?: string;
   cause?: string;
+  // M8 multi-run: fan-out event attribution. Absent on single-run events
+  // (byte-identical journals). run_id = runDirID; run_index = 0-based
+  // batch ordinal.
+  run_id?: string;
+  run_index?: number;
   detail?: string;
   // review_action when action == "distill" (M1 memory distiller).
   epoch?: number;
@@ -131,6 +136,10 @@ export interface Diff {
   status: DiffStatus;
   path: string;
   content: string;
+  // M8: fan-out run attribution (omitempty on the wire; absent for
+  // single-run diffs and old journals).
+  run_id?: string;
+  run_index?: number;
 }
 
 export interface BootstrapResponse {
@@ -177,6 +186,8 @@ export interface PollEventsResponse {
   preview?: PreviewEvent | null;
   streaming?: boolean;
   diff?: Diff | null;
+  // M8: all pending diffs (one per fan-out lane), newest-first.
+  diffs?: Diff[];
   runs?: RunInfo[];
 }
 
@@ -258,10 +269,16 @@ export type UpdateSettingsRequest = {
   settings: Partial<Settings>;
 };
 
-// One parallel run started by `fanout_send`.
+// One parallel run started by `fanout_send`. run_id is the daemon's runDirID
+// (joins events → worktree → diff). index is the 0-based batch ordinal.
+// diff_id is set when the run has produced a pending diff. preview carries
+// the run's M7 streaming preview (partial:true, never journaled).
 export interface RunInfo {
   run_id: string;
   status: "running" | "done" | "error" | (string & {});
+  index: number;
+  diff_id?: number;
+  preview?: PreviewEvent | null;
 }
 
 // Type alias (not interface) so it is assignable to Tauri's InvokeArgs.
