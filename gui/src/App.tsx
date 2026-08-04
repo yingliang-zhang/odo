@@ -736,7 +736,7 @@ export default function App() {
       )}
       <main className="app-main">
         {error && (
-          <div className="error-banner" aria-live="assertive">
+          <div className="error-banner" role="alert">
             <span>{error}</span>
             <button
               type="button"

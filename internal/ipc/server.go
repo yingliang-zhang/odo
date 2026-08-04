@@ -415,11 +415,11 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 // injected layer bodies, the recall path list, and the injection receipt
 // (ADR-0003 inv 5: content hashes of exactly what was injected).
 type memoryLayers struct {
-	user    string // ~/.odo/user.md (global principles)
-	project string // .odo/memory.md (project behavior rules)
-	pins    string // .odo/pins.md (M5: user-authored, verbatim)
-	index   string // wiki/index.md (M5: always-injected)
-	wiki    string // recalled epoch notes block
+	user    string       // ~/.odo/user.md (global principles)
+	project string       // .odo/memory.md (project behavior rules)
+	pins    string       // .odo/pins.md (M5: user-authored, verbatim)
+	index   string       // wiki/index.md (M5: always-injected)
+	wiki    string       // recalled epoch notes block
 	recall  []recallItem // M6: was []string, now per-note with matched terms
 	receipt map[string]string
 }
@@ -1237,7 +1237,7 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		"epoch":          newEpoch,
 		"wiki_path":      wikiPath,
 		"duration_ms":    time.Since(start).Milliseconds(), // M6: ledger metric
-		"contradictions": contradictions,                    // M6: contradiction report count
+		"contradictions": contradictions,                   // M6: contradiction report count
 	}))
 	if err != nil {
 		return Response{}, err
@@ -1245,20 +1245,37 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 
 	// M6: ledger append (best-effort, after the distill event so its seq is
 	// citable). Section header uses c.Epoch — the distilled note's epoch,
-	// not newEpoch (the counter after increment). A write failure journals
-	// memory_update{layer:"ledger", cause:"write_failed"} but never fails
-	// the distill.
-	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
-		if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d", c.Epoch),
-			distillLedgerMetrics(events, distillEv, lastRecallCount(events), c.Epoch)); err != nil {
-			_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
-				"layer":  "ledger",
-				"cause":  "write_failed",
-				"detail": err.Error(),
-			}))
-		}
-	}
+	// not newEpoch (the counter after increment).
+	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
 	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: proposals}, nil
+}
+
+// journalDistillLedger appends the distill's section to .odo/ledger.md from
+// a fresh events scan. Best-effort: a failed ledger write journals
+// memory_update{layer:"ledger", cause:"write_failed"} and a failed
+// metrics scan journals the same with the underlying list error —
+// silently dropping the section would leave an unaccountable hole in the
+// ledger (inv 3). The gap journal goes out on a cancel-free copy of ctx:
+// when the request's ctx is what failed (client dropped mid-distill), the
+// original ctx could never carry the record.
+func (s *Server) journalDistillLedger(ctx context.Context, conversationID int64, epoch int, distillEv store.Event) {
+	events, lerr := s.store.ListEvents(ctx, conversationID, 0)
+	if lerr != nil {
+		_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "ledger",
+			"cause":  "write_failed",
+			"detail": "list_events: " + lerr.Error(),
+		}))
+		return
+	}
+	if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d", epoch),
+		distillLedgerMetrics(events, distillEv, lastRecallCount(events), epoch)); err != nil {
+		_, _ = s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "ledger",
+			"cause":  "write_failed",
+			"detail": err.Error(),
+		}))
+	}
 }
 
 // handlePendingCounts reports, per workstream, the number of pending diffs
@@ -1354,6 +1371,7 @@ func diffTargetPaths(pathOnDisk string) ([]string, error) {
 				target = target[:i] // strip an optional trailing timestamp
 			}
 			target = strings.TrimSpace(target)
+			target = strings.Trim(target, "\"") // git C-quotes paths with non-ASCII bytes (+++ "b/<path>")
 			if strings.HasPrefix(target, "b/") {
 				paths = append(paths, strings.TrimPrefix(target, "b/"))
 			}

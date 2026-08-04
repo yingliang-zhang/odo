@@ -5,6 +5,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { useFocusTrap } from "../focusTrap";
 
 // Belt B (⌘K): fuzzy action launcher overlaying the shell, patterned on
 // settings-overlay. Two modes: the action list (filter by substring,
@@ -47,6 +48,11 @@ export default function CommandPalette({ actions, onClose }: Props) {
   const [promptFor, setPromptFor] = useState<PaletteAction | null>(null);
   const [promptText, setPromptText] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  // Modal: Tab must cycle the panel, never escape to the page behind it.
+  // Initial focus lands on the first focusable — the input — matching the
+  // prompt-mode effect below.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(panelRef);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -132,6 +138,7 @@ export default function CommandPalette({ actions, onClose }: Props) {
   return (
     <div className="palette-overlay" onClick={onClose}>
       <div
+        ref={panelRef}
         className="palette-panel"
         role="dialog"
         aria-modal="true"

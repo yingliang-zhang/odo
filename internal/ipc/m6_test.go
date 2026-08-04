@@ -617,6 +617,134 @@ func TestLedgerZeroProposalsNoCrossEpoch(t *testing.T) {
 	}
 }
 
+// TestDiffGuardCQuotedPath (K3 hardening): git C-quotes the +++ header
+// when a path carries non-ASCII bytes (+++ "b/.odo/<escapes>"). The guard
+// must strip the quotes before the b/ prefix match — else a protected
+// target parses as unprotected-or-absent and the prefix check never fires.
+// (Only the non-ASCII tail is octal-escaped; the .odo/ prefix stays literal.)
+func TestDiffGuardCQuotedPath(t *testing.T) {
+	patch := filepath.Join(t.TempDir(), "quoted.diff")
+	content := "diff --git \"a/.odo/m\\303\\251mory.md\" \"b/.odo/m\\303\\251mory.md\"\n" +
+		"index 1111111..2222222 100644\n" +
+		"--- \"a/.odo/m\\303\\251mory.md\"\n" +
+		"+++ \"b/.odo/m\\303\\251mory.md\"\n" +
+		"@@ -1 +1 @@\n" +
+		"-old\n" +
+		"+new\n"
+	if err := os.WriteFile(patch, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := diffTargetPaths(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != `.odo/m\303\251mory.md` {
+		t.Fatalf("diffTargetPaths = %v, want [.odo/m\\303\\251mory.md]", paths)
+	}
+	if err := rejectProtectedPaths(paths); err == nil || !strings.Contains(err.Error(), ".odo/") {
+		t.Errorf("rejectProtectedPaths = %v, want a protected-path error naming .odo/", err)
+	}
+
+	// A quoted benign path is still extracted (not silently dropped by the
+	// quote) and passes the guard.
+	benign := filepath.Join(t.TempDir(), "quoted-benign.diff")
+	benignPatch := strings.Replace(content, ".odo/m\\303\\251mory.md", "src/f\\303\\251.go", -1)
+	if err := os.WriteFile(benign, []byte(benignPatch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err = diffTargetPaths(benign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != `src/f\303\251.go` {
+		t.Fatalf("diffTargetPaths(benign) = %v, want [src/f\\303\\251.go]", paths)
+	}
+	if err := rejectProtectedPaths(paths); err != nil {
+		t.Errorf("rejectProtectedPaths(benign) = %v, want nil", err)
+	}
+}
+
+// TestContradictionPassDoesNotReJournalRetracted (K3 hardening): a note
+// already in the journal's retraction set is never re-journaled — neither
+// by a later pass re-flagging the same fact, nor by two sentences of one
+// new note flagging the same old note.
+func TestContradictionPassDoesNotReJournalRetracted(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	rig := startRig(t, root)
+	t.Cleanup(func() { rig.stop(t) })
+	ctx := context.Background()
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	writeEpochNote(t, root, "main-epoch-1", "Authentication uses JWT.\n")
+	writeEpochNote(t, root, "main-epoch-2", "Build system notes for the project.\n")
+
+	// In-pass dedup: two sentences flag the same old note → one journal entry.
+	const flagTwice = "Auth switched from JWT to session cookies.\nAuth switched from JWT to session cookies.\n"
+	if n := rig.server.runContradictionPass(ctx, convID, "main-epoch-3", flagTwice, 3); n != 1 {
+		t.Fatalf("first pass = %d, want 1 (duplicate sentences journal once)", n)
+	}
+	// Cross-pass dedup: epoch 1 is now retracted; a re-flag must not duplicate.
+	const flag = "Auth switched from JWT to session cookies.\n"
+	if n := rig.server.runContradictionPass(ctx, convID, "main-epoch-4", flag, 4); n != 0 {
+		t.Fatalf("second pass = %d, want 0 (epoch 1 already retracted)", n)
+	}
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	retracts := memoryUpdatesByCause(t, events, "retract")
+	if len(retracts) != 1 {
+		t.Fatalf("retract events = %d, want exactly 1 — no duplicate retraction", len(retracts))
+	}
+	if detail, _ := retracts[0]["detail"].(string); !strings.HasPrefix(detail, "main-epoch-1 contradicted by main-epoch-3") {
+		t.Errorf("retract detail = %q, want main-epoch-1 contradicted by main-epoch-3", detail)
+	}
+}
+
+// TestDistillLedgerListEventsFailureJournalsGap (K3 hardening, inv 3 edge):
+// when the ledger's metrics scan fails, the skipped section is journaled
+// as memory_update{layer:"ledger", cause:"write_failed"} with the
+// list_events detail — never silently dropped. The scan fails here on an
+// already-cancelled ctx; the gap record still lands because the journal
+// write uses a cancel-free ctx.
+func TestDistillLedgerListEventsFailureJournalsGap(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	rig := startRig(t, root)
+	t.Cleanup(func() { rig.stop(t) })
+	ctx := context.Background()
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	distillEv, err := rig.store.AppendEvent(ctx, convID, store.EventReviewAction,
+		mustJSON(map[string]interface{}{"action": "distill", "epoch": 2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	rig.server.journalDistillLedger(cancelled, convID, 1, distillEv)
+
+	events, err := rig.store.ListEvents(ctx, convID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := memoryUpdatesByCause(t, events, "write_failed")
+	found := false
+	for _, p := range failed {
+		detail, _ := p["detail"].(string)
+		if p["layer"] == "ledger" && strings.HasPrefix(detail, "list_events: ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing memory_update{layer:ledger, cause:write_failed, detail:'list_events: …'}: got %+v", failed)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".odo", "ledger.md")); !os.IsNotExist(err) {
+		t.Error("ledger.md must not gain a section when the metrics scan failed")
+	}
+}
+
 // eventsTypes returns the conversation's journaled event types in order.
 func eventsTypes(t *testing.T, rig *testRig, convID int64) []string {
 	t.Helper()

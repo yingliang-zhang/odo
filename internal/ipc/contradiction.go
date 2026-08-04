@@ -157,8 +157,11 @@ func detectContradictions(newNote string, oldNotes []epochNote) []contradiction 
 // the query-selected 12 KB recall window, which would miss the
 // contradiction by construction). Each contradiction is journaled as
 // memory_update{layer:"note", cause:"retract"} with before_sha == after_sha
-// (the retraction is a journal record, not a file mutation). Returns the
-// count (journaled on the distill review_action as "contradictions").
+// (the retraction is a journal record, not a file mutation). Notes
+// already in the journal's retraction set (and repeated flags against one
+// note inside a single pass) are skipped — no duplicate records. Returns
+// the journaled count (recorded on the distill review_action as
+// "contradictions").
 // Journaling failures are logged, never fatal — the distill succeeds.
 func (s *Server) runContradictionPass(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int) int {
 	notes, err := allEpochNotes(s.projectRoot)
@@ -180,7 +183,14 @@ func (s *Server) runContradictionPass(ctx context.Context, conversationID int64,
 	for _, n := range olds {
 		contents[n.name] = n.content
 	}
+	// A note already retracted is out of the recall set; re-journaling it
+	// would only duplicate the retraction record.
+	retracted := s.retractedNotes(ctx, conversationID)
+	journaled := 0
 	for _, c := range found {
+		if retracted[c.oldNote] {
+			continue // already retracted: the record stands, don't re-journal
+		}
 		sha := sha16([]byte(contents[c.oldNote]))
 		if _, err := s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":      "note",
@@ -190,9 +200,14 @@ func (s *Server) runContradictionPass(ctx context.Context, conversationID int64,
 			"after_sha":  sha,
 		})); err != nil {
 			log.Printf("contradiction pass: journal retract %s: %v", c.oldNote, err)
+			continue
 		}
+		journaled++
+		// Two new-note sentences can flag the same old note; one retraction
+		// record per note suffices.
+		retracted[c.oldNote] = true
 	}
-	return len(found)
+	return journaled
 }
 
 // lastRecallEvent scans the conversation's events newest-first for the last

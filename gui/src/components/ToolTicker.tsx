@@ -14,8 +14,10 @@ function briefArgs(args: unknown): string {
   return raw.length > MAX_ARGS_LEN ? raw.slice(0, MAX_ARGS_LEN) + "…" : raw;
 }
 
-// Activity indicator shown while the agent runs. Displays each agent_tool_call
-// event as it arrives; with none, degrades to a bare spinner.
+// Activity indicator shown only while the agent runs. Displays each
+// agent_tool_call event as it arrives; with none, degrades to a bare
+// spinner. Historical calls are the run group header's job (collapsed
+// tool-group details) — rendering them here at idle duplicated both.
 export default function ToolTicker({ running, events }: Props) {
   const listRef = useRef<HTMLUListElement>(null);
   const toolCalls = events.filter((e) => e.type === "agent_tool_call");
@@ -26,7 +28,7 @@ export default function ToolTicker({ running, events }: Props) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [toolCalls.length]);
 
-  if (!running && toolCalls.length === 0) return null;
+  if (!running) return null;
 
   return (
     <div className="tool-ticker">

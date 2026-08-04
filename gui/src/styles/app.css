@@ -1264,7 +1264,7 @@ body {
   justify-content: space-between;
   margin-bottom: 8px;
   padding: 6px 10px;
-  background: rgba(43, 94, 167, 0.15);
+  background: color-mix(in srgb, var(--accent-user) 15%, transparent);
   border: 1px solid var(--accent-user);
   border-radius: 6px;
   color: var(--text);
@@ -1686,7 +1686,7 @@ body {
 .mem-propose-btn {
   width: 100%;
   margin-top: 6px;
-  background: rgba(43, 94, 167, 0.15);
+  background: color-mix(in srgb, var(--accent-user) 15%, transparent);
   border: 1px solid var(--accent-user);
   border-radius: 6px;
   color: var(--text);
@@ -1698,7 +1698,7 @@ body {
 }
 
 .mem-propose-btn:hover {
-  background: rgba(43, 94, 167, 0.3);
+  background: color-mix(in srgb, var(--accent-user) 30%, transparent);
 }
 
 /* Ephemeral green chip after a memory layer changed; click opens the
@@ -1927,17 +1927,6 @@ body {
 
 .markdown a {
   color: var(--link);
-}
-
-.markdown table {
-  border-collapse: collapse;
-  margin: 6px 0;
-}
-
-.markdown th,
-.markdown td {
-  border: 1px solid var(--border);
-  padding: 3px 8px;
 }
 
 /* Fenced code block (also used by chat search's <mark> inside tokens). */
