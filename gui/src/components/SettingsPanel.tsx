@@ -11,13 +11,15 @@ type Theme = "dark" | "light";
 
 interface Props {
   onClose: () => void;
+  // M9 P4: fired after a successful save so App can re-read the adapter.
+  onSaved?: () => void;
 }
 
 // M2 settings modal: loads the daemon's project settings on mount, edits a
 // curated subset (coding/orchestrator model, OMP timeout, default adapter,
 // review models), and saves the full object back so untouched keys
 // (providers) survive the round trip.
-export default function SettingsPanel({ onClose }: Props) {
+export default function SettingsPanel({ onClose, onSaved }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -82,6 +84,7 @@ export default function SettingsPanel({ onClose }: Props) {
       setSavedToast(true);
       clearTimeout(toastTimer.current ?? undefined);
       toastTimer.current = setTimeout(() => setSavedToast(false), SAVED_TOAST_MS);
+      onSaved?.();
     } catch (err) {
       setError(`save failed: ${errorMessage(err)}`);
     } finally {

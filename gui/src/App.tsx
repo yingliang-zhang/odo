@@ -27,10 +27,11 @@ import DiffViewer from "./components/DiffViewer";
 import LedgerPanel from "./components/LedgerPanel";
 import MemoryPanel from "./components/MemoryPanel";
 import SettingsPanel from "./components/SettingsPanel";
-import Sidebar, { type SidebarToast } from "./components/Sidebar";
+import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
+import { basename } from "./files";
 import { notifyRunDone } from "./notify";
 import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, RunInfo, Workstream } from "./types";
 
@@ -41,9 +42,9 @@ const POLL_INTERVAL_RUNNING_MS = 350;
 const POLL_INTERVAL_IDLE_MS = 1500;
 
 // Every transient toast — memory chips, retractions, ledger failures, and
-// sidebar confirmations (distill/curate/pin) — auto-dismisses after 10 s,
+// action confirmations (distill/curate/pin) — auto-dismisses after 10 s,
 // same cadence as the error banner.
-const TOAST_MS = 10_000;        // sidebar confirmations (distill/curate/pin)
+const TOAST_MS = 10_000;        // action confirmations (distill/curate/pin)
 const DAEMON_CHIP_MS = 30_000;  // daemon-sourced chips (memory/retraction/ledger) — longer, per M4 spec
 // Belt C (§Fix 2): the error banner auto-dismisses after 10 s.
 const ERROR_BANNER_MS = 10_000;
@@ -64,8 +65,16 @@ export interface RetractionInfo {
   snippet: string;
 }
 
-// One toast in the viewport: the sidebar-emitted payload plus its id.
-interface ToastItem extends SidebarToast {
+// A transient confirmation (distill/curate/pin result) for the toast
+// viewport; click-through opens the panel the toast is about.
+interface ToastPayload {
+  text: string;
+  title?: string;
+  onClick?: () => void;
+}
+
+// One toast in the viewport: the payload plus its id.
+interface ToastItem extends ToastPayload {
   id: number;
 }
 
@@ -73,6 +82,13 @@ function parseRetraction(detail: string): RetractionInfo | null {
   const m = detail.match(/^(\S+) contradicted by (\S+): ([\s\S]*)$/);
   if (!m) return null;
   return { oldNote: m[1], newNote: m[2], snippet: m[3] };
+}
+
+// Shorten an absolute wiki path to "wiki/<note>.md" for display.
+function shortWikiPath(path: string): string {
+  const marker = "/wiki/";
+  const at = path.indexOf(marker);
+  return at >= 0 ? path.slice(at + 1) : basename(path);
 }
 
 export default function App() {
@@ -114,11 +130,10 @@ export default function App() {
   const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // M3: wiki note count for the sidebar Memory section (null = unknown).
+  // M3: wiki note count — TopBar badge + panel wiki tab (null = unknown).
   const [wikiNoteCount, setWikiNoteCount] = useState<number | null>(null);
-  // M5: topic page count beside the wiki note count (null = unknown).
-  const [topicCount, setTopicCount] = useState<number | null>(null);
-  // M4: pending learner-proposal count (sidebar badge) and the ephemeral
+  // M4: pending learner-proposal count (TopBar distill badge + panel
+  // memory tab badge) and the ephemeral
   // "memory updated" chip state. Both live beside wikiNoteCount.
   const [pendingMemoryProposals, setPendingMemoryProposals] = useState(0);
   const [lastMemoryUpdate, setLastMemoryUpdate] = useState<{
@@ -129,10 +144,13 @@ export default function App() {
   // ledger write failure toasts the same way (rare, journaled).
   const [lastRetraction, setLastRetraction] = useState<RetractionInfo | null>(null);
   const [lastLedgerFailure, setLastLedgerFailure] = useState<string | null>(null);
-  // Transient confirmations emitted by the sidebar (distill/curate/pin),
-  // rendered beside the chips in the toast viewport; each carries its own
-  // 10 s expiry started by pushToast.
+  // Transient confirmations emitted by the action handlers
+  // (distill/curate/pin), rendered beside the chips in the toast viewport;
+  // each carries its own 10 s expiry started by pushToast.
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  // M9 P4: the TopBar Distill button's disabled/spinner state. The
+  // matching distillingRef pauses the poll loop; this is the UI twin.
+  const [distillBusy, setDistillBusy] = useState(false);
   // M3 visibility (spec §3c): project-wide pending-diff counts and running
   // workstreams, refreshed every few poll ticks via pending_counts.
   const [pendingCounts, setPendingCounts] = useState<Record<number, number>>({});
@@ -252,17 +270,9 @@ export default function App() {
     } catch {
       if (conversationRef.current === conversationId) setWikiNoteCount(null);
     }
-    // M5: topics are project-wide (not per-workstream), but the same
-    // refresh hook + degrade pattern covers them.
-    try {
-      const topics = await listTopics();
-      setTopicCount(topics.wiki_notes?.length ?? 0);
-    } catch {
-      setTopicCount(null);
-    }
   }, []);
 
-  // M4: refresh the pending learner-proposal count (sidebar badge).
+  // M4: refresh the pending learner-proposal count (TopBar distill badge).
   // Failures degrade to hidden (0), mirroring refreshWikiCount; they never
   // surface in the error banner.
   const refreshMemoryProposals = useCallback(async (conversationId: number) => {
@@ -336,8 +346,9 @@ export default function App() {
     };
   }, [applyBootstrap]);
 
-  // K3 review P1: read the daemon's default_adapter on bootstrap so the
-  // sidebar select reflects the persisted setting instead of hardcoded "omp".
+  // K3 review P1: read the daemon's default_adapter on bootstrap so sends
+  // use the persisted setting instead of hardcoded "omp" (the adapter
+  // selector itself moves to the StatusBar in M9 P5).
   useEffect(() => {
     if (!booted) return;
     let cancelled = false;
@@ -601,10 +612,39 @@ export default function App() {
     [project?.root_path, handleSwitchWorkstream],
   );
 
-  const handleDistill = useCallback(async (): Promise<string> => {
+  // M9 P3: every former modal affordance (Wiki, Review proposals, Ledger)
+  // now pivots to the right panel on the matching tab — one helper shared
+  // by the TopBar buttons, the palette, and the toast click-throughs.
+  const openPanelTab = useCallback((tab: PanelTab, memSubTab?: "proposals" | "files") => {
+    setPanelOpen(true);
+    setPanelTab(tab);
+    // Toast click-throughs pass memSubTab="files"; default reset to "proposals".
+    setMemorySubTab(memSubTab ?? "proposals");
+  }, []);
+
+  // Toast viewport lifecycle: push shows a confirmation for 10 s; either
+  // the timer or a click (which also click-throughs to its panel) removes it.
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const pushToast = useCallback(
+    (toast: ToastPayload) => {
+      const id = ++toastSeqRef.current;
+      setToasts((prev) => [...prev, { ...toast, id }]);
+      window.setTimeout(() => dismissToast(id), TOAST_MS);
+    },
+    [dismissToast],
+  );
+
+  // M9 P4: owns the full distill UX — the TopBar's busy flag and the
+  // success toast live here so the palette and TopBar share one path.
+  // Never rejects: failures surface in the error banner only.
+  const handleDistill = useCallback(async () => {
     const cid = conversationRef.current;
-    if (cid == null) throw new Error("no active conversation yet");
+    if (cid == null) return; // the action buttons are disabled without a conversation
     distillingRef.current = true;
+    setDistillBusy(true);
     try {
       const resp = unwrap(await distill(cid));
       if (resp.epoch != null) {
@@ -612,56 +652,79 @@ export default function App() {
         setConversation((prev) => (prev ? { ...prev, epoch } : prev));
       }
       setLastDistillPath(resp.wiki_path ?? null);
-      // The distill just wrote a new note; the sidebar count follows.
+      // The distill just wrote a new note; the TopBar count follows.
       void refreshWikiCount(cid);
       // M4: the learner ran synchronously inside the same distill call, so
       // the proposal batch (if any) is already journaled — re-read it for
-      // the sidebar badge.
+      // the TopBar badge.
       void refreshMemoryProposals(cid);
       setError(null);
-      return resp.wiki_path ?? "";
+      if (resp.wiki_path) {
+        pushToast({
+          text: `Distilled to ${shortWikiPath(resp.wiki_path)}`,
+          onClick: () => openPanelTab("wiki"),
+        });
+      }
     } catch (e) {
+      // The error banner carries the message; the toast stays hidden.
       setError(`distill failed: ${errorMessage(e)}`);
-      throw e; // Sidebar clears its busy state; keep the toast hidden.
     } finally {
       distillingRef.current = false;
+      setDistillBusy(false);
     }
-  }, [refreshWikiCount, refreshMemoryProposals]);
+  }, [refreshWikiCount, refreshMemoryProposals, pushToast, openPanelTab]);
 
   // M5: the curator one-shot rewrites every topic page + wiki/index.md
   // from the full epoch-note set. Blocks daemon-side like distill, so the
   // poll loop pauses; counts refresh on success.
   const handleCurate = useCallback(async () => {
     const cid = conversationRef.current;
-    if (cid == null) throw new Error("no active conversation yet");
+    if (cid == null) return; // the action buttons are disabled without a conversation
     curatingRef.current = true;
     try {
       unwrap(await curate(cid));
       void refreshWikiCount(cid);
       setError(null);
+      // The toast names the topic count, read straight from the daemon
+      // (the single source of truth). That read is toast-only: if it
+      // fails after a successful pass, skip the toast rather than banner
+      // "curate failed" for a pass that worked.
+      try {
+        const topics = await listTopics();
+        pushToast({
+          text: `Curated ${topics.wiki_notes?.length ?? 0} topics`,
+          onClick: () => openPanelTab("wiki"),
+        });
+      } catch {
+        /* toast skipped */
+      }
     } catch (e) {
+      // The error banner carries the message; the toast stays hidden.
       setError(`curate failed: ${errorMessage(e)}`);
-      throw e; // Sidebar clears its busy state; keep the toast hidden.
     } finally {
       curatingRef.current = false;
     }
-  }, [refreshWikiCount]);
+  }, [refreshWikiCount, pushToast, openPanelTab]);
 
   // M5: a pin is a verbatim user statement hoovered into .odo/pins.md — no
   // LLM processing, no poll pause (returns immediately). The journaled
   // memory_update{layer:"pins"} arrives on the next poll tick and toasts
   // through the generic recordEvents branch.
-  const handlePin = useCallback(async (text: string) => {
-    const cid = conversationRef.current;
-    if (cid == null) throw new Error("no active conversation yet");
-    try {
-      unwrap(await pin(cid, text));
-      setError(null);
-    } catch (e) {
-      setError(`pin failed: ${errorMessage(e)}`);
-      throw e; // Sidebar shows the refusal (e.g. overflow names the pin).
-    }
-  }, []);
+  const handlePin = useCallback(
+    async (text: string) => {
+      const cid = conversationRef.current;
+      if (cid == null) throw new Error("no active conversation yet");
+      try {
+        unwrap(await pin(cid, text));
+        setError(null);
+        pushToast({ text: `Pinned: ${text}` });
+      } catch (e) {
+        setError(`pin failed: ${errorMessage(e)}`);
+        throw e; // The TopBar pin popover shows the refusal inline.
+      }
+    },
+    [pushToast],
+  );
 
   const handleAccept = useCallback(async (diffId: number) => {
     try {
@@ -712,31 +775,6 @@ export default function App() {
     const cid = conversationRef.current;
     if (cid != null) void refreshMemoryProposals(cid);
   }, [refreshMemoryProposals]);
-
-  // M9 P3: every former modal affordance (Wiki, Review proposals, Ledger)
-  // now pivots to the right panel on the matching tab — one helper shared
-  // by the sidebar rows, the palette, and the toast click-throughs.
-  const openPanelTab = useCallback((tab: PanelTab, memSubTab?: "proposals" | "files") => {
-    setPanelOpen(true);
-    setPanelTab(tab);
-    // Toast click-throughs pass memSubTab="files"; default reset to "proposals".
-    setMemorySubTab(memSubTab ?? "proposals");
-  }, []);
-
-  // Toast viewport lifecycle: push shows a confirmation for 10 s; either
-  // the timer or a click (which also click-throughs to its panel) removes it.
-  const dismissToast = useCallback((id: number) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
-  const pushToast = useCallback(
-    (toast: SidebarToast) => {
-      const id = ++toastSeqRef.current;
-      setToasts((prev) => [...prev, { ...toast, id }]);
-      window.setTimeout(() => dismissToast(id), TOAST_MS);
-    },
-    [dismissToast],
-  );
 
   // Drop the chips' dismiss timers on unmount.
   useEffect(() => {
@@ -858,34 +896,46 @@ export default function App() {
         workstreamName={workstream?.name ?? null}
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
         sidebarCollapsed={sidebarCollapsed}
-      />
-      <div className="app-body">
-      <Sidebar
-        project={project}
-        workstream={workstream}
-        conversationId={conversation?.id ?? null}
-        workstreams={workstreams}
-        agentRunning={agentRunning}
-        adapter={adapter}
-        onAdapterChange={setAdapter}
-        onSwitchWorkstream={handleSwitchWorkstream}
-        onCreateWorkstream={handleCreateWorkstream}
         onDistill={handleDistill}
-        wikiNoteCount={wikiNoteCount}
         onOpenWiki={() => openPanelTab("wiki")}
         onCurate={handleCurate}
         onPin={handlePin}
-        topicCount={topicCount}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenLedger={() => openPanelTab("ledger")}
+        wikiNoteCount={wikiNoteCount}
+        pendingMemoryProposals={pendingMemoryProposals}
+        distillBusy={distillBusy}
+        actionsDisabled={conversation == null}
+      />
+      <div className="app-body">
+      <Sidebar
+        workstreams={workstreams}
+        workstream={workstream}
+        agentRunning={agentRunning}
         pendingCounts={pendingCounts}
         runningWorkstreams={runningWorkstreams}
-        pendingMemoryProposals={pendingMemoryProposals}
-        onToast={pushToast}
-        onOpenMemoryReview={openPanelTab}
+        onSwitchWorkstream={handleSwitchWorkstream}
+        onCreateWorkstream={handleCreateWorkstream}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-        onOpenSettings={() => setSettingsOpen(true)}
       />
-      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsPanel
+          onClose={() => setSettingsOpen(false)}
+          onSaved={() => {
+            // M9 P4: re-read adapter from daemon after settings save
+            // (the sidebar adapter selector was removed; SettingsPanel
+            // is now the only mid-session path to change it until P5
+            // adds the StatusBar selector).
+            void (async () => {
+              try {
+                const resp = unwrap(await getSettings());
+                if (resp.settings?.default_adapter) setAdapter(resp.settings.default_adapter);
+              } catch { /* degrade silently */ }
+            })();
+          }}
+        />
+      )}
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
       <main className="app-main">
         {/* Toast viewport: the transient chips the sidebar used to host,

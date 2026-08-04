@@ -200,6 +200,87 @@ body {
   color: var(--text-dim);
 }
 
+/* M9 P4: action row — icon + label buttons moved up from the sidebar */
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 16px;
+}
+
+.topbar-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 7px;
+  border-radius: 4px;
+  line-height: 1.5;
+}
+
+.topbar-action:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-input);
+}
+
+.topbar-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.topbar-badge {
+  flex-shrink: 0;
+  min-width: 16px;
+  padding: 0 5px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* M9 P4: pin popover — inline text entry anchored under the Pin button */
+.topbar-pin {
+  position: relative;
+}
+
+.topbar-pin-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-raised, var(--bg-input));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.topbar-pin-popover .pin-input {
+  width: 200px;
+  flex: none;
+}
+
+.topbar-pin-error {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  white-space: nowrap;
+  margin-top: 2px;
+  color: var(--err);
+  font-size: 11px;
+}
+
 /* M9 Phase 1: body grid — sidebar | chat | context panel */
 .app-body {
   display: grid;
