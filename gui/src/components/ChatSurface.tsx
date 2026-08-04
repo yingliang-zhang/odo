@@ -11,7 +11,7 @@ import {
 } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
-import type { OdoEvent } from "../types";
+import type { OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
 import ToolTicker from "./ToolTicker";
 
@@ -27,6 +27,10 @@ function formatElapsed(ms: number): string {
 interface Props {
   events: OdoEvent[];
   agentRunning: boolean;
+  // M7: transient in-flight block preview from poll_events (never
+  // journaled). Rendered as the dimmed preview bubble; replaced wholesale
+  // per poll, null when the stream is between blocks or done.
+  preview?: PreviewEvent | null;
   sendDisabled: boolean;
   onSend: (text: string, attachments: string[], steer: boolean) => Promise<void>;
   // M2 fan-out: run the prompt through N parallel runs; resolves to the
@@ -111,6 +115,36 @@ function runRenderItems(events: OdoEvent[]): RunRenderItem[] {
   return items;
 }
 
+// M7 streaming preview: the in-flight block below the journaled bubbles —
+// dimmed and italic so it reads as provisional. Text previews end in a
+// pulsing caret; tool previews lead with a spinning ⟳ plus the call's
+// intent. When the block completes, the next poll journals it and this
+// bubble is replaced by the real one.
+function PreviewBubble({ preview }: { preview: PreviewEvent }) {
+  const p = preview.payload ?? {};
+  if (preview.type === "agent_tool_call") {
+    const tool = typeof p.tool === "string" && p.tool !== "" ? p.tool : "tool";
+    const intent = typeof p.intent === "string" && p.intent !== "" ? ` — ${p.intent}` : "";
+    return (
+      <div className="bubble bubble-tool bubble-preview" aria-live="polite">
+        <span className="preview-spinner" aria-hidden="true">
+          ⟳
+        </span>{" "}
+        {tool}
+        {intent}
+      </div>
+    );
+  }
+  const text = typeof p.text === "string" ? p.text : "";
+  if (text === "") return null;
+  return (
+    <div className="bubble bubble-agent bubble-preview" aria-live="polite">
+      {text}
+      <span className="preview-caret" aria-hidden="true" />
+    </div>
+  );
+}
+
 // Run header: timestamp, tool call count, duration when the run journaled
 // agent_done, and a status icon (✓ done / ✗ error / ⟳ running).
 function RunHeader({ group }: { group: RunGroup }) {
@@ -161,6 +195,7 @@ const EXAMPLE_PROMPTS = [
 export default function ChatSurface({
   events,
   agentRunning,
+  preview,
   sendDisabled,
   onSend,
   onFanout,
@@ -216,7 +251,9 @@ export default function ChatSurface({
     } else {
       setNewOutput(true);
     }
-  }, [events.length]);
+    // Preview changes poll-by-poll without touching events.length, so it
+    // joins the follow-the-tail trigger too.
+  }, [events.length, preview]);
 
   // A run flipping state (done banner appearing, ticker hiding) also nudges
   // the view, but never yanks a reader back down.
@@ -637,6 +674,7 @@ export default function ChatSurface({
               )}
             </div>
           ))}
+          {preview && <PreviewBubble preview={preview} />}
           <ToolTicker running={agentRunning} events={events} />
         </div>
         {newOutput && (

@@ -100,6 +100,19 @@ export interface EventPayload {
   // topic pages were rewritten and how many epoch notes were read.
   topics?: number;
   notes_read?: number;
+  // M7: streaming-preview payloads. partial marks the transient preview
+  // (never journaled); intent/call_id come from tool_execution_start.
+  partial?: boolean;
+  intent?: string;
+  call_id?: string;
+}
+
+// M7 live streaming: the transient in-flight block preview returned by
+// poll_events while a run streams. Never journaled — replaced wholesale on
+// every poll and dropped when the block completes.
+export interface PreviewEvent {
+  type: EventType;
+  payload: EventPayload;
 }
 
 export interface OdoEvent {
@@ -160,6 +173,9 @@ export interface PollEventsResponse {
   error?: string;
   events?: OdoEvent[];
   agent_running?: boolean;
+  // M7: transient in-flight block preview (partial:true), or null.
+  preview?: PreviewEvent | null;
+  streaming?: boolean;
   diff?: Diff | null;
   runs?: RunInfo[];
 }

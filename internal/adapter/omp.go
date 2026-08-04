@@ -7,12 +7,22 @@
 // agent_tool_result events parsed from the print-mode output, then agent_done
 // (or agent_error). Unparseable output degrades to M0 behavior: agent_text +
 // agent_done only.
+//
+// M7 (live streaming): Start passes --mode json, so the output file carries
+// OMP's JSONL event stream instead of print-mode text. While the run is in
+// flight, Events tails that stream with a byte-offset cursor, returns
+// completed blocks (text_end, tool_execution_end) as journal events, and
+// returns the in-flight text/tool progress as a trailing transient preview
+// event (partial:true — never journaled). Runs whose output does not start
+// with '{' (text stubs) auto-detect to the legacy behavior unchanged.
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +67,27 @@ type ompRun struct {
 
 	done chan struct{} // closed when the process has exited
 	err  error         // set before done is closed; safe to read after <-done
+
+	// M7 live-streaming state (--mode json). Guarded by streamMu; Events is
+	// the only writer.
+	streamMu      sync.Mutex
+	streamMode    bool                     // output file begins with '{' → JSONL stream
+	streamLegacy  bool                     // output file decisively not JSON → M0–M6 path
+	streamOffset  int64                    // bytes of the output file consumed so far
+	streamEvents  []AgentEvent             // completed blocks, in stream order
+	streamPreview *AgentEvent              // in-flight block preview (partial:true)
+	terminalAdded bool                     // agent_done/agent_error appended
+	textAcc       map[int]*strings.Builder // text_delta accumulation per content index
+	msgStreamed   bool                     // current assistant message produced text_end(s)
+	toolAcc       map[string]pendingTool   // in-flight tool calls by call ID (args live on tool_execution_start)
+}
+
+// pendingTool carries a tool call's identity from tool_execution_start to
+// tool_execution_end (which repeats name + result but NOT args).
+type pendingTool struct {
+	name   string
+	args   string
+	intent string
 }
 
 // tailBuffer caps captured stderr at maxStderrTail bytes (last-write-wins is
@@ -185,6 +216,12 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 		"--hermes-model", model,
 		"--task-tier", "normal",
 		"--session-dir", sessionDir,
+		// M7: --mode json makes OMP emit its live JSONL event stream
+		// (message_update deltas, tool_execution_* lifecycle events) to
+		// stdout, which the wrapper pipes into the output file. Runs whose
+		// output does not start with '{' auto-detect back to legacy text
+		// parsing, so text-producing stubs are unaffected.
+		"--mode", "json",
 	}
 	cmd := exec.Command(a.wrapperPath, args...)
 	cmd.Dir = workdir
@@ -245,10 +282,18 @@ func (a *OMP) Send(ctx context.Context, runID string, message string) error {
 	return nil
 }
 
-// Events implements Adapter. While the run is in flight it returns nothing;
-// once the process exits it deterministically rebuilds the run's event list
-// (agent_text from the output file, then agent_done or agent_error) and
-// returns the tail after afterSeq.
+// Events implements Adapter. Legacy runs: while the run is in flight it
+// returns nothing; once the process exits it deterministically rebuilds the
+// run's event list (agent_text from the output file, then agent_done or
+// agent_error) and returns the tail after afterSeq.
+//
+// M7 streaming runs (--mode json detected from the output file's first
+// byte): Events tails the JSONL stream on every call. Completed blocks
+// (text_end payloads, tool_execution_* pairs) are returned as journal
+// events; the in-flight block is appended as a trailing transient preview
+// event (payload partial:true) that consumers MUST NOT journal — the daemon
+// strips it and runOneShot skips it. afterSeq counts journaled events only;
+// the preview never advances it.
 func (a *OMP) Events(ctx context.Context, runID string, afterSeq int) ([]AgentEvent, error) {
 	a.mu.Lock()
 	r, ok := a.runs[runID]
@@ -257,17 +302,334 @@ func (a *OMP) Events(ctx context.Context, runID string, afterSeq int) ([]AgentEv
 		return nil, fmt.Errorf("omp: unknown run %q", runID)
 	}
 
-	select {
-	case <-r.done:
-	default:
-		return nil, nil // still running
+	r.streamMu.Lock()
+	if !r.streamMode && !r.streamLegacy {
+		r.detectStream()
 	}
 
-	events := a.buildEvents(r)
-	if afterSeq >= len(events) {
-		return nil, nil
+	select {
+	case <-r.done:
+		if r.streamMode {
+			r.tailStream(true) // final drain: catch the last lines
+			if len(r.streamEvents) > 0 {
+				if !r.terminalAdded {
+					r.appendTerminalLocked()
+				}
+				if afterSeq >= len(r.streamEvents) {
+					r.streamMu.Unlock()
+					return nil, nil
+				}
+				out := make([]AgentEvent, len(r.streamEvents)-afterSeq)
+				copy(out, r.streamEvents[afterSeq:])
+				r.streamMu.Unlock()
+				return out, nil
+			}
+			// The stream parsed to nothing (degenerate input / stderr-only
+			// noise): rebuild from the session JSONL or text output exactly
+			// like a legacy run.
+			r.streamLegacy = true
+		}
+		r.streamMu.Unlock()
+
+		events := a.buildEvents(r)
+		if afterSeq >= len(events) {
+			return nil, nil
+		}
+		return events[afterSeq:], nil
+	default:
+		if !r.streamMode {
+			r.streamMu.Unlock()
+			return nil, nil // legacy: nothing until the process exits
+		}
+		r.tailStream(false)
+		out := make([]AgentEvent, 0, len(r.streamEvents)+1)
+		if afterSeq < len(r.streamEvents) {
+			out = append(out, r.streamEvents[afterSeq:]...)
+		}
+		if r.streamPreview != nil {
+			out = append(out, *r.streamPreview)
+		}
+		r.streamMu.Unlock()
+		if len(out) == 0 {
+			return nil, nil
+		}
+		return out, nil
 	}
-	return events[afterSeq:], nil
+}
+
+// detectStream inspects the output file's first byte: '{' selects the M7
+// --mode json stream; anything else locks the legacy text path for this
+// run. An unreadable or empty file leaves the choice open and is retried on
+// the next Events call.
+func (r *ompRun) detectStream() {
+	f, err := os.Open(r.outputFile)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	var b [1]byte
+	n, err := f.Read(b[:])
+	if err != nil || n == 0 {
+		return
+	}
+	if b[0] == '{' {
+		r.streamMode = true
+	} else {
+		r.streamLegacy = true
+	}
+}
+
+// tailStream consumes new complete JSONL lines from the output file since
+// streamOffset. A trailing partial line (no \n yet) is left for the next
+// call; when final is true the process has exited, so an unterminated tail
+// is parsed as a complete line (junk fails the JSON parse and is skipped).
+func (r *ompRun) tailStream(final bool) {
+	f, err := os.Open(r.outputFile)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if _, err := f.Seek(r.streamOffset, io.SeekStart); err != nil {
+		return // truncated/rotated: retry next call
+	}
+	data, err := io.ReadAll(f)
+	if err != nil || len(data) == 0 {
+		return
+	}
+
+	end := len(data)
+	var trailing []byte
+	lastNL := bytes.LastIndexByte(data, '\n')
+	switch {
+	case lastNL == len(data)-1:
+		// Ends with a newline: every line is complete.
+	case lastNL >= 0:
+		end = lastNL + 1
+		trailing = data[end:]
+	default:
+		// No newline at all: partial line only.
+		end = 0
+		trailing = data
+	}
+	for _, line := range bytes.Split(data[:end], []byte{'\n'}) {
+		r.streamLine(line)
+	}
+	if final && len(trailing) > 0 {
+		r.streamLine(trailing)
+		end = len(data)
+	}
+	r.streamOffset += int64(end)
+}
+
+// streamLine parses one line of OMP's --mode json stream and mutates the
+// run's journaled-blocks list and transient preview. Only three things
+// journal: finished text blocks (text_end), finished tool executions
+// (tool_execution_end, emitting call + result), and — as a safety net for
+// providers that skip message_update deltas — whole assistant messages at
+// message_end when the message streamed nothing. Non-JSON lines (stderr
+// noise the wrapper merged via 2>&1, timeout diagnostics appended after the
+// stream) fail the parse and are skipped.
+func (r *ompRun) streamLine(line []byte) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 || line[0] != '{' {
+		return
+	}
+	var ev struct {
+		Type    string `json:"type"`
+		Message *struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+		Update *struct {
+			Type         string `json:"type"`
+			ContentIndex int    `json:"contentIndex"`
+			Delta        string `json:"delta"`
+			Content      string `json:"content"`
+		} `json:"assistantMessageEvent"`
+		ToolCallID string          `json:"toolCallId"`
+		ToolName   string          `json:"toolName"`
+		Args       json.RawMessage `json:"args"`
+		Intent     string          `json:"intent"`
+		Result     *struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return
+	}
+
+	switch ev.Type {
+	case "message_update":
+		u := ev.Update
+		if u == nil {
+			return
+		}
+		switch u.Type {
+		case "text_start":
+			if r.textAcc == nil {
+				r.textAcc = make(map[int]*strings.Builder)
+			}
+			r.textAcc[u.ContentIndex] = &strings.Builder{}
+		case "text_delta":
+			b := r.textAcc[u.ContentIndex]
+			if b == nil {
+				return // delta without text_start: not ours to show
+			}
+			b.WriteString(u.Delta)
+			r.streamPreview = &AgentEvent{
+				Type:    "agent_text",
+				Payload: map[string]interface{}{"text": b.String(), "partial": true},
+			}
+		case "text_end":
+			text := u.Content
+			if text == "" {
+				if b := r.textAcc[u.ContentIndex]; b != nil {
+					text = b.String()
+				}
+			}
+			delete(r.textAcc, u.ContentIndex)
+			if text != "" {
+				r.streamEvents = append(r.streamEvents, AgentEvent{
+					Type:    "agent_text",
+					Payload: map[string]interface{}{"text": text},
+				})
+				r.msgStreamed = true
+			}
+			r.streamPreview = nil
+		}
+	case "message_start":
+		// A new assistant message: the safety-net journal rule applies to
+		// the new message only.
+		if ev.Message != nil && ev.Message.Role == "assistant" {
+			r.msgStreamed = false
+		}
+	case "message_end":
+		// Safety net: a complete assistant text block that never streamed
+		// deltas (non-streaming provider, instant reply) journals here.
+		if ev.Message == nil || ev.Message.Role != "assistant" || r.msgStreamed || len(ev.Message.Content) == 0 {
+			return
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(ev.Message.Content, &blocks); err != nil {
+			return
+		}
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				r.streamEvents = append(r.streamEvents, AgentEvent{
+					Type:    "agent_text",
+					Payload: map[string]interface{}{"text": b.Text},
+				})
+			}
+		}
+	case "tool_execution_start":
+		if r.toolAcc == nil {
+			r.toolAcc = make(map[string]pendingTool)
+		}
+		r.toolAcc[ev.ToolCallID] = pendingTool{
+			name:   ev.ToolName,
+			args:   strings.TrimSpace(string(ev.Args)),
+			intent: ev.Intent,
+		}
+		r.streamPreview = &AgentEvent{
+			Type: "agent_tool_call",
+			Payload: map[string]interface{}{
+				"tool":    ev.ToolName,
+				"call_id": ev.ToolCallID,
+				"intent":  ev.Intent,
+				"partial": true,
+			},
+		}
+	case "tool_execution_end":
+		// tool_execution_end carries name + result but NOT args; the start
+		// event supplied them. Merge, preferring what the start stashed.
+		pending := r.toolAcc[ev.ToolCallID]
+		delete(r.toolAcc, ev.ToolCallID)
+		name := pending.name
+		if name == "" {
+			name = ev.ToolName
+		}
+		args := pending.args
+		if args == "" && len(ev.Args) > 0 {
+			args = strings.TrimSpace(string(ev.Args))
+		}
+		result := ""
+		if ev.Result != nil {
+			for _, c := range ev.Result.Content {
+				if c.Type == "text" && c.Text != "" {
+					result = c.Text
+					break
+				}
+			}
+		}
+		// Payload keys match ADR-0002 exactly (tool/args, tool/result) —
+		// journaled blocks are indistinguishable from M0–M6 events.
+		r.streamEvents = append(r.streamEvents,
+			AgentEvent{
+				Type:    "agent_tool_call",
+				Payload: map[string]interface{}{"tool": name, "args": args},
+			},
+			AgentEvent{
+				Type:    "agent_tool_result",
+				Payload: map[string]interface{}{"tool": name, "result": result},
+			},
+		)
+		r.streamPreview = nil
+	}
+}
+
+// appendTerminalLocked appends the run's terminal event to the streamed
+// blocks once (streamMu held). The summary/error shapes mirror buildEvents.
+func (r *ompRun) appendTerminalLocked() {
+	r.terminalAdded = true
+	r.streamPreview = nil
+	if r.err != nil {
+		r.streamEvents = append(r.streamEvents, agentErrorEvent(r))
+		return
+	}
+	r.streamEvents = append(r.streamEvents, AgentEvent{
+		Type:    "agent_done",
+		Payload: map[string]interface{}{"summary": doneSummary(r.streamEvents)},
+	})
+}
+
+// doneSummary builds the agent_done summary from the first agent_text in
+// events, or "agent completed" when there is none.
+func doneSummary(events []AgentEvent) string {
+	for _, ev := range events {
+		if ev.Type != "agent_text" {
+			continue
+		}
+		if t, ok := ev.Payload["text"].(string); ok && t != "" {
+			summary := t
+			if i := strings.IndexByte(summary, '\n'); i >= 0 {
+				summary = summary[:i]
+			}
+			if len(summary) > 200 {
+				summary = summary[:200]
+			}
+			return summary
+		}
+	}
+	return "agent completed"
+}
+
+// agentErrorEvent builds the terminal agent_error event from the process
+// error plus the captured stderr tail.
+func agentErrorEvent(r *ompRun) AgentEvent {
+	msg := fmt.Sprintf("agent failed: %v", r.err)
+	if tail := r.stderr.String(); tail != "" {
+		msg = fmt.Sprintf("%s: %s", msg, tail)
+	}
+	return AgentEvent{
+		Type:    "agent_error",
+		Payload: map[string]interface{}{"error": msg},
+	}
 }
 
 // Regexes for OMP print-mode tool output:
@@ -356,36 +718,13 @@ func (a *OMP) buildEvents(r *ompRun) []AgentEvent {
 	}
 
 	if r.err != nil {
-		msg := fmt.Sprintf("agent failed: %v", r.err)
-		if tail := r.stderr.String(); tail != "" {
-			msg = fmt.Sprintf("%s: %s", msg, tail)
-		}
-		events = append(events, AgentEvent{
-			Type:    "agent_error",
-			Payload: map[string]interface{}{"error": msg},
-		})
+		events = append(events, agentErrorEvent(r))
 		return events
 	}
 
-	// Build summary from the first agent_text event, or "agent completed".
-	summary := "agent completed"
-	for _, ev := range events {
-		if ev.Type == "agent_text" {
-			if t, ok := ev.Payload["text"].(string); ok && t != "" {
-				summary = t
-				if i := strings.IndexByte(summary, '\n'); i >= 0 {
-					summary = summary[:i]
-				}
-				if len(summary) > 200 {
-					summary = summary[:200]
-				}
-			}
-			break
-		}
-	}
 	events = append(events, AgentEvent{
 		Type:    "agent_done",
-		Payload: map[string]interface{}{"summary": summary},
+		Payload: map[string]interface{}{"summary": doneSummary(events)},
 	})
 	return events
 }

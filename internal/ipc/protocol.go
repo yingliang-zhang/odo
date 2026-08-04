@@ -126,16 +126,21 @@ type Response struct {
 	Event        *store.Event        `json:"event,omitempty"`
 	Events       []store.Event       `json:"events,omitempty"`
 	AgentRunning *bool               `json:"agent_running,omitempty"`
-	Diff         *DiffInfo           `json:"diff,omitempty"`
-	DiffID       int64               `json:"diff_id,omitempty"`
-	Applied      bool                `json:"applied,omitempty"`
-	WikiPath     string              `json:"wiki_path,omitempty"`
-	Epoch        int                 `json:"epoch,omitempty"`
-	Reviews      []ReviewResult      `json:"reviews,omitempty"`
-	Runs         []RunInfo           `json:"runs,omitempty"`
-	Settings     *Settings           `json:"settings,omitempty"`
-	WikiNotes    []WikiNoteInfo      `json:"wiki_notes,omitempty"`
-	WikiContent  string              `json:"wiki_content,omitempty"`
+	// M7 live streaming: the active run's transient in-flight block preview
+	// (partial:true; never journaled — rebuilt on every poll). Streaming is
+	// true while a preview is present.
+	Preview     *adapter.AgentEvent `json:"preview,omitempty"`
+	Streaming   bool                `json:"streaming,omitempty"`
+	Diff        *DiffInfo           `json:"diff,omitempty"`
+	DiffID      int64               `json:"diff_id,omitempty"`
+	Applied     bool                `json:"applied,omitempty"`
+	WikiPath    string              `json:"wiki_path,omitempty"`
+	Epoch       int                 `json:"epoch,omitempty"`
+	Reviews     []ReviewResult      `json:"reviews,omitempty"`
+	Runs        []RunInfo           `json:"runs,omitempty"`
+	Settings    *Settings           `json:"settings,omitempty"`
+	WikiNotes   []WikiNoteInfo      `json:"wiki_notes,omitempty"`
+	WikiContent string              `json:"wiki_content,omitempty"`
 	// read_memory: contents of the daemon-constructed canonical files
 	// (missing files come back as "").
 	MemoryContent  string `json:"memory_content,omitempty"`

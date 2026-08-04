@@ -702,6 +702,32 @@ body {
   font-weight: 600;
 }
 
+/* ---------- M7 streaming preview ---------- */
+
+/* The in-flight block: dimmed + italic so it reads as provisional next to
+   the journaled bubbles. Replaced wholesale on every poll. */
+.bubble-preview {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* Text previews end in a pulsing caret (ws-pulse is the existing pulse). */
+.preview-caret {
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: ws-pulse 1.1s ease-in-out infinite;
+}
+
+/* Tool previews lead with a spinning ⟳ (spin is the existing rotation). */
+.preview-spinner {
+  display: inline-block;
+  animation: spin 1.2s linear infinite;
+}
+
 .badge-accept {
   background: rgba(63, 163, 95, 0.18);
   color: var(--ok);

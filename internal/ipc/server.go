@@ -37,6 +37,10 @@ type runMeta struct {
 	consumed       int  // adapter events already journaled
 	finished       bool // terminal adapter event (done/error) journaled
 	errored        bool // terminal adapter event was agent_error
+	// M7: the run's transient streaming preview (adapter event with
+	// partial:true), rebuilt by each drainRun while the run is live. Never
+	// journaled; handlePollEvents passes it through verbatim.
+	previewEvent *adapter.AgentEvent
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -743,9 +747,17 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 			agentRunning = true
 		}
 	}
+	var preview *adapter.AgentEvent
+	if runID, ok := s.byConv[c.ID]; ok {
+		if meta := s.runs[runID]; meta != nil && !meta.finished {
+			preview = meta.previewEvent
+		}
+	}
 	return Response{
 		Events:       events,
 		AgentRunning: new(agentRunning),
+		Preview:      preview,
+		Streaming:    preview != nil,
 		Diff:         s.latestDiffInfo(ctx, c.ID),
 		Runs:         s.runInfos(c.ID),
 	}, nil
@@ -792,6 +804,16 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	evs, err := s.adapterFor(meta.adapter).Events(ctx, meta.runID, meta.consumed)
 	if err != nil {
 		return err
+	}
+	// M7: a trailing partial event is the adapter's transient preview —
+	// strip it before journaling and stash it for this poll's response. It
+	// never advances consumed: the next Events call re-sends the completed
+	// block it was previewing.
+	meta.previewEvent = nil
+	if n := len(evs); n > 0 && evs[n-1].Payload["partial"] == true {
+		preview := evs[n-1]
+		meta.previewEvent = &preview
+		evs = evs[:n-1]
 	}
 	for _, ev := range evs {
 		if _, err := s.store.AppendEvent(ctx, meta.conversationID, ev.Type, mustJSON(ev.Payload)); err != nil {
@@ -1761,6 +1783,11 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 		evs, err := ad.Events(ctx, runID, consumed)
 		if err != nil {
 			return "", err
+		}
+		// M7: a trailing partial event is the transient streaming preview —
+		// not journaled, not counted, not part of the concatenated output.
+		if n := len(evs); n > 0 && evs[n-1].Payload["partial"] == true {
+			evs = evs[:n-1]
 		}
 		consumed += len(evs)
 		for _, ev := range evs {

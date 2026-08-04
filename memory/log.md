@@ -538,3 +538,30 @@ stubs don't validate flags. Fix: removed 3 lines, kept Hermes route flags.
 5. **Agent completes in ~4s**: real K3 model via sudo for simple tasks
 
 HEAD: 4ca78f9
+
+## M7 Live Streaming — implementation (K3+DSF design lock)
+
+Block-level streaming: adapter passes `--mode json`, tails `output.txt` with
+a byte-offset cursor, journals completed blocks, and returns the in-flight
+block as a trailing partial preview; daemon strips it (never journaled) and
+passes it through `poll_events`; frontend polls 350 ms running / 1500 ms
+idle and renders the preview as a dimmed bubble.
+
+- Earlier doc draft (session-JSONL tail) discarded; doc rewritten to the
+  shipped design (`docs/milestones/m7-live-streaming.md`).
+- Ground truth probed live: real stream is `message_update` sub-events
+  (`text_start`/`text_delta`/`text_end`) + top-level `tool_execution_start`/
+  `tool_execution_end`. `tool_execution_end` carries NO args — merged from
+  the start event per `call_id` (`pendingTool` map). Test caught it.
+- Wrinkles fixed by tests: empty-slice-vs-nil at the terminal boundary;
+  `message_end` safety net for no-delta providers with per-message dedup
+  (`msgStreamed`).
+- Tests: 7 adapter stream tests + 1 socket E2E (`TestStreamingVisibleLoopPreview`,
+  stub sleeps between JSONL appends; preview seen, never journaled,
+  `[user_message agent_text agent_done]`).
+- Gates: `go build/vet/test ./...` ✓ (full ipc suite 94 s, stubs unaffected —
+  first-byte auto-detect to legacy), `tsc --noEmit` + `vite build` ✓,
+  `cargo check` ✓, real wrapper smoke (`… --mode json`, exit 0, output starts
+  `{"type":"session"…}`) ✓.
+
+Uncommitted at HEAD c7bd684; GUI webview E2E (cua-driver) still outstanding.

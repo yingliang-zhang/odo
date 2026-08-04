@@ -26,10 +26,13 @@ import SettingsPanel from "./components/SettingsPanel";
 import Sidebar from "./components/Sidebar";
 import WikiBrowser from "./components/WikiBrowser";
 import { notifyRunDone } from "./notify";
-import type { BootstrapResponse, Conversation, Diff, OdoEvent, Project, Workstream } from "./types";
+import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, Workstream } from "./types";
 
-// Polling is the declared transport for M0 (no SSE/WebSocket).
-const POLL_INTERVAL_MS = 1500;
+// Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
+// interval adapts to run state — fast while the agent streams blocks (the
+// preview bubble follows the stream), slow when idle.
+const POLL_INTERVAL_RUNNING_MS = 350;
+const POLL_INTERVAL_IDLE_MS = 1500;
 
 // M4 (spec §8): the "memory updated" chip auto-dismisses after 30 s.
 const MEMORY_CHIP_MS = 30_000;
@@ -65,6 +68,8 @@ export default function App() {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [events, setEvents] = useState<OdoEvent[]>([]);
   const [agentRunning, setAgentRunning] = useState(false);
+  // M7: transient streaming preview (never journaled), rebuilt every poll.
+  const [preview, setPreview] = useState<PreviewEvent | null>(null);
   const [diff, setDiff] = useState<Diff | null>(null);
   const [adapter, setAdapter] = useState("omp");
   // Belt A: sidebar collapse (⌘B) and the settings modal, lifted out of the
@@ -231,6 +236,7 @@ export default function App() {
       lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
       setEvents(evs);
       setAgentRunning(resp.agent_running ?? false);
+      setPreview(null); // bootstrap carries no preview; the next poll restores it
       setDiff(resp.diff ?? null);
       setLastDistillPath(null);
       const cid = resp.conversation?.id;
@@ -285,10 +291,14 @@ export default function App() {
         if (conversationRef.current !== cid) return; // workstream switched mid-flight
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
+        // M7: transient in-flight block preview — replaced wholesale per
+        // poll; renders as the dimmed preview bubble.
+        setPreview(resp.preview ?? null);
         // The daemon always reports the latest diff (any status); only a
         // pending one is actionable in the UI.
         if (resp.diff) setDiff(resp.diff);
-        // M3 (spec §3c): project-wide visibility every ~4th tick (~6s).
+        // M3 (spec §3c): project-wide visibility every ~4th tick (~6 s
+        // idle, ~1.4 s while a run streams).
         // Guarded: a daemon without the command (or any failure) leaves the
         // previous badge state untouched.
         if (pollTickRef.current % 4 === 0 && projectRootRef.current != null) {
@@ -316,9 +326,14 @@ export default function App() {
         inFlight = false;
       }
     };
-    const timer = setInterval(() => void tick(), POLL_INTERVAL_MS);
+    // M7: 350 ms while the agent runs (block-level preview latency), 1.5 s
+    // idle. The interval resets when agentRunning flips.
+    const timer = setInterval(
+      () => void tick(),
+      agentRunning ? POLL_INTERVAL_RUNNING_MS : POLL_INTERVAL_IDLE_MS,
+    );
     return () => clearInterval(timer);
-  }, [booted, recordEvents]);
+  }, [booted, recordEvents, agentRunning]);
 
   const handleSend = useCallback(
     async (text: string, attachments: string[], steer: boolean) => {
@@ -751,6 +766,7 @@ export default function App() {
         <ChatSurface
           events={events}
           agentRunning={agentRunning}
+          preview={preview}
           sendDisabled={!booted}
           onSend={handleSend}
           onFanout={handleFanout}
