@@ -19,6 +19,7 @@ import {
   rejectDiff,
   sendMessage,
   unwrap,
+  updateSettings,
 } from "./api";
 import ChatSurface from "./components/ChatSurface";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
@@ -1078,7 +1079,22 @@ export default function App() {
         workstreamName={workstream?.name ?? null}
         conversationId={conversation?.id ?? null}
         epoch={conversation?.epoch ?? 1}
+        projectRoot={project?.root_path ?? null}
         agentRunning={agentRunning}
+        runningCount={runs.filter((r) => r.status === "running").length}
+        adapter={adapter}
+        onAdapterChange={async (a) => {
+          setAdapter(a);
+          // M9 P5: persist to daemon so the choice survives relaunch.
+          try {
+            const s = unwrap(await getSettings());
+            unwrap(await updateSettings({ ...s, default_adapter: a }));
+          } catch { /* degrade silently */ }
+        }}
+        pendingDiffs={diffs.length}
+        wikiNoteCount={wikiNoteCount}
+        pendingMemoryProposals={pendingMemoryProposals}
+        onBadgeClick={(tab) => openPanelTab(tab)}
       />
     </div>
   );

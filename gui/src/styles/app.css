@@ -2614,3 +2614,45 @@ mark {
     box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
   }
 }
+
+/* ---------- M9 Phase 5: StatusBar badges + adapter ---------- */
+
+.status-badge {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 1px 5px;
+  cursor: pointer;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.status-badge:hover {
+  color: var(--text);
+  background: var(--bg-input);
+  border-color: var(--text-dim);
+}
+
+.status-adapter {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 1px 4px;
+  cursor: pointer;
+  outline: none;
+}
+
+.status-adapter:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.status-adapter:focus {
+  border-color: var(--accent-user);
+}
