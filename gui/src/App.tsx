@@ -22,8 +22,9 @@ import {
 import ChatSurface from "./components/ChatSurface";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
 import DiffViewer from "./components/DiffViewer";
+import MemoryReviewPanel, { type Tab as MemoryReviewTab } from "./components/MemoryReviewPanel";
 import SettingsPanel from "./components/SettingsPanel";
-import Sidebar from "./components/Sidebar";
+import Sidebar, { type SidebarToast } from "./components/Sidebar";
 import WikiBrowser from "./components/WikiBrowser";
 import { notifyRunDone } from "./notify";
 import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, Workstream } from "./types";
@@ -34,8 +35,10 @@ import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Pro
 const POLL_INTERVAL_RUNNING_MS = 350;
 const POLL_INTERVAL_IDLE_MS = 1500;
 
-// M4 (spec §8): the "memory updated" chip auto-dismisses after 30 s.
-const MEMORY_CHIP_MS = 30_000;
+// Every transient toast — memory chips, retractions, ledger failures, and
+// sidebar confirmations (distill/curate/pin) — auto-dismisses after 10 s,
+// same cadence as the error banner.
+const TOAST_MS = 10_000;
 // Belt C (§Fix 2): the error banner auto-dismisses after 10 s.
 const ERROR_BANNER_MS = 10_000;
 
@@ -53,6 +56,11 @@ export interface RetractionInfo {
   oldNote: string;
   newNote: string;
   snippet: string;
+}
+
+// One toast in the viewport: the sidebar-emitted payload plus its id.
+interface ToastItem extends SidebarToast {
+  id: number;
 }
 
 function parseRetraction(detail: string): RetractionInfo | null {
@@ -73,9 +81,15 @@ export default function App() {
   const [diff, setDiff] = useState<Diff | null>(null);
   const [adapter, setAdapter] = useState("omp");
   // Belt A: sidebar collapse (⌘B) and the settings modal, lifted out of the
-  // Sidebar so ⌘, opens it regardless of sidebar visibility.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Sidebar so ⌘, opens it regardless of sidebar visibility. The collapse
+  // state persists across launches.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("odo-sidebar-collapsed") === "true",
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The memory review modal lives here (not in the sidebar): toasts click
+  // through into it, and it must survive the sidebar collapsing to the rail.
+  const [memoryReviewTab, setMemoryReviewTab] = useState<MemoryReviewTab | null>(null);
   // Belt B: chat search (⌘F) and the command palette (⌘K); the wiki
   // browser is lifted out of the Sidebar so the palette can open it too.
   const [searchOpen, setSearchOpen] = useState(false);
@@ -96,10 +110,14 @@ export default function App() {
     layer: string;
     detail?: string;
   } | null>(null);
-  // M6: the contradiction pass chips the sidebar when it retracts a stale
-  // note; a ledger write failure chips as a toast (rare, journaled).
+  // M6: the contradiction pass toasts when it retracts a stale note; a
+  // ledger write failure toasts the same way (rare, journaled).
   const [lastRetraction, setLastRetraction] = useState<RetractionInfo | null>(null);
   const [lastLedgerFailure, setLastLedgerFailure] = useState<string | null>(null);
+  // Transient confirmations emitted by the sidebar (distill/curate/pin),
+  // rendered beside the chips in the toast viewport; each carries its own
+  // 10 s expiry started by pushToast.
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
   // M3 visibility (spec §3c): project-wide pending-diff counts and running
   // workstreams, refreshed every few poll ticks via pending_counts.
   const [pendingCounts, setPendingCounts] = useState<Record<number, number>>({});
@@ -114,6 +132,11 @@ export default function App() {
       document.documentElement.dataset.theme = saved;
     }
   }, []);
+
+  // Sidebar collapse persistence, mirroring the theme pattern above.
+  useEffect(() => {
+    localStorage.setItem("odo-sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   const lastSeqRef = useRef(0);
   const conversationRef = useRef<number | null>(null);
@@ -139,6 +162,8 @@ export default function App() {
   // M6: same ephemeral-chip pattern for the retraction + ledger chips.
   const retractionChipTimer = useRef<number | undefined>(undefined);
   const ledgerChipTimer = useRef<number | undefined>(undefined);
+  // Sequence for toast ids (App-level confirmations plus the chips).
+  const toastSeqRef = useRef(0);
 
   const recordEvents = useCallback((incoming: OdoEvent[]) => {
     if (incoming.length === 0) return;
@@ -151,7 +176,7 @@ export default function App() {
       if (e.type === "agent_done") {
         void notifyRunDone(workstreamNameRef.current ?? "?", e.payload?.summary ?? "");
       }
-      // M4 (spec §8): memory_update chips the sidebar. Deliberately NOT
+      // M4 (spec §8): memory_update pops a toast. Deliberately NOT
       // handled in applyBootstrap — bootstrap replays history wholesale and
       // a stale memory_update must not re-chip. This callback only ever
       // sees freshly polled events.
@@ -166,7 +191,7 @@ export default function App() {
             clearTimeout(retractionChipTimer.current);
             retractionChipTimer.current = window.setTimeout(
               () => setLastRetraction(null),
-              MEMORY_CHIP_MS,
+              TOAST_MS,
             );
           }
           continue;
@@ -176,13 +201,13 @@ export default function App() {
           clearTimeout(ledgerChipTimer.current);
           ledgerChipTimer.current = window.setTimeout(
             () => setLastLedgerFailure(null),
-            MEMORY_CHIP_MS,
+            TOAST_MS,
           );
           continue;
         }
         setLastMemoryUpdate({ layer, detail: e.payload?.detail });
         clearTimeout(memoryChipTimer.current);
-        memoryChipTimer.current = window.setTimeout(() => setLastMemoryUpdate(null), MEMORY_CHIP_MS);
+        memoryChipTimer.current = window.setTimeout(() => setLastMemoryUpdate(null), TOAST_MS);
       }
     }
   }, []);
@@ -528,8 +553,8 @@ export default function App() {
 
   // M5: a pin is a verbatim user statement hoovered into .odo/pins.md — no
   // LLM processing, no poll pause (returns immediately). The journaled
-  // memory_update{layer:"pins"} arrives on the next poll tick and chips
-  // the sidebar through the generic recordEvents branch.
+  // memory_update{layer:"pins"} arrives on the next poll tick and toasts
+  // through the generic recordEvents branch.
   const handlePin = useCallback(async (text: string) => {
     const cid = conversationRef.current;
     if (cid == null) throw new Error("no active conversation yet");
@@ -571,8 +596,8 @@ export default function App() {
     if (cid != null) void refreshWikiCount(cid);
   }, [refreshWikiCount]);
 
-  // M4: clicking the chip dismisses it (the auto-dismiss also runs on a
-  // 30 s timer); closing/applying in the review panel re-reads the badge.
+  // M4: clicking the toast dismisses it (the auto-dismiss also runs on a
+  // 10 s timer); closing/applying in the review panel re-reads the badge.
   const handleMemoryChipDismiss = useCallback(() => {
     if (memoryChipTimer.current !== undefined) {
       clearTimeout(memoryChipTimer.current);
@@ -598,6 +623,23 @@ export default function App() {
     const cid = conversationRef.current;
     if (cid != null) void refreshMemoryProposals(cid);
   }, [refreshMemoryProposals]);
+
+  const openMemoryReview = useCallback((tab: MemoryReviewTab) => setMemoryReviewTab(tab), []);
+
+  // Toast viewport lifecycle: push shows a confirmation for 10 s; either
+  // the timer or a click (which also click-throughs to its panel) removes it.
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const pushToast = useCallback(
+    (toast: SidebarToast) => {
+      const id = ++toastSeqRef.current;
+      setToasts((prev) => [...prev, { ...toast, id }]);
+      window.setTimeout(() => dismissToast(id), TOAST_MS);
+    },
+    [dismissToast],
+  );
 
   // Drop the chips' dismiss timers on unmount.
   useEffect(() => {
@@ -707,7 +749,7 @@ export default function App() {
   ];
 
   return (
-    <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+    <div className="app-shell">
       <Sidebar
         project={project}
         workstream={workstream}
@@ -727,13 +769,8 @@ export default function App() {
         pendingCounts={pendingCounts}
         runningWorkstreams={runningWorkstreams}
         pendingMemoryProposals={pendingMemoryProposals}
-        lastMemoryUpdate={lastMemoryUpdate}
-        onMemoryChipDismiss={handleMemoryChipDismiss}
-        lastRetraction={lastRetraction}
-        onRetractionDismiss={handleRetractionDismiss}
-        lastLedgerFailure={lastLedgerFailure}
-        onLedgerFailureDismiss={handleLedgerFailureDismiss}
-        onMemoryReviewClosed={handleMemoryReviewClosed}
+        onToast={pushToast}
+        onOpenMemoryReview={openMemoryReview}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -749,7 +786,80 @@ export default function App() {
           }}
         />
       )}
+      {memoryReviewTab != null && conversation?.id != null && (
+        <MemoryReviewPanel
+          conversationId={conversation.id}
+          workstreamName={workstream?.name}
+          initialTab={memoryReviewTab}
+          onClose={() => {
+            setMemoryReviewTab(null);
+            handleMemoryReviewClosed();
+          }}
+          onApplied={handleMemoryReviewClosed}
+        />
+      )}
       <main className="app-main">
+        {/* Toast viewport: the transient chips the sidebar used to host,
+            plus sidebar confirmations. Click-through opens the panel the
+            toast is about; every toast auto-dismisses after TOAST_MS. */}
+        <div className="toast-viewport">
+          {lastMemoryUpdate && (
+            <button
+              type="button"
+              className="toast-item"
+              title={lastMemoryUpdate.detail ?? `${lastMemoryUpdate.layer} memory changed`}
+              onClick={() => {
+                handleMemoryChipDismiss();
+                setMemoryReviewTab("files");
+              }}
+            >
+              memory updated
+              {lastMemoryUpdate.detail && (
+                <span className="toast-detail">{lastMemoryUpdate.detail}</span>
+              )}
+            </button>
+          )}
+          {lastRetraction && (
+            <button
+              type="button"
+              className="toast-item"
+              title={`${lastRetraction.oldNote} contradicted by ${lastRetraction.newNote}: ${lastRetraction.snippet}`}
+              onClick={() => {
+                handleRetractionDismiss();
+                setMemoryReviewTab("files");
+              }}
+            >
+              ⚠ {lastRetraction.oldNote} retracted (contradicts {lastRetraction.newNote})
+            </button>
+          )}
+          {lastLedgerFailure && (
+            <button
+              type="button"
+              className="toast-item"
+              title={lastLedgerFailure}
+              onClick={() => {
+                handleLedgerFailureDismiss();
+                setMemoryReviewTab("ledger");
+              }}
+            >
+              ⚠ ledger write failed
+            </button>
+          )}
+          {toasts.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className="toast-item"
+              title={t.title}
+              onClick={() => {
+                dismissToast(t.id);
+                t.onClick?.();
+              }}
+            >
+              {t.text}
+            </button>
+          ))}
+        </div>
         {error && (
           <div className="error-banner" role="alert">
             <span>{error}</span>

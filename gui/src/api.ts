@@ -206,7 +206,7 @@ export async function ledger(): Promise<LedgerResponse> {
 }
 
 // M6 precision+ledger: the conversation's note-retraction events for the
-// wiki browser's "⚠ retracted" badges and the sidebar retraction chip.
+// wiki browser's "⚠ retracted" badges and the retraction toast.
 export async function contradictions(conversationId: number): Promise<ContradictionsResponse> {
   return unwrap(await invoke<ContradictionsResponse>("contradictions", { conversationId }));
 }

@@ -8,7 +8,7 @@ import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse } from "../
 // gate — nothing is written until Apply. The batch is fetched here, not
 // threaded from App: App only tracks its size for the sidebar badge.
 
-type Tab = "proposals" | "files" | "ledger";
+export type Tab = "proposals" | "files" | "ledger";
 
 interface Props {
   conversationId: number;

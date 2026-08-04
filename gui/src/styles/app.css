@@ -13,6 +13,9 @@
   --ok: #3fa35f;
   --err: #c34a4a;
   --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* Sidebar geometry: expanded column vs. the collapsed icon rail. */
+  --sidebar-width: 240px;
+  --sidebar-width-icon: 48px;
   /* Belt D: semantic colors lifted out of literals so the light theme can
      re-theme every surface by overriding this block alone. Values below
      are the previous hardcoded dark-theme colors. */
@@ -147,12 +150,10 @@ body {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  /* auto track: the sidebar owns its width (the width transition animates
+     the column); collapse shrinks it to the icon rail, never zero. */
+  grid-template-columns: auto 1fr;
   height: 100%;
-}
-
-.app-shell.sidebar-collapsed {
-  grid-template-columns: 0 1fr;
 }
 
 .app-main {
@@ -191,19 +192,112 @@ body {
   background: rgba(0, 0, 0, 0.25);
 }
 
+/* ---------- Toast viewport ---------- */
+
+/* Transient confirmations (distill/curate/pin, learner updates,
+   retractions, ledger failures) live top-right of the main area — out of
+   the sidebar — and auto-dismiss after 10s. Below the modal/palette
+   overlays (z-index 100+) but above the chat surface. */
+.toast-viewport {
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 340px;
+}
+
+.toast-item {
+  background: var(--panel-float);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-size: 12px;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.toast-item:hover {
+  border-color: var(--accent-user);
+}
+
+.toast-item .toast-detail {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 /* ---------- Sidebar ---------- */
 
 .sidebar {
+  width: var(--sidebar-width);
   background: var(--bg-raised);
   border-right: 1px solid var(--border);
-  padding: 16px;
+  padding: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.16s ease;
+}
+
+/* Collapse is a 48px icon rail, never a hidden 0px column. The expanded
+   content stays mounted (form state survives) and is hidden with CSS. */
+.sidebar[data-sidebar-state="collapsed"] {
+  width: var(--sidebar-width-icon);
+  padding: 8px 6px;
+}
+
+.sidebar-rail {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar[data-sidebar-state="collapsed"] .sidebar-rail {
+  display: flex;
+}
+
+.sidebar-sections {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
 }
 
-.sidebar-collapsed {
-  padding: 0;
-  border-right: none;
-  overflow: hidden;
+.sidebar[data-sidebar-state="collapsed"] .sidebar-sections {
+  display: none;
+}
+
+/* Rail buttons are icon-only; the label lives in the title tooltip. */
+.sidebar-rail button {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sidebar-rail button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-input);
+}
+
+.sidebar-rail button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .collapse-btn {
@@ -263,6 +357,69 @@ body {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 6px;
+}
+
+/* Collapsible sections (Capture/Knowledge) are <details> elements; the
+   summary header reveals its caret on hover/focus, rotated when open. */
+.sidebar-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.sidebar-section-header::-webkit-details-marker {
+  display: none;
+}
+
+.sidebar-section-header .caret {
+  margin-left: auto;
+  font-size: 9px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.sidebar-section-header:hover .caret,
+.sidebar-section-header:focus-visible .caret {
+  opacity: 1;
+}
+
+details.sidebar-section[open] > .sidebar-section-header .caret {
+  transform: rotate(90deg);
+}
+
+/* Workstreams is the primary section: it absorbs spare column height and
+   scrolls its own list so Capture/Knowledge/System stay in view. */
+.sidebar-section-grow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-section-grow .ws-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* System footer: pinned to the bottom of the column. */
+.sidebar-footer {
+  flex-shrink: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-footer .sidebar-facts {
+  margin-top: 10px;
 }
 
 .ws-add {
@@ -355,32 +512,61 @@ body {
   color: var(--ok);
 }
 
-.distill-btn {
+/* Unified sidebar row: icon + label + optional trailing count badge. */
+.menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  margin-top: 6px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
+  background: none;
+  border: 1px solid transparent;
   border-radius: 6px;
   color: var(--text);
-  padding: 7px 10px;
+  padding: 6px 8px;
   font: inherit;
+  text-align: left;
   cursor: pointer;
 }
 
-.distill-btn:hover:not(:disabled) {
-  border-color: var(--accent-user);
+.menu-row:hover:not(:disabled) {
+  background: var(--bg-input);
 }
 
-.distill-btn:disabled {
+.menu-row:disabled {
   opacity: 0.5;
   cursor: default;
 }
 
-.distill-toast {
-  margin-top: 6px;
-  color: var(--ok);
-  font-size: 12px;
-  word-break: break-word;
+.menu-row-icon {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.menu-row:hover:not(:disabled) .menu-row-icon {
+  color: var(--text);
+}
+
+.menu-row-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-row-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .adapter-select {
@@ -1014,22 +1200,6 @@ body {
   margin: 0;
 }
 
-.gear-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-dim);
-  font-size: 15px;
-  line-height: 1;
-  padding: 4px 7px;
-  cursor: pointer;
-}
-
-.gear-btn:hover {
-  color: var(--text);
-  border-color: var(--accent-user);
-}
-
 .settings-overlay {
   position: fixed;
   inset: 0;
@@ -1473,12 +1643,6 @@ body {
   border-color: var(--accent-user);
 }
 
-.wiki-count {
-  margin: 6px 0 2px;
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
 .wiki-panel {
   width: 720px;
   max-width: calc(100vw - 48px);
@@ -1589,6 +1753,7 @@ body {
    line surfaces daemon refusals (overflow names the pin text). */
 .pin-form {
   display: flex;
+  align-items: center;
   gap: 6px;
   margin-top: 6px;
 }
@@ -1706,54 +1871,6 @@ body {
 }
 
 /* ---------- M4: learning (spec §7/§8) ---------- */
-
-/* Sidebar badge-button for pending learner proposals ("N memory proposed —
-   Review"). Quieter than the distill button: an invitation, not an action. */
-.mem-propose-btn {
-  width: 100%;
-  margin-top: 6px;
-  background: color-mix(in srgb, var(--accent-user) 15%, transparent);
-  border: 1px solid var(--accent-user);
-  border-radius: 6px;
-  color: var(--text);
-  padding: 6px 10px;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.mem-propose-btn:hover {
-  background: color-mix(in srgb, var(--accent-user) 30%, transparent);
-}
-
-/* Ephemeral green chip after a memory layer changed; click opens the
-   review panel's reader tab and dismisses it. */
-.mem-chip {
-  display: inline-block;
-  margin-top: 8px;
-  background: rgba(63, 163, 95, 0.15);
-  border: 1px solid var(--ok);
-  border-radius: 12px;
-  color: var(--ok);
-  padding: 2px 10px;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.mem-chip:hover {
-  background: rgba(63, 163, 95, 0.28);
-}
-
-.mem-chip-detail {
-  margin-top: 2px;
-  color: var(--text-dim);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* Review panel: wiki-panel sizing and chrome, single-column body. */
 .mem-panel {
