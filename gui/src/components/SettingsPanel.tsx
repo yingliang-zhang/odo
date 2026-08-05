@@ -179,6 +179,39 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
               />
             </label>
 
+            {/* M10: Knowledge capture (auto-distill) */}
+            <div className="settings-section-title">Knowledge capture</div>
+            <label className="settings-row">
+              <span>Auto-distill</span>
+              <select
+                value={settings.auto_distill}
+                onChange={(e) => set("auto_distill", e.target.value)}
+              >
+                <option value="never">Never (manual)</option>
+                <option value="on_idle">On idle (after N seconds)</option>
+              </select>
+            </label>
+            <label className="settings-row">
+              <span>Idle seconds</span>
+              <input
+                type="number"
+                min="5"
+                max="300"
+                value={settings.auto_distill_idle_seconds}
+                onChange={(e) => set("auto_distill_idle_seconds", e.target.value)}
+              />
+            </label>
+            <label className="settings-row">
+              <span>Auto-curate after distill</span>
+              <select
+                value={settings.auto_curate_after_distill}
+                onChange={(e) => set("auto_curate_after_distill", e.target.value)}
+              >
+                <option value="false">No (manual)</option>
+                <option value="true">Yes (chain after distill)</option>
+              </select>
+            </label>
+
             <div className="settings-actions">
               <button type="submit" className="settings-save" disabled={saving}>
                 {saving ? "Saving…" : "Save"}

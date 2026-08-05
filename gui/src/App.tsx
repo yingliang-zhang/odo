@@ -220,6 +220,9 @@ export default function App() {
   // minutes; polling is paused for the duration instead of queueing up
   // certain timeout failures.
   const distillingRef = useRef(false);
+  // M10: auto-distill idle timer. Armed when agentRunning flips false;
+  // cancelled on send, workstream/project switch, or manual distill.
+  const autoDistillTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // M5: curate blocks daemon-side like distill (one connection at a time),
   // so the poll loop pauses for the curator one-shot the same way.
   const curatingRef = useRef(false);
@@ -495,6 +498,7 @@ export default function App() {
     async (text: string, attachments: string[], steer: boolean) => {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
+      cancelAutoDistill(); // M10: user sent a message — cancel pending auto-distill
       try {
         const resp = unwrap(
           await sendMessage(cid, text, attachments, {
@@ -521,6 +525,7 @@ export default function App() {
   const handleFanout = useCallback(async (text: string, n: number): Promise<number> => {
     const cid = conversationRef.current;
     if (cid == null) throw new Error("no active conversation yet");
+    cancelAutoDistill(); // M10: cancel pending auto-distill
     try {
       const resp = unwrap(await fanoutSend(cid, text, n, projectRootRef.current ?? undefined));
       const started = resp.runs?.length ?? 0;
@@ -625,6 +630,7 @@ export default function App() {
   const handleSwitchWorkstream = useCallback(
     async (workstreamId: number) => {
       if (workstreamId === workstream?.id) return;
+      cancelAutoDistill(); // M10: switching workstreams cancels pending auto-distill
       try {
         const resp = unwrap(await bootstrap(project?.root_path, workstreamId));
         applyBootstrap(resp);
@@ -644,6 +650,7 @@ export default function App() {
   const handleSwitchProject = useCallback(
     async (root: string) => {
       if (root === activeProjectRoot) return;
+      cancelAutoDistill(); // M10: switching projects cancels pending auto-distill
       try {
         const resp = unwrap(await bootstrap(root));
         setActiveProjectRoot(root);
@@ -719,6 +726,7 @@ export default function App() {
   const handleDistill = useCallback(async () => {
     const cid = conversationRef.current;
     if (cid == null) return; // the action buttons are disabled without a conversation
+    cancelAutoDistill(); // M10: manual distill cancels any pending auto-distill
     distillingRef.current = true;
     setDistillBusy(true);
     try {
@@ -781,6 +789,47 @@ export default function App() {
       curatingRef.current = false;
     }
   }, [refreshWikiCount, pushToast, openPanelTab]);
+
+  // M10: auto-distill — when agentRunning flips false, arm an idle timer.
+  // Cancel on send, workstream/project switch, or manual distill.
+  const cancelAutoDistill = useCallback(() => {
+    if (autoDistillTimerRef.current) {
+      clearTimeout(autoDistillTimerRef.current);
+      autoDistillTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (agentRunning) {
+      // Agent started — cancel any pending auto-distill.
+      cancelAutoDistill();
+      return;
+    }
+    // Agent just finished (true→false transition).
+    // Only arm when auto_distill is "on_idle" and we have a conversation.
+    if (!conversation?.id) return;
+    let idleSec = 30;
+    getSettings(projectRootRef.current ?? undefined).then((raw) => {
+      const s = unwrap(raw);
+      if (!s.settings || s.settings.auto_distill !== "on_idle") return;
+      if (s.settings.auto_distill_idle_seconds) {
+        const n = parseInt(s.settings.auto_distill_idle_seconds, 10);
+        if (!isNaN(n) && n >= 5) idleSec = n;
+      }
+      cancelAutoDistill();
+      autoDistillTimerRef.current = setTimeout(async () => {
+        autoDistillTimerRef.current = null;
+        // Re-check: user may have sent a message or switched workstream.
+        if (conversationRef.current == null || agentRunningRef.current || distillingRef.current) return;
+        await handleDistill();
+        // Chain auto-curate if enabled.
+        if (s.settings?.auto_curate_after_distill === "true" && conversationRef.current != null) {
+          await handleCurate();
+        }
+      }, idleSec * 1000);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentRunning, conversation?.id, cancelAutoDistill, handleDistill, handleCurate]);
 
   // M5: a pin is a verbatim user statement hoovered into .odo/pins.md — no
   // LLM processing, no poll pause (returns immediately). The journaled

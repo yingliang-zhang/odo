@@ -1003,13 +1003,16 @@ func TestGetSettings(t *testing.T) {
 		t.Fatal("get_settings: settings missing")
 	}
 	want := Settings{
-		CodingModel:          "t9s/kimi-k3",
-		CodingProvider:       "sudo",
-		OrchestratorModel:    "t9s/kimi-k3",
-		OrchestratorProvider: "sudo",
-		OMPTimeout:           "600",
-		DefaultAdapter:       "omp",
-		ReviewModels:         "",
+		CodingModel:             "t9s/kimi-k3",
+		CodingProvider:          "sudo",
+		OrchestratorModel:       "t9s/kimi-k3",
+		OrchestratorProvider:    "sudo",
+		OMPTimeout:              "600",
+		DefaultAdapter:          "omp",
+		ReviewModels:            "",
+		AutoDistill:             "never",
+		AutoDistillIdleSeconds:  "30",
+		AutoCurateAfterDistill:  "false",
 	}
 	if *got.Settings != want {
 		t.Errorf("defaults = %+v, want %+v", *got.Settings, want)
@@ -1019,13 +1022,16 @@ func TestGetSettings(t *testing.T) {
 	writePrefs(t, home, "# my prefs\ncoding: glm-5.2@sudo\norchestrator: orch-model@orch-prov\nreview: rm1@test,rm2@test\nomp_timeout: 900\ndefault_adapter: pi\n")
 	got = rig.call(t, Request{Cmd: CmdGetSettings, ProjectRoot: root})
 	want = Settings{
-		CodingModel:          "glm-5.2",
-		CodingProvider:       "sudo",
-		OrchestratorModel:    "orch-model",
-		OrchestratorProvider: "orch-prov",
-		OMPTimeout:           "900",
-		DefaultAdapter:       "pi",
-		ReviewModels:         "rm1@test,rm2@test",
+		CodingModel:             "glm-5.2",
+		CodingProvider:          "sudo",
+		OrchestratorModel:       "orch-model",
+		OrchestratorProvider:    "orch-prov",
+		OMPTimeout:              "900",
+		DefaultAdapter:          "pi",
+		ReviewModels:            "rm1@test,rm2@test",
+		AutoDistill:             "never",
+		AutoDistillIdleSeconds:  "30",
+		AutoCurateAfterDistill:  "false",
 	}
 	if *got.Settings != want {
 		t.Errorf("from prefs = %+v, want %+v", *got.Settings, want)

@@ -21,6 +21,10 @@ type Settings struct {
 	OMPTimeout           string `json:"omp_timeout"`
 	DefaultAdapter       string `json:"default_adapter"`
 	ReviewModels         string `json:"review_models"` // comma-separated model@provider entries
+	// M10: auto-distill settings (opt-in, default "never")
+	AutoDistill              string `json:"auto_distill"`               // "never" | "on_idle"
+	AutoDistillIdleSeconds   string `json:"auto_distill_idle_seconds"`  // e.g. "30"
+	AutoCurateAfterDistill   string `json:"auto_curate_after_distill"` // "true" | "false"
 }
 
 // defaultAdapterName is used when prefs.md has no default_adapter line.
@@ -129,6 +133,19 @@ func ReadSettings() Settings {
 	if v := LoadPrefsRaw("default_adapter"); v != "" {
 		s.DefaultAdapter = v
 	}
+	// M10: auto-distill settings (opt-in, default "never")
+	s.AutoDistill = LoadPrefsRaw("auto_distill")
+	if s.AutoDistill == "" {
+		s.AutoDistill = "never"
+	}
+	s.AutoDistillIdleSeconds = LoadPrefsRaw("auto_distill_idle_seconds")
+	if s.AutoDistillIdleSeconds == "" {
+		s.AutoDistillIdleSeconds = "30"
+	}
+	s.AutoCurateAfterDistill = LoadPrefsRaw("auto_curate_after_distill")
+	if s.AutoCurateAfterDistill == "" {
+		s.AutoCurateAfterDistill = "false"
+	}
 	return s
 }
 
@@ -174,6 +191,16 @@ func UpdateSettings(up Settings) error {
 	}
 	if up.DefaultAdapter != "" {
 		set("default_adapter", up.DefaultAdapter)
+	}
+	// M10: auto-distill settings
+	if up.AutoDistill != "" {
+		set("auto_distill", up.AutoDistill)
+	}
+	if up.AutoDistillIdleSeconds != "" {
+		set("auto_distill_idle_seconds", up.AutoDistillIdleSeconds)
+	}
+	if up.AutoCurateAfterDistill != "" {
+		set("auto_curate_after_distill", up.AutoCurateAfterDistill)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

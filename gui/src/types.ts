@@ -262,6 +262,9 @@ export interface Settings {
   omp_timeout: string;
   default_adapter: string;
   review_models: string;
+  auto_distill: string;
+  auto_distill_idle_seconds: string;
+  auto_curate_after_distill: string;
 }
 
 export interface GetSettingsResponse {
