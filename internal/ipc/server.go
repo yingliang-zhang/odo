@@ -397,6 +397,12 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if s.fanoutActive(c.ID) {
 		return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 	}
+	// M11 P0 (DS review): reject sends during distill — the distill's
+	// unlocked 10-min window would let a new run journal events into
+	// the epoch the distill is about to roll.
+	if _, ok := s.distilling[c.ID]; ok {
+		return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
+	}
 
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
 	if err != nil {
@@ -616,6 +622,10 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 	}
 	if s.fanoutActive(c.ID) {
 		return Response{}, fmt.Errorf("fanout_send: agent already running for conversation %d", c.ID)
+	}
+	// M11 P0 (DS review): reject fan-out during distill.
+	if _, ok := s.distilling[c.ID]; ok {
+		return Response{}, fmt.Errorf("fanout_send: distill in progress for conversation %d", c.ID)
 	}
 
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
