@@ -350,3 +350,77 @@ func TestCancelDuringDistill(t *testing.T) {
 	fin := <-distill
 	requireOK(t, "distill", fin)
 }
+
+// TestCapRejectsSecondSend: with max_concurrent_runs=1, a second send while
+// the first agent is still running must be rejected with the cap error.
+// Uses rig.roundTrip (not rig.call) because rig.call fatals on !OK.
+func TestCapRejectsSecondSend(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	// Set cap to 1 via prefs.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "max_concurrent_runs: 1\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	// Bootstrap main workstream.
+	boot1, err := rig.roundTrip(Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if err != nil || !boot1.OK {
+		t.Fatalf("bootstrap: err=%v resp=%+v", err, boot1)
+	}
+	if boot1.Conversation == nil {
+		t.Fatal("bootstrap: missing conversation")
+	}
+	conv1 := boot1.Conversation.ID
+
+	// Create + bootstrap side workstream.
+	wsResp, err := rig.roundTrip(Request{Cmd: CmdCreateWorkstream, ProjectRoot: root, Name: "side"})
+	if err != nil || !wsResp.OK {
+		t.Fatalf("create_workstream: err=%v resp=%+v", err, wsResp)
+	}
+	if wsResp.Workstream == nil {
+		t.Fatal("create_workstream: missing workstream")
+	}
+	boot2, err := rig.roundTrip(Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: wsResp.Workstream.ID})
+	if err != nil || !boot2.OK {
+		t.Fatalf("bootstrap side: err=%v resp=%+v", err, boot2)
+	}
+	if boot2.Conversation == nil {
+		t.Fatal("bootstrap side: missing conversation")
+	}
+	conv2 := boot2.Conversation.ID
+
+	// Start first agent (succeeds — 0 active runs, cap=1).
+	r1, err := rig.roundTrip(Request{Cmd: CmdSendMessage, ConversationID: conv1, Text: "Create a.txt"})
+	if err != nil {
+		t.Fatalf("first send: transport: %v", err)
+	}
+	if !r1.OK {
+		t.Fatalf("first send should succeed at cap=1 with 0 active runs, got: %s", r1.Error)
+	}
+
+	// Second send to a different conversation must be rejected at cap.
+	r2, err := rig.roundTrip(Request{Cmd: CmdSendMessage, ConversationID: conv2, Text: "Create b.txt"})
+	if err != nil {
+		t.Fatalf("second send: transport: %v", err)
+	}
+	if r2.OK {
+		t.Fatal("second send should have been rejected at cap=1, got OK")
+	}
+	if !strings.Contains(r2.Error, "cap") {
+		t.Fatalf("expected cap error, got: %s", r2.Error)
+	}
+
+	// Fan-out (n=2) must also be rejected when cap=1.
+	r3, err := rig.roundTrip(Request{Cmd: CmdFanoutSend, ConversationID: conv2, Text: "fix", N: 2})
+	if err != nil {
+		t.Fatalf("fanout: transport: %v", err)
+	}
+	if r3.OK {
+		t.Fatal("fanout_send should have been rejected at cap=1, got OK")
+	}
+	if !strings.Contains(r3.Error, "cap") {
+		t.Fatalf("expected cap error for fanout, got: %s", r3.Error)
+	}
+}
