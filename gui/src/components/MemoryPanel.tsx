@@ -18,6 +18,9 @@ interface Props {
   initialTab?: "proposals" | "files";
   // Fired after a successful apply so App can re-read the pending count.
   onApplied?: () => void;
+  // M11 P1: all reads/writes route to this project's daemon; null = bridge
+  // default. App remounts the panel on project switch.
+  projectRoot?: string | null;
 }
 
 // Split the mixed proposals array into per-target sections while keeping
@@ -70,7 +73,7 @@ function ProposalRow({
   );
 }
 
-export default function MemoryPanel({ conversationId, workstreamName, initialTab, onApplied }: Props) {
+export default function MemoryPanel({ conversationId, workstreamName, initialTab, onApplied, projectRoot }: Props) {
   const [tab, setTab] = useState<"proposals" | "files">(initialTab ?? "proposals");
   const [batch, setBatch] = useState<PendingMemoryBatch | null>(null);
   const [batchLoading, setBatchLoading] = useState(true);
@@ -91,7 +94,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
   // a fresh distill supersedes an older unconsumed batch the same way.
   const refreshBatch = useCallback(async () => {
     try {
-      const resp = await memoryProposals(conversationId);
+      const resp = await memoryProposals(conversationId, projectRoot ?? undefined);
       if ((resp.epoch ?? 0) > 0 && (resp.proposals?.length ?? 0) > 0) {
         setBatch({
           epoch: resp.epoch ?? 0,
@@ -110,7 +113,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
     } finally {
       setBatchLoading(false);
     }
-  }, [conversationId]);
+  }, [conversationId, projectRoot]);
 
   useEffect(() => {
     void refreshBatch();
@@ -122,7 +125,10 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
   const loadFiles = useCallback(async () => {
     setFilesLoading(true);
     try {
-      const [mem, pinsResp] = await Promise.all([readMemory(), readPins()]);
+      const [mem, pinsResp] = await Promise.all([
+        readMemory(projectRoot ?? undefined),
+        readPins(projectRoot ?? undefined),
+      ]);
       setFiles(mem);
       setPins(pinsResp.memory_content ?? "");
       setFilesError(null);
@@ -131,7 +137,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
     } finally {
       setFilesLoading(false);
     }
-  }, []);
+  }, [projectRoot]);
 
   useEffect(() => {
     if (tab === "files") void loadFiles();
@@ -158,7 +164,10 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
     setApplyResult(null);
     setError(null);
     try {
-      const resp = await applyMemory({ conversationId, epoch: batch.epoch, accepted });
+      const resp = await applyMemory(
+        { conversationId, epoch: batch.epoch, accepted },
+        projectRoot ?? undefined,
+      );
       if (!resp.applied) throw new Error("daemon did not confirm the apply");
       const memCount = accepted.filter((a) => a.target === "memory.md").length;
       const userCount = accepted.length - memCount;

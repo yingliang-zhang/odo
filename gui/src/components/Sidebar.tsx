@@ -1,8 +1,14 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../api";
-import type { Workstream } from "../types";
+import type { ProjectEntry, Workstream } from "../types";
 
 interface Props {
+  // M11 P1: the global project registry and the currently bound root. The
+  // picker renders only when the registry has entries; an empty registry
+  // keeps the static "Odo" title (pre-M11 look, bridged default project).
+  projects: ProjectEntry[];
+  activeProjectRoot: string | null;
+  onSwitchProject: (root: string) => void;
   workstreams: Workstream[];
   workstream: Workstream | null;
   agentRunning: boolean;
@@ -24,6 +30,9 @@ interface Props {
 // mounted but hidden when collapsed so workstream-create form state
 // survives the toggle; all panel/toast state lives in App.
 export default function Sidebar({
+  projects,
+  activeProjectRoot,
+  onSwitchProject,
   workstreams,
   workstream,
   agentRunning,
@@ -38,6 +47,39 @@ export default function Sidebar({
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  // M11 P1: project picker dropdown state; closes on outside click or Esc.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!pickerRef.current?.contains(e.target as Node)) setPickerOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      // Claim the Esc here: the global shortcut handler listens on window
+      // (after document in the bubble path) and would also close the panel
+      // or cancel a running agent on the same keypress.
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setPickerOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [pickerOpen]);
+
+  // Badges exist only for the active project: pending_counts is the only
+  // cross-workstream view (spec §3c), and no daemon of an inactive project
+  // is ever queried. Other rows show name + root tooltip only.
+  const activeEntry = projects.find((p) => p.root === activeProjectRoot);
+  const activeLabel = activeEntry?.name ?? projects[0]?.name ?? "Odo";
+  const pendingTotal = Object.values(pendingCounts).reduce((a, b) => a + b, 0);
+  const runningAny = agentRunning || runningWorkstreams.length > 0;
 
   const resetCreate = () => {
     setCreating(false);
@@ -78,7 +120,57 @@ export default function Sidebar({
 
       <div className="sidebar-sections">
         <div className="sidebar-head">
-          <h1 className="sidebar-app">Odo</h1>
+          {projects.length > 0 ? (
+            <div className="project-picker" ref={pickerRef}>
+              <button
+                type="button"
+                className={`project-toggle${pickerOpen ? " open" : ""}`}
+                title={activeEntry?.root ?? "Switch project"}
+                aria-haspopup="listbox"
+                aria-expanded={pickerOpen}
+                onClick={() => setPickerOpen((v) => !v)}
+              >
+                <span aria-hidden="true" className="project-caret">
+                  ▾
+                </span>
+                <span className="project-name">{activeLabel}</span>
+                {pendingTotal > 0 && <span className="ws-pending-pill">{pendingTotal}</span>}
+                {runningAny && <span className="ws-running-dot" />}
+              </button>
+              {pickerOpen && (
+                <ul className="project-menu" role="listbox" aria-label="Projects">
+                  {projects.map((p) => {
+                    const isActive = p.root === activeProjectRoot;
+                    return (
+                      <li key={p.root}>
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={isActive}
+                          className={`ws-item${isActive ? " active" : ""}`}
+                          title={p.root}
+                          onClick={() => {
+                            setPickerOpen(false);
+                            onSwitchProject(p.root);
+                          }}
+                        >
+                          <span className="ws-name">{p.name}</span>
+                          <span className="ws-meta">
+                            {isActive && pendingTotal > 0 && (
+                              <span className="ws-pending-pill">{pendingTotal}</span>
+                            )}
+                            {isActive && runningAny && <span className="ws-running-dot" />}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <h1 className="sidebar-app">Odo</h1>
+          )}
           <button
             type="button"
             className="collapse-btn"

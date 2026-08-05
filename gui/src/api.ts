@@ -1,6 +1,11 @@
 // Thin type-safe wrappers over the Tauri commands. The Rust layer forwards
 // each call to the Go daemon's Unix socket; these functions never contain
 // business logic — the daemon is the single source of truth (Invariant 1).
+//
+// M11 P1: every daemon-bound function takes an optional projectRoot; when
+// absent the bridge resolves its default root (identical to pre-M11
+// behavior). list_projects is the only command that never touches a
+// daemon — it reads the global ~/.odo/projects.json registry directly.
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
@@ -24,6 +29,7 @@ import type {
   PendingCountsResponse,
   PinResponse,
   PollEventsResponse,
+  ProjectEntry,
   ReadMemoryResponse,
   ReadPinsResponse,
   ReadWikiResponse,
@@ -45,11 +51,20 @@ export function bootstrap(projectRoot?: string, workstreamId?: number): Promise<
   });
 }
 
+// M11 P1: the daemon-owned global project registry (~/.odo/projects.json),
+// read straight from disk by the bridge — no daemon is contacted, so a
+// project whose daemon won't start still appears in the switcher.
+export function listProjects(): Promise<ProjectEntry[]> {
+  return invoke<ProjectEntry[]>("list_projects");
+}
+
 export interface SendOptions {
   // steer: journal the message for the running agent (no new run started).
   steer?: boolean;
   // adapter: backend to run with ("omp" | "pi"); ignored for steering.
   adapter?: string;
+  // M11 P1: route to that project's daemon; null keeps the bridge default.
+  projectRoot?: string;
 }
 
 export function sendMessage(
@@ -69,14 +84,15 @@ export function sendMessage(
   if (opts?.adapter) {
     req.adapter = opts.adapter;
   }
+  req.projectRoot = opts?.projectRoot ?? null;
   return invoke<SendMessageResponse>("send_message", req);
 }
 
 // Belt A: abort the conversation's active run (adapter SIGKILL). The
 // daemon journals agent_error{cancelled by user}; ok:false means the run
 // ended before the cancel landed — a benign race, so callers may ignore it.
-export function cancel(conversationId: number): Promise<CancelResponse> {
-  return invoke<CancelResponse>("cancel", { conversationId });
+export function cancel(conversationId: number, projectRoot?: string): Promise<CancelResponse> {
+  return invoke<CancelResponse>("cancel", { conversationId, projectRoot: projectRoot ?? null });
 }
 
 export function listWorkstreams(projectRoot: string): Promise<ListWorkstreamsResponse> {
@@ -92,51 +108,74 @@ export function createWorkstream(
 
 // distill blocks daemon-side until the summary agent finishes (up to 10
 // minutes); the Rust bridge uses a matching read timeout for this command.
-export function distill(conversationId: number): Promise<DistillResponse> {
-  return invoke<DistillResponse>("distill", { conversationId });
+export function distill(conversationId: number, projectRoot?: string): Promise<DistillResponse> {
+  return invoke<DistillResponse>("distill", { conversationId, projectRoot: projectRoot ?? null });
 }
 
-export function pollEvents(conversationId: number, afterSeq: number): Promise<PollEventsResponse> {
-  return invoke<PollEventsResponse>("poll_events", { conversationId, afterSeq });
+export function pollEvents(
+  conversationId: number,
+  afterSeq: number,
+  projectRoot?: string,
+): Promise<PollEventsResponse> {
+  return invoke<PollEventsResponse>("poll_events", {
+    conversationId,
+    afterSeq,
+    projectRoot: projectRoot ?? null,
+  });
 }
 
-export function acceptDiff(diffId: number): Promise<AcceptDiffResponse> {
-  return invoke<AcceptDiffResponse>("accept_diff", { diffId });
+export function acceptDiff(diffId: number, projectRoot?: string): Promise<AcceptDiffResponse> {
+  return invoke<AcceptDiffResponse>("accept_diff", { diffId, projectRoot: projectRoot ?? null });
 }
 
-export function rejectDiff(diffId: number): Promise<RejectDiffResponse> {
-  return invoke<RejectDiffResponse>("reject_diff", { diffId });
+export function rejectDiff(diffId: number, projectRoot?: string): Promise<RejectDiffResponse> {
+  return invoke<RejectDiffResponse>("reject_diff", { diffId, projectRoot: projectRoot ?? null });
 }
 
 // M2: review_diff blocks daemon-side while every configured review model
 // grades the diff; the Rust bridge uses a matching long read timeout.
-export function reviewDiff(diffId: number): Promise<ReviewDiffResponse> {
-  return invoke<ReviewDiffResponse>("review_diff", { diffId });
+export function reviewDiff(diffId: number, projectRoot?: string): Promise<ReviewDiffResponse> {
+  return invoke<ReviewDiffResponse>("review_diff", { diffId, projectRoot: projectRoot ?? null });
 }
 
-// M2 settings: the daemon resolves the project root when none is passed.
-export function getSettings(): Promise<GetSettingsResponse> {
-  return invoke<GetSettingsResponse>("get_settings", { projectRoot: null });
+// M2 settings: the bridge resolves its default project root when none is
+// passed.
+export function getSettings(projectRoot?: string): Promise<GetSettingsResponse> {
+  return invoke<GetSettingsResponse>("get_settings", { projectRoot: projectRoot ?? null });
 }
 
-export function updateSettings(settings: Partial<Settings>): Promise<UpdateSettingsResponse> {
+export function updateSettings(
+  settings: Partial<Settings>,
+  projectRoot?: string,
+): Promise<UpdateSettingsResponse> {
   const req: UpdateSettingsRequest = { settings };
-  return invoke<UpdateSettingsResponse>("update_settings", { projectRoot: null, ...req });
+  return invoke<UpdateSettingsResponse>("update_settings", {
+    projectRoot: projectRoot ?? null,
+    ...req,
+  });
 }
 
 // M2 fan-out: run the same prompt through N parallel agent runs.
-export function fanoutSend(conversationId: number, text: string, n: number): Promise<FanoutSendResponse> {
+export function fanoutSend(
+  conversationId: number,
+  text: string,
+  n: number,
+  projectRoot?: string,
+): Promise<FanoutSendResponse> {
   const req: FanoutSendRequest = { conversationId, text, n };
-  return invoke<FanoutSendResponse>("fanout_send", req);
+  return invoke<FanoutSendResponse>("fanout_send", { ...req, projectRoot: projectRoot ?? null });
 }
 
-// M3 wiki browser: read-only, served from the daemon's project root.
-export function listWiki(conversationId: number): Promise<ListWikiResponse> {
-  return invoke<ListWikiResponse>("list_wiki", { conversationId });
+// M3 wiki browser: read-only, served from the project's daemon.
+export function listWiki(conversationId: number, projectRoot?: string): Promise<ListWikiResponse> {
+  return invoke<ListWikiResponse>("list_wiki", {
+    conversationId,
+    projectRoot: projectRoot ?? null,
+  });
 }
 
-export function readWiki(path: string): Promise<ReadWikiResponse> {
-  return invoke<ReadWikiResponse>("read_wiki", { path });
+export function readWiki(path: string, projectRoot?: string): Promise<ReadWikiResponse> {
+  return invoke<ReadWikiResponse>("read_wiki", { path, projectRoot: projectRoot ?? null });
 }
 
 // M3 visibility (spec §3c): the sidebar's only view into OTHER workstreams'
@@ -146,28 +185,40 @@ export function pendingCounts(projectRoot: string): Promise<PendingCountsRespons
 }
 
 // M4 learning: read the three canonical memory files (project memory.md,
-// memory-archive.md, global user.md) through the daemon; a project root is
-// never sent — the daemon uses its bound root.
-export async function readMemory(): Promise<ReadMemoryResponse> {
-  return unwrap(await invoke<ReadMemoryResponse>("read_memory", { projectRoot: null }));
+// memory-archive.md, global user.md) through the project's daemon; when no
+// root is given the bridge default daemon answers (today's behavior).
+export async function readMemory(projectRoot?: string): Promise<ReadMemoryResponse> {
+  return unwrap(await invoke<ReadMemoryResponse>("read_memory", {
+    projectRoot: projectRoot ?? null,
+  }));
 }
 
 // M4 learning: the conversation's pending proposal batch. ok:true with no
 // epoch means nothing is pending (no batch, or the latest distill emitted
 // none); unwrap turns daemon failures into thrown Errors.
-export async function memoryProposals(conversationId: number): Promise<MemoryProposalsResponse> {
-  return unwrap(await invoke<MemoryProposalsResponse>("memory_proposals", { conversationId }));
+export async function memoryProposals(
+  conversationId: number,
+  projectRoot?: string,
+): Promise<MemoryProposalsResponse> {
+  return unwrap(await invoke<MemoryProposalsResponse>("memory_proposals", {
+    conversationId,
+    projectRoot: projectRoot ?? null,
+  }));
 }
 
 // M4 learning: apply the accepted subset of the pending batch
 // (all-or-nothing daemon-side). A refusal (e.g. user.md overflow) throws via
 // unwrap and leaves the batch pending for retry.
-export async function applyMemory(req: ApplyMemoryRequest): Promise<ApplyMemoryResponse> {
+export async function applyMemory(
+  req: ApplyMemoryRequest,
+  projectRoot?: string,
+): Promise<ApplyMemoryResponse> {
   return unwrap(
     await invoke<ApplyMemoryResponse>("apply_memory", {
       conversationId: req.conversationId,
       epoch: req.epoch,
       accepted: req.accepted,
+      projectRoot: projectRoot ?? null,
     }),
   );
 }
@@ -175,40 +226,49 @@ export async function applyMemory(req: ApplyMemoryRequest): Promise<ApplyMemoryR
 // M5 curation: curate blocks daemon-side up to 10 minutes while the
 // curator reads the full epoch-note set and rewrites every topic page +
 // index.md; the Rust bridge uses CURATE_READ_TIMEOUT for this command.
-export function curate(conversationId: number): Promise<CurateResponse> {
-  return invoke<CurateResponse>("curate", { conversationId });
+export function curate(conversationId: number, projectRoot?: string): Promise<CurateResponse> {
+  return invoke<CurateResponse>("curate", { conversationId, projectRoot: projectRoot ?? null });
 }
 
 // M5 curation: store a verbatim pin in .odo/pins.md. A refusal (empty
 // text, or the file would overflow its 2 KB cap) arrives as ok:false
 // naming the pin text; nothing is written.
-export function pin(conversationId: number, text: string): Promise<PinResponse> {
-  return invoke<PinResponse>("pin", { conversationId, text });
+export function pin(conversationId: number, text: string, projectRoot?: string): Promise<PinResponse> {
+  return invoke<PinResponse>("pin", { conversationId, text, projectRoot: projectRoot ?? null });
 }
 
 // M5 curation: .odo/pins.md content for the review panel reader; same
 // shape and unwrap semantics as readMemory.
-export async function readPins(): Promise<ReadPinsResponse> {
-  return unwrap(await invoke<ReadPinsResponse>("read_pins", { projectRoot: null }));
+export async function readPins(projectRoot?: string): Promise<ReadPinsResponse> {
+  return unwrap(await invoke<ReadPinsResponse>("read_pins", { projectRoot: projectRoot ?? null }));
 }
 
-// M5 curation: topic pages for the wiki browser's Topics tab; the daemon
-// uses its bound project root (a project root is never sent).
-export async function listTopics(): Promise<ListTopicsResponse> {
-  return unwrap(await invoke<ListTopicsResponse>("list_topics", { projectRoot: null }));
+// M5 curation: topic pages for the wiki browser's Topics tab; the
+// project's daemon lists them (the bridge default answers when no root is
+// given).
+export async function listTopics(projectRoot?: string): Promise<ListTopicsResponse> {
+  return unwrap(await invoke<ListTopicsResponse>("list_topics", {
+    projectRoot: projectRoot ?? null,
+  }));
 }
 
 // M6 precision+ledger: .odo/ledger.md content for the review panel's Ledger
 // tab; same shape and unwrap semantics as readMemory/readPins. The daemon
 // is the only writer; the file is never injected into prompts (pull-only).
-export async function ledger(): Promise<LedgerResponse> {
-  return unwrap(await invoke<LedgerResponse>("ledger", { projectRoot: null }));
+export async function ledger(projectRoot?: string): Promise<LedgerResponse> {
+  return unwrap(await invoke<LedgerResponse>("ledger", { projectRoot: projectRoot ?? null }));
 }
 
 // M6 precision+ledger: the conversation's note-retraction events for the
 // wiki browser's "⚠ retracted" badges and the retraction toast.
-export async function contradictions(conversationId: number): Promise<ContradictionsResponse> {
-  return unwrap(await invoke<ContradictionsResponse>("contradictions", { conversationId }));
+export async function contradictions(
+  conversationId: number,
+  projectRoot?: string,
+): Promise<ContradictionsResponse> {
+  return unwrap(await invoke<ContradictionsResponse>("contradictions", {
+    conversationId,
+    projectRoot: projectRoot ?? null,
+  }));
 }
 
 // Daemon-level failures arrive with ok:false; transport failures (invoke

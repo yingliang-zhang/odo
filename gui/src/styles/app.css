@@ -487,6 +487,84 @@ body {
   font-weight: 600;
 }
 
+/* ---------- Sidebar: M11 P1 project switcher ---------- */
+
+/* Holds the switcher's dropdown anchor; replaces the static "Odo" title
+   when the registry has entries. */
+.project-picker {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* The toggle keeps the title row's rhythm (same weight family as
+   .sidebar-app) while reading as an interactive disclosure. */
+.project-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 4px;
+  margin-left: -4px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-toggle:hover {
+  background: var(--bg-input);
+}
+
+.project-toggle.open {
+  background: var(--bg-input);
+  border-color: var(--border);
+}
+
+.project-caret {
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.12s ease;
+}
+
+.project-toggle.open .project-caret {
+  transform: rotate(180deg);
+}
+
+.project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Absolute so opening never reflows the workstream list; .sidebar is
+   overflow:hidden, so the menu must stay within the rail width. */
+.project-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-menu .ws-item {
+  width: 100%;
+}
+
 /* ---------- Sidebar: M1 sections ---------- */
 
 .sidebar-section {

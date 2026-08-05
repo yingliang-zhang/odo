@@ -8,9 +8,12 @@ import { errorMessage, ledger } from "../api";
 // the panel-tab wiring contract; the ledger itself is project-global.
 interface Props {
   conversationId: number;
+  // M11 P1: the ledger read routes to this project's daemon; null =
+  // bridge default. App remounts the panel on project switch.
+  projectRoot?: string | null;
 }
 
-export default function LedgerPanel(_props: Props) {
+export default function LedgerPanel({ projectRoot }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +22,7 @@ export default function LedgerPanel(_props: Props) {
     let cancelled = false;
     (async () => {
       try {
-        const resp = await ledger();
+        const resp = await ledger(projectRoot ?? undefined);
         if (cancelled) return;
         setContent(resp.memory_content ?? "");
         setError(null);
@@ -32,7 +35,7 @@ export default function LedgerPanel(_props: Props) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [projectRoot]);
 
   return (
     <div className="mem-body">

@@ -13,13 +13,15 @@ interface Props {
   onClose: () => void;
   // M9 P4: fired after a successful save so App can re-read the adapter.
   onSaved?: () => void;
+  // M11 P1: settings belong to this project's daemon; null = bridge default.
+  projectRoot?: string | null;
 }
 
 // M2 settings modal: loads the daemon's project settings on mount, edits a
 // curated subset (coding/orchestrator model, OMP timeout, default adapter,
 // review models), and saves the full object back so untouched keys
 // (providers) survive the round trip.
-export default function SettingsPanel({ onClose, onSaved }: Props) {
+export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -42,7 +44,7 @@ export default function SettingsPanel({ onClose, onSaved }: Props) {
     let cancelled = false;
     (async () => {
       try {
-        const resp = unwrap(await getSettings());
+        const resp = unwrap(await getSettings(projectRoot ?? undefined));
         if (!cancelled && resp.settings) {
           setSettings(resp.settings);
         }
@@ -55,7 +57,7 @@ export default function SettingsPanel({ onClose, onSaved }: Props) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [projectRoot]);
 
   // Escape closes, like every other modal affordance.
   useEffect(() => {
@@ -80,7 +82,7 @@ export default function SettingsPanel({ onClose, onSaved }: Props) {
     setSaving(true);
     setError(null);
     try {
-      unwrap(await updateSettings(settings));
+      unwrap(await updateSettings(settings, projectRoot ?? undefined));
       setSavedToast(true);
       clearTimeout(toastTimer.current ?? undefined);
       toastTimer.current = setTimeout(() => setSavedToast(false), SAVED_TOAST_MS);

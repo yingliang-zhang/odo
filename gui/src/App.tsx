@@ -9,6 +9,7 @@ import {
   errorMessage,
   fanoutSend,
   getSettings,
+  listProjects,
   listTopics,
   listWiki,
   listWorkstreams,
@@ -34,7 +35,7 @@ import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { notifyRunDone } from "./notify";
-import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, RunInfo, Workstream } from "./types";
+import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, ProjectEntry, RunInfo, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -94,6 +95,13 @@ function shortWikiPath(path: string): string {
 
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
+  // M11 P1: the daemon-owned global registry (read once at boot) and the
+  // registry root currently bound in the UI; null = bridge default, which
+  // is exactly the pre-M11 single-project behavior.
+  const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  const [activeProjectRoot, setActiveProjectRoot] = useState<string | null>(
+    () => localStorage.getItem("odo-active-project"),
+  );
   const [workstream, setWorkstream] = useState<Workstream | null>(null);
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -171,6 +179,16 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("odo-sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  // M11 P1: the selected project survives relaunches; null (no registry
+  // entries) removes the key so the next boot uses the bridge default.
+  useEffect(() => {
+    if (activeProjectRoot != null) {
+      localStorage.setItem("odo-active-project", activeProjectRoot);
+    } else {
+      localStorage.removeItem("odo-active-project");
+    }
+  }, [activeProjectRoot]);
 
   // M9 Phase 1: panel open/closed + active tab persistence.
   useEffect(() => {
@@ -265,7 +283,7 @@ export default function App() {
   // banner.
   const refreshWikiCount = useCallback(async (conversationId: number) => {
     try {
-      const resp = await listWiki(conversationId);
+      const resp = await listWiki(conversationId, projectRootRef.current ?? undefined);
       if (conversationRef.current !== conversationId) return; // switched mid-flight
       setWikiNoteCount(resp.ok ? (resp.wiki_notes?.length ?? 0) : null);
     } catch {
@@ -278,7 +296,7 @@ export default function App() {
   // surface in the error banner.
   const refreshMemoryProposals = useCallback(async (conversationId: number) => {
     try {
-      const resp = await memoryProposals(conversationId);
+      const resp = await memoryProposals(conversationId, projectRootRef.current ?? undefined);
       if (conversationRef.current !== conversationId) return; // switched mid-flight
       setPendingMemoryProposals(
         (resp.epoch ?? 0) > 0 && resp.proposals ? resp.proposals.length : 0,
@@ -322,13 +340,33 @@ export default function App() {
     [refreshWikiCount, refreshMemoryProposals],
   );
 
-  // Session restore: bootstrap returns project/workstream/conversation plus
-  // the full journaled event history and the latest diff.
+  // Session restore: the project registry is read first (M11 P1) — the
+  // persisted selection wins when it still resolves to a registry entry,
+  // else the first entry; an empty registry keeps the bridge default.
+  // bootstrap then returns project/workstream/conversation plus the full
+  // journaled event history and the latest diff.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const resp = unwrap(await bootstrap());
+        // Best-effort: an unreadable/corrupt registry must not block boot —
+        // the switcher stays empty and the bridge default project loads.
+        let initialRoot: string | null = null;
+        try {
+          const entries = await listProjects();
+          if (cancelled) return;
+          setProjects(entries);
+          if (entries.length > 0) {
+            const stored = localStorage.getItem("odo-active-project");
+            initialRoot = entries.find((p) => p.root === stored)?.root ?? entries[0].root;
+            setActiveProjectRoot(initialRoot);
+          } else {
+            setActiveProjectRoot(null);
+          }
+        } catch {
+          // Switcher unavailable; single-project flow continues.
+        }
+        const resp = unwrap(await bootstrap(initialRoot ?? undefined));
         if (cancelled) return;
         setProject(resp.project ?? null);
         projectRootRef.current = resp.project?.root_path ?? null;
@@ -355,7 +393,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const resp = unwrap(await getSettings());
+        const resp = unwrap(await getSettings(projectRootRef.current ?? undefined));
         if (!cancelled && resp.settings?.default_adapter) {
           setAdapter(resp.settings.default_adapter);
         }
@@ -379,7 +417,9 @@ export default function App() {
       if (cid == null || inFlight) return;
       inFlight = true;
       try {
-        const resp = unwrap(await pollEvents(cid, lastSeqRef.current));
+        const resp = unwrap(
+          await pollEvents(cid, lastSeqRef.current, projectRootRef.current ?? undefined),
+        );
         if (conversationRef.current !== cid) return; // workstream switched mid-flight
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
@@ -453,7 +493,13 @@ export default function App() {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
       try {
-        const resp = unwrap(await sendMessage(cid, text, attachments, { steer, adapter }));
+        const resp = unwrap(
+          await sendMessage(cid, text, attachments, {
+            steer,
+            adapter,
+            projectRoot: projectRootRef.current ?? undefined,
+          }),
+        );
         if (resp.event) recordEvents([resp.event]);
         // The daemon starts the agent synchronously inside send_message.
         // A steering message does not start a run.
@@ -473,7 +519,7 @@ export default function App() {
     const cid = conversationRef.current;
     if (cid == null) throw new Error("no active conversation yet");
     try {
-      const resp = unwrap(await fanoutSend(cid, text, n));
+      const resp = unwrap(await fanoutSend(cid, text, n, projectRootRef.current ?? undefined));
       const started = resp.runs?.length ?? 0;
       if (started > 0) setAgentRunning(true);
       setError(null);
@@ -493,7 +539,7 @@ export default function App() {
     const cid = conversationRef.current;
     if (cid == null) return;
     try {
-      await cancel(cid);
+      await cancel(cid, projectRootRef.current ?? undefined);
       setError(null);
     } catch (e) {
       setError(`cancel failed: ${errorMessage(e)}`);
@@ -587,6 +633,32 @@ export default function App() {
     [workstream?.id, project?.root_path, applyBootstrap],
   );
 
+  // M11 P1: full re-bootstrap against another registry project — every
+  // conversation-scoped value is replaced wholesale by applyBootstrap, and
+  // the bridge spawns that project's daemon on demand. The root flips only
+  // after a successful bootstrap; a failure keeps the old project bound and
+  // explains itself in the error banner (same posture as workstream switch).
+  const handleSwitchProject = useCallback(
+    async (root: string) => {
+      if (root === activeProjectRoot) return;
+      try {
+        const resp = unwrap(await bootstrap(root));
+        setActiveProjectRoot(root);
+        setProject(resp.project ?? null);
+        projectRootRef.current = resp.project?.root_path ?? null;
+        applyBootstrap(resp);
+        if (resp.project) {
+          const list = unwrap(await listWorkstreams(resp.project.root_path));
+          setWorkstreams(list.workstreams ?? []);
+        }
+        setError(null);
+      } catch (e) {
+        setError(`project switch failed: ${errorMessage(e)}`);
+      }
+    },
+    [activeProjectRoot, applyBootstrap],
+  );
+
   const handleCreateWorkstream = useCallback(
     async (name: string) => {
       const root = project?.root_path;
@@ -647,7 +719,7 @@ export default function App() {
     distillingRef.current = true;
     setDistillBusy(true);
     try {
-      const resp = unwrap(await distill(cid));
+      const resp = unwrap(await distill(cid, projectRootRef.current ?? undefined));
       if (resp.epoch != null) {
         const epoch = resp.epoch;
         setConversation((prev) => (prev ? { ...prev, epoch } : prev));
@@ -683,7 +755,7 @@ export default function App() {
     if (cid == null) return; // the action buttons are disabled without a conversation
     curatingRef.current = true;
     try {
-      unwrap(await curate(cid));
+      unwrap(await curate(cid, projectRootRef.current ?? undefined));
       void refreshWikiCount(cid);
       setError(null);
       // The toast names the topic count, read straight from the daemon
@@ -691,7 +763,7 @@ export default function App() {
       // fails after a successful pass, skip the toast rather than banner
       // "curate failed" for a pass that worked.
       try {
-        const topics = await listTopics();
+        const topics = await listTopics(projectRootRef.current ?? undefined);
         pushToast({
           text: `Curated ${topics.wiki_notes?.length ?? 0} topics`,
           onClick: () => openPanelTab("wiki"),
@@ -716,7 +788,7 @@ export default function App() {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
       try {
-        unwrap(await pin(cid, text));
+        unwrap(await pin(cid, text, projectRootRef.current ?? undefined));
         setError(null);
         pushToast({ text: `Pinned: ${text}` });
       } catch (e) {
@@ -729,7 +801,7 @@ export default function App() {
 
   const handleAccept = useCallback(async (diffId: number) => {
     try {
-      const resp = unwrap(await acceptDiff(diffId));
+      const resp = unwrap(await acceptDiff(diffId, projectRootRef.current ?? undefined));
       if (resp.applied) {
         setDiff((d) => (d && d.id === diffId ? { ...d, status: "accepted" } : d));
         setError(null);
@@ -741,7 +813,7 @@ export default function App() {
 
   const handleReject = useCallback(async (diffId: number) => {
     try {
-      unwrap(await rejectDiff(diffId));
+      unwrap(await rejectDiff(diffId, projectRootRef.current ?? undefined));
       setDiff((d) => (d && d.id === diffId ? { ...d, status: "rejected" } : d));
       setError(null);
     } catch (e) {
@@ -910,6 +982,9 @@ export default function App() {
       />
       <div className="app-body">
       <Sidebar
+        projects={projects}
+        activeProjectRoot={activeProjectRoot}
+        onSwitchProject={(root) => void handleSwitchProject(root)}
         workstreams={workstreams}
         workstream={workstream}
         agentRunning={agentRunning}
@@ -922,6 +997,7 @@ export default function App() {
       />
       {settingsOpen && (
         <SettingsPanel
+          projectRoot={project?.root_path ?? null}
           onClose={() => setSettingsOpen(false)}
           onSaved={() => {
             // M9 P4: re-read adapter from daemon after settings save
@@ -930,7 +1006,7 @@ export default function App() {
             // adds the StatusBar selector).
             void (async () => {
               try {
-                const resp = unwrap(await getSettings());
+                const resp = unwrap(await getSettings(projectRootRef.current ?? undefined));
                 if (resp.settings?.default_adapter) setAdapter(resp.settings.default_adapter);
               } catch { /* degrade silently */ }
             })();
@@ -1047,29 +1123,44 @@ export default function App() {
                 runLabel={d.run_index != null ? `Run ${d.run_index + 1}` : undefined}
                 onAccept={handleAccept}
                 onReject={handleReject}
+                projectRoot={project?.root_path ?? null}
               />
             ))
           : diff
-            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} />
+            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} projectRoot={project?.root_path ?? null} />
             : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
         )}
         {panelTab === "wiki" && (conversation?.id != null ? (
-          <WikiBrowser conversationId={conversation.id} />
+          // M11 P1: the key remounts the panel on project switch so no
+          // cross-project state (lists, reader cache, selection) survives;
+          // conversation ids can collide across projects (both are
+          // per-project SQLite sequences).
+          <WikiBrowser
+            key={`${project?.root_path ?? "default"}:${conversation.id}`}
+            conversationId={conversation.id}
+            projectRoot={project?.root_path ?? null}
+          />
         ) : (
           <div className="panel-empty">No active conversation.</div>
         ))}
         {panelTab === "memory" && (conversation?.id != null ? (
           <MemoryPanel
+            key={`${project?.root_path ?? "default"}:${conversation.id}`}
             conversationId={conversation.id}
             workstreamName={workstream?.name}
             initialTab={memorySubTab}
             onApplied={handleMemoryReviewClosed}
+            projectRoot={project?.root_path ?? null}
           />
         ) : (
           <div className="panel-empty">No active conversation.</div>
         ))}
         {panelTab === "ledger" && (conversation?.id != null ? (
-          <LedgerPanel conversationId={conversation.id} />
+          <LedgerPanel
+            key={`${project?.root_path ?? "default"}:${conversation.id}`}
+            conversationId={conversation.id}
+            projectRoot={project?.root_path ?? null}
+          />
         ) : (
           <div className="panel-empty">No active conversation.</div>
         ))}
@@ -1087,8 +1178,10 @@ export default function App() {
           setAdapter(a);
           // M9 P5: persist to daemon so the choice survives relaunch.
           try {
-            const s = unwrap(await getSettings());
-            unwrap(await updateSettings({ ...s, default_adapter: a }));
+            const s = unwrap(await getSettings(projectRootRef.current ?? undefined));
+            unwrap(
+              await updateSettings({ ...s, default_adapter: a }, projectRootRef.current ?? undefined),
+            );
           } catch { /* degrade silently */ }
         }}
         pendingDiffs={diffs.length}

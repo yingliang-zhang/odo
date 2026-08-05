@@ -31,6 +31,10 @@ const CITATION_RE = /\(epoch-(\d+)\)$/;
 
 interface Props {
   conversationId: number;
+  // M11 P1: reads route to this project's daemon; null = bridge default.
+  // App remounts the browser on project switch, so no cross-project state
+  // (note list, reader cache, selection) can survive.
+  projectRoot?: string | null;
 }
 
 // Compact relative timestamp for the note list ("45s ago", "3h ago", …).
@@ -55,7 +59,7 @@ function relativeTime(iso: string): string {
 // M9 P3: the browser renders inline inside the right panel's Wiki tab; the
 // list and reader stack vertically and scroll independently while the tabs
 // and search stay pinned. Closing is the panel's job (⌘J).
-export default function WikiBrowser({ conversationId }: Props) {
+export default function WikiBrowser({ conversationId, projectRoot }: Props) {
   const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -85,7 +89,7 @@ export default function WikiBrowser({ conversationId }: Props) {
     let cancelled = false;
     (async () => {
       try {
-        const resp = await listWiki(conversationId);
+        const resp = await listWiki(conversationId, projectRoot ?? undefined);
         if (cancelled) return;
         if (resp.ok) {
           setNotes(resp.wiki_notes ?? []);
@@ -100,7 +104,7 @@ export default function WikiBrowser({ conversationId }: Props) {
     // to no badges (the note list is still fully usable).
     (async () => {
       try {
-        const resp = await contradictions(conversationId);
+        const resp = await contradictions(conversationId, projectRoot ?? undefined);
         if (!cancelled) setRetracted(retractedNames(resp.events ?? []));
       } catch {
         // Badges are optional surface; never disturb the browser.
@@ -109,7 +113,7 @@ export default function WikiBrowser({ conversationId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [conversationId]);
+  }, [conversationId, projectRoot]);
 
   // M5: topics are project-wide (not per-workstream) — fetched lazily on
   // the first switch to the Topics tab.
@@ -118,7 +122,7 @@ export default function WikiBrowser({ conversationId }: Props) {
     let cancelled = false;
     (async () => {
       try {
-        const resp = await listTopics();
+        const resp = await listTopics(projectRoot ?? undefined);
         if (!cancelled) setTopics(resp.wiki_notes ?? []);
       } catch (e) {
         if (!cancelled) setTopicsError(errorMessage(e));
@@ -127,7 +131,7 @@ export default function WikiBrowser({ conversationId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [tab, topics, topicsError]);
+  }, [tab, topics, topicsError, projectRoot]);
 
   // Reader: fetch the selected entry once, then serve from the cache.
   useEffect(() => {
@@ -142,7 +146,7 @@ export default function WikiBrowser({ conversationId }: Props) {
     setContentLoading(true);
     (async () => {
       try {
-        const resp = await readWiki(selected);
+        const resp = await readWiki(selected, projectRoot ?? undefined);
         if (cancelled) return;
         const text = resp.ok ? (resp.wiki_content ?? "") : `read failed: ${resp.error ?? "unknown error"}`;
         cache.current.set(selected, text);
@@ -156,7 +160,7 @@ export default function WikiBrowser({ conversationId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, projectRoot]);
 
   // M5 (spec §9): a citation click jumps to the source epoch note in the
   // Notes tab ONLY when exactly one note in the current workstream matches

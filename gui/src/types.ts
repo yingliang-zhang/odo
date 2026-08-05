@@ -10,6 +10,15 @@ export interface Project {
   created_at?: string;
 }
 
+// M11 P1: one row of the daemon-owned global registry
+// (~/.odo/projects.json) for the project switcher — read-only bridge view
+// via list_projects. Distinct from Project, which is the daemon's DB row.
+export interface ProjectEntry {
+  root: string;
+  name: string;
+  added: string;
+}
+
 export interface Workstream {
   id: number;
   project_id: number;
@@ -162,6 +171,8 @@ export type SendMessageRequest = {
   // a new run; adapter selects the backend ("omp" | "pi").
   steer?: boolean;
   adapter?: string;
+  // M11 P1: routes to that project's daemon; null = bridge default.
+  projectRoot?: string | null;
 };
 
 export interface SendMessageResponse {

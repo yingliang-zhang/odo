@@ -244,8 +244,9 @@ async fn send_message(
     attachments: Option<Vec<String>>,
     steer: Option<bool>,
     adapter: Option<String>,
+    project_root: Option<String>,
 ) -> Result<Value, String> {
-    let root = default_project_root()?;
+    let root = resolve_root(project_root)?;
     // The daemon ignores `attachments` today (its Request struct has no such
     // field, and Go JSON decoding drops unknown keys); the frontend already
     // prefixes the paths into `text`. Forwarded now so the daemon-side
@@ -271,8 +272,8 @@ async fn send_message(
 // process group); the daemon journals agent_error{cancelled by user} and
 // the drain path settles the run on the next poll.
 #[tauri::command]
-async fn cancel(conversation_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn cancel(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "cancel", "conversation_id": conversation_id});
     run_command(root, req, READ_TIMEOUT).await
 }
@@ -292,8 +293,8 @@ async fn list_workstreams(project_root: Option<String>) -> Result<Value, String>
 }
 
 #[tauri::command]
-async fn distill(conversation_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn distill(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     // The daemon's distillTimeout is 10 minutes and it serves one connection
     // at a time: this command holds the daemon until the note is written.
     // The frontend pauses its poll loop while a distill is in flight.
@@ -302,22 +303,26 @@ async fn distill(conversation_id: i64) -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn poll_events(conversation_id: i64, after_seq: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn poll_events(
+    conversation_id: i64,
+    after_seq: i64,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "poll_events", "conversation_id": conversation_id, "after_seq": after_seq});
     run_command(root, req, READ_TIMEOUT).await
 }
 
 #[tauri::command]
-async fn accept_diff(diff_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn accept_diff(diff_id: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "accept_diff", "diff_id": diff_id});
     run_command(root, req, READ_TIMEOUT).await
 }
 
 #[tauri::command]
-async fn reject_diff(diff_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn reject_diff(diff_id: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "reject_diff", "diff_id": diff_id});
     run_command(root, req, READ_TIMEOUT).await
 }
@@ -325,8 +330,8 @@ async fn reject_diff(diff_id: i64) -> Result<Value, String> {
 // M2: ask the configured review models to grade the pending diff. Blocks
 // daemon-side until every reviewer answers, hence the long read timeout.
 #[tauri::command]
-async fn review_diff(diff_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn review_diff(diff_id: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "review_diff", "diff_id": diff_id});
     run_command(root, req, REVIEW_READ_TIMEOUT).await
 }
@@ -351,16 +356,21 @@ async fn update_settings(project_root: Option<String>, settings: Value) -> Resul
 // M2 fan-out: start N parallel agent runs on one prompt. The daemon returns
 // immediately with the run list; progress arrives through the poll loop.
 #[tauri::command]
-async fn fanout_send(conversation_id: i64, text: String, n: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn fanout_send(
+    conversation_id: i64,
+    text: String,
+    n: i64,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "fanout_send", "conversation_id": conversation_id, "text": text, "n": n});
     run_command(root, req, READ_TIMEOUT).await
 }
 
 // M3 wiki browser: list the workstream's distilled notes (read-only).
 #[tauri::command]
-async fn list_wiki(conversation_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn list_wiki(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "list_wiki", "conversation_id": conversation_id});
     run_command(root, req, READ_TIMEOUT).await
 }
@@ -368,8 +378,8 @@ async fn list_wiki(conversation_id: i64) -> Result<Value, String> {
 // M3 wiki browser: read one note (or ~/.odo/user.md) through the daemon,
 // which enforces the wiki/-only path guard.
 #[tauri::command]
-async fn read_wiki(path: String) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn read_wiki(path: String, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "read_wiki", "path": path});
     run_command(root, req, READ_TIMEOUT).await
 }
@@ -397,8 +407,11 @@ async fn read_memory(project_root: Option<String>) -> Result<Value, String> {
 // M4 learning: the conversation's pending learner-proposal batch
 // (journal-only storage; no batch fields in the response = nothing pending).
 #[tauri::command]
-async fn memory_proposals(conversation_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn memory_proposals(
+    conversation_id: i64,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "memory_proposals", "conversation_id": conversation_id});
     run_command(root, req, READ_TIMEOUT).await
 }
@@ -408,8 +421,13 @@ async fn memory_proposals(conversation_id: i64) -> Result<Value, String> {
 // append) plus journal appends, so it gets a review-length timeout rather
 // than the generic 120 s. `accepted` is forwarded verbatim, like settings.
 #[tauri::command]
-async fn apply_memory(conversation_id: i64, epoch: i64, accepted: Value) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn apply_memory(
+    conversation_id: i64,
+    epoch: i64,
+    accepted: Value,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "apply_memory", "conversation_id": conversation_id, "epoch": epoch, "accepted": accepted});
     run_command(root, req, REVIEW_READ_TIMEOUT).await
 }
@@ -419,8 +437,8 @@ async fn apply_memory(conversation_id: i64, epoch: i64, accepted: Value) -> Resu
 // distill, hence the curator-length read timeout; the frontend pauses its
 // poll loop while a curate is in flight.
 #[tauri::command]
-async fn curate(conversation_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn curate(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "curate", "conversation_id": conversation_id});
     run_command(root, req, CURATE_READ_TIMEOUT).await
 }
@@ -428,8 +446,12 @@ async fn curate(conversation_id: i64) -> Result<Value, String> {
 // M5 curation: store one verbatim pin line in .odo/pins.md (no LLM
 // processing; overflow refuses with an error naming the pin text).
 #[tauri::command]
-async fn pin(conversation_id: i64, text: String) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn pin(
+    conversation_id: i64,
+    text: String,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "pin", "conversation_id": conversation_id, "text": text});
     run_command(root, req, READ_TIMEOUT).await
 }
@@ -466,10 +488,36 @@ async fn ledger(project_root: Option<String>) -> Result<Value, String> {
 // (memory_update{layer:"note", cause:"retract"}) for the wiki browser's
 // retracted badges. Read-only, generic READ_TIMEOUT.
 #[tauri::command]
-async fn contradictions(conversation_id: i64) -> Result<Value, String> {
-    let root = default_project_root()?;
+async fn contradictions(
+    conversation_id: i64,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
     let req = json!({"cmd": "contradictions", "conversation_id": conversation_id});
     run_command(root, req, READ_TIMEOUT).await
+}
+
+// M11 P1: read-only view of the daemon-owned global registry
+// (<home>/.odo/projects.json, ODO_REGISTRY_PATH override — same path
+// resolution as the Go registry) for the sidebar project switcher. Absent
+// file → empty list; a parse failure surfaces as a command error rather
+// than degrading to empty (the daemon owns the format and would still
+// boot on a corrupt file, so the UI should show the real problem).
+#[tauri::command]
+async fn list_projects() -> Result<Value, String> {
+    let path = match std::env::var_os("ODO_REGISTRY_PATH").filter(|p| !p.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let home = std::env::var_os("HOME").ok_or("cannot find home directory")?;
+            Path::new(&home).join(".odo").join("projects.json")
+        }
+    };
+    if !path.exists() {
+        return Ok(json!([]));
+    }
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -708,7 +756,8 @@ pub fn run() {
             read_pins,
             list_topics,
             ledger,
-            contradictions
+            contradictions,
+            list_projects
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");
