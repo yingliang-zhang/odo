@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"strconv"
 	"sync"
 	"time"
 	"unicode"
@@ -403,6 +404,10 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if _, ok := s.distilling[c.ID]; ok {
 		return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
 	}
+	// M11 P3: parallelism cap — reject when too many concurrent runs.
+	if cap := resolveMaxConcurrent(); s.activeRunCount() >= cap {
+		return Response{}, fmt.Errorf("send_message: %d concurrent runs (cap %d)", s.activeRunCount(), cap)
+	}
 
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
 	if err != nil {
@@ -626,6 +631,11 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 	// M11 P0 (DS review): reject fan-out during distill.
 	if _, ok := s.distilling[c.ID]; ok {
 		return Response{}, fmt.Errorf("fanout_send: distill in progress for conversation %d", c.ID)
+	}
+	// M11 P3: parallelism cap — reject when too many concurrent runs.
+	// Fan-out counts its N lanes against the cap, so check n + current.
+	if cap := resolveMaxConcurrent(); s.activeRunCount()+n > cap {
+		return Response{}, fmt.Errorf("fanout_send: %d active + %d requested > cap %d", s.activeRunCount(), n, cap)
 	}
 
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
@@ -882,6 +892,36 @@ func (s *Server) fanoutActive(conversationID int64) bool {
 		}
 	}
 	return false
+}
+
+// activeRunCount returns the number of non-finished runs across all
+// conversations — the daemon-wide concurrency level used by the cap.
+// Caller must hold s.mu.
+func (s *Server) activeRunCount() int {
+	n := 0
+	for _, meta := range s.runs {
+		if !meta.finished {
+			n++
+		}
+	}
+	return n
+}
+
+// maxConcurrentDefault is used when prefs.md has no max_concurrent_runs line.
+const maxConcurrentDefault = 4
+
+// resolveMaxConcurrent reads the cap from prefs.md, falling back to the
+// default when absent or unparseable.
+func resolveMaxConcurrent() int {
+	v := adapter.LoadPrefsRaw("max_concurrent_runs")
+	if v == "" {
+		return maxConcurrentDefault
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return maxConcurrentDefault
+	}
+	return n
 }
 
 // runInfos snapshots all tracked fan-out runs for the conversation — running,

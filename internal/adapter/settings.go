@@ -25,6 +25,8 @@ type Settings struct {
 	AutoDistill              string `json:"auto_distill"`               // "never" | "on_idle"
 	AutoDistillIdleSeconds   string `json:"auto_distill_idle_seconds"`  // e.g. "30"
 	AutoCurateAfterDistill   string `json:"auto_curate_after_distill"` // "true" | "false"
+	// M11 P3: parallelism cap (default 4)
+	MaxConcurrentRuns string `json:"max_concurrent_runs"` // e.g. "4"
 }
 
 // defaultAdapterName is used when prefs.md has no default_adapter line.
@@ -146,6 +148,10 @@ func ReadSettings() Settings {
 	if s.AutoCurateAfterDistill == "" {
 		s.AutoCurateAfterDistill = "false"
 	}
+	s.MaxConcurrentRuns = LoadPrefsRaw("max_concurrent_runs")
+	if s.MaxConcurrentRuns == "" {
+		s.MaxConcurrentRuns = "4"
+	}
 	return s
 }
 
@@ -201,6 +207,9 @@ func UpdateSettings(up Settings) error {
 	}
 	if up.AutoCurateAfterDistill != "" {
 		set("auto_curate_after_distill", up.AutoCurateAfterDistill)
+	}
+	if up.MaxConcurrentRuns != "" {
+		set("max_concurrent_runs", up.MaxConcurrentRuns)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

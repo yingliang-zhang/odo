@@ -265,6 +265,7 @@ export interface Settings {
   auto_distill: string;
   auto_distill_idle_seconds: string;
   auto_curate_after_distill: string;
+  max_concurrent_runs: string;
 }
 
 export interface GetSettingsResponse {

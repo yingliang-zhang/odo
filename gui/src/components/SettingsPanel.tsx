@@ -211,6 +211,16 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
                 <option value="true">Yes (chain after distill)</option>
               </select>
             </label>
+            <label className="settings-row">
+              <span>Max concurrent runs</span>
+              <input
+                type="number"
+                min="1"
+                max="16"
+                value={settings.max_concurrent_runs}
+                onChange={(e) => set("max_concurrent_runs", e.target.value)}
+              />
+            </label>
 
             <div className="settings-actions">
               <button type="submit" className="settings-save" disabled={saving}>
