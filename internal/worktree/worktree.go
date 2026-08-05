@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/yingliang-zhang/odo/internal/git"
@@ -16,6 +17,11 @@ import (
 
 // Manager binds worktree + diff paths for one project.
 type Manager struct {
+	// mu serializes Create and Remove (M11 P0): with goroutine-per-connection
+	// serving, concurrent `git worktree add/remove` on the same repo could
+	// race on .git/worktrees bookkeeping. ExtractDiff stays unlocked — it
+	// operates on an existing worktree directory and touches no shared state.
+	mu          sync.Mutex
 	projectRoot string
 	stateDir    string // <project>/.odo
 }
@@ -64,6 +70,8 @@ func (m *Manager) EnsureDirs() error {
 // Create adds a detached worktree at HEAD for runID and returns its path.
 // The caller must tolerate this failing on repositories with no commits.
 func (m *Manager) Create(runID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	path := m.WorktreePath(runID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("worktree: create worktrees dir: %w", err)
@@ -98,6 +106,8 @@ func (m *Manager) ExtractDiff(worktreePath, runID string) (string, error) {
 // Remove deletes the worktree at path (force; tolerates an already-missing
 // path). Called on accept/reject — never implicitly.
 func (m *Manager) Remove(worktreePath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if err := git.RemoveWorktree(m.projectRoot, worktreePath); err != nil {
 		return fmt.Errorf("worktree: remove: %w", err)
 	}

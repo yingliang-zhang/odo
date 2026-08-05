@@ -18,7 +18,7 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-M0–M7 complete. 76 commits, ~21K lines (12.5K Go + 8.1K TS/CSS/Rust).
+M0–M7 complete. M10 (Auto-Distill) is designed, not shipped. 76 commits, ~21K lines (12.5K Go + 8.1K TS/CSS/Rust).
 
 | Milestone | What it delivers | Tests |
 |---|---|---|
@@ -33,6 +33,10 @@ M0–M7 complete. 76 commits, ~21K lines (12.5K Go + 8.1K TS/CSS/Rust).
 | Sidebar Redesign | 48px icon rail, 4 sections, toast viewport, collapse (⌘B) | computer-use E2E |
 | GUI Belt A–D | Abort, scroll, textarea, shortcuts, markdown, search, palette, split diff, theme, empty state, a11y | 58 E2E |
 | Hardening | 8 tri-model review items (path guard, retraction dedup, CSS var, palette trap) | 3 Go |
+
+### Planned
+
+- **M10 — Auto-Distill / Auto-Curate** — design in `docs/milestones/m10-auto-distill.md`. Distill and curate stay manual by default; optional `auto_distill: on_idle | on_run_end` with an idle gate and an optional `auto_curate: after_distill` chain, all client-driven through the existing distill/curate IPC (no daemon changes, no new commands).
 
 ### Features
 

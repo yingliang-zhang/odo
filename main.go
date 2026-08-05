@@ -99,6 +99,10 @@ func main() {
 	if err := srv.Serve(listener); err != nil {
 		log.Printf("serve: %v", err)
 	}
+	// Drain in-flight per-connection handler goroutines (M11 P0) — e.g. a
+	// distill still inside its agent run — before killing agents. Connections
+	// are per-request, so this waits only for requests already being served.
+	srv.Wait()
 
 	// Kill in-flight agents so no orphan keeps writing into a worktree, then
 	// release resources. Worktrees and diffs persist for review on next boot.

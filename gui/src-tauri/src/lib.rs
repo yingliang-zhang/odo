@@ -69,8 +69,8 @@ fn daemon_binary(project_root: &str) -> PathBuf {
 }
 
 /// Single request → single response on a fresh connection. The daemon serves
-/// one connection at a time until EOF, so keeping connections open would
-/// starve the polling loop; every call connects, exchanges, and drops.
+/// each connection on its own goroutine (M11 P0), so concurrent calls no
+/// longer queue behind one another; every call connects, exchanges, and drops.
 fn round_trip(project_root: &str, req: &Value, read_timeout: Duration) -> Result<Value, String> {
     let socket = socket_path(project_root);
     let mut stream = UnixStream::connect(&socket).map_err(|e| format!("connect {}: {e}", socket.display()))?;

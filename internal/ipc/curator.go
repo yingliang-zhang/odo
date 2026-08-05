@@ -284,6 +284,21 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 	if err != nil {
 		return Response{}, err
 	}
+	// One curate at a time (M11 P0). The slot is reserved under the mutex and
+	// the multi-minute orchestrator pass below runs unlocked, so other
+	// connections stay responsive.
+	s.mu.Lock()
+	if s.curating {
+		s.mu.Unlock()
+		return Response{}, fmt.Errorf("curate: already in progress")
+	}
+	s.curating = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.curating = false
+		s.mu.Unlock()
+	}()
 	notes, err := allEpochNotes(s.projectRoot)
 	if err != nil {
 		return Response{}, fmt.Errorf("curate: %w", err)

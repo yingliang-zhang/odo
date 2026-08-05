@@ -57,9 +57,20 @@ type Server struct {
 	distillAdapter adapter.Adapter            // uses orchestrator model from prefs.md
 	mgr            *worktree.Manager
 
+	// mu (M11 P0) guards every piece of in-memory run bookkeeping below it:
+	// runs, byConv, fanoutRuns, distilling, curating, and each runMeta's
+	// consumed/previewEvent/finished/errored fields. Handlers doing only
+	// store/filesystem work don't take it; distill and curate explicitly
+	// drop it around their multi-minute agent runs. wg tracks handleConn
+	// goroutines for graceful shutdown (Wait).
+	mu         sync.Mutex
 	runs       map[string]*runMeta // adapter runID -> meta
 	byConv     map[int64]string    // conversationID -> adapter runID (active run)
 	fanoutRuns map[int64][]string  // conversationID -> fan-out adapter runIDs (kept until their diffs are reviewed)
+
+	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
+	curating   bool               // a curate pass is in flight (M11 P0)
+	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
 }
 
 // NewServer builds a Server bound to one project root. ad becomes the default
@@ -80,6 +91,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		runs:         make(map[string]*runMeta),
 		byConv:       make(map[int64]string),
 		fanoutRuns:   make(map[int64][]string),
+		distilling:   make(map[int64]struct{}),
 	}
 	s.adapters[""] = ad
 	s.adapters["omp"] = ad
@@ -108,8 +120,11 @@ func (s *Server) adapterFor(name string) adapter.Adapter {
 	return s.adapters[""]
 }
 
-// Serve accepts connections and handles them one at a time (M0). It returns
-// when the listener is closed (net.ErrClosed) or on a fatal accept error.
+// Serve accepts connections and handles each on its own goroutine (M11 P0;
+// M0 was one connection at a time). Shared run bookkeeping is guarded by
+// s.mu. Serve returns when the listener is closed (net.ErrClosed) or on a
+// fatal accept error; in-flight handler goroutines keep running — call Wait
+// to drain them during shutdown.
 func (s *Server) Serve(listener net.Listener) error {
 	for {
 		conn, err := listener.Accept()
@@ -119,8 +134,20 @@ func (s *Server) Serve(listener net.Listener) error {
 			}
 			return err
 		}
-		s.handleConn(conn)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleConn(conn)
+		}()
 	}
+}
+
+// Wait blocks until every accepted connection's handler goroutine has
+// returned. Call after Serve returns (the listener is closed) to drain
+// in-flight requests — e.g. a distill still inside its 10-minute agent run —
+// before shutdown cleanup kills agents and closes the journal.
+func (s *Server) Wait() {
+	s.wg.Wait()
 }
 
 // handleConn processes requests on a connection until EOF. Requests and
@@ -334,6 +361,11 @@ func sanitizeBranchName(name string) string {
 // handleSendMessage journals the user message, creates a run worktree, and
 // starts the agent in it.
 func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, error) {
+	// Held for the entire handler (M11 P0): the byConv/fanoutActive check and
+	// the run-table insert must be one critical section, and adapter.Start is
+	// non-blocking so the hold stays short (~200ms).
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if req.Text == "" {
 		return Response{}, fmt.Errorf("send_message: text is required")
 	}
@@ -548,6 +580,11 @@ func buildPrompt(text string, attachments []string, userMem, projectMem, pins, i
 // agent runs sharing the conversation, each in its own worktree. Polling
 // drains and reviews each run independently, producing one diff per run.
 func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, error) {
+	// Held for the entire handler, same rationale as handleSendMessage (M11
+	// P0): N quick non-blocking Starts, and the run-table inserts must not
+	// interleave with a concurrent send to the same conversation.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if req.Text == "" {
 		return Response{}, fmt.Errorf("fanout_send: text is required")
 	}
@@ -639,7 +676,7 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 }
 
 // cancelFanout unwinds the fan-out runs that already started after a sibling
-// run's setup failed.
+// run's setup failed. Caller holds s.mu (called from handleFanoutSend).
 func (s *Server) cancelFanout(ctx context.Context, ad adapter.Adapter, started []*runMeta) {
 	for _, meta := range started {
 		_ = ad.Cancel(ctx, meta.runID)
@@ -667,7 +704,8 @@ func (s *Server) cancelFanout(ctx context.Context, ad adapter.Adapter, started [
 // starting a new run. An active run receives the text via the owning
 // adapter's Send; adapters without steering support get a journaled
 // agent_error so the user sees why the message stops at the chat. With no
-// active run the message is simply journaled.
+// active run the message is simply journaled. Caller holds s.mu (called from
+// handleSendMessage).
 func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req Request) (Response, error) {
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
@@ -718,6 +756,10 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 // adapter's own terminal event, and extracts whatever partial diff exists
 // (ADR-0001: partial changes stay reviewable).
 func (s *Server) handleCancel(ctx context.Context, req Request) (Response, error) {
+	// Held for the entire handler (M11 P0): run-table reads, adapter.Cancel,
+	// and the journal write stay consistent against concurrent drains.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
@@ -768,6 +810,11 @@ func (s *Server) handleCancel(ctx context.Context, req Request) (Response, error
 // Fan-out conversations drain every tracked run and report all of them in
 // the runs field.
 func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, error) {
+	// Held for the entire handler (M11 P0): drainRun advances the consumed
+	// cursor and sets finished, so concurrent pollers of the same run must
+	// serialize — without this two polls journal the same adapter events.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
@@ -817,7 +864,7 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 }
 
 // fanoutActive reports whether any fan-out run for the conversation is still
-// unfinished.
+// unfinished. Caller holds s.mu (M11 P0).
 func (s *Server) fanoutActive(conversationID int64) bool {
 	for _, id := range s.fanoutRuns[conversationID] {
 		if meta := s.runs[id]; meta != nil && !meta.finished {
@@ -831,6 +878,7 @@ func (s *Server) fanoutActive(conversationID int64) bool {
 // done, and errored alike. A run leaves the list only when its diff is
 // reviewed (retireRunForDiff drops it). RunID is the runDirID (not the
 // adapter's internal ID) so it joins to event payloads and diff basenames.
+// Caller holds s.mu (called from handlePollEvents).
 func (s *Server) runInfos(ctx context.Context, conversationID int64) []RunInfo {
 	ids := s.fanoutRuns[conversationID]
 	if len(ids) == 0 {
@@ -879,6 +927,8 @@ func (s *Server) runInfos(ctx context.Context, conversationID int64) []RunInfo {
 
 // drainRun pulls new adapter events into the journal once. When the terminal
 // event arrives it extracts the worktree diff exactly once and records it.
+// Caller holds s.mu (called from handlePollEvents): consumed/finished must
+// not advance concurrently or the same events journal twice.
 func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	evs, err := s.adapterFor(meta.adapter).Events(ctx, meta.runID, meta.consumed)
 	if err != nil {
@@ -1005,6 +1055,10 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 		return Response{}, err
 	}
 
+	// Retire the reviewed run — and on accept, its fan-out siblings — under
+	// the mutex (M11 P0): map deletes, adapter.Close, and worktree removal
+	// must not interleave with concurrent poll drains of the same runs.
+	s.mu.Lock()
 	s.retireRunForDiff(ctx, d)
 
 	// Fan-out auto-reject: when one diff from a fan-out is accepted,
@@ -1013,6 +1067,7 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 	if action == "accept" {
 		s.autoRejectFanoutSiblings(ctx, d)
 	}
+	s.mu.Unlock()
 
 	return Response{DiffID: diffID, Applied: applied}, nil
 }
@@ -1026,7 +1081,8 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 
 // autoRejectFanoutSiblings rejects all other pending diffs from the same
 // fan-out batch when one diff is accepted. This prevents worktree leaks and
-// ensures the user isn't stuck with unreviewable sibling diffs.
+// ensures the user isn't stuck with unreviewable sibling diffs. Caller holds
+// s.mu (handleDiffAction's locked section).
 func (s *Server) autoRejectFanoutSiblings(ctx context.Context, accepted store.Diff) {
 	ids, ok := s.fanoutRuns[accepted.ConversationID]
 	if !ok {
@@ -1073,6 +1129,7 @@ func (s *Server) autoRejectFanoutSiblings(ctx context.Context, accepted store.Di
 	delete(s.fanoutRuns, accepted.ConversationID)
 }
 
+// Caller holds s.mu (handleDiffAction's locked section).
 func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
 	// The diff file basename is the run's runDirID (see worktree.DiffPath).
 	runDirID := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
@@ -1101,6 +1158,7 @@ func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
 // review. After a restart there is no in-memory run; the workstream's bound
 // worktree path is the fallback. Removal failures are logged, not fatal — the
 // review already happened and worktrees are reaped by `git worktree prune`.
+// Caller holds s.mu (via retireRunForDiff).
 func (s *Server) retireRun(ctx context.Context, conversationID int64) {
 	var wtPath string
 	if runID, ok := s.byConv[conversationID]; ok {
@@ -1287,23 +1345,40 @@ const distillTimeout = 10 * time.Minute
 // handleDistill summarizes the conversation's journaled events into a wiki
 // note at <project>/wiki/<workstream>-epoch-<N>.md (N = the distilled epoch)
 // and starts a new epoch. The summary comes from a one-shot run of the
-// default adapter in a throwaway directory — it blocks the single-connection
-// daemon but never touches the user's working tree. Old events stay in the
-// append-only journal; only the epoch counter moves (ADR-0002).
+// default adapter in a throwaway directory — it blocks only its own
+// connection (M11 P0) and never touches the user's working tree. Old events
+// stay in the append-only journal; only the epoch counter moves (ADR-0002).
 func (s *Server) handleDistill(ctx context.Context, req Request) (Response, error) {
 	start := time.Now() // M6: distill duration metric (ledger)
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
 	}
+	// Reserve this conversation's distill slot under the mutex (M11 P0), then
+	// drop the lock for the 10-minute agent run so other connections
+	// (poll_events, cancel, …) stay responsive throughout the distill.
+	s.mu.Lock()
+	if _, ok := s.distilling[c.ID]; ok {
+		s.mu.Unlock()
+		return Response{}, fmt.Errorf("distill: already in progress for conversation %d", c.ID)
+	}
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
+			s.mu.Unlock()
 			return Response{}, fmt.Errorf("distill: agent still running for conversation %d", c.ID)
 		}
 	}
 	if s.fanoutActive(c.ID) {
+		s.mu.Unlock()
 		return Response{}, fmt.Errorf("distill: agent still running for conversation %d", c.ID)
 	}
+	s.distilling[c.ID] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.distilling, c.ID)
+		s.mu.Unlock()
+	}()
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
 	if err != nil {
 		return Response{}, err
@@ -1402,11 +1477,13 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 		return Response{}, err
 	}
 	var running []int64
+	s.mu.Lock() // M11 P0: the in-memory run table is shared
 	for _, meta := range s.runs {
 		if !meta.finished {
 			running = append(running, meta.workstreamID)
 		}
 	}
+	s.mu.Unlock()
 	return Response{PendingCounts: counts, RunningWorkstreams: running}, nil
 }
 
