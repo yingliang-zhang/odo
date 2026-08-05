@@ -282,9 +282,10 @@ export default function App() {
   // "unknown" (the lines are omitted); they never surface in the error
   // banner.
   const refreshWikiCount = useCallback(async (conversationId: number) => {
+    const root = projectRootRef.current;
     try {
-      const resp = await listWiki(conversationId, projectRootRef.current ?? undefined);
-      if (conversationRef.current !== conversationId) return; // switched mid-flight
+      const resp = await listWiki(conversationId, root ?? undefined);
+      if (conversationRef.current !== conversationId || projectRootRef.current !== root) return; // switched mid-flight
       setWikiNoteCount(resp.ok ? (resp.wiki_notes?.length ?? 0) : null);
     } catch {
       if (conversationRef.current === conversationId) setWikiNoteCount(null);
@@ -295,14 +296,15 @@ export default function App() {
   // Failures degrade to hidden (0), mirroring refreshWikiCount; they never
   // surface in the error banner.
   const refreshMemoryProposals = useCallback(async (conversationId: number) => {
+    const root = projectRootRef.current;
     try {
-      const resp = await memoryProposals(conversationId, projectRootRef.current ?? undefined);
-      if (conversationRef.current !== conversationId) return; // switched mid-flight
+      const resp = await memoryProposals(conversationId, root ?? undefined);
+      if (conversationRef.current !== conversationId || projectRootRef.current !== root) return; // switched mid-flight
       setPendingMemoryProposals(
         (resp.epoch ?? 0) > 0 && resp.proposals ? resp.proposals.length : 0,
       );
     } catch {
-      if (conversationRef.current === conversationId) setPendingMemoryProposals(0);
+      if (conversationRef.current === conversationId && projectRootRef.current === root) setPendingMemoryProposals(0);
     }
   }, []);
 
@@ -414,13 +416,14 @@ export default function App() {
       if (distillingRef.current || curatingRef.current) return;
       pollTickRef.current += 1;
       const cid = conversationRef.current;
+      const root = projectRootRef.current;
       if (cid == null || inFlight) return;
       inFlight = true;
       try {
         const resp = unwrap(
-          await pollEvents(cid, lastSeqRef.current, projectRootRef.current ?? undefined),
+          await pollEvents(cid, lastSeqRef.current, root ?? undefined),
         );
-        if (conversationRef.current !== cid) return; // workstream switched mid-flight
+        if (conversationRef.current !== cid || projectRootRef.current !== root) return; // switched mid-flight
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
         // M7: transient in-flight block preview — replaced wholesale per
@@ -1118,7 +1121,7 @@ export default function App() {
         {panelTab === "changes" && (diffs.length > 0
           ? diffs.map((d) => (
               <DiffViewer
-                key={d.id}
+                key={`${projectRootRef.current ?? ""}:${d.id}`}
                 diff={d}
                 runLabel={d.run_index != null ? `Run ${d.run_index + 1}` : undefined}
                 onAccept={handleAccept}
