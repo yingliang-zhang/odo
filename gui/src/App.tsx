@@ -790,7 +790,7 @@ export default function App() {
     }
   }, [refreshWikiCount, pushToast, openPanelTab]);
 
-  // M10: auto-distill — when agentRunning flips false, arm an idle timer.
+  // M10: auto-distill — arm idle timer ONLY on genuine agentRunning true→false.
   // Cancel on send, workstream/project switch, or manual distill.
   const cancelAutoDistill = useCallback(() => {
     if (autoDistillTimerRef.current) {
@@ -799,17 +799,25 @@ export default function App() {
     }
   }, []);
 
+  // Track previous agentRunning to detect true→false transitions only.
+  const prevAgentRunningRef = useRef(false);
+
   useEffect(() => {
+    const wasRunning = prevAgentRunningRef.current;
+    prevAgentRunningRef.current = agentRunning;
+
     if (agentRunning) {
       // Agent started — cancel any pending auto-distill.
       cancelAutoDistill();
       return;
     }
-    // Agent just finished (true→false transition).
-    // Only arm when auto_distill is "on_idle" and we have a conversation.
-    if (!conversation?.id) return;
+    // Only arm on genuine true→false transition, not initial load or switch.
+    if (!wasRunning || !conversation?.id) return;
+    const armCid = conversation.id;
     let idleSec = 30;
+    let cancelled = false;
     getSettings(projectRootRef.current ?? undefined).then((raw) => {
+      if (cancelled) return;
       const s = unwrap(raw);
       if (!s.settings || s.settings.auto_distill !== "on_idle") return;
       if (s.settings.auto_distill_idle_seconds) {
@@ -819,15 +827,16 @@ export default function App() {
       cancelAutoDistill();
       autoDistillTimerRef.current = setTimeout(async () => {
         autoDistillTimerRef.current = null;
-        // Re-check: user may have sent a message or switched workstream.
-        if (conversationRef.current == null || agentRunningRef.current || distillingRef.current) return;
+        // Re-check: same conversation, no new run, not distilling/curating.
+        if (conversationRef.current !== armCid || agentRunningRef.current || distillingRef.current || curatingRef.current) return;
         await handleDistill();
         // Chain auto-curate if enabled.
-        if (s.settings?.auto_curate_after_distill === "true" && conversationRef.current != null) {
+        if (s.settings?.auto_curate_after_distill === "true" && conversationRef.current === armCid) {
           await handleCurate();
         }
       }, idleSec * 1000);
     }).catch(() => {});
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentRunning, conversation?.id, cancelAutoDistill, handleDistill, handleCurate]);
 
