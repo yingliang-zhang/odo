@@ -1320,6 +1320,95 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-top: 1px dashed var(--border);
 }
 
+/* ---------- D0: diff file navigation chips ---------- */
+
+.diff-file-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+/* Chips never shrink — the row scrolls horizontally instead. */
+.diff-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.diff-file-chip:hover:not(:disabled) {
+  border-color: var(--text-dim);
+}
+
+/* Past the truncation cap: listed for context, but nothing is rendered
+   below to scroll to. */
+.diff-file-chip.truncated {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.diff-file-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--warn);
+}
+
+.diff-file-status[data-status="add"] {
+  background: var(--ok);
+}
+
+.diff-file-status[data-status="del"] {
+  background: var(--err);
+}
+
+.diff-file-status[data-status="mod"] {
+  background: var(--warn);
+}
+
+.diff-file-status[data-status="rename"] {
+  background: var(--link);
+}
+
+.diff-file-name {
+  white-space: nowrap;
+}
+
+.diff-file-churn {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.churn-add {
+  color: var(--diff-add-text);
+}
+
+.churn-del {
+  color: var(--diff-del-text);
+}
+
+.diff-file-nav-note {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
 /* Token highlighting (see highlight.ts). Colors must read on the tinted
    add/del backgrounds as well as plain context lines. */
 

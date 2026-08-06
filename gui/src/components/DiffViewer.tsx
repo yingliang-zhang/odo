@@ -58,12 +58,81 @@ function diffFilePath(line: string): string | null {
   return null;
 }
 
+// D0: one navigable file inside a multi-file diff. `lineIndex` targets the
+// `diff --git` line (falling back to the `+++` header) so a chip click can
+// scroll straight to the file's section.
+interface DiffFileSegment {
+  path: string;
+  lineIndex: number;
+  adds: number;
+  dels: number;
+  status: "add" | "del" | "mod" | "rename";
+}
+
+// Walk the full (untruncated) diff once, splitting it into per-file segments
+// at each `--- a/…` / `+++ b/…` header pair; content `+`/`-` lines accrue to
+// the current segment (headers never count). Status is inferred from which
+// header read `/dev/null` and whether the old/new paths differ.
+function parseFileSegments(lines: string[]): DiffFileSegment[] {
+  const segments: DiffFileSegment[] = [];
+  let current: DiffFileSegment | null = null;
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const oldMatch = OLD_FILE_RE.exec(line);
+    if (oldMatch) {
+      oldPath = stripQuotes(oldMatch[1]);
+      if (oldPath === "/dev/null") oldPath = null;
+    }
+    const newMatch = NEW_FILE_RE.exec(line);
+    if (newMatch) {
+      newPath = stripQuotes(newMatch[1]);
+      if (newPath === "/dev/null") newPath = null;
+
+      // Scroll target: the `diff --git` above this header pair, else the
+      // `+++` line itself. Never scan before the previous segment's start.
+      let startIndex = i;
+      const prevStart = segments.length > 0 ? segments[segments.length - 1].lineIndex : -1;
+      for (let j = i - 1; j > prevStart; j--) {
+        if (lines[j].startsWith("diff --git")) {
+          startIndex = j;
+          break;
+        }
+      }
+
+      const path = newPath ?? oldPath ?? "unknown";
+      let status: DiffFileSegment["status"] = "mod";
+      if (oldPath === null) status = "add";
+      else if (newPath === null) status = "del";
+      else if (oldPath !== newPath) status = "rename";
+
+      current = { path, lineIndex: startIndex, adds: 0, dels: 0, status };
+      segments.push(current);
+      oldPath = null;
+      newPath = null;
+    }
+
+    // Payload only — the +++/--- header lines above are excluded.
+    if (current) {
+      if (line.startsWith("+") && !line.startsWith("+++")) current.adds++;
+      else if (line.startsWith("-") && !line.startsWith("---")) current.dels++;
+    }
+  }
+
+  return segments;
+}
+
 // Belt D: one side of one side-by-side row. `sign` retains the +/- marker
 // for the gutter; kind only picks the tint class.
 interface SplitCell {
   text: string;
   kind: "old" | "new" | "ctx";
   lang: Language | null;
+  // D0: index into the diff's line array, for chip-scroll targeting
+  // (undefined only on the synthetic truncation-note row).
+  src?: number;
 }
 
 interface SplitRow {
@@ -89,7 +158,8 @@ function parseSplitRows(lines: string[]): SplitRow[] {
     olds = [];
     news = [];
   };
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const fp = diffFilePath(line);
     if (fp) lang = languageFromPath(fp);
 
@@ -98,17 +168,17 @@ function parseSplitRows(lines: string[]): SplitRow[] {
       continue;
     }
     if (line.startsWith("-") && !line.startsWith("---")) {
-      olds.push({ text: line.slice(1), kind: "old", lang });
+      olds.push({ text: line.slice(1), kind: "old", lang, src: i });
       continue;
     }
     if (line.startsWith("+") && !line.startsWith("+++")) {
-      news.push({ text: line.slice(1), kind: "new", lang });
+      news.push({ text: line.slice(1), kind: "new", lang, src: i });
       continue;
     }
     // Context lines carry a leading space; file headers and other metadata
     // are duplicated across both columns so file boundaries stay visible.
     flush();
-    const ctx: SplitCell = { text: line, kind: "ctx", lang };
+    const ctx: SplitCell = { text: line, kind: "ctx", lang, src: i };
     rows.push({ left: ctx, right: ctx });
   }
   flush();
@@ -146,6 +216,12 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
   const [split, setSplit] = useState(false);
   const oldColRef = useRef<HTMLDivElement>(null);
   const newColRef = useRef<HTMLDivElement>(null);
+  // D0: whichever body is mounted (inline <pre> or split grid) — chip clicks
+  // query it for the target line. Callback form so <pre> and <div> both fit.
+  const diffBodyRef = useRef<HTMLElement | null>(null);
+  const setDiffBodyRef = (el: HTMLElement | null) => {
+    diffBodyRef.current = el;
+  };
 
   // Split columns scroll together: drive the other column's scrollTop from
   // whichever fired. The equality guard ends the one-event feedback loop a
@@ -182,12 +258,27 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
     }
   };
 
+  // D0: chip click scrolls the file's first diff line into view. In split
+  // mode the row exists in both columns; the first DOM match is the old
+  // column, and syncColumn mirrors its scroll to the new column.
+  const scrollToFile = (lineIndex: number) => {
+    const target = diffBodyRef.current;
+    if (target) {
+      const child = target.querySelector(`[data-line="${lineIndex}"]`);
+      if (child) child.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
   const allLines = diff.content.split("\n");
   const truncated = allLines.length > MAX_LINES;
   const lines = truncated ? allLines.slice(0, MAX_LINES) : allLines;
   const truncatedNote = truncated
     ? `Diff truncated — showing first ${MAX_LINES} of ${allLines.length} lines.`
     : null;
+
+  // D0: segments come from the untruncated lines so the chip row lists every
+  // file even when the tail is cut off; chips past MAX_LINES render disabled.
+  const fileSegments = parseFileSegments(allLines);
 
   // Walk the lines once, tracking the language of the file currently being
   // diffed (multi-file diffs switch at each `diff --git` / `+++ b/` header).
@@ -200,7 +291,7 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
     const cls = lineClass(line);
     const isCode = cls.endsWith("diff-add") || cls.endsWith("diff-del");
     rendered.push(
-      <div key={i} className={cls}>
+      <div key={i} className={cls} data-line={i}>
         {isCode ? renderCode(line.slice(0, 1), line.slice(1), lang) : line}
       </div>,
     );
@@ -224,20 +315,20 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
     }
     if (cell.kind === "old") {
       return (
-        <div key={key} className="diff-line diff-line-old">
+        <div key={key} className="diff-line diff-line-old" data-line={cell.src}>
           {renderCode("-", cell.text, cell.lang)}
         </div>
       );
     }
     if (cell.kind === "new") {
       return (
-        <div key={key} className="diff-line diff-line-new">
+        <div key={key} className="diff-line diff-line-new" data-line={cell.src}>
           {renderCode("+", cell.text, cell.lang)}
         </div>
       );
     }
     return (
-      <div key={key} className="diff-line diff-line-context">
+      <div key={key} className="diff-line diff-line-context" data-line={cell.src}>
         {cell.text}
       </div>
     );
@@ -312,10 +403,42 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
           ))}
         </div>
       )}
+      {/* D0: file navigation — chip row for multi-file diffs */}
+      {fileSegments.length > 1 && (
+        <div className="diff-file-nav" role="tablist" aria-label="Files in this diff">
+          {fileSegments.map((seg, i) => {
+            const basename = seg.path.split("/").pop() || seg.path;
+            const isTruncated = seg.lineIndex >= MAX_LINES;
+            return (
+              <button
+                key={`${seg.path}-${i}`}
+                type="button"
+                role="tab"
+                className={`diff-file-chip${isTruncated ? " truncated" : ""}`}
+                title={seg.path}
+                disabled={isTruncated}
+                onClick={() => scrollToFile(seg.lineIndex)}
+              >
+                <span className="diff-file-status" data-status={seg.status} />
+                <span className="diff-file-name">{basename}</span>
+                <span className="diff-file-churn">
+                  <span className="churn-add">+{seg.adds}</span>{" "}
+                  <span className="churn-del">-{seg.dels}</span>
+                </span>
+              </button>
+            );
+          })}
+          {fileSegments.some((s) => s.lineIndex >= MAX_LINES) && (
+            <span className="diff-file-nav-note">
+              Files beyond line {MAX_LINES} are not rendered (truncated diff).
+            </span>
+          )}
+        </div>
+      )}
       {diff.content === "" ? (
         <div className="diff-empty">Diff file is empty or unreadable.</div>
       ) : split ? (
-        <div className="diff-split">
+        <div className="diff-split" ref={setDiffBodyRef}>
           <div
             className="diff-split-col"
             ref={oldColRef}
@@ -334,7 +457,7 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
           </div>
         </div>
       ) : (
-        <pre className="diff-body">
+        <pre className="diff-body" ref={setDiffBodyRef}>
           {rendered}
           {truncatedNote !== null && (
             <div className="diff-truncated">
