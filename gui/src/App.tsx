@@ -1181,6 +1181,13 @@ export default function App() {
         onDeleteWorkstream={handleDeleteWorkstream}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+        onFetchWorkstreams={async (root) => {
+          try {
+            return unwrap(await listWorkstreams(root)).workstreams ?? [];
+          } catch {
+            return [];
+          }
+        }}
       />
       {settingsOpen && (
         <SettingsPanel

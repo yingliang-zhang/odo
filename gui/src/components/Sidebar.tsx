@@ -6,17 +6,21 @@ import type { ProjectEntry, Workstream } from "../types";
 
 // Phase 3.1: Status dot priority reducer (inspired by Hermes session-row-state.ts).
 // One mutually-exclusive state per workstream row, resolved from boolean signals.
-type DotState = "needs-input" | "running" | "pending" | "idle";
+type DotState = "running" | "pending" | "idle";
 function dotState(running: boolean, pending: number): DotState {
   if (running) return "running";
   if (pending > 0) return "pending";
   return "idle";
 }
 const dotClass: Record<DotState, string> = {
-  "needs-input": "dot-amber pulse",
   running: "dot-accent pulse",
   pending: "dot-amber",
   idle: "dot-idle",
+};
+const dotLabel: Record<DotState, string> = {
+  running: "Running",
+  pending: "Pending review",
+  idle: "Idle",
 };
 
 // Phase 3.4: Tail-pin truncation (inspired by Hermes LaneLabel).
@@ -97,10 +101,16 @@ export default function Sidebar({
   const [newName, setNewName] = useState("");
   const [renamingId, setRenamingId] = useState<number | null>(null);
 
-  // Phase 3.5: which projects are collapsed in the tree
+  // Phase 3.5: which projects are collapsed in the tree.
+  // Active project is force-expanded; non-active projects follow saved state
+  // (default: collapsed unless user previously expanded them).
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
-    // Active project should be expanded by default; others follow saved state
     const saved = readCollapsedSet();
+    // Ensure active project is never collapsed on mount
+    if (activeProjectRoot && saved.has(activeProjectRoot)) {
+      saved.delete(activeProjectRoot);
+      writeCollapsedSet(saved);
+    }
     return saved;
   });
 
@@ -112,8 +122,12 @@ export default function Sidebar({
       const next = new Set(prev);
       if (next.has(root)) next.delete(root);
       else next.add(root);
-      writeCollapsedSet(next);
       return next;
+    });
+    // Persist after state update (not inside updater — StrictMode safe)
+    setCollapsedProjects((prev) => {
+      writeCollapsedSet(prev);
+      return prev;
     });
   };
 
@@ -179,7 +193,7 @@ export default function Sidebar({
   ];
 
   // Render a single workstream row (shared between active and remote projects)
-  const renderWorkstream = (w: Workstream, isActiveProject: boolean) => {
+  const renderWorkstream = (w: Workstream, isActiveProject: boolean, projectRoot: string) => {
     const active = w.id === workstream?.id && isActiveProject;
     const running = runningWorkstreams.includes(w.id) || (active && agentRunning);
     const pending = isActiveProject ? (pendingCounts[w.id] ?? 0) : 0;
@@ -188,10 +202,6 @@ export default function Sidebar({
       <li
         key={w.id}
         className={clsx("ws-row", active && "ws-row-active")}
-        onClick={() => {
-          if (!isActiveProject) onSwitchProject(activeEntry?.root ?? "");
-          onSwitchWorkstream(w.id);
-        }}
       >
         {renamingId === w.id && isActiveProject ? (
           <form
@@ -214,13 +224,13 @@ export default function Sidebar({
           </form>
         ) : (
           <>
-            <span className={clsx("ws-dot", dotClass[ds])} aria-label={ds} />
+            <span className={clsx("ws-dot", dotClass[ds])} aria-hidden="true" />
+            <span className="sr-only">{dotLabel[ds]}</span>
             <button
               type="button"
               className={clsx("ws-item", active && "active")}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!isActiveProject) onSwitchProject(activeEntry?.root ?? "");
+              onClick={() => {
+                if (!isActiveProject) onSwitchProject(projectRoot);
                 onSwitchWorkstream(w.id);
               }}
             >
@@ -263,8 +273,10 @@ export default function Sidebar({
 
     return (
       <li key={p.root} className="proj-group">
-        <div
+        <button
+          type="button"
           className={clsx("proj-row", isActive && "proj-row-active")}
+          aria-expanded={isExpanded}
           onClick={() => {
             if (!isActive) onSwitchProject(p.root);
             toggleProject(p.root);
@@ -273,11 +285,13 @@ export default function Sidebar({
           <ChevronRight
             size={12}
             className={clsx("proj-chevron", isExpanded && "proj-chevron-open")}
+            aria-hidden="true"
           />
-          <span className={clsx("ws-dot", dotClass[ds])} aria-label={ds} />
+          <span className={clsx("ws-dot", dotClass[ds])} aria-hidden="true" />
+          <span className="sr-only">{dotLabel[ds]}</span>
           <span className="proj-name" title={p.root}>{p.name}</span>
           {status.pending > 0 && <span className="ws-pending-pill">{status.pending}</span>}
-        </div>
+        </button>
         {isExpanded && (
           <ul className="ws-list">
             {isActive && creating && (
@@ -299,7 +313,7 @@ export default function Sidebar({
             {wsList.length === 0 && !isActive && (
               <li className="ws-empty-hint">No workstreams</li>
             )}
-            {wsList.map((w) => renderWorkstream(w, isActive))}
+            {wsList.map((w) => renderWorkstream(w, isActive, p.root))}
             {isActive && (
               <li className="ws-row ws-add-row" onClick={(e) => { e.stopPropagation(); setCreateError(null); setCreating(true); }}>
                 <button type="button" className="ws-add-inline" title="New workstream (⌘N)">
@@ -356,20 +370,6 @@ export default function Sidebar({
               </button>
             </li>
           </ul>
-          {creating && (
-            <form className="ws-create" onSubmit={handleCreate}>
-              <input
-                type="text"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Escape") resetCreate(); }}
-                placeholder="workstream name"
-                disabled={createBusy}
-                autoFocus
-              />
-            </form>
-          )}
-          {createError && <div className="ws-error">{createError}</div>}
         </div>
       </div>
     </aside>

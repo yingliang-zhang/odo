@@ -831,7 +831,8 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   gap: 2px;
   flex-shrink: 0;
 }
-.ws-row:hover > .ws-actions {
+.ws-row:hover > .ws-actions,
+.ws-row:focus-within > .ws-actions {
   display: flex;
 }
 .ws-action-btn {
@@ -878,6 +879,17 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 /* Unified sidebar row: icon + label + optional trailing count badge. */
 /* Phase 3: Status dots — priority reducer (Hermes session-row-state pattern) */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .ws-dot {
   width: 7px;
   height: 7px;
@@ -938,6 +950,10 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   font-size: var(--text-body);
   font-weight: 500;
   color: var(--text);
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
 }
 .proj-row:hover {
   background: var(--bg-input);
