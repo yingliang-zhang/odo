@@ -135,7 +135,7 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
         <div className="bubble bubble-thinking">
           <details>
             <summary>Thinking…</summary>
-            <div className="bubble-thinking-text">{p.text ?? ""}</div>
+            <div className="bubble-thinking-text">{highlightText(p.text ?? "", highlight, "th")}</div>
           </details>
         </div>
       );

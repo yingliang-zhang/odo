@@ -249,18 +249,26 @@ func TestStreamMessageEndFallback(t *testing.T) {
 			"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"x\"},{\"type\":\"text\",\"text\":\"instant answer\"}]}}\n")
 
 	evs := streamEvents(t, a, r, 0)
-	if len(evs) != 1 || evs[0].Type != "agent_text" || evs[0].Payload["text"] != "instant answer" {
-		t.Fatalf("message_end fallback = %#v", evs)
+	// message_end now journals both thinking and text blocks.
+	if len(evs) != 2 {
+		t.Fatalf("message_end fallback = %d events, want 2: %#v", len(evs), evs)
+	}
+	if evs[0].Type != "agent_thinking" || evs[0].Payload["text"] != "x" {
+		t.Errorf("thinking event = %#v", evs[0])
+	}
+	if evs[1].Type != "agent_text" || evs[1].Payload["text"] != "instant answer" {
+		t.Errorf("text event = %#v", evs[1])
 	}
 
-	// A streamed message after the fallback: exactly one new text event.
+	// A streamed message after the fallback: exactly one new text event
+	// (the thinking block is already journaled, text streamed via deltas).
 	appendOutput(t, r,
 		"{\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n"+
 			"{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_start\",\"contentIndex\":0}}\n"+
 			"{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"streamed\"}}\n"+
 			"{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_end\",\"contentIndex\":0,\"content\":\"streamed in full\"}}\n"+
 			"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"streamed in full\"}]}}\n")
-	evs = streamEvents(t, a, r, 1)
+	evs = streamEvents(t, a, r, 2)
 	if len(evs) != 1 || evs[0].Payload["text"] != "streamed in full" {
 		t.Fatalf("streamed message after fallback = %#v", evs)
 	}

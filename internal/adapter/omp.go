@@ -509,21 +509,30 @@ func (r *ompRun) streamLine(line []byte) {
 	case "message_end":
 		// Safety net: a complete assistant text block that never streamed
 		// deltas (non-streaming provider, instant reply) journals here.
-		if ev.Message == nil || ev.Message.Role != "assistant" || r.msgStreamed || len(ev.Message.Content) == 0 {
+		// Thinking blocks are always journaled here regardless of
+		// msgStreamed — they never appear in streaming delta events.
+		if ev.Message == nil || ev.Message.Role != "assistant" || len(ev.Message.Content) == 0 {
 			return
 		}
 		var blocks []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Thinking string `json:"thinking"`
 		}
 		if err := json.Unmarshal(ev.Message.Content, &blocks); err != nil {
 			return
 		}
 		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
+			if b.Type == "text" && b.Text != "" && !r.msgStreamed {
 				r.streamEvents = append(r.streamEvents, AgentEvent{
 					Type:    "agent_text",
 					Payload: map[string]interface{}{"text": b.Text},
+				})
+			}
+			if b.Type == "thinking" && b.Thinking != "" {
+				r.streamEvents = append(r.streamEvents, AgentEvent{
+					Type:    "agent_thinking",
+					Payload: map[string]interface{}{"text": b.Thinking},
 				})
 			}
 		}
