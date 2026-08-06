@@ -8,8 +8,9 @@ import (
 
 // CreateOrGetWorkstream returns the active workstream named name under the
 // project, creating it when no active row exists. A new workstream's branch
-// is its name (callers sanitize for git first); existing rows are returned
-// untouched.
+// is its bare name (callers sanitize for git first); git consumers prefix it
+// to "odo/<name>" (M11c) and the branch is created lazily on the first run.
+// Existing rows are returned untouched.
 func (s *Store) CreateOrGetWorkstream(ctx context.Context, projectID int64, name string) (Workstream, error) {
 	w, err := scanWorkstream(s.db.QueryRowContext(ctx,
 		`SELECT id, project_id, name, branch, worktree_path, status, created_at

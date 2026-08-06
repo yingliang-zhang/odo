@@ -359,6 +359,17 @@ func sanitizeBranchName(name string) string {
 	return strings.Trim(b.String(), ".-")
 }
 
+// workstreamGitBranch maps a workstream's stored branch name to the git
+// branch its runs check out (M11c). The row stores the bare name (e.g.
+// "main"); every git consumer prefixes it with "odo/". "" means detached
+// worktrees — legacy workstreams with no branch binding.
+func workstreamGitBranch(w store.Workstream) string {
+	if w.Branch == nil || *w.Branch == "" {
+		return ""
+	}
+	return "odo/" + *w.Branch
+}
+
 // handleSendMessage journals the user message, creates a run worktree, and
 // starts the agent in it.
 func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, error) {
@@ -436,7 +447,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
 	runDirID := worktree.NewRunID()
-	wtPath, err := s.mgr.Create(runDirID)
+	wtPath, err := s.mgr.Create(runDirID, workstreamGitBranch(w))
 	if err != nil {
 		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("create worktree: %w", err))
 	}
@@ -667,7 +678,7 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 	started := make([]*runMeta, 0, n)
 	for range n {
 		runDirID := worktree.NewRunID()
-		wtPath, err := s.mgr.Create(runDirID)
+		wtPath, err := s.mgr.Create(runDirID, workstreamGitBranch(w))
 		if err != nil {
 			s.cancelFanout(ctx, ad, started)
 			return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("fanout_send: create worktree: %w", err))
@@ -1116,10 +1127,40 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 	// This prevents worktree leaks and unreviewable sibling diffs.
 	if action == "accept" {
 		s.autoRejectFanoutSiblings(ctx, d)
+		// M11c: the run's worktree (and fan-out siblings', which share the
+		// branch) is retired, so no live worktree holds the workstream
+		// branch — advance it past the accept commit.
+		s.advanceWorkstreamBranch(ctx, d)
 	}
 	s.mu.Unlock()
 
 	return Response{DiffID: diffID, Applied: applied}, nil
+}
+
+// advanceWorkstreamBranch points the workstream's odo/<name> branch at the
+// main HEAD that now includes the accepted diff, so the branch accumulates
+// changes across runs. Caller holds s.mu (handleDiffAction's locked
+// section): the retire calls above must free the branch first — git refuses
+// `branch -f` while the branch is checked out in a live worktree. Failures
+// are non-fatal: a concurrent run on another conversation of the same
+// workstream can still hold the branch, and the next run's
+// `git worktree add -B` resets the ref forward regardless.
+func (s *Server) advanceWorkstreamBranch(ctx context.Context, d store.Diff) {
+	c, err := s.store.GetConversation(ctx, d.ConversationID)
+	if err != nil {
+		log.Printf("accept_diff: workstream branch advance: %v", err)
+		return
+	}
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		log.Printf("accept_diff: workstream branch advance: %v", err)
+		return
+	}
+	if branch := workstreamGitBranch(w); branch != "" {
+		if err := git.AdvanceBranch(s.projectRoot, branch); err != nil {
+			log.Printf("accept_diff: workstream branch advance (non-fatal): %v", err)
+		}
+	}
 }
 
 // retireRunForDiff releases resources after a diff review. A fan-out run is

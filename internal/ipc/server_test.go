@@ -95,6 +95,17 @@ func gitIn(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// gitOut runs git like gitIn but returns trimmed stdout.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	argv := append([]string{"-C", dir, "-c", "user.email=odo@test", "-c", "user.name=odo"}, args...)
+	out, err := exec.Command("git", argv...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // startRig builds a project repo and a live daemon bound to it.
 func startRig(t *testing.T, root string) *testRig {
 	t.Helper()
@@ -306,6 +317,67 @@ func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	resp := rig.callExpectErr(t, Request{Cmd: CmdAcceptDiff, DiffID: done2.Diff.ID})
 	if !strings.Contains(resp.Error, "already rejected") {
 		t.Errorf("double review error = %q", resp.Error)
+	}
+}
+
+// TestWorkstreamBranchAccumulatesAccepts covers M11c: runs on a workstream
+// check out the odo/<name> branch (not a detached HEAD), and each accept
+// advances that branch to the new main HEAD so the next run's worktree
+// includes the previously accepted changes.
+func TestWorkstreamBranchAccumulatesAccepts(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// --- run 1: the worktree is on the workstream branch, not detached ---
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "branch run one"})
+	done1 := rig.pollUntilDone(t, convID)
+	if done1.Diff == nil {
+		t.Fatal("run 1: no diff")
+	}
+	bound1 := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if bound1.Workstream == nil || bound1.Workstream.WorktreePath == nil {
+		t.Fatal("bootstrap: workstream has no bound worktree during run 1")
+	}
+	if got := gitOut(t, *bound1.Workstream.WorktreePath, "symbolic-ref", "HEAD"); got != "refs/heads/odo/main" {
+		t.Errorf("run 1 worktree HEAD = %q, want refs/heads/odo/main", got)
+	}
+
+	acc1 := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done1.Diff.ID})
+	if !acc1.Applied {
+		t.Fatal("accept_diff run 1: applied must be true")
+	}
+	// Accept advanced odo/main to the new main HEAD.
+	if branch, head := gitOut(t, root, "rev-parse", "odo/main"), gitOut(t, root, "rev-parse", "HEAD"); branch != head {
+		t.Errorf("after accept 1: odo/main = %s, HEAD = %s, want equal", branch, head)
+	}
+
+	// --- run 2: the branch checkout includes run 1's accepted change ---
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "branch run two"})
+	done2 := rig.pollUntilDone(t, convID)
+	if done2.Diff == nil {
+		t.Fatal("run 2: no diff")
+	}
+	bound2 := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if bound2.Workstream == nil || bound2.Workstream.WorktreePath == nil {
+		t.Fatal("bootstrap: workstream has no bound worktree during run 2")
+	}
+	// hello.txt was committed to main (and odo/main) by run 1's accept, so
+	// it exists in run 2's branch checkout.
+	if _, err := os.Stat(filepath.Join(*bound2.Workstream.WorktreePath, "hello.txt")); err != nil {
+		t.Errorf("run 2 worktree missing hello.txt from accept 1: %v", err)
+	}
+
+	acc2 := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done2.Diff.ID})
+	if !acc2.Applied {
+		t.Fatal("accept_diff run 2: applied must be true")
+	}
+	if branch, head := gitOut(t, root, "rev-parse", "odo/main"), gitOut(t, root, "rev-parse", "HEAD"); branch != head {
+		t.Errorf("after accept 2: odo/main = %s, HEAD = %s, want equal", branch, head)
 	}
 }
 

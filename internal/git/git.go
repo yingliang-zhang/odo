@@ -34,6 +34,37 @@ func CreateWorktree(repoPath, worktreePath string) error {
 	return err
 }
 
+// CreateWorktreeOnBranch adds a worktree of repoPath at HEAD checked out on
+// branch (M11c). -B creates the branch when missing or resets it to HEAD when
+// it exists — safe because the worktree is a fresh checkout and accepted
+// diffs always land on the main working tree first (see AdvanceBranch).
+//
+// Git refuses -B when branch is already checked out in another worktree, so
+// concurrent runs of one workstream (fan-out lanes, cross-conversation runs)
+// fall back to checking the existing ref out in place (-f), which never moves
+// the ref out from under a live worktree.
+func CreateWorktreeOnBranch(repoPath, worktreePath, branch string) error {
+	if _, err := run(repoPath, "worktree", "add", "-B", branch, worktreePath, "HEAD"); err != nil {
+		if !strings.Contains(err.Error(), "already used by worktree") {
+			return err
+		}
+		if _, ferr := run(repoPath, "worktree", "add", "--force", worktreePath, branch); ferr != nil {
+			return fmt.Errorf("%w (branch fallback: %w)", err, ferr)
+		}
+	}
+	return nil
+}
+
+// AdvanceBranch force-points branch at HEAD. Called after an accept so a
+// workstream branch accumulates the newly committed change. It fails when
+// branch is checked out in a live worktree — callers must run it after the
+// run's worktree is retired and treat any error as non-fatal (the next run's
+// -B checkout resets the branch forward regardless).
+func AdvanceBranch(repoPath, branch string) error {
+	_, err := run(repoPath, "branch", "-f", branch, "HEAD")
+	return err
+}
+
 // RemoveWorktree force-removes a worktree. The worktree index may be dirty
 // (ExtractDiff stages everything), so --force is required. A missing path is
 // not an error.

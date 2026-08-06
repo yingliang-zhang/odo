@@ -67,16 +67,25 @@ func (m *Manager) EnsureDirs() error {
 	return nil
 }
 
-// Create adds a detached worktree at HEAD for runID and returns its path.
-// The caller must tolerate this failing on repositories with no commits.
-func (m *Manager) Create(runID string) (string, error) {
+// Create adds a worktree at HEAD for runID and returns its path. A ""
+// branch yields a detached checkout (pre-M11c behavior); a non-empty branch
+// checks out that branch, creating or resetting it to HEAD (see
+// git.CreateWorktreeOnBranch). The caller must tolerate this failing on
+// repositories with no commits.
+func (m *Manager) Create(runID string, branch string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	path := m.WorktreePath(runID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("worktree: create worktrees dir: %w", err)
 	}
-	if err := git.CreateWorktree(m.projectRoot, path); err != nil {
+	var err error
+	if branch == "" {
+		err = git.CreateWorktree(m.projectRoot, path)
+	} else {
+		err = git.CreateWorktreeOnBranch(m.projectRoot, path, branch)
+	}
+	if err != nil {
 		return "", fmt.Errorf("worktree: create: %w", err)
 	}
 	return path, nil
