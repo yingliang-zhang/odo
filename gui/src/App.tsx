@@ -682,13 +682,27 @@ export default function App() {
       cancelAutoDistill(); // M10: switching workstreams cancels pending auto-distill
       try {
         const resp = unwrap(await bootstrap(root, workstreamId));
+        // Phase 5: when switching to a foreign project's workstream, adopt
+        // the new project state BEFORE applyBootstrap so poll loop and all
+        // daemon calls target the correct daemon. Without this, projectRootRef
+        // stays on the old root → poll hits old daemon with new conversation
+        // ID → daemon-down banner (K3 Round 3 critical bug).
+        if (projectRoot && projectRoot !== activeProjectRoot) {
+          setActiveProjectRoot(projectRoot);
+          setProject(resp.project ?? null);
+          projectRootRef.current = resp.project?.root_path ?? null;
+        }
         applyBootstrap(resp);
+        if (projectRoot && projectRoot !== activeProjectRoot && resp.project) {
+          const list = unwrap(await listWorkstreams(resp.project.root_path));
+          setWorkstreams(list.workstreams ?? []);
+        }
         setError(null);
       } catch (e) {
         setError(`switch failed: ${errorMessage(e)}`);
       }
     },
-    [workstream?.id, project?.root_path, applyBootstrap],
+    [workstream?.id, project?.root_path, activeProjectRoot, applyBootstrap],
   );
 
   // M11 P1: full re-bootstrap against another registry project — every
@@ -717,6 +731,18 @@ export default function App() {
     },
     [activeProjectRoot, applyBootstrap],
   );
+
+  // Phase 3.7: stable callback for lazy-fetching workstreams from non-active
+  // project daemons. Must be useCallback (stable identity) so the Sidebar
+  // lazy-fetch effect doesn't re-fire at poll cadence. Hoisted before the
+  // conditional early return (line ~1050) to comply with Rules of Hooks.
+  const handleFetchWorkstreams = useCallback(async (root: string): Promise<Workstream[]> => {
+    try {
+      return unwrap(await listWorkstreams(root)).workstreams ?? [];
+    } catch {
+      return [];
+    }
+  }, []);
 
   // M11 F1: add a new project via native folder picker. The bridge
   // ensures the daemon is running (auto-registers it), then we refresh
@@ -1183,13 +1209,7 @@ export default function App() {
         onDeleteWorkstream={handleDeleteWorkstream}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-        onFetchWorkstreams={useCallback(async (root: string) => {
-          try {
-            return unwrap(await listWorkstreams(root)).workstreams ?? [];
-          } catch {
-            return [];
-          }
-        }, [])}
+        onFetchWorkstreams={handleFetchWorkstreams}
       />
       {settingsOpen && (
         <SettingsPanel
