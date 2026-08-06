@@ -24,8 +24,35 @@ function lineClass(line: string): string {
   return "diff-line";
 }
 
-const DIFF_GIT_RE = /^diff --git a\/\S+ b\/(\S+)/;
-const NEW_FILE_RE = /^\+\+\+ b\/(\S+)/;
+// Extract the "new" path from a git diff header. Git quotes paths with
+// spaces/special chars, so we match to end-of-line and strip surrounding
+// quotes. `+++ b/Y` (new file or rename) is the primary; `+++ /dev/null`
+// (deleted file) is mapped to the old path via `--- a/X`.  The old `\S+`
+// patterns truncated on spaces and never matched quoted-unicode paths.
+const NEW_FILE_RE = /^\+\+\+ (?:b\/)?(.+)$/;
+const OLD_FILE_RE = /^--- (?:a\/)?(.+)$/;
+
+function stripQuotes(s: string): string {
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) return s.slice(1, -1);
+  return s;
+}
+
+// Resolve the display path for a file header line, preferring the new path
+// (`+++ b/`), falling back to the old path (`--- a/`) for deletions.  Returns
+// null when neither header is on this line.
+function diffFilePath(line: string): string | null {
+  let m = NEW_FILE_RE.exec(line);
+  if (m) {
+    const p = stripQuotes(m[1]);
+    return p === "/dev/null" ? null : p; // pure deletion — no "new" file
+  }
+  m = OLD_FILE_RE.exec(line);
+  if (m) {
+    const p = stripQuotes(m[1]);
+    return p === "/dev/null" ? null : p; // pure addition — old is /dev/null
+  }
+  return null;
+}
 
 // Belt D: one side of one side-by-side row. `sign` retains the +/- marker
 // for the gutter; kind only picks the tint class.
@@ -59,10 +86,8 @@ function parseSplitRows(lines: string[]): SplitRow[] {
     news = [];
   };
   for (const line of lines) {
-    const gitMatch = DIFF_GIT_RE.exec(line);
-    if (gitMatch) lang = languageFromPath(gitMatch[1]);
-    const newMatch = NEW_FILE_RE.exec(line);
-    if (newMatch) lang = languageFromPath(newMatch[1]);
+    const fp = diffFilePath(line);
+    if (fp) lang = languageFromPath(fp);
 
     if (line.startsWith("@@")) {
       flush();
@@ -165,10 +190,8 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
   const rendered: ReactNode[] = [];
   let lang: Language | null = null;
   lines.forEach((line, i) => {
-    const gitMatch = DIFF_GIT_RE.exec(line);
-    if (gitMatch) lang = languageFromPath(gitMatch[1]);
-    const newMatch = NEW_FILE_RE.exec(line);
-    if (newMatch) lang = languageFromPath(newMatch[1]);
+    const fp = diffFilePath(line);
+    if (fp) lang = languageFromPath(fp);
 
     const cls = lineClass(line);
     const isCode = cls.endsWith("diff-add") || cls.endsWith("diff-del");
