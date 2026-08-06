@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { errorMessage, ledger } from "../api";
+import LoadingInline from "./LoadingInline";
 
 // M9 P3: the ledger view, lifted out of the memory review modal into the
 // right panel's Ledger tab. The panel remounts on each tab visit, so every
@@ -39,7 +40,7 @@ export default function LedgerPanel({ projectRoot }: Props) {
 
   return (
     <div className="mem-body">
-      {loading && <div className="wiki-hint">Loading…</div>}
+      {loading && <LoadingInline />}
       {error && <div className="wiki-hint">read failed: {error}</div>}
       {!loading && content !== null && (
         <>

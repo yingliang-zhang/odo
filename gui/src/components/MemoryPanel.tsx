@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse } from "../types";
+import LoadingInline from "./LoadingInline";
 
 // M4 memory review (spec §7): the learner proposes rules at distill time
 // (journaled as one memory_propose batch per epoch); this panel is the human
@@ -225,7 +226,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
       {tab === "proposals" && (
         <>
           <div className="mem-body">
-            {batchLoading && <div className="wiki-hint">Loading…</div>}
+            {batchLoading && <LoadingInline />}
             {!batchLoading && !batch && (
               <div className="wiki-hint">
                 No pending memory proposals{workstreamName ? ` for ${workstreamName}` : ""}.
@@ -289,7 +290,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
 
       {tab === "files" && (
         <div className="mem-body">
-          {filesLoading && <div className="wiki-hint">Loading…</div>}
+          {filesLoading && <LoadingInline />}
           {filesError && <div className="wiki-hint">read failed: {filesError}</div>}
           {files && !filesLoading && (
             <>

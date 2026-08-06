@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage, getSettings, unwrap, updateSettings } from "../api";
 import { useFocusTrap } from "../focusTrap";
 import type { Settings } from "../types";
+import LoadingInline from "./LoadingInline";
 
 const SAVED_TOAST_MS = 3000;
 
@@ -129,7 +130,7 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
           </div>
         </div>
 
-        {loading && <div className="settings-loading">Loading…</div>}
+        {loading && <LoadingInline />}
         {error && <div className="settings-error">{error}</div>}
 
         {settings && (

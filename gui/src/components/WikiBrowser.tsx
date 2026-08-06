@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
 import type { WikiNoteInfo } from "../types";
 import Markdown, { highlightText } from "./Markdown";
+import LoadingInline from "./LoadingInline";
 
 // M6: the retracted-note set names notes filtered out of recall by the
 // contradiction pass — parsed from each retraction event's detail (the
@@ -235,7 +236,7 @@ export default function WikiBrowser({ conversationId, projectRoot }: Props) {
                   <span className="wiki-row-name">{highlightText("user.md (global)", needle, "umd")}</span>
                 </button>
               )}
-              {notes === null && !listError && <div className="wiki-hint">Loading…</div>}
+              {notes === null && !listError && <LoadingInline />}
               {listError && <div className="wiki-hint">list failed: {listError}</div>}
               {notes !== null && notes.length === 0 && (
                 <div className="wiki-hint">No wiki notes yet — Distill writes the first one.</div>
@@ -272,7 +273,7 @@ export default function WikiBrowser({ conversationId, projectRoot }: Props) {
           )}
           {tab === "topics" && (
             <>
-              {topics === null && !topicsError && <div className="wiki-hint">Loading…</div>}
+              {topics === null && !topicsError && <LoadingInline />}
               {topicsError && <div className="wiki-hint">list failed: {topicsError}</div>}
               {topics !== null && topics.length === 0 && (
                 <div className="wiki-hint">No topic pages yet — Curate writes the first set.</div>
@@ -299,7 +300,7 @@ export default function WikiBrowser({ conversationId, projectRoot }: Props) {
         </div>
 
         <div className="wiki-reader">
-          {contentLoading && <div className="wiki-hint">Loading…</div>}
+          {contentLoading && <LoadingInline />}
           {!contentLoading && content !== null && content !== "" && !isTopicPage && (
             <Markdown content={content} className="wiki-content" />
           )}
