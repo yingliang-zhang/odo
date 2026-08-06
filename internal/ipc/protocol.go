@@ -21,6 +21,8 @@ const (
 	CmdRejectDiff       = "reject_diff"
 	CmdCreateWorkstream = "create_workstream"
 	CmdListWorkstreams  = "list_workstreams"
+	CmdRenameWorkstream = "rename_workstream"
+	CmdDeleteWorkstream = "delete_workstream"
 	CmdDistill          = "distill"
 	CmdReviewDiff       = "review_diff"
 	CmdGetSettings      = "get_settings"

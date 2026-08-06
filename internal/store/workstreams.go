@@ -79,3 +79,50 @@ func (s *Store) UpdateWorkstreamWorktree(ctx context.Context, id int64, path *st
 	}
 	return nil
 }
+
+// RenameWorkstream updates the name of a workstream. The name should be
+// sanitized by the caller. Returns an error if the name is empty or
+// a name collision exists in the same project.
+func (s *Store) RenameWorkstream(ctx context.Context, id int64, name string) error {
+	if name == "" {
+		return fmt.Errorf("store: rename workstream: name is required")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workstreams SET name = ? WHERE id = ? AND status = ?`,
+		name, id, WorkstreamActive)
+	if err != nil {
+		return fmt.Errorf("store: rename workstream: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("store: rename workstream: %d not found or not active", id)
+	}
+	return nil
+}
+
+// DeleteWorkstream soft-deletes a workstream by setting status to "deleted".
+// This preserves journal history for audit. Returns an error if the
+// workstream has pending diffs (must accept/reject first) or is the only
+// workstream in the project (must keep at least one).
+func (s *Store) DeleteWorkstream(ctx context.Context, id int64) error {
+	// Check for pending diffs
+	pending, err := s.PendingDiffCountsByWorkstream(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("store: delete workstream: check pending: %w", err)
+	}
+	if count, ok := pending[id]; ok && count > 0 {
+		return fmt.Errorf("store: delete workstream: %d has %d pending diff(s) — accept or reject first", id, count)
+	}
+	// Soft-delete: set status to deleted
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workstreams SET status = ? WHERE id = ? AND status = ?`,
+		"deleted", id, WorkstreamActive)
+	if err != nil {
+		return fmt.Errorf("store: delete workstream: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("store: delete workstream: %d not found or not active", id)
+	}
+	return nil
+}

@@ -293,6 +293,20 @@ async fn list_workstreams(project_root: Option<String>) -> Result<Value, String>
 }
 
 #[tauri::command]
+async fn rename_workstream(project_root: Option<String>, workstream_id: i64, name: String) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "rename_workstream", "project_root": root, "workstream_id": workstream_id, "name": name});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+#[tauri::command]
+async fn delete_workstream(project_root: Option<String>, workstream_id: i64) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "delete_workstream", "project_root": root, "workstream_id": workstream_id});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+#[tauri::command]
 async fn distill(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     // The daemon's distillTimeout is 10 minutes and it serves one connection
@@ -779,6 +793,8 @@ pub fn run() {
             reject_diff,
             create_workstream,
             list_workstreams,
+            rename_workstream,
+            delete_workstream,
             distill,
             review_diff,
             get_settings,

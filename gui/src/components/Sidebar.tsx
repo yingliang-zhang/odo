@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../api";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pencil, Trash2 } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
 
 interface Props {
@@ -23,6 +23,9 @@ interface Props {
   runningWorkstreams: number[];
   onSwitchWorkstream: (id: number) => void;
   onCreateWorkstream: (name: string) => Promise<void>;
+  // M11 F7: rename + delete workstream
+  onRenameWorkstream: (workstreamId: number, name: string) => Promise<void>;
+  onDeleteWorkstream: (workstreamId: number) => Promise<void>;
   // Belt A: sidebar collapse (⌘B) — collapse is a 48px icon rail, not a
   // hidden 0px column.
   collapsed: boolean;
@@ -47,6 +50,8 @@ export default function Sidebar({
   runningWorkstreams,
   onSwitchWorkstream,
   onCreateWorkstream,
+  onRenameWorkstream,
+  onDeleteWorkstream,
   collapsed,
   onToggleCollapsed,
 }: Props) {
@@ -57,6 +62,8 @@ export default function Sidebar({
   // M11 P1: project picker dropdown state; closes on outside click or Esc.
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  // M11 F7: inline rename state — which workstream id is being renamed
+  const [renamingId, setRenamingId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -243,28 +250,74 @@ export default function Sidebar({
           <ul className="ws-list">
             {workstreams.map((w) => {
               const active = w.id === workstream?.id;
-              // M3: the daemon's running set covers other workstreams; the
-              // active one also reports through the poll loop directly.
               const running = runningWorkstreams.includes(w.id) || (active && agentRunning);
               const pending = pendingCounts[w.id] ?? 0;
               return (
-                <li key={w.id}>
-                  <button
-                    type="button"
-                    className={`ws-item${active ? " active" : ""}`}
-                    onClick={() => onSwitchWorkstream(w.id)}
-                  >
-                    <span className="ws-name" title={w.name}>
-                      {w.name}
-                    </span>
-                    <span className="ws-meta">
-                      {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
-                      {running && <span className="ws-running-dot" />}
-                      <span className={`ws-status${running ? " running" : ""}`}>
-                        {running ? "running" : "idle"}
+                <li key={w.id} className="ws-row">
+                  {renamingId === w.id ? (
+                    <form
+                      className="ws-rename-form"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        const name = (e.currentTarget.elements.namedItem("name") as HTMLInputElement)?.value?.trim();
+                        if (name) void onRenameWorkstream(w.id, name);
+                        setRenamingId(null);
+                      }}
+                    >
+                      <input
+                        name="name"
+                        type="text"
+                        defaultValue={w.name}
+                        autoFocus
+                        onKeyDown={(e) => { if (e.key === "Escape") setRenamingId(null); }}
+                        className="ws-rename-input"
+                      />
+                    </form>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className={`ws-item${active ? " active" : ""}`}
+                        onClick={() => onSwitchWorkstream(w.id)}
+                      >
+                        <span className="ws-name" title={w.name}>
+                          {w.name}
+                        </span>
+                        <span className="ws-meta">
+                          {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
+                          {running && <span className="ws-running-dot" />}
+                          <span className={`ws-status${running ? " running" : ""}`}>
+                            {running ? "running" : "idle"}
+                          </span>
+                        </span>
+                      </button>
+                      <span className="ws-actions">
+                        <button
+                          type="button"
+                          className="ws-action-btn"
+                          title="Rename"
+                          aria-label={`Rename ${w.name}`}
+                          onClick={(e) => { e.stopPropagation(); setRenamingId(w.id); }}
+                        >
+                          <Pencil size={10} />
+                        </button>
+                        <button
+                          type="button"
+                          className="ws-action-btn ws-action-delete"
+                          title="Delete"
+                          aria-label={`Delete ${w.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm(`Delete workstream "${w.name}"? Pending diffs must be resolved first.`)) {
+                              void onDeleteWorkstream(w.id);
+                            }
+                          }}
+                        >
+                          <Trash2 size={10} />
+                        </button>
                       </span>
-                    </span>
-                  </button>
+                    </>
+                  )}
                 </li>
               );
             })}

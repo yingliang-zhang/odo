@@ -755,6 +755,56 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   white-space: nowrap;
 }
 
+/* M11 F7: workstream row — hover actions */
+.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.ws-row > .ws-item {
+  flex: 1;
+  min-width: 0;
+}
+.ws-actions {
+  display: none;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.ws-row:hover > .ws-actions {
+  display: flex;
+}
+.ws-action-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+}
+.ws-action-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+.ws-action-delete:hover {
+  color: var(--err);
+}
+.ws-rename-form {
+  flex: 1;
+}
+.ws-rename-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--accent-user);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
 .ws-status {
   font-size: 11px;
   color: var(--text-dim);

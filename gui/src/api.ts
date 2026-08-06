@@ -114,6 +114,22 @@ export function createWorkstream(
   return invoke<CreateWorkstreamResponse>("create_workstream", { projectRoot, name });
 }
 
+// M11 F7: rename + delete workstream
+export function renameWorkstream(
+  projectRoot: string,
+  workstreamId: number,
+  name: string,
+): Promise<BootstrapResponse> {
+  return invoke<BootstrapResponse>("rename_workstream", { projectRoot, workstreamId, name });
+}
+
+export async function deleteWorkstream(
+  projectRoot: string,
+  workstreamId: number,
+): Promise<ListWorkstreamsResponse> {
+  return invoke<ListWorkstreamsResponse>("delete_workstream", { projectRoot, workstreamId });
+}
+
 // distill blocks daemon-side until the summary agent finishes (up to 10
 // minutes); the Rust bridge uses a matching read timeout for this command.
 export function distill(conversationId: number, projectRoot?: string): Promise<DistillResponse> {

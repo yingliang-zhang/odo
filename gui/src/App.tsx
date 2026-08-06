@@ -7,6 +7,7 @@ import {
   cancel,
   createWorkstream,
   curate,
+  deleteWorkstream,
   distill,
   errorMessage,
   fanoutSend,
@@ -16,6 +17,7 @@ import {
   listWiki,
   listWorkstreams,
   memoryProposals,
+  renameWorkstream,
   pendingCounts as fetchPendingCounts,
   pin,
   pollEvents,
@@ -720,6 +722,56 @@ export default function App() {
     }
   }, [handleSwitchProject]);
 
+  // M11 F7: rename a workstream. Refreshes the list; if renaming the active
+  // workstream, re-bootstraps to pick up the new name in the TopBar.
+  const handleRenameWorkstream = useCallback(
+    async (workstreamId: number, name: string) => {
+      const root = project?.root_path;
+      if (!root) throw new Error("no project loaded yet");
+      try {
+        const resp = unwrap(await renameWorkstream(root, workstreamId, name));
+        // Refresh the workstream list
+        const list = unwrap(await listWorkstreams(root));
+        setWorkstreams(list.workstreams ?? []);
+        // If renaming the active workstream, update local state
+        if (workstream && workstream.id === workstreamId && resp.workstream) {
+          setWorkstream(resp.workstream);
+        }
+        setError(null);
+      } catch (e) {
+        setError(`rename workstream failed: ${errorMessage(e)}`);
+      }
+    },
+    [project, workstream],
+  );
+
+  // M11 F7: delete a workstream. Refuses if pending diffs exist (daemon-side
+  // check). After delete, switches to the first remaining workstream.
+  const handleDeleteWorkstream = useCallback(
+    async (workstreamId: number) => {
+      const root = project?.root_path;
+      if (!root) throw new Error("no project loaded yet");
+      try {
+        const resp = unwrap(await deleteWorkstream(root, workstreamId));
+        const remaining = resp.workstreams ?? [];
+        setWorkstreams(remaining);
+        // If deleting the active workstream, switch to the first remaining
+        if (workstream && workstream.id === workstreamId) {
+          if (remaining.length > 0) {
+            await handleSwitchWorkstream(remaining[0].id);
+          } else {
+            setWorkstream(null);
+            setEvents([]);
+          }
+        }
+        setError(null);
+      } catch (e) {
+        setError(`delete workstream failed: ${errorMessage(e)}`);
+      }
+    },
+    [project, workstream, handleSwitchWorkstream],
+  );
+
   const handleCreateWorkstream = useCallback(
     async (name: string) => {
       const root = project?.root_path;
@@ -1107,6 +1159,8 @@ export default function App() {
         runningWorkstreams={runningWorkstreams}
         onSwitchWorkstream={handleSwitchWorkstream}
         onCreateWorkstream={handleCreateWorkstream}
+        onRenameWorkstream={handleRenameWorkstream}
+        onDeleteWorkstream={handleDeleteWorkstream}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
       />

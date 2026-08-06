@@ -184,6 +184,10 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleCreateWorkstream(ctx, req)
 	case CmdListWorkstreams:
 		resp, err = s.handleListWorkstreams(ctx, req)
+	case CmdRenameWorkstream:
+		resp, err = s.handleRenameWorkstream(ctx, req)
+	case CmdDeleteWorkstream:
+		resp, err = s.handleDeleteWorkstream(ctx, req)
 	case CmdSendMessage:
 		resp, err = s.handleSendMessage(ctx, req)
 	case CmdCancel:
@@ -330,6 +334,43 @@ func (s *Server) handleListWorkstreams(ctx context.Context, req Request) (Respon
 	p, err := s.resolveProject(ctx, req.ProjectRoot)
 	if err != nil {
 		return Response{}, fmt.Errorf("list_workstreams: %w", err)
+	}
+	ws, err := s.store.ListWorkstreams(ctx, p.ID)
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{Project: &p, Workstreams: ws}, nil
+}
+
+// handleRenameWorkstream renames a workstream. The new name is sanitized
+// to a git-safe branch name. Returns the updated workstream.
+func (s *Server) handleRenameWorkstream(ctx context.Context, req Request) (Response, error) {
+	name := sanitizeBranchName(req.Name)
+	if name == "" {
+		return Response{}, fmt.Errorf("rename_workstream: a usable name is required")
+	}
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("rename_workstream: %w", err)
+	}
+	if err := s.store.RenameWorkstream(ctx, req.WorkstreamID, name); err != nil {
+		return Response{}, fmt.Errorf("rename_workstream: %w", err)
+	}
+	w, err := s.store.GetWorkstream(ctx, req.WorkstreamID)
+	if err != nil {
+		return Response{}, fmt.Errorf("rename_workstream: refetch: %w", err)
+	}
+	return Response{Workstream: &w}, nil
+}
+
+// handleDeleteWorkstream soft-deletes a workstream. Refuses if the
+// workstream has pending diffs. Returns the updated workstream list.
+func (s *Server) handleDeleteWorkstream(ctx context.Context, req Request) (Response, error) {
+	p, err := s.resolveProject(ctx, req.ProjectRoot)
+	if err != nil {
+		return Response{}, fmt.Errorf("delete_workstream: %w", err)
+	}
+	if err := s.store.DeleteWorkstream(ctx, req.WorkstreamID); err != nil {
+		return Response{}, fmt.Errorf("delete_workstream: %w", err)
 	}
 	ws, err := s.store.ListWorkstreams(ctx, p.ID)
 	if err != nil {
