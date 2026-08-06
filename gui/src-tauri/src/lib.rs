@@ -70,31 +70,20 @@ fn daemon_binary(project_root: &str) -> PathBuf {
     if local.exists() {
         return local;
     }
-    // 2. The binary that launched this GUI — the Tauri app and the daemon
-    //    are built from the same repo, so the GUI's directory likely has
-    //    a sibling `odo` binary. This lets us add new projects without
-    //    requiring a Go toolchain in the target repo.
+    // 2. Walk up from the GUI binary's directory looking for a sibling
+    //    `odo` binary. The Tauri app and daemon are built from the same
+    //    repo, so the GUI's ancestor directories likely contain it.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("odo");
-            if sibling.exists() {
-                return sibling;
+        let mut dir = exe.parent();
+        while let Some(d) = dir {
+            let candidate = d.join("odo");
+            if candidate.exists() {
+                return candidate;
             }
-            // 3. Two levels up from the GUI binary (target/debug/odo-gui →
-            //    the repo root with the daemon binary).
-            if let Some(repo_root) = dir
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-            {
-                let up = repo_root.join("odo");
-                if up.exists() {
-                    return up;
-                }
-            }
+            dir = d.parent();
         }
     }
-    // 4. ~/.odo/bin/odo — global install path
+    // 3. ~/.odo/bin/odo — global install path
     if let Some(home) = std::env::var_os("HOME") {
         let global = Path::new(&home).join(".odo").join("bin").join("odo");
         if global.exists() {
