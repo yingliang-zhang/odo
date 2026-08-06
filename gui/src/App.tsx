@@ -102,6 +102,8 @@ export default function App() {
   const [activeProjectRoot, setActiveProjectRoot] = useState<string | null>(
     () => localStorage.getItem("odo-active-project"),
   );
+  // M11 P2: cross-project status badges — { root: { pending, running } }
+  const [crossProjectStatus, setCrossProjectStatus] = useState<Record<string, { pending: number; running: boolean }>>({});
   const [workstream, setWorkstream] = useState<Workstream | null>(null);
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -493,6 +495,28 @@ export default function App() {
     );
     return () => clearInterval(timer);
   }, [booted, recordEvents, agentRunning]);
+
+  // M11 P2: cross-project status poll — every 5s, fetch pending_counts for
+  // all registered projects except the active one (whose counts come from the
+  // main poll loop). Failures degrade to hidden badges (no error banner).
+  useEffect(() => {
+    if (projects.length <= 1) return; // no cross-project badges with ≤1 project
+    const timer = setInterval(() => {
+      for (const p of projects) {
+        if (p.root === activeProjectRoot) continue;
+        fetchPendingCounts(p.root).then((counts) => {
+          if (!counts.ok) return;
+          const pending = Object.values(counts.pending_counts ?? {}).reduce((a, b) => a + b, 0);
+          const running = (counts.running_workstreams ?? []).length > 0;
+          setCrossProjectStatus((prev) => ({
+            ...prev,
+            [p.root]: { pending, running },
+          }));
+        }).catch(() => {});
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [projects, activeProjectRoot]);
 
   const handleSend = useCallback(
     async (text: string, attachments: string[], steer: boolean) => {
@@ -1045,6 +1069,7 @@ export default function App() {
       <Sidebar
         projects={projects}
         activeProjectRoot={activeProjectRoot}
+        crossProjectStatus={crossProjectStatus}
         onSwitchProject={(root) => void handleSwitchProject(root)}
         workstreams={workstreams}
         workstream={workstream}

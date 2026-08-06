@@ -8,6 +8,8 @@ interface Props {
   // keeps the static "Odo" title (pre-M11 look, bridged default project).
   projects: ProjectEntry[];
   activeProjectRoot: string | null;
+  // M11 P2: cross-project status for non-active projects in the dropdown.
+  crossProjectStatus: Record<string, { pending: number; running: boolean }>;
   onSwitchProject: (root: string) => void;
   workstreams: Workstream[];
   workstream: Workstream | null;
@@ -32,6 +34,7 @@ interface Props {
 export default function Sidebar({
   projects,
   activeProjectRoot,
+  crossProjectStatus,
   onSwitchProject,
   workstreams,
   workstream,
@@ -160,6 +163,12 @@ export default function Sidebar({
                               <span className="ws-pending-pill">{pendingTotal}</span>
                             )}
                             {isActive && runningAny && <span className="ws-running-dot" />}
+                            {!isActive && crossProjectStatus[p.root]?.pending > 0 && (
+                              <span className="ws-pending-pill">{crossProjectStatus[p.root].pending}</span>
+                            )}
+                            {!isActive && crossProjectStatus[p.root]?.running && (
+                              <span className="ws-running-dot" />
+                            )}
                           </span>
                         </button>
                       </li>
