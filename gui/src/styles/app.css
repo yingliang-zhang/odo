@@ -2364,7 +2364,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .markdown ul:first-child,
 .markdown ol:first-child,
 .markdown blockquote:first-child,
-.markdown .bubble-code:first-child {
+.markdown .bubble-code-wrap:first-child {
   margin-top: 0;
 }
 
