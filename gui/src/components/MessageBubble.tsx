@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Check, X } from "lucide-react";
 import { basename } from "../files";
 import type { OdoEvent, RecallItem } from "../types";
 import Markdown, { highlightText } from "./Markdown";
@@ -174,7 +175,7 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
     case "agent_done":
       body = (
         <div className="bubble bubble-done">
-          <span className="bubble-icon">✓</span> {highlightText(p.summary ?? "Agent finished", highlight, "d")}
+          <span className="bubble-icon"><Check size={14} /></span> {highlightText(p.summary ?? "Agent finished", highlight, "d")}
         </div>
       );
       break;
@@ -182,7 +183,7 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
     case "agent_error":
       body = (
         <div className="bubble bubble-error">
-          <span className="bubble-icon">✗</span> {highlightText(p.error ?? "Agent failed", highlight, "e")}
+          <span className="bubble-icon"><X size={14} /></span> {highlightText(p.error ?? "Agent failed", highlight, "e")}
         </div>
       );
       break;

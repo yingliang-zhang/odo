@@ -2,6 +2,8 @@
 // clickable badges, and run indicator. Absorbs everything System-ish that
 // used to weigh down the sidebar.
 
+import { LoaderCircle, GitCompareArrows, FileText, MapPin } from "lucide-react";
+
 interface Props {
   workstreamName: string | null;
   conversationId: number | null;
@@ -51,7 +53,7 @@ export default function StatusBar({
       {/* Center-right: run indicator */}
       {agentRunning && (
         <span className="status-item status-run">
-          ⟳ running{runningCount > 1 ? ` (${runningCount})` : ""}
+          <LoaderCircle size={11} className="spin" /> running{runningCount > 1 ? ` (${runningCount})` : ""}
         </span>
       )}
       {/* Right: clickable badges */}
@@ -62,7 +64,7 @@ export default function StatusBar({
           title={`${pendingDiffs} pending diff${pendingDiffs > 1 ? "s" : ""}`}
           onClick={() => onBadgeClick("changes")}
         >
-          ±{pendingDiffs}
+          <GitCompareArrows size={11} /> {pendingDiffs}
         </button>
       )}
       {wikiNoteCount != null && wikiNoteCount > 0 && (
@@ -72,7 +74,7 @@ export default function StatusBar({
           title={`${wikiNoteCount} wiki notes`}
           onClick={() => onBadgeClick("wiki")}
         >
-          ❑{wikiNoteCount}
+          <FileText size={11} /> {wikiNoteCount}
         </button>
       )}
       {pendingMemoryProposals > 0 && (
@@ -82,7 +84,7 @@ export default function StatusBar({
           title={`${pendingMemoryProposals} pending memory proposals`}
           onClick={() => onBadgeClick("memory")}
         >
-          ◈{pendingMemoryProposals}
+          <MapPin size={11} /> {pendingMemoryProposals}
         </button>
       )}
       {/* Adapter selector */}

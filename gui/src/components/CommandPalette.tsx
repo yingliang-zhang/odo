@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 import { useFocusTrap } from "../focusTrap";
 
@@ -15,7 +16,7 @@ import { useFocusTrap } from "../focusTrap";
 export interface PaletteAction {
   id: string;
   name: string;
-  icon?: string;
+  icon?: ReactNode;
   // Right-aligned hint (e.g. "⌘B"); display only.
   shortcut?: string;
   // Shown greyed-out and skipped by keyboard navigation.

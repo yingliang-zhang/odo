@@ -13,6 +13,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
 import type { OdoEvent, PreviewEvent, RunInfo } from "../types";
 import MessageBubble from "./MessageBubble";
+import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown } from "lucide-react";
 import ToolTicker from "./ToolTicker";
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
@@ -132,7 +133,7 @@ function PreviewBubble({ preview }: { preview: PreviewEvent }) {
     return (
       <div className="bubble bubble-tool bubble-preview" aria-live="polite">
         <span className="preview-spinner" aria-hidden="true">
-          ⟳
+          <LoaderCircle size={12} className="spin" />
         </span>{" "}
         {tool}
         {intent}
@@ -173,7 +174,7 @@ function RunTabs({
         All
       </button>
       {runs.map((r) => {
-        const icon = r.status === "error" ? "✗" : r.status === "done" ? "✓" : "⟳";
+        const icon = r.status === "error" ? <X size={10} /> : r.status === "done" ? <Check size={10} /> : <LoaderCircle size={10} className="spin" />;
         const isActive = selectedRunId === r.run_id;
         const hasDiff = r.diff_id != null;
         return (
@@ -207,7 +208,7 @@ function RunHeader({ group, runs }: { group: RunGroup; runs?: RunInfo[] }) {
   // M8: fan-out status — running while any lane is still live.
   const fanoutRunning = runs && runs.some((r) => r.status === "running");
   const status = fanoutRunning ? "running" : failed ? "error" : done ? "done" : "running";
-  const icon = fanoutRunning ? "⟳" : failed ? "✗" : done ? "✓" : "⟳";
+  const icon = fanoutRunning ? <LoaderCircle size={11} className="spin" /> : failed ? <X size={11} /> : done ? <Check size={11} /> : <LoaderCircle size={11} className="spin" />;
   const startMs = Date.parse(start.created_at);
   const clock = Number.isNaN(startMs)
     ? "?"
@@ -668,7 +669,7 @@ export default function ChatSurface({
               disabled={matches.length === 0}
               onClick={() => stepMatch(-1)}
             >
-              ↑
+              <ChevronUp size={14} />
             </button>
             <button
               type="button"
@@ -677,10 +678,10 @@ export default function ChatSurface({
               disabled={matches.length === 0}
               onClick={() => stepMatch(1)}
             >
-              ↓
+              <ChevronDown size={14} />
             </button>
             <button type="button" aria-label="Close search" title="Close (Esc)" onClick={onSearchClose}>
-              ×
+              <X size={14} />
             </button>
           </div>
         )}
@@ -765,7 +766,7 @@ export default function ChatSurface({
         </div>
         {newOutput && (
           <button type="button" className="new-output-pill" onClick={scrollToBottom}>
-            ↓ new output
+            <ArrowDown size={12} /> new output
           </button>
         )}
       </div>
@@ -793,7 +794,7 @@ export default function ChatSurface({
                   aria-label={`Remove ${basename(path)}`}
                   onClick={() => removeAttachment(path)}
                 >
-                  ×
+                  <X size={10} />
                 </button>
               </span>
             ))}

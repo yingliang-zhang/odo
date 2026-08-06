@@ -4,6 +4,7 @@
 // Phase 3: Wiki/Memory/Ledger tabs get their content.
 
 import { type ReactNode } from "react";
+import { GitCompareArrows, FileText, MapPin, BookOpen, X } from "lucide-react";
 
 export type PanelTab = "changes" | "wiki" | "memory" | "ledger";
 
@@ -21,11 +22,11 @@ interface Props {
   children?: ReactNode;
 }
 
-const TABS: { id: PanelTab; label: string; icon: string }[] = [
-  { id: "changes", label: "Changes", icon: "±" },
-  { id: "wiki", label: "Wiki", icon: "❑" },
-  { id: "memory", label: "Memory", icon: "◈" },
-  { id: "ledger", label: "Ledger", icon: "▤" },
+const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
+  { id: "changes", label: "Changes", icon: <GitCompareArrows size={12} /> },
+  { id: "wiki", label: "Wiki", icon: <FileText size={12} /> },
+  { id: "memory", label: "Memory", icon: <MapPin size={12} /> },
+  { id: "ledger", label: "Ledger", icon: <BookOpen size={12} /> },
 ];
 
 export default function ContextPanel({
@@ -80,7 +81,7 @@ export default function ContextPanel({
           title="Close (⌘J)"
           onClick={onClose}
         >
-          ×
+          <X size={14} />
         </button>
       </div>
       <div className="panel-body">

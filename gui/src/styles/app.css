@@ -1179,6 +1179,10 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
+/* M11 F5: lucide-react spinner — SVG rotation */
+.spin {
+  animation: spin 0.8s linear infinite;
+}
 
 @keyframes spin {
   to {

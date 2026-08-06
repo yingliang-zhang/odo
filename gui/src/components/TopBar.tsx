@@ -1,5 +1,6 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useState, type ReactNode } from "react";
 import { errorMessage } from "../api";
+import { Sparkles, FileText, Wand2, MapPin, BookOpen, Settings, PanelLeft, ChevronLeft } from "lucide-react";
 
 // M9 Phase 1: TopBar — 32px bar above the main content area.
 // M9 Phase 4: owns the action row that used to live in the sidebar
@@ -39,7 +40,7 @@ function ActionButton({
   title,
   onClick,
 }: {
-  icon: string;
+  icon: ReactNode;
   label: string;
   badge?: number | null;
   disabled?: boolean;
@@ -131,7 +132,7 @@ export default function TopBar({
         title="Toggle sidebar (⌘B)"
         onClick={onToggleSidebar}
       >
-        {sidebarCollapsed ? "☰" : "‹"}
+        {sidebarCollapsed ? <PanelLeft size={14} /> : <ChevronLeft size={14} />}
       </button>
       <span className="topbar-brand">Odo</span>
       {workstreamName && (
@@ -143,7 +144,7 @@ export default function TopBar({
 
       <div className="topbar-actions">
         <ActionButton
-          icon="✦"
+          icon={<Sparkles size={14} />}
           label={distillBusy ? "Distilling…" : "Distill"}
           badge={pendingMemoryProposals > 0 ? pendingMemoryProposals : null}
           disabled={distillBusy || actionsDisabled}
@@ -151,7 +152,7 @@ export default function TopBar({
           onClick={onDistill}
         />
         <ActionButton
-          icon="❑"
+          icon={<FileText size={14} />}
           label="Wiki"
           badge={wikiNoteCount}
           disabled={actionsDisabled}
@@ -159,7 +160,7 @@ export default function TopBar({
           onClick={onOpenWiki}
         />
         <ActionButton
-          icon="✣"
+          icon={<Wand2 size={14} />}
           label={curateBusy ? "Curating…" : "Curate"}
           disabled={curateBusy || actionsDisabled}
           title="Rewrite wiki topic pages + index from all epoch notes"
@@ -167,7 +168,7 @@ export default function TopBar({
         />
         <div className="topbar-pin">
           <ActionButton
-            icon="◈"
+            icon={<MapPin size={14} />}
             label="Pin"
             disabled={actionsDisabled}
             title="Store a verbatim pin in .odo/pins.md (always injected, human-owned)"
@@ -203,14 +204,14 @@ export default function TopBar({
           )}
         </div>
         <ActionButton
-          icon="▤"
+          icon={<BookOpen size={14} />}
           label="Ledger"
           disabled={actionsDisabled}
           title="Open .odo/ledger.md — daemon-written verified metrics (durations, proposals, accept/reject)"
           onClick={onOpenLedger}
         />
         <ActionButton
-          icon="⚙"
+          icon={<Settings size={14} />}
           label="Settings"
           title="Settings (⌘,)"
           onClick={onOpenSettings}

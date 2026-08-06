@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Plus, Sparkles, Wand2, MapPin, FileText, Settings, Square, ChevronLeft, Columns, Search, X } from "lucide-react";
 import {
   acceptDiff,
   addProject,
@@ -994,7 +995,7 @@ export default function App() {
     {
       id: "new-workstream",
       name: "New Workstream",
-      icon: "＋",
+      icon: <Plus size={14} />,
       shortcut: "⌘N",
       prompt: "Workstream name…",
       onRun: async (name) => {
@@ -1008,21 +1009,21 @@ export default function App() {
     {
       id: "distill",
       name: "Distill to Wiki",
-      icon: "✦",
+      icon: <Sparkles size={14} />,
       disabled: conversation == null,
       onRun: () => handleDistill(),
     },
     {
       id: "curate",
       name: "Curate Topics",
-      icon: "✣",
+      icon: <Wand2 size={14} />,
       disabled: conversation == null,
       onRun: () => handleCurate(),
     },
     {
       id: "pin",
       name: "Pin Memory",
-      icon: "◈",
+      icon: <MapPin size={14} />,
       prompt: "remember: …",
       disabled: conversation == null,
       onRun: (text) => handlePin(text),
@@ -1030,14 +1031,14 @@ export default function App() {
     {
       id: "open-wiki",
       name: "Open Wiki",
-      icon: "❑",
+      icon: <FileText size={14} />,
       disabled: conversation == null,
       onRun: () => openPanelTab("wiki"),
     },
     {
       id: "open-settings",
       name: "Open Settings",
-      icon: "⚙",
+      icon: <Settings size={14} />,
       shortcut: "⌘,",
       onRun: () => setSettingsOpen(true),
     },
@@ -1046,7 +1047,7 @@ export default function App() {
           {
             id: "cancel-run",
             name: "Cancel Run",
-            icon: "■",
+            icon: <Square size={14} />,
             shortcut: "Esc",
             onRun: () => handleCancel(),
           } satisfies PaletteAction,
@@ -1055,21 +1056,21 @@ export default function App() {
     {
       id: "toggle-sidebar",
       name: "Toggle Sidebar",
-      icon: "⇤",
+      icon: <ChevronLeft size={14} />,
       shortcut: "⌘B",
       onRun: () => setSidebarCollapsed((v) => !v),
     },
     {
       id: "toggle-panel",
       name: "Toggle Context Panel",
-      icon: "⫿",
+      icon: <Columns size={14} />,
       shortcut: "⌘J",
       onRun: () => setPanelOpen((v) => !v),
     },
     {
       id: "search-chat",
       name: "Search Chat",
-      icon: "⌕",
+      icon: <Search size={14} />,
       shortcut: "⌘F",
       onRun: () => setSearchOpen(true),
     },
@@ -1199,7 +1200,7 @@ export default function App() {
               aria-label="Dismiss error"
               onClick={() => setError(null)}
             >
-              ×
+              <X size={14} />
             </button>
           </div>
         )}
