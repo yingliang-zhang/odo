@@ -33,7 +33,11 @@ const NEW_FILE_RE = /^\+\+\+ (?:b\/)?(.+)$/;
 const OLD_FILE_RE = /^--- (?:a\/)?(.+)$/;
 
 function stripQuotes(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) return s.slice(1, -1);
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) s = s.slice(1, -1);
+  // Git places the a// b/ prefix OUTSIDE the quotes: `"b/my file.txt"` → strip
+  // leaves `b/my file.txt`. Remove the prefix so downstream consumers (language
+  // detection, file navigation labels) get a clean relative path.
+  s = s.replace(/^(?:a|b)\//, "");
   return s;
 }
 
