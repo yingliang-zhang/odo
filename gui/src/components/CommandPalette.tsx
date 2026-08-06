@@ -29,6 +29,9 @@ export interface PaletteAction {
 interface Props {
   actions: PaletteAction[];
   onClose: () => void;
+  // M11 D2: when set, the palette opens straight into prompt mode for this
+  // action (⌘N → new-workstream name entry).
+  initialActionId?: string;
 }
 
 // Handlers surface failures through App's error banner; the palette just
@@ -42,7 +45,7 @@ function execute(action: PaletteAction, text: string) {
   }
 }
 
-export default function CommandPalette({ actions, onClose }: Props) {
+export default function CommandPalette({ actions, onClose, initialActionId }: Props) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [promptFor, setPromptFor] = useState<PaletteAction | null>(null);
@@ -61,6 +64,14 @@ export default function CommandPalette({ actions, onClose }: Props) {
 
   // Every filter change restarts selection at the top of the list.
   useEffect(() => setSelected(0), [query]);
+  // M11 D2: ⌘N opens the palette straight into the new-workstream prompt.
+  useEffect(() => {
+    if (initialActionId) {
+      const a = actions.find((act) => act.id === initialActionId);
+      if (a && a.prompt !== undefined) setPromptFor(a);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Focus on mount and again when switching into/out of prompt mode.
   useEffect(() => {
     inputRef.current?.focus();

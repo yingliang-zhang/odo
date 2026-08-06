@@ -138,6 +138,8 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // M11 D2: ⌘N opens palette in new-workstream prompt mode directly.
+  const [paletteInitialAction, setPaletteInitialAction] = useState<string | undefined>(undefined);
   const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -644,6 +646,12 @@ export default function App() {
         case "k":
           e.preventDefault();
           setPaletteOpen(true);
+          setPaletteInitialAction(undefined);
+          break;
+        case "n":
+          e.preventDefault();
+          setPaletteOpen(true);
+          setPaletteInitialAction("new-workstream");
           break;
       }
     };
@@ -969,6 +977,7 @@ export default function App() {
       id: "new-workstream",
       name: "New Workstream",
       icon: "＋",
+      shortcut: "⌘N",
       prompt: "Workstream name…",
       onRun: async (name) => {
         try {
@@ -1099,7 +1108,7 @@ export default function App() {
           }}
         />
       )}
-      {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
+      {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} initialActionId={paletteInitialAction} />}
       <main className="app-main">
         {/* Toast viewport: the transient chips the sidebar used to host,
             plus sidebar confirmations. Click-through opens the panel the

@@ -197,8 +197,8 @@ export default function Sidebar({
             <button
               type="button"
               className="ws-add"
-              title="New workstream"
-              aria-label="New workstream"
+              title="New workstream (⌘N)"
+              aria-label="New workstream (⌘N)"
               onClick={() => {
                 setCreateError(null);
                 setCreating(true);
