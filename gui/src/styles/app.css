@@ -41,6 +41,30 @@
   --tok-comment: #7a818c;
   --tok-number: #6fd3d3;
   --tok-fn: #7aa2f7;
+  /* E P2: design tokens — consistent corner radii */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+/* E P2: thin scrollbars — macOS-native feel, consistent across themes */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
 }
 
 /* Belt D: light theme. Every component rule consumes the variables, so
@@ -356,6 +380,19 @@ body {
 }
 
 /* ---------- Toast viewport ---------- */
+
+/* E P2: daemon disconnect banner — persistent, amber, no auto-dismiss */
+.daemon-down-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(180, 120, 0, 0.15);
+  border-bottom: 1px solid rgba(220, 160, 0, 0.6);
+  color: #e8b030;
+  padding: 6px 12px;
+  font-size: 13px;
+  animation: toast-in 0.2s ease-out;
+}
 
 /* Transient confirmations (distill/curate/pin, learner updates,
    retractions, ledger failures) live top-right of the main area — out of

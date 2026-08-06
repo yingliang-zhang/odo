@@ -232,6 +232,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleLedger(ctx, req)
 	case CmdContradictions:
 		resp, err = s.handleContradictions(ctx, req)
+	case CmdSearchEvents:
+		resp, err = s.handleSearchEvents(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -1658,6 +1660,23 @@ func (s *Server) handleContradictions(ctx context.Context, req Request) (Respons
 		}
 	}
 	return Response{Events: out}, nil
+}
+
+// handleSearchEvents searches event payloads across all active workstreams
+// in the project for the given query. Returns matches ordered newest-first.
+func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response, error) {
+	if req.Text == "" {
+		return Response{}, fmt.Errorf("search_events: query is required")
+	}
+	p, err := s.resolveProject(ctx, req.ProjectRoot)
+	if err != nil {
+		return Response{}, fmt.Errorf("search_events: %w", err)
+	}
+	results, err := s.store.SearchEvents(ctx, p.ID, req.Text, 100)
+	if err != nil {
+		return Response{}, fmt.Errorf("search_events: %w", err)
+	}
+	return Response{SearchResults: results}, nil
 }
 
 // diffTargetPaths reads the unified diff at pathOnDisk and returns the

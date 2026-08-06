@@ -460,3 +460,17 @@ export interface ContradictionsResponse {
   error?: string;
   events?: OdoEvent[];
 }
+
+// E P2: cross-conversation search
+export interface SearchResult {
+  event: OdoEvent;
+  workstream_id: number;
+  workstream_name: string;
+  conversation_id: number;
+}
+
+export interface SearchEventsResponse {
+  ok: boolean;
+  error?: string;
+  search_results?: SearchResult[];
+}

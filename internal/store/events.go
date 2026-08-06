@@ -72,3 +72,51 @@ func (s *Store) ListEvents(ctx context.Context, conversationID int64, afterSeq i
 	}
 	return events, rows.Err()
 }
+
+// SearchResult is one event match from SearchEvents, carrying the event
+// plus its workstream/conversation context for display.
+type SearchResult struct {
+	Event          Event   `json:"event"`
+	WorkstreamID   int64   `json:"workstream_id"`
+	WorkstreamName string  `json:"workstream_name"`
+	ConversationID int64   `json:"conversation_id"`
+}
+
+// SearchEvents searches event payloads across all active workstreams in a
+// project for the given query string (case-insensitive LIKE match on
+// payload_json). Returns matches ordered by created_at descending (newest
+// first). Limited to maxResults (default 100).
+func (s *Store) SearchEvents(ctx context.Context, projectID int64, query string, maxResults int) ([]SearchResult, error) {
+	if maxResults <= 0 {
+		maxResults = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.id, e.conversation_id, e.seq, e.type, e.payload_json, e.created_at,
+		        c.workstream_id, w.name
+		 FROM events e
+		 JOIN conversations c ON e.conversation_id = c.id
+		 JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE w.project_id = ? AND w.status = 'active'
+		   AND e.payload_json LIKE '%' || ? || '%'
+		 ORDER BY e.created_at DESC
+		 LIMIT ?`, projectID, query, maxResults)
+	if err != nil {
+		return nil, fmt.Errorf("store: search events: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		var payload string
+		if err := rows.Scan(&r.Event.ID, &r.Event.ConversationID, &r.Event.Seq,
+			&r.Event.Type, &payload, &r.Event.CreatedAt,
+			&r.WorkstreamID, &r.WorkstreamName); err != nil {
+			return nil, fmt.Errorf("store: search events: scan: %w", err)
+		}
+		r.Event.Payload = json.RawMessage(payload)
+		r.ConversationID = r.Event.ConversationID
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}

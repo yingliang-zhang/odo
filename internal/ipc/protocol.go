@@ -46,6 +46,7 @@ const (
 	// events for the wiki browser's retracted badges.
 	CmdLedger         = "ledger"
 	CmdContradictions = "contradictions"
+	CmdSearchEvents    = "search_events"
 )
 
 // Request is one command line on the socket.
@@ -170,6 +171,8 @@ type Response struct {
 	MemoryProposals int `json:"memory_proposals,omitempty"`
 	// pending_counts: Go map keys serialize as JSON strings — that is the
 	// contract the frontend implements.
-	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`
-	RunningWorkstreams []int64       `json:"running_workstreams,omitempty"`
+	PendingCounts      map[int64]int             `json:"pending_counts,omitempty"`
+	RunningWorkstreams []int64                   `json:"running_workstreams,omitempty"`
+	// search_events: cross-conversation search results.
+	SearchResults []store.SearchResult           `json:"search_results,omitempty"`
 }

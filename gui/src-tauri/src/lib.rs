@@ -511,6 +511,13 @@ async fn contradictions(
     run_command(root, req, READ_TIMEOUT).await
 }
 
+#[tauri::command]
+async fn search_events(project_root: Option<String>, text: String) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "search_events", "project_root": root, "text": text});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M11 P1: read-only view of the daemon-owned global registry
 // (<home>/.odo/projects.json, ODO_REGISTRY_PATH override — same path
 // resolution as the Go registry) for the sidebar project switcher. Absent
@@ -812,6 +819,7 @@ pub fn run() {
             list_topics,
             ledger,
             contradictions,
+            search_events,
             list_projects,
             add_project,
         ])

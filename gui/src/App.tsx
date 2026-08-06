@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Plus, Sparkles, Wand2, MapPin, FileText, Settings, Square, ChevronLeft, Columns, Search, X } from "lucide-react";
+import { Plus, Sparkles, Wand2, MapPin, FileText, Settings, Square, ChevronLeft, Columns, Search, X, WifiOff } from "lucide-react";
 import {
   acceptDiff,
   addProject,
@@ -54,6 +54,7 @@ const TOAST_MS = 10_000;        // action confirmations (distill/curate/pin)
 const DAEMON_CHIP_MS = 30_000;  // daemon-sourced chips (memory/retraction/ledger) — longer, per M4 spec
 // Belt C (§Fix 2): the error banner auto-dismisses after 10 s.
 const ERROR_BANNER_MS = 10_000;
+const POLL_FAIL_THRESHOLD = 3; // consecutive poll failures before showing disconnect banner
 
 function mergeEvents(prev: OdoEvent[], next: OdoEvent[]): OdoEvent[] {
   if (next.length === 0) return prev;
@@ -147,6 +148,9 @@ export default function App() {
   const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // E P2: daemon disconnect tracking — consecutive poll failures
+  const [daemonDown, setDaemonDown] = useState(false);
+  const pollFailRef = useRef(0);
   // M3: wiki note count — TopBar badge + panel wiki tab (null = unknown).
   const [wikiNoteCount, setWikiNoteCount] = useState<number | null>(null);
   // M4: pending learner-proposal count (TopBar distill badge + panel
@@ -485,7 +489,15 @@ export default function App() {
           }
         }
         setError(null);
+        // E P2: reset consecutive failure counter on success
+        pollFailRef.current = 0;
+        setDaemonDown(false);
       } catch (e) {
+        // E P2: track consecutive poll failures for disconnect detection
+        pollFailRef.current += 1;
+        if (pollFailRef.current >= POLL_FAIL_THRESHOLD) {
+          setDaemonDown(true);
+        }
         if (!distillingRef.current && !curatingRef.current) {
           setError(`poll failed: ${errorMessage(e)}`);
         }
@@ -1130,6 +1142,12 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {daemonDown && (
+        <div className="daemon-down-banner" role="alert">
+          <WifiOff size={14} />
+          <span>Daemon connection lost — retrying…</span>
+        </div>
+      )}
       <TopBar
         workstreamName={workstream?.name ?? null}
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
