@@ -130,6 +130,17 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
       );
       break;
 
+    case "agent_thinking":
+      body = (
+        <div className="bubble bubble-thinking">
+          <details>
+            <summary>Thinking…</summary>
+            <div className="bubble-thinking-text">{p.text ?? ""}</div>
+          </details>
+        </div>
+      );
+      break;
+
     case "agent_tool_call":
       body = (
         <div className="bubble bubble-tool">

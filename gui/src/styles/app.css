@@ -1001,6 +1001,36 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-bottom-left-radius: 2px;
 }
 
+/* M11 F2: agent thinking — collapsible, muted, no bubble bg */
+.bubble-thinking {
+  align-self: flex-start;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 4px;
+  width: 100%;
+}
+.bubble-thinking > details > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-style: italic;
+  user-select: none;
+}
+.bubble-thinking > details[open] > summary {
+  margin-bottom: 4px;
+}
+.bubble-thinking-text {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  opacity: 0.8;
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
+  margin-left: 4px;
+  max-height: 300px;
+  overflow: auto;
+}
+
 .bubble-tool {
   align-self: flex-start;
   background: transparent;

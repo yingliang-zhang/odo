@@ -818,6 +818,13 @@ func parseSessionJSONL(r *ompRun) []AgentEvent {
 						Payload: map[string]interface{}{"tool": b.Name, "args": args},
 					})
 					lastTool = b.Name
+				case "thinking":
+					if b.Thinking != "" {
+						events = append(events, AgentEvent{
+							Type:    "agent_thinking",
+							Payload: map[string]interface{}{"text": b.Thinking},
+						})
+					}
 				}
 			}
 		}

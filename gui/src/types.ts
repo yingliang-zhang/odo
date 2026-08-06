@@ -41,6 +41,7 @@ export interface Conversation {
 export type EventType =
   | "user_message"
   | "agent_text"
+  | "agent_thinking"
   | "agent_tool_call"
   | "agent_tool_result"
   | "agent_done"

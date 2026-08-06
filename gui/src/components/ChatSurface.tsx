@@ -62,6 +62,7 @@ function searchableText(e: OdoEvent): string {
   switch (e.type) {
     case "user_message":
     case "agent_text":
+    case "agent_thinking":
       return p.text ?? "";
     case "agent_tool_call":
       return `${p.tool ?? ""} ${p.args != null ? JSON.stringify(p.args) : ""}`;
