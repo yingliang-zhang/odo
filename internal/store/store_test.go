@@ -395,3 +395,89 @@ func TestIncrementEpoch(t *testing.T) {
 		t.Error("IncrementEpoch on missing conversation: want error, got nil")
 	}
 }
+
+func TestSearchEvents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	p, _ := s.CreateOrGetProject(ctx, "/repo/s", "s")
+	w1, _ := s.CreateOrGetWorkstream(ctx, p.ID, "alpha")
+	w2, _ := s.CreateOrGetWorkstream(ctx, p.ID, "beta")
+	c1, _ := s.CreateConversation(ctx, w1.ID, "")
+	c2, _ := s.CreateConversation(ctx, w2.ID, "")
+
+	// c1 has a text event matching "hello world"
+	if _, err := s.AppendEvent(ctx, c1.ID, EventAgentText, `{"text":"hello world"}`); err != nil {
+		t.Fatalf("append c1: %v", err)
+	}
+	// c1 also has a non-matching event
+	if _, err := s.AppendEvent(ctx, c1.ID, EventAgentText, `{"text":"bye"}`); err != nil {
+		t.Fatalf("append c1b: %v", err)
+	}
+	// c2 has a matching event in a different workstream
+	if _, err := s.AppendEvent(ctx, c2.ID, EventAgentText, `{"text":"hello again"}`); err != nil {
+		t.Fatalf("append c2: %v", err)
+	}
+
+	// Search for "hello" — should find 2 results (from c1 and c2)
+	results, err := s.SearchEvents(ctx, p.ID, "hello", 100)
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d: %+v", len(results), results)
+	}
+
+	// Results should carry workstream context
+	names := map[string]bool{}
+	for _, r := range results {
+		names[r.WorkstreamName] = true
+		if r.Event.ConversationID == 0 {
+			t.Error("event conversation_id is zero")
+		}
+	}
+	if len(names) != 2 {
+		t.Errorf("expected 2 distinct workstream names, got %v", names)
+	}
+
+	// Search for non-existent — 0 results
+	empty, err := s.SearchEvents(ctx, p.ID, "nonexistent", 100)
+	if err != nil {
+		t.Fatalf("SearchEvents empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected 0 results for nonexistent query, got %d", len(empty))
+	}
+
+	// Limit respected
+	if _, err := s.AppendEvent(ctx, c1.ID, EventAgentText, `{"text":"hello 1"}`); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := s.AppendEvent(ctx, c1.ID, EventAgentText, `{"text":"hello 2"}`); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	limited, err := s.SearchEvents(ctx, p.ID, "hello", 2)
+	if err != nil {
+		t.Fatalf("SearchEvents limited: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Errorf("expected 2 results with limit=2, got %d", len(limited))
+	}
+
+	// Deleted workstream excluded
+	if err := s.DeleteWorkstream(ctx, w2.ID); err != nil {
+		t.Fatalf("DeleteWorkstream: %v", err)
+	}
+	afterDelete, err := s.SearchEvents(ctx, p.ID, "hello", 100)
+	if err != nil {
+		t.Fatalf("SearchEvents after delete: %v", err)
+	}
+	// Only c1's "hello world" remains (c2's "hello again" excluded)
+	if len(afterDelete) != 3 { // "hello world", "hello 1", "hello 2"
+		t.Errorf("expected 3 results after delete (c1 only), got %d: %+v", len(afterDelete), afterDelete)
+	}
+	for _, r := range afterDelete {
+		if r.WorkstreamName == "beta" {
+			t.Error("deleted workstream 'beta' should not appear in search results")
+		}
+	}
+}
