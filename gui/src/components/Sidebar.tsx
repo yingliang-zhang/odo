@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../api";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
 
 interface Props {
@@ -121,7 +121,7 @@ export default function Sidebar({
           aria-label="Expand sidebar"
           onClick={onToggleCollapsed}
         >
-          ›
+          <ChevronRight size={14} />
         </button>
       </div>
 

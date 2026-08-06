@@ -1111,10 +1111,10 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   animation: ws-pulse 1.1s ease-in-out infinite;
 }
 
-/* Tool previews lead with a spinning ⟳ (spin is the existing rotation). */
+/* Tool previews lead with a spinning LoaderCircle (.spin on the SVG). */
 .preview-spinner {
-  display: inline-block;
-  animation: spin 1.2s linear infinite;
+  display: inline-flex;
+  align-items: center;
 }
 
 .badge-accept {

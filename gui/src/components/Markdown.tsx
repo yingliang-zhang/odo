@@ -1,4 +1,5 @@
 import { Fragment, useState, type ReactNode } from "react";
+import { Check } from "lucide-react";
 import { tokenize, type Language } from "../highlight";
 
 // Belt B: a small dependency-free markdown renderer for agent output and
@@ -270,7 +271,7 @@ function CodeBlock({ block, highlight, index }: { block: Extract<Block, { kind: 
       <div className="bubble-code-header">
         {langLabel && <span className="bubble-code-lang">{langLabel}</span>}
         <button type="button" className="bubble-code-copy" onClick={copy} aria-label="Copy code">
-          {copied ? "✓" : "Copy"}
+          {copied ? <Check size={11} /> : "Copy"}
         </button>
       </div>
       <pre className="bubble-code">

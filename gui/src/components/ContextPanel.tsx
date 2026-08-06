@@ -66,6 +66,7 @@ export default function ContextPanel({
                 className={`panel-tab${isActive ? " active" : ""}`}
                 onClick={() => onTabChange(tab.id)}
               >
+                {tab.icon}
                 {tab.label}
                 {count != null && count > 0 && (
                   <span className="panel-tab-badge">{count}</span>
