@@ -2368,6 +2368,27 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   margin-top: 0;
 }
 
+/* M11 F4: GFM tables */
+.md-table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 6px 0;
+  font-size: 12px;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.md-table th {
+  background: var(--bg-raised);
+  font-weight: 600;
+}
+.md-table tbody tr:nth-child(even) {
+  background: var(--bg-raised);
+}
+
 .markdown h1 { font-size: 18px; }
 .markdown h2 { font-size: 16px; }
 .markdown h3 { font-size: 15px; }

@@ -124,6 +124,7 @@ type Block =
   | { kind: "ol"; items: string[] }
   | { kind: "quote"; text: string }
   | { kind: "hr" }
+  | { kind: "table"; headers: string[]; rows: string[][] }
   | { kind: "para"; text: string };
 
 const FENCE_RE = /^```(\S*)\s*$/;
@@ -176,6 +177,25 @@ function parseBlocks(content: string): Block[] {
     if (HR_RE.test(line)) {
       blocks.push({ kind: "hr" });
       i++;
+      continue;
+    }
+    // GFM table: header row | --- | data rows
+    if (line.includes("|") && i + 1 < lines.length && /^\|?[\s:]*-{2,}[\s:]*-?/.test(lines[i + 1]) && lines[i + 1].includes("|")) {
+      // Strip leading/trailing pipes, split on |
+      const parseRow = (row: string): string[] => {
+        let r = row.trim();
+        if (r.startsWith("|")) r = r.slice(1);
+        if (r.endsWith("|")) r = r.slice(0, -1);
+        return r.split("|").map((c) => c.trim());
+      };
+      const h = parseRow(line);
+      i += 2; // skip header + separator
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|") && !isBlockStart(lines[i])) {
+        rows.push(parseRow(lines[i]));
+        i++;
+      }
+      blocks.push({ kind: "table", headers: h, rows });
       continue;
     }
     if (UL_RE.test(line)) {
@@ -293,6 +313,28 @@ function renderBlock(block: Block, index: number, highlight: string | undefined)
       return <blockquote key={key}>{parseInline(block.text, highlight, key)}</blockquote>;
     case "hr":
       return <hr key={key} />;
+    case "table": {
+      return (
+        <table key={key} className="md-table">
+          <thead>
+            <tr>
+              {block.headers.map((h, hi) => (
+                <th key={hi}>{parseInline(h, highlight, `${key}-h${hi}`)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {block.rows.map((row, ri) => (
+              <tr key={ri}>
+                {block.headers.map((_, ci) => (
+                  <td key={ci}>{parseInline(row[ci] ?? "", highlight, `${key}-r${ri}c${ci}`)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      );
+    }
     case "para":
       return <p key={key}>{parseInline(block.text, highlight, key)}</p>;
   }
