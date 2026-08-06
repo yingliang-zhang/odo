@@ -5,7 +5,7 @@
   --bg: #14161a;
   --bg-raised: #1c1f25;
   --bg-input: #22262e;
-  --border: #31363f;
+  --border: var(--stroke-secondary); /* alias for backward compat */
   --text: #d7dae0;
   --text-dim: #8a919c;
   --accent-user: #2b5ea7;
@@ -45,6 +45,21 @@
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
+  /* Phase 3: semantic type scale (inspired by Multica tokens.css) —
+     named for the role the text plays, not a t-shirt size. */
+  --text-micro: 11px;
+  --text-caption: 12px;
+  --text-label: 13px;
+  --text-body: 14px;
+  --text-body-lg: 15px;
+  --text-heading: 16px;
+  --text-title: 18px;
+  --text-display: 24px;
+  /* Phase 3: stroke hierarchy (inspired by Hermes DESIGN.md) —
+     descending strength for different elevation levels. */
+  --stroke-primary: #3d4350;
+  --stroke-secondary: #31363f;
+  --stroke-tertiary: #282d35;
 }
 
 /* E P2: thin scrollbars — macOS-native feel, consistent across themes */
@@ -73,7 +88,7 @@
   --bg: #f5f5f5;
   --bg-raised: #fff;
   --bg-input: #fff;
-  --border: #ddd;
+  --border: var(--stroke-secondary); /* alias for backward compat */
   --text: #1a1a1a;
   --text-dim: #666;
   --accent-user: #2563eb;
@@ -98,6 +113,10 @@
   --tok-comment: #6b7280;
   --tok-number: #0e7490;
   --tok-fn: #1d4ed8;
+  /* Phase 3: light theme stroke overrides */
+  --stroke-primary: #c0c4cc;
+  --stroke-secondary: #ddd;
+  --stroke-tertiary: #ebebeb;
 }
 
 /* In the light theme the agent bubble is saturated purple; page-link blue
@@ -853,6 +872,142 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 }
 
 /* Unified sidebar row: icon + label + optional trailing count badge. */
+/* Phase 3: Status dots — priority reducer (Hermes session-row-state pattern) */
+.ws-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dim);
+}
+.ws-dot.dot-accent {
+  background: var(--accent-user);
+}
+.ws-dot.dot-amber {
+  background: var(--warn);
+}
+.ws-dot.dot-idle {
+  background: var(--text-dim);
+  opacity: 0.4;
+}
+.ws-dot.pulse {
+  animation: ws-pulse 1.2s ease-in-out infinite;
+}
+
+/* Phase 3.4: Tail-pin truncation (Hermes LaneLabel pattern) */
+.tail-pin {
+  display: inline-flex;
+  min-width: 0;
+  overflow: hidden;
+}
+.tail-head {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tail-tail {
+  flex-shrink: 0;
+  white-space: pre;
+}
+
+/* Phase 3.5+3.7: Project tree */
+.proj-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.proj-group {
+  display: flex;
+  flex-direction: column;
+}
+.proj-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--text);
+}
+.proj-row:hover {
+  background: var(--bg-input);
+}
+.proj-row-active {
+  color: var(--text);
+}
+.proj-chevron {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  transition: transform 0.15s ease;
+}
+.proj-chevron-open {
+  transform: rotate(90deg);
+}
+.proj-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proj-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  width: 100%;
+  text-align: left;
+}
+.proj-add:hover {
+  background: var(--bg-input);
+  color: var(--text);
+}
+.proj-add-group {
+  margin-top: 4px;
+}
+.ws-add-inline {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+  padding: 6px 8px 6px 28px;
+  text-align: left;
+  width: 100%;
+  border-radius: var(--radius-md);
+}
+.ws-add-inline:hover {
+  color: var(--text);
+  background: var(--bg-input);
+}
+.ws-add-row {
+  cursor: pointer;
+}
+.ws-empty-hint {
+  padding: 6px 8px 6px 28px;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  font-style: italic;
+}
+.ws-create-row {
+  padding: 0;
+}
+.ws-create-row .ws-create {
+  padding: 0 8px;
+}
+
 /* ---------- Epoch banner ---------- */
 
 .epoch-banner {
