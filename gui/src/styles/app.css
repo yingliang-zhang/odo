@@ -911,6 +911,12 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   animation: ws-pulse 1.2s ease-in-out infinite;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .ws-dot.pulse {
+    animation: none;
+  }
+}
+
 /* Phase 3.4: Tail-pin truncation (Hermes LaneLabel pattern) */
 .tail-pin {
   display: inline-flex;

@@ -676,11 +676,12 @@ export default function App() {
   }, [handleCancel]);
 
   const handleSwitchWorkstream = useCallback(
-    async (workstreamId: number) => {
-      if (workstreamId === workstream?.id) return;
+    async (workstreamId: number, projectRoot?: string) => {
+      const root = projectRoot ?? project?.root_path;
+      if (workstreamId === workstream?.id && projectRoot === undefined) return;
       cancelAutoDistill(); // M10: switching workstreams cancels pending auto-distill
       try {
-        const resp = unwrap(await bootstrap(project?.root_path, workstreamId));
+        const resp = unwrap(await bootstrap(root, workstreamId));
         applyBootstrap(resp);
         setError(null);
       } catch (e) {
@@ -1176,18 +1177,19 @@ export default function App() {
         pendingCounts={pendingCounts}
         runningWorkstreams={runningWorkstreams}
         onSwitchWorkstream={handleSwitchWorkstream}
+        onOpenForeignWorkstream={(root, wsId) => void handleSwitchWorkstream(wsId, root)}
         onCreateWorkstream={handleCreateWorkstream}
         onRenameWorkstream={handleRenameWorkstream}
         onDeleteWorkstream={handleDeleteWorkstream}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-        onFetchWorkstreams={async (root) => {
+        onFetchWorkstreams={useCallback(async (root: string) => {
           try {
             return unwrap(await listWorkstreams(root)).workstreams ?? [];
           } catch {
             return [];
           }
-        }}
+        }, [])}
       />
       {settingsOpen && (
         <SettingsPanel

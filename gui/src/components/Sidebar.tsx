@@ -26,11 +26,14 @@ const dotLabel: Record<DotState, string> = {
 // Phase 3.4: Tail-pin truncation (inspired by Hermes LaneLabel).
 // Long branch/workstream names keep their tail visible so `feat-foo-bar-baz`
 // and `feat-foo-bar-qux` stay distinguishable.
+// Uses array spread for code-point-aware splitting (handles emoji/surrogates).
 function TailPin({ label, title }: { label: string; title?: string }) {
   if (label.length <= 20) return <span title={title}>{label}</span>;
-  const tailLen = Math.min(12, Math.floor(label.length / 2));
-  const head = label.slice(0, label.length - tailLen);
-  const tail = label.slice(label.length - tailLen);
+  const chars = [...label];
+  if (chars.length <= 20) return <span title={title}>{label}</span>;
+  const tailLen = Math.min(12, Math.floor(chars.length / 2));
+  const head = chars.slice(0, chars.length - tailLen).join("");
+  const tail = chars.slice(chars.length - tailLen).join("");
   return (
     <span className="tail-pin" title={title ?? label}>
       <span className="tail-head">{head}</span>
@@ -67,6 +70,10 @@ interface Props {
   pendingCounts: Record<number, number>;
   runningWorkstreams: number[];
   onSwitchWorkstream: (id: number) => void;
+  // Phase 5: single-call handler for clicking a workstream in a non-active
+  // project — avoids the two-call race (switch-project + switch-workstream)
+  // by bootstrapping target root + wsId in one daemon roundtrip.
+  onOpenForeignWorkstream?: (root: string, wsId: number) => void;
   onCreateWorkstream: (name: string) => Promise<void>;
   onRenameWorkstream: (workstreamId: number, name: string) => Promise<void>;
   onDeleteWorkstream: (workstreamId: number) => Promise<void>;
@@ -88,6 +95,7 @@ export default function Sidebar({
   pendingCounts,
   runningWorkstreams,
   onSwitchWorkstream,
+  onOpenForeignWorkstream,
   onCreateWorkstream,
   onRenameWorkstream,
   onDeleteWorkstream,
@@ -114,14 +122,23 @@ export default function Sidebar({
     return saved;
   });
 
-  // Phase 3.7: lazily fetched workstreams for non-active projects
+  // Phase 3.7: lazily fetched workstreams for non-active projects.
+  // `remoteWorkstreams` caches successful fetches; `fetchAttempted` tracks
+  // roots that have been fetched (success or failure) to prevent re-fetching
+  // at poll cadence when the daemon is unavailable for that project.
   const [remoteWorkstreams, setRemoteWorkstreams] = useState<Record<string, Workstream[]>>({});
+  const [fetchAttempted, setFetchAttempted] = useState<Set<string>>(new Set());
 
   const toggleProject = (root: string) => {
     setCollapsedProjects((prev) => {
       const next = new Set(prev);
-      if (next.has(root)) next.delete(root);
-      else next.add(root);
+      if (next.has(root)) {
+        next.delete(root);
+        // Reset fetch state on collapse so re-expand retries
+        setFetchAttempted((fa) => { const nfa = new Set(fa); nfa.delete(root); return nfa; });
+      } else {
+        next.add(root);
+      }
       return next;
     });
     // Persist after state update (not inside updater — StrictMode safe)
@@ -137,13 +154,16 @@ export default function Sidebar({
     for (const p of projects) {
       const isActive = p.root === activeProjectRoot;
       const isExpanded = !collapsedProjects.has(p.root);
-      if (!isActive && isExpanded && !remoteWorkstreams[p.root]) {
+      if (!isActive && isExpanded && !fetchAttempted.has(p.root)) {
+        setFetchAttempted((prev) => new Set(prev).add(p.root));
         onFetchWorkstreams(p.root).then(ws => {
           setRemoteWorkstreams(prev => ({ ...prev, [p.root]: ws }));
-        }).catch(() => { /* daemon may not be running for this project */ });
+        }).catch(() => {
+          // Already marked as attempted; won't retry until collapse→re-expand
+        });
       }
     }
-  }, [projects, collapsedProjects, activeProjectRoot, remoteWorkstreams, onFetchWorkstreams]);
+  }, [projects, collapsedProjects, activeProjectRoot, fetchAttempted, onFetchWorkstreams]);
 
   const activeEntry = projects.find((p) => p.root === activeProjectRoot);
   const activeLabel = activeEntry?.name ?? projects[0]?.name ?? "Odo";
@@ -230,8 +250,12 @@ export default function Sidebar({
               type="button"
               className={clsx("ws-item", active && "active")}
               onClick={() => {
-                if (!isActiveProject) onSwitchProject(projectRoot);
-                onSwitchWorkstream(w.id);
+                if (!isActiveProject) {
+                  if (onOpenForeignWorkstream) onOpenForeignWorkstream(projectRoot, w.id);
+                  else { onSwitchProject(projectRoot); onSwitchWorkstream(w.id); }
+                } else {
+                  onSwitchWorkstream(w.id);
+                }
               }}
             >
               <TailPin label={w.name} title={w.name} />
