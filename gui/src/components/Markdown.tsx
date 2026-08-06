@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { tokenize, type Language } from "../highlight";
 
 // Belt B: a small dependency-free markdown renderer for agent output and
@@ -218,32 +218,57 @@ function parseBlocks(content: string): Block[] {
   return blocks;
 }
 
+// M11 F3: code block with language label + copy button.
+function CodeBlock({ block, highlight, index }: { block: Extract<Block, { kind: "code" }>; highlight: string | undefined; index: number }) {
+  const key = `b${index}`;
+  const [copied, setCopied] = useState(false);
+  const langLabel = block.lang ?? "";
+
+  const copy = () => {
+    navigator.clipboard.writeText(block.text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+
+  return (
+    <div className="bubble-code-wrap" key={key}>
+      <div className="bubble-code-header">
+        {langLabel && <span className="bubble-code-lang">{langLabel}</span>}
+        <button type="button" className="bubble-code-copy" onClick={copy} aria-label="Copy code">
+          {copied ? "✓" : "Copy"}
+        </button>
+      </div>
+      <pre className="bubble-code">
+        <code>
+          {block.text.split("\n").map((line, li) => (
+            <Fragment key={li}>
+              {li > 0 ? "\n" : ""}
+              {tokenize(line, block.lang).map((t, ti) =>
+                t.cls !== null ? (
+                  <span key={ti} className={t.cls}>
+                    {highlightText(t.text, highlight, `${key}-${li}-${ti}`)}
+                  </span>
+                ) : (
+                  <Fragment key={ti}>
+                    {highlightText(t.text, highlight, `${key}-${li}-${ti}`)}
+                  </Fragment>
+                ),
+              )}
+            </Fragment>
+          ))}
+        </code>
+      </pre>
+    </div>
+  );
+}
+
 function renderBlock(block: Block, index: number, highlight: string | undefined): ReactNode {
   const key = `b${index}`;
   switch (block.kind) {
-    case "code":
-      return (
-        <pre key={key} className="bubble-code">
-          <code>
-            {block.text.split("\n").map((line, li) => (
-              <Fragment key={li}>
-                {li > 0 ? "\n" : ""}
-                {tokenize(line, block.lang).map((t, ti) =>
-                  t.cls !== null ? (
-                    <span key={ti} className={t.cls}>
-                      {highlightText(t.text, highlight, `${key}-${li}-${ti}`)}
-                    </span>
-                  ) : (
-                    <Fragment key={ti}>
-                      {highlightText(t.text, highlight, `${key}-${li}-${ti}`)}
-                    </Fragment>
-                  ),
-                )}
-              </Fragment>
-            ))}
-          </code>
-        </pre>
-      );
+    case "code": {
+      return <CodeBlock key={key} block={block} highlight={highlight} index={index} />;
+    }
     case "heading": {
       const Tag = `h${block.level}` as "h1" | "h2" | "h3" | "h4";
       return <Tag key={key}>{parseInline(block.text, highlight, key)}</Tag>;
