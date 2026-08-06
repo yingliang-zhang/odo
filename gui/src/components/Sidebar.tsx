@@ -11,6 +11,8 @@ interface Props {
   // M11 P2: cross-project status for non-active projects in the dropdown.
   crossProjectStatus: Record<string, { pending: number; running: boolean }>;
   onSwitchProject: (root: string) => void;
+  // M11 F1: add a new project via native folder picker.
+  onAddProject: () => void;
   workstreams: Workstream[];
   workstream: Workstream | null;
   agentRunning: boolean;
@@ -36,6 +38,7 @@ export default function Sidebar({
   activeProjectRoot,
   crossProjectStatus,
   onSwitchProject,
+  onAddProject,
   workstreams,
   workstream,
   agentRunning,
@@ -141,6 +144,7 @@ export default function Sidebar({
                 {runningAny && <span className="ws-running-dot" />}
               </button>
               {pickerOpen && (
+                <>
                 <ul className="project-menu" role="listbox" aria-label="Projects">
                   {projects.map((p) => {
                     const isActive = p.root === activeProjectRoot;
@@ -175,6 +179,18 @@ export default function Sidebar({
                     );
                   })}
                 </ul>
+                {/* M11 F1: add a new project via native folder picker */}
+                <button
+                  type="button"
+                  className="ws-item project-add"
+                  onClick={() => {
+                    setPickerOpen(false);
+                    onAddProject();
+                  }}
+                >
+                  <span className="ws-name">+ Add project…</span>
+                </button>
+                </>
               )}
             </div>
           ) : (

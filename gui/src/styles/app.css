@@ -564,6 +564,13 @@ body {
 .project-menu .ws-item {
   width: 100%;
 }
+/* M11 F1: "Add project…" button at the bottom of the project picker */
+.project-add {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  font-style: italic;
+  color: var(--text-dim);
+}
 
 /* ---------- Sidebar: M1 sections ---------- */
 

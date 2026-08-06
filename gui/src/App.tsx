@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   acceptDiff,
+  addProject,
   bootstrap,
   cancel,
   createWorkstream,
@@ -701,6 +702,23 @@ export default function App() {
     [activeProjectRoot, applyBootstrap],
   );
 
+  // M11 F1: add a new project via native folder picker. The bridge
+  // ensures the daemon is running (auto-registers it), then we refresh
+  // the project list and switch to the new project.
+  const handleAddProject = useCallback(async () => {
+    try {
+      const entry = await addProject();
+      if (!entry) return; // user cancelled the folder picker
+      // Refresh the project list.
+      const list = await listProjects();
+      setProjects(list);
+      // Switch to the new project.
+      await handleSwitchProject(entry.root);
+    } catch (e) {
+      setError(`add project failed: ${errorMessage(e)}`);
+    }
+  }, [handleSwitchProject]);
+
   const handleCreateWorkstream = useCallback(
     async (name: string) => {
       const root = project?.root_path;
@@ -1080,6 +1098,7 @@ export default function App() {
         activeProjectRoot={activeProjectRoot}
         crossProjectStatus={crossProjectStatus}
         onSwitchProject={(root) => void handleSwitchProject(root)}
+        onAddProject={() => void handleAddProject()}
         workstreams={workstreams}
         workstream={workstream}
         agentRunning={agentRunning}

@@ -58,6 +58,14 @@ export function listProjects(): Promise<ProjectEntry[]> {
   return invoke<ProjectEntry[]>("list_projects");
 }
 
+// M11 F1: open a native folder picker; if the user selects a folder, the
+// bridge ensures the daemon is running (auto-registers the project) and
+// returns the new entry. Returns null when the user cancels.
+export async function addProject(): Promise<ProjectEntry | null> {
+  const entry = await invoke<ProjectEntry | null>("add_project");
+  return entry ?? null;
+}
+
 export interface SendOptions {
   // steer: journal the message for the running agent (no new run started).
   steer?: boolean;

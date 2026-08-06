@@ -520,6 +520,31 @@ async fn list_projects() -> Result<Value, String> {
     serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+// M11 F1: open a native folder picker, ensure the daemon for that project is
+// running (which auto-registers it in ~/.odo/projects.json via Go's
+// ensureProjectRegistered), and return the new project entry so the frontend
+// can refresh its list and switch to the new project.
+#[tauri::command]
+async fn add_project(app: tauri::AppHandle) -> Result<Option<Value>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let folder = app.dialog().file()
+        .set_title("Select a repository folder")
+        .blocking_pick_folder();
+    match folder {
+        Some(path) => {
+            let root = path.to_string();
+            ensure_daemon_running(&root)?;
+            // Re-read the registry to get the full entry (with name + added).
+            let projects = list_projects().await?;
+            let entry = projects.as_array().and_then(|rows| {
+                rows.iter().find(|r| r.get("root") == Some(&json!(root)))
+            });
+            Ok(entry.cloned())
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +755,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             bootstrap,
@@ -757,7 +783,8 @@ pub fn run() {
             list_topics,
             ledger,
             contradictions,
-            list_projects
+            list_projects,
+            add_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");
