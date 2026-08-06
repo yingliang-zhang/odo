@@ -181,12 +181,26 @@ function parseBlocks(content: string): Block[] {
     }
     // GFM table: header row | --- | data rows
     if (line.includes("|") && i + 1 < lines.length && /^\|?[\s:]*-{2,}[\s:]*-?/.test(lines[i + 1]) && lines[i + 1].includes("|")) {
-      // Strip leading/trailing pipes, split on |
+      // Split on pipes outside inline code spans (backtick-aware).
+      // GFM: a pipe inside a code span must not delimit a cell.
       const parseRow = (row: string): string[] => {
         let r = row.trim();
         if (r.startsWith("|")) r = r.slice(1);
         if (r.endsWith("|")) r = r.slice(0, -1);
-        return r.split("|").map((c) => c.trim());
+        const cells: string[] = [];
+        let cur = "";
+        let inCode = false;
+        for (let c = 0; c < r.length; c++) {
+          if (r[c] === "`") inCode = !inCode;
+          if (r[c] === "|" && !inCode) {
+            cells.push(cur.trim());
+            cur = "";
+          } else {
+            cur += r[c];
+          }
+        }
+        cells.push(cur.trim());
+        return cells;
       };
       const h = parseRow(line);
       i += 2; // skip header + separator
