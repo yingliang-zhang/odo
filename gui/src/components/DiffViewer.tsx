@@ -1,4 +1,4 @@
-import { useRef, useState, type UIEvent, type ReactNode } from "react";
+import { useMemo, useRef, useState, type UIEvent, type ReactNode } from "react";
 import { errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
 import type { Diff, ReviewResult } from "../types";
@@ -278,7 +278,8 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
 
   // D0: segments come from the untruncated lines so the chip row lists every
   // file even when the tail is cut off; chips past MAX_LINES render disabled.
-  const fileSegments = parseFileSegments(allLines);
+  // Memoized on diff.content — parseFileSegments is a full linear pass.
+  const fileSegments = useMemo(() => parseFileSegments(allLines), [diff.content]);
 
   // Walk the lines once, tracking the language of the file currently being
   // diffed (multi-file diffs switch at each `diff --git` / `+++ b/` header).
@@ -405,7 +406,7 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
       )}
       {/* D0: file navigation — chip row for multi-file diffs */}
       {fileSegments.length > 1 && (
-        <div className="diff-file-nav" role="tablist" aria-label="Files in this diff">
+        <div className="diff-file-nav" role="group" aria-label="Files in this diff">
           {fileSegments.map((seg, i) => {
             const basename = seg.path.split("/").pop() || seg.path;
             const isTruncated = seg.lineIndex >= MAX_LINES;
@@ -413,7 +414,7 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
               <button
                 key={`${seg.path}-${i}`}
                 type="button"
-                role="tab"
+                role="button"
                 className={`diff-file-chip${isTruncated ? " truncated" : ""}`}
                 title={seg.path}
                 disabled={isTruncated}
