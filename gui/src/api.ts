@@ -7,7 +7,24 @@
 // behavior). list_projects is the only command that never touches a
 // daemon — it reads the global ~/.odo/projects.json registry directly.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { mockInvoke } from "./dev/mock-invoke";
+
+// E P2: browser dev mode — when not in the Tauri webview, route all
+// invoke calls to the mock adapter (fixture data). Same `invoke<T>(cmd, args)`
+// signature, so the rest of api.ts is unchanged. Add ?nomock=1 to force
+// the real invoke even in a browser.
+const useMock = typeof window !== "undefined" &&
+  !("__TAURI_INTERNALS__" in window) &&
+  !new URLSearchParams(location.search).has("nomock");
+
+// Generic wrapper — mirrors Tauri v2's invoke<T>(cmd, args) signature.
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (useMock) {
+    return mockInvoke(cmd, args) as Promise<T>;
+  }
+  return tauriInvoke<T>(cmd, args);
+}
 import type {
   AcceptDiffResponse,
   ApplyMemoryRequest,

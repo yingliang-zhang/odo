@@ -350,7 +350,10 @@ export default function ChatSurface({
   // The composer is the only sensible drop target in M0.1, so we accept
   // all drops without position checking — Tauri 2's PhysicalPosition
   // coordinate space is inconsistent across platforms and DPI modes.
+  // E P2: skip in browser dev mode — getCurrentWebview() requires
+  // __TAURI_INTERNALS__ which only exists in the Tauri webview.
   useEffect(() => {
+    if (typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)) return;
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
       if (p.type === "enter" || p.type === "over") {
