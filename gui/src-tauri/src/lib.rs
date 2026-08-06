@@ -532,14 +532,27 @@ async fn add_project(app: tauri::AppHandle) -> Result<Option<Value>, String> {
         .blocking_pick_folder();
     match folder {
         Some(path) => {
-            let root = path.to_string();
+            let raw = path.to_string();
+            // Go's ensureProjectRegistered stores EvalSymlinks-resolved
+            // roots in the registry, so we must canonicalize the picked
+            // path before looking it up — otherwise a symlinked folder
+            // (e.g. /tmp → /private/tmp on macOS) silently fails to match.
+            let root = std::fs::canonicalize(&raw)
+                .map(|p| p.display().to_string())
+                .unwrap_or(raw);
             ensure_daemon_running(&root)?;
             // Re-read the registry to get the full entry (with name + added).
             let projects = list_projects().await?;
             let entry = projects.as_array().and_then(|rows| {
                 rows.iter().find(|r| r.get("root") == Some(&json!(root)))
             });
-            Ok(entry.cloned())
+            match entry {
+                Some(e) => Ok(Some(e.clone())),
+                None => Err(format!(
+                    "daemon started for {} but project not found in registry (check ~/.odo/projects.json)",
+                    root
+                )),
+            }
         }
         None => Ok(None),
     }

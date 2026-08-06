@@ -144,8 +144,8 @@ export default function Sidebar({
                 {runningAny && <span className="ws-running-dot" />}
               </button>
               {pickerOpen && (
-                <>
-                <ul className="project-menu" role="listbox" aria-label="Projects">
+                <div className="project-menu" role="group" aria-label="Projects">
+                <ul role="listbox">
                   {projects.map((p) => {
                     const isActive = p.root === activeProjectRoot;
                     return (
@@ -190,7 +190,7 @@ export default function Sidebar({
                 >
                   <span className="ws-name">+ Add project…</span>
                 </button>
-                </>
+                </div>
               )}
             </div>
           ) : (
