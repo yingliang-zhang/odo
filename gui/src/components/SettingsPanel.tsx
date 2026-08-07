@@ -41,7 +41,11 @@ function ReviewModelsInput({
             type="button"
             className="model-chip-remove"
             aria-label={`Remove ${c}`}
-            onClick={() => commit(chips.filter((x) => x !== c))}
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              commit(chips.filter((x) => x !== c));
+            }}
           >
             ×
           </button>
@@ -62,11 +66,6 @@ function ReviewModelsInput({
         onBlur={addChip}
         placeholder="Add model…"
       />
-      <datalist id="sudo-models">
-        {SUDO_MODELS.map((m) => (
-          <option key={m} value={m} />
-        ))}
-      </datalist>
     </div>
   );
 }
@@ -200,6 +199,11 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
 
         {settings && (
           <form className="settings-form" onSubmit={handleSave}>
+            <datalist id="sudo-models">
+              {SUDO_MODELS.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
             <label className="settings-field">
               <span>Coding model</span>
               <input
