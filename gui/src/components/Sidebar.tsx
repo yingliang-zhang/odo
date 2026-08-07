@@ -302,8 +302,21 @@ export default function Sidebar({
           className={clsx("proj-row", isActive && "proj-row-active")}
           aria-expanded={isExpanded}
           onClick={() => {
-            if (!isActive) onSwitchProject(p.root);
-            toggleProject(p.root);
+            if (!isActive) {
+              onSwitchProject(p.root);
+              // Switching to a new project: ensure it's expanded, don't toggle
+              if (collapsedProjects.has(p.root)) {
+                setCollapsedProjects((prev) => {
+                  const next = new Set(prev);
+                  next.delete(p.root);
+                  return next;
+                });
+                setCollapsedProjects((prev) => { writeCollapsedSet(prev); return prev; });
+              }
+            } else {
+              // Clicking the already-active project: toggle expand/collapse
+              toggleProject(p.root);
+            }
           }}
         >
           <ChevronRight
