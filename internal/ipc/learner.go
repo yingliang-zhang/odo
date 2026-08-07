@@ -173,11 +173,11 @@ type siblingMemory struct {
 // vetoStats counts daemon-side evidence vetoes (journaled in the propose
 // event's stats, spec §2). M9 adds procedure (skill) counters.
 type vetoStats struct {
-	MemoryKept      int `json:"memory_kept"`
-	MemoryDropped   int `json:"memory_dropped"`
-	UserKept        int `json:"user_kept"`
-	UserDropped     int `json:"user_dropped"`
-	ProceduresKept  int `json:"procedures_kept,omitempty"`
+	MemoryKept        int `json:"memory_kept"`
+	MemoryDropped     int `json:"memory_dropped"`
+	UserKept          int `json:"user_kept"`
+	UserDropped       int `json:"user_dropped"`
+	ProceduresKept    int `json:"procedures_kept,omitempty"`
 	ProceduresDropped int `json:"procedures_dropped,omitempty"`
 }
 

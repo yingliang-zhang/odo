@@ -3,7 +3,6 @@ package ipc
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -24,9 +23,9 @@ import (
 
 // SkillGateResult is one proposal's gate outcome.
 type SkillGateResult struct {
-	Tier      string         // "auto_discard" | "human_gate" | "auto_accept" (deferred)
-	Proposal  MemoryProposal
-	Reviews   []ReviewResult
+	Tier     string // "auto_discard" | "human_gate" | "auto_accept" (deferred)
+	Proposal MemoryProposal
+	Reviews  []ReviewResult
 }
 
 // skillWrite is one pre-computed skill file write (path + content) for the
@@ -114,29 +113,4 @@ func splitSkillProposals(proposals []MemoryProposal) (nonSkills, skills []Memory
 		}
 	}
 	return
-}
-
-// filterGateResults returns the human_gate proposals (with reviews attached)
-// and the auto_discard proposals for separate journaling.
-func filterGateResults(gateResults []SkillGateResult) (humanGate, autoDiscard []MemoryProposal) {
-	for _, gr := range gateResults {
-		if gr.Tier == "auto_discard" {
-			autoDiscard = append(autoDiscard, gr.Proposal)
-		} else {
-			// human_gate (or auto_accept, deferred) — attach reviews
-			p := gr.Proposal
-			p.Reviews = gr.Reviews
-			humanGate = append(humanGate, p)
-		}
-	}
-	return
-}
-
-// joinVerdicts is a small helper for the skill_gate journal payload.
-func joinVerdicts(reviews []ReviewResult) string {
-	var parts []string
-	for _, r := range reviews {
-		parts = append(parts, fmt.Sprintf("%s=%s", r.Model, r.Verdict))
-	}
-	return strings.Join(parts, ", ")
 }

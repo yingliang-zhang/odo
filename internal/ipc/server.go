@@ -12,8 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -1589,13 +1589,21 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		for _, gr := range gateResults {
 			if gr.Tier == "auto_discard" {
 				// Journaled as skill_gate event (auditable, never in the batch).
-				_, _ = s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+				if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
 					"action":  "skill_gate",
 					"epoch":   c.Epoch,
 					"name":    gr.Proposal.Name,
 					"tier":    "auto_discard",
 					"reviews": gr.Reviews,
-				}))
+				})); err != nil {
+					// Fallback: journal a memory_update so the discard is never
+					// invisible (the skill_gate event exists for auditability).
+					_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+						"layer":  "skills",
+						"cause":  "gate_journal_failed",
+						"detail": fmt.Sprintf("auto_discard %s: %s", gr.Proposal.Name, err.Error()),
+					}))
+				}
 			} else {
 				// human_gate: attach reviews, include in the batch.
 				p := gr.Proposal
@@ -1984,28 +1992,28 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 				rule: p.Rule, evidence: p.Evidence, contradicts: p.Contradicts,
 			})
 		case "user.md":
-				// Projects on the proposal are the daemon-verified recurrence set
-				// (the LLM's self-tagged list was replaced at vet time).
-				userAccepted = append(userAccepted, acceptedUserRule{
-					rule: p.Rule, projects: p.Projects,
-				})
-			case "skills":
-				// M9: skill proposals write to .odo/skills/<name>.md. Use the
-				// vetted p.Name directly (NOT re-parsed frontmatter — TOCTOU risk).
-				if p.Name == "" {
-					return Response{}, fmt.Errorf("apply_memory: skill proposal %d has empty name", a.Index)
-				}
-				fname := filepath.Base(p.Name)
-				if !strings.HasSuffix(fname, ".md") {
-					fname += ".md"
-				}
-				if fname == "" || strings.Contains(fname, "..") {
-					return Response{}, fmt.Errorf("apply_memory: invalid skill name: %s", p.Name)
-				}
-				target := filepath.Join(s.projectRoot, ".odo", "skills", fname)
-				skillWrites = append(skillWrites, skillWrite{path: target, content: p.Rule})
-			default:
-				return Response{}, fmt.Errorf("apply_memory: unknown proposal target %q", p.Target)
+			// Projects on the proposal are the daemon-verified recurrence set
+			// (the LLM's self-tagged list was replaced at vet time).
+			userAccepted = append(userAccepted, acceptedUserRule{
+				rule: p.Rule, projects: p.Projects,
+			})
+		case "skills":
+			// M9: skill proposals write to .odo/skills/<name>.md. Use the
+			// vetted p.Name directly (NOT re-parsed frontmatter — TOCTOU risk).
+			if p.Name == "" {
+				return Response{}, fmt.Errorf("apply_memory: skill proposal %d has empty name", a.Index)
+			}
+			fname := filepath.Base(p.Name)
+			if !strings.HasSuffix(fname, ".md") {
+				fname += ".md"
+			}
+			if fname == "" || strings.Contains(fname, "..") {
+				return Response{}, fmt.Errorf("apply_memory: invalid skill name: %s", p.Name)
+			}
+			target := filepath.Join(s.projectRoot, ".odo", "skills", fname)
+			skillWrites = append(skillWrites, skillWrite{path: target, content: p.Rule})
+		default:
+			return Response{}, fmt.Errorf("apply_memory: unknown proposal target %q", p.Target)
 		}
 	}
 	// Rejected refs are daemon-computed (every proposal not accepted).
@@ -2140,8 +2148,8 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 	// M9: journal one memory_update per skill write.
 	for _, sw := range skillWrites {
 		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
-			"layer": "skills",
-			"cause": "applied",
+			"layer":  "skills",
+			"cause":  "applied",
 			"detail": fmt.Sprintf("wrote %s", filepath.Base(sw.path)),
 		})); err != nil {
 			return Response{}, err

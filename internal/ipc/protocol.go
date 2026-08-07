@@ -46,7 +46,7 @@ const (
 	// events for the wiki browser's retracted badges.
 	CmdLedger         = "ledger"
 	CmdContradictions = "contradictions"
-	CmdSearchEvents    = "search_events"
+	CmdSearchEvents   = "search_events"
 	// M8 (Skills): skills are plain markdown files in ~/.odo/skills/ and
 	// .odo/skills/. list_skills returns metadata; read_skill returns the
 	// full body; update_skill writes (creates or overwrites) a skill file.
@@ -71,7 +71,7 @@ type Request struct {
 	Adapter        string         `json:"adapter,omitempty"`
 	N              int            `json:"n,omitempty"`
 	Settings       *Settings      `json:"settings,omitempty"`
-	Path           string         `json:"path,omitempty"` // read_wiki: wiki note path; read_skill/update_skill: skill filename
+	Path           string         `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename
 	Scope          string         `json:"scope,omitempty"` // update_skill: "global" | "project" (M8)
 	Epoch          int            `json:"epoch,omitempty"`
 	Accepted       []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
@@ -94,9 +94,9 @@ type MemoryAccept struct {
 // carries the tri-model gate verdicts (nil for auto_discard proposals, which
 // are never included in the memory_propose batch).
 type MemoryProposal struct {
-	Target      string         `json:"target"`           // "memory.md" | "user.md" | "skills"
-	Rule        string         `json:"rule"`             // imperative rule OR full SKILL.md content (skills target)
-	Name        string         `json:"name,omitempty"`   // M9: vetted skill name (skills target only)
+	Target      string         `json:"target"`         // "memory.md" | "user.md" | "skills"
+	Rule        string         `json:"rule"`           // imperative rule OR full SKILL.md content (skills target)
+	Name        string         `json:"name,omitempty"` // M9: vetted skill name (skills target only)
 	Evidence    string         `json:"evidence,omitempty"`
 	Contradicts string         `json:"contradicts,omitempty"` // memory: contradicts existing rule; skills: "overwrites existing skill: <name>"
 	Projects    []string       `json:"projects,omitempty"`
@@ -186,10 +186,10 @@ type Response struct {
 	MemoryProposals int `json:"memory_proposals,omitempty"`
 	// pending_counts: Go map keys serialize as JSON strings — that is the
 	// contract the frontend implements.
-	PendingCounts      map[int64]int             `json:"pending_counts,omitempty"`
-	RunningWorkstreams []int64                   `json:"running_workstreams,omitempty"`
+	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`
+	RunningWorkstreams []int64       `json:"running_workstreams,omitempty"`
 	// search_events: cross-conversation search results.
-	SearchResults []store.SearchResult           `json:"search_results,omitempty"`
+	SearchResults []store.SearchResult `json:"search_results,omitempty"`
 	// M8 (Skills): list_skills returns all discovered skill metadata;
 	// read_skill returns the full markdown body of one skill.
 	Skills       []SkillInfo `json:"skills,omitempty"`
