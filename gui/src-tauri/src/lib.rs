@@ -26,10 +26,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `distill` runs a full summary-agent turn (bounded by the daemon's
 /// 10-minute `distillTimeout`) followed by the M4 learner one-shot (bounded
-/// by the 5-minute `learnerTimeout`) — both synchronously before the daemon
-/// answers, and the daemon serves one connection at a time, so the read
-/// timeout covers both plus margin (10m + 5m + margin).
-const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(960);
+/// by the 5-minute `learnerTimeout`) and the M9 tri-model skill gate
+/// (bounded by the 5-minute `moaReviewTimeout`) — all synchronously before
+/// the daemon answers, and the daemon serves one connection at a time, so
+/// the read timeout covers all three plus margin (10m + 5m + 5m + margin).
+const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(1900);
 
 /// `curate` runs the curator one-shot (bounded by the daemon's 10-minute
 /// `curatorTimeout`): it reads up to 50 epoch notes and rewrites every topic

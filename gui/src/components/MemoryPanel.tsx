@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
-import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse } from "../types";
+import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult } from "../types";
 import LoadingInline from "./LoadingInline";
 
 // M4 memory review (spec §7): the learner proposes rules at distill time
@@ -74,6 +74,70 @@ function ProposalRow({
   );
 }
 
+// M9: parse name + description from a SKILL.md rule's frontmatter for
+// display in the skill proposal row. Minimal parser — no external YAML dep.
+function parseSkillFrontmatter(rule: string): { name: string; description: string } {
+  const m = rule.match(/^---\nname:\s*(.+)\ndescription:\s*(.+)/);
+  if (!m) return { name: "", description: "" };
+  return { name: m[1].trim(), description: m[2].trim() };
+}
+
+// M9: SkillProposalRow — one proposed skill with tri-model review verdict
+// badges and a collapsible full-content view. Skills are reject-by-default
+// (stricter trust posture: skills inject into every prompt).
+function SkillProposalRow({
+  p,
+  index,
+  rejected,
+  onDecision,
+}: {
+  p: MemoryProposal;
+  index: number;
+  rejected: boolean;
+  onDecision: (index: number, accept: boolean) => void;
+}) {
+  const { name, description } = parseSkillFrontmatter(p.rule);
+  return (
+    <div className="mem-row mem-row-skill">
+      <div className="mem-row-main">
+        <div className="mem-skill-name">{name || p.name || "(unnamed skill)"}</div>
+        {description && <div className="mem-meta">{description}</div>}
+        {p.evidence && <div className="mem-meta">cites {p.evidence}</div>}
+        {p.contradicts && <div className="mem-meta mem-meta-warn">⚠ {p.contradicts}</div>}
+        {p.reviews && p.reviews.length > 0 && (
+          <div className="mem-verdicts">
+            {p.reviews.map((r: ReviewResult, i: number) => (
+              <span key={i} className={`verdict-badge verdict-${r.verdict}`}>
+                {r.model}: {r.verdict}
+              </span>
+            ))}
+          </div>
+        )}
+        <details className="mem-skill-details">
+          <summary>Full SKILL.md</summary>
+          <pre className="wiki-content mem-file">{p.rule}</pre>
+        </details>
+      </div>
+      <div className="mem-decisions">
+        <button
+          type="button"
+          className={`mem-decision accept${rejected ? "" : " selected"}`}
+          onClick={() => onDecision(index, true)}
+        >
+          Accept
+        </button>
+        <button
+          type="button"
+          className={`mem-decision reject${rejected ? " selected" : ""}`}
+          onClick={() => onDecision(index, false)}
+        >
+          Reject
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function MemoryPanel({ conversationId, workstreamName, initialTab, onApplied, projectRoot }: Props) {
   const [tab, setTab] = useState<"proposals" | "files">(initialTab ?? "proposals");
   const [batch, setBatch] = useState<PendingMemoryBatch | null>(null);
@@ -103,10 +167,17 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
           proposals: resp.proposals ?? [],
           reaffirm: resp.reaffirm,
         });
+        // M9: reject-by-default for skills — stricter trust posture because
+        // skills inject into every prompt. User must actively accept.
+        const skillRejects = new Set<number>();
+        (resp.proposals ?? []).forEach((p, i) => {
+          if (p.target === "skills") skillRejects.add(i);
+        });
+        setRejects(skillRejects);
       } else {
         setBatch(null);
+        setRejects(new Set());
       }
-      setRejects(new Set());
       setError(null);
     } catch (e) {
       setError(`memory proposals failed: ${errorMessage(e)}`);
@@ -171,7 +242,8 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
       );
       if (!resp.applied) throw new Error("daemon did not confirm the apply");
       const memCount = accepted.filter((a) => a.target === "memory.md").length;
-      const userCount = accepted.length - memCount;
+      const skillCount = accepted.filter((a) => a.target === "skills").length;
+      const userCount = accepted.length - memCount - skillCount;
       // The batch is now consumed; the refetch below lands on the empty
       // state and resets the decision set.
       await refreshBatch();
@@ -181,6 +253,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
         const summary: string[] = [];
         if (memCount > 0) summary.push(`${memCount} → memory.md`);
         if (userCount > 0) summary.push(`${userCount} → user.md`);
+        if (skillCount > 0) summary.push(`${skillCount} → skills`);
         setApplyResult(
           `applied — ${accepted.length} rule${accepted.length === 1 ? "" : "s"}${
             summary.length > 0 ? ` (${summary.join(", ")})` : ""
@@ -200,6 +273,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
 
   const memRows = batch ? byTarget(batch, "memory.md") : [];
   const userRows = batch ? byTarget(batch, "user.md") : [];
+  const skillRows = batch ? byTarget(batch, "skills") : [];
   const acceptedCount = batch ? batch.proposals.length - rejects.size : 0;
 
   return (
@@ -253,6 +327,20 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
                     <div className="mem-section-title">user.md (global)</div>
                     {userRows.map(({ p, index }) => (
                       <ProposalRow
+                        key={index}
+                        p={p}
+                        index={index}
+                        rejected={rejects.has(index)}
+                        onDecision={handleDecision}
+                      />
+                    ))}
+                  </>
+                )}
+                {skillRows.length > 0 && (
+                  <>
+                    <div className="mem-section-title">skills (proposed)</div>
+                    {skillRows.map(({ p, index }) => (
+                      <SkillProposalRow
                         key={index}
                         p={p}
                         index={index}

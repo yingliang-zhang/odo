@@ -80,7 +80,7 @@ type Request struct {
 // MemoryAccept references one proposal out of a pending memory_propose batch:
 // the proposal's target plus its index in the batch's proposals array.
 type MemoryAccept struct {
-	Target string `json:"target"` // "memory.md" | "user.md"
+	Target string `json:"target"` // "memory.md" | "user.md" | "skills"
 	Index  int    `json:"index"`
 }
 
@@ -88,12 +88,19 @@ type MemoryAccept struct {
 // evidence vetting. Projects carries the daemon-verified project names whose
 // staged inputs contained the rule (user.md target only) — never the LLM's
 // self-tagged list.
+//
+// M9: when Target is "skills", Rule holds the full composed SKILL.md content
+// (frontmatter + body), Name is the vetted kebab-case skill name, and Reviews
+// carries the tri-model gate verdicts (nil for auto_discard proposals, which
+// are never included in the memory_propose batch).
 type MemoryProposal struct {
-	Target      string   `json:"target"` // "memory.md" | "user.md"
-	Rule        string   `json:"rule"`
-	Evidence    string   `json:"evidence,omitempty"`
-	Contradicts string   `json:"contradicts,omitempty"`
-	Projects    []string `json:"projects,omitempty"`
+	Target      string         `json:"target"`           // "memory.md" | "user.md" | "skills"
+	Rule        string         `json:"rule"`             // imperative rule OR full SKILL.md content (skills target)
+	Name        string         `json:"name,omitempty"`   // M9: vetted skill name (skills target only)
+	Evidence    string         `json:"evidence,omitempty"`
+	Contradicts string         `json:"contradicts,omitempty"` // memory: contradicts existing rule; skills: "overwrites existing skill: <name>"
+	Projects    []string       `json:"projects,omitempty"`
+	Reviews     []ReviewResult `json:"reviews,omitempty"` // M9: tri-model gate verdicts (skills target only)
 }
 
 // ReviewResult is one model's verdict on a diff (MoA review fan-out).

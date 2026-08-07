@@ -10,6 +10,7 @@ package ipc
 // order.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -266,4 +267,24 @@ func loadSkillsForPrompt(projectRoot, query string) (string, []skillReceiptItem)
 	}
 	matched := matchSkills(query, entries)
 	return formatSkillsForInjection(matched, skillsInjectionCap)
+}
+
+// sanitizeSingleLine strips control characters (newline, carriage return,
+// tab) and collapses internal whitespace to single spaces, producing a
+// single-line string suitable for YAML frontmatter values (M9).
+func sanitizeSingleLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "	", " ")
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// composeSkillMD assembles a complete SKILL.md from the daemon-vetted
+// procedure fields. The daemon stamps origin: agent-authored — the LLM
+// never produces YAML frontmatter (M9 design constraint).
+func composeSkillMD(name, description string, keywords []string, body string) string {
+	name = sanitizeSingleLine(name)
+	description = sanitizeSingleLine(description)
+	return fmt.Sprintf("---\nname: %s\ndescription: %s\nkeywords: [%s]\norigin: agent-authored\n---\n\n%s",
+		name, description, strings.Join(keywords, ", "), body)
 }

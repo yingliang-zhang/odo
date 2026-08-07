@@ -125,6 +125,22 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true, ...fx.memoryProposals };
     }
     case "apply_memory": {
+      // M9: simulate skill writes for accepted skills proposals
+      const accepted = args?.accepted ?? [];
+      for (const a of accepted) {
+        const proposal = fx.memoryProposals.proposals[a.index];
+        if (proposal && proposal.target === "skills") {
+          const name = proposal.name ?? "unknown-skill";
+          fx.addMockSkill({
+            name,
+            description: proposal.rule.match(/^description:\s*(.+)$/m)?.[1]?.trim() ?? "",
+            keywords: [],
+            path: `.odo/skills/${name}.md`,
+            origin: "agent-authored",
+            scope: "project",
+          }, proposal.rule);
+        }
+      }
       return { ok: true, applied: true };
     }
     case "curate": {

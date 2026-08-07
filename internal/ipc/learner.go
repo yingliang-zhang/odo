@@ -121,7 +121,8 @@ func normalizeRule(s string) string {
 // --- learner output contract -------------------------------------------------
 
 // learnerResult is the JSON object the orchestrator one-shot must emit
-// (spec §2 output contract).
+// (spec §2 output contract). M9 adds the optional `procedures` array for
+// skill distillation.
 type learnerResult struct {
 	Memory []struct {
 		Rule        string `json:"rule"`
@@ -132,6 +133,15 @@ type learnerResult struct {
 		Rule     string   `json:"rule"`
 		Projects []string `json:"projects"`
 	} `json:"user"`
+	// M9: reusable workflows discovered in this epoch. The daemon composes
+	// the SKILL.md frontmatter from these fields — the LLM never produces
+	// YAML directly.
+	Procedures []struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Keywords    []string `json:"keywords"`
+		Body        string   `json:"body"`
+	} `json:"procedures"`
 	Reaffirm []string `json:"reaffirm"`
 }
 
@@ -161,12 +171,65 @@ type siblingMemory struct {
 }
 
 // vetoStats counts daemon-side evidence vetoes (journaled in the propose
-// event's stats, spec §2).
+// event's stats, spec §2). M9 adds procedure (skill) counters.
 type vetoStats struct {
-	MemoryKept    int `json:"memory_kept"`
-	MemoryDropped int `json:"memory_dropped"`
-	UserKept      int `json:"user_kept"`
-	UserDropped   int `json:"user_dropped"`
+	MemoryKept      int `json:"memory_kept"`
+	MemoryDropped   int `json:"memory_dropped"`
+	UserKept        int `json:"user_kept"`
+	UserDropped     int `json:"user_dropped"`
+	ProceduresKept  int `json:"procedures_kept,omitempty"`
+	ProceduresDropped int `json:"procedures_dropped,omitempty"`
+}
+
+// vettedProcedure is one learner-proposed procedure after daemon-side vetting
+// (M9). The daemon composes the SKILL.md frontmatter from these fields.
+type vettedProcedure struct {
+	Name        string
+	Description string
+	Keywords    []string
+	Body        string
+	Contradicts string // non-empty when name collides with an existing skill
+}
+
+// procedureBodyCap bounds one procedure's body. 2 KB allows up to 3 skills
+// within the 8 KB skillsInjectionCap (M9 design constraint).
+const procedureBodyCap = 2 * 1024
+
+// procedureMaxCount is the hard limit on procedures per epoch (M9).
+const procedureMaxCount = 3
+
+// slugifySkillName normalizes a name to kebab-case [a-z0-9-]+: lower-case,
+// replace non-[a-z0-9-] with -, collapse duplicate -, trim leading/trailing -.
+func slugifySkillName(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevDash = false
+		} else {
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// isSingleTokenKeyword returns true when a keyword is a single token (no
+// commas, no whitespace, no quotes) — the M9 keyword validation.
+func isSingleTokenKeyword(kw string) bool {
+	if kw == "" {
+		return false
+	}
+	for _, r := range kw {
+		if r == ',' || r == ' ' || r == '	' || r == '\n' || r == '\r' || r == '"' || r == '\'' {
+			return false
+		}
+	}
+	return true
 }
 
 // vetLearnerOutput applies the daemon-side evidence checks the LLM's
@@ -177,9 +240,12 @@ type vetoStats struct {
 //     registered projects' staged inputs ({own memory.md, new note} ∪ sibling
 //     memory.mds); kept proposals get daemon-verified Projects names.
 //     (With <2 registered projects this gate can never pass.)
+//   - M9 procedures: slugified kebab-case name, body cap, keyword single-token
+//     check, cap-3, batch-internal dedupe, and scanSkills conflict detection.
 //
 // ownName names the bound project in the verified projects list.
-func vetLearnerOutput(res *learnerResult, noteName, ownMem, noteContent, ownName string, siblings []siblingMemory) (proposals []MemoryProposal, reaffirm []string, stats vetoStats) {
+// projectRoot is used for the scanSkills conflict check (M9).
+func vetLearnerOutput(res *learnerResult, noteName, ownMem, noteContent, ownName string, siblings []siblingMemory, projectRoot string) (proposals []MemoryProposal, procedures []vettedProcedure, reaffirm []string, stats vetoStats) {
 	for _, mp := range res.Memory {
 		if mp.Rule == "" || mp.Evidence != noteName || strings.Contains(ownMem, mp.Rule) {
 			stats.MemoryDropped++
@@ -233,21 +299,89 @@ func vetLearnerOutput(res *learnerResult, noteName, ownMem, noteContent, ownName
 			reaffirm = append(reaffirm, t)
 		}
 	}
-	return proposals, reaffirm, stats
+
+	// M9: procedure (skill) vetting. The daemon composes the SKILL.md
+	// frontmatter — the LLM only provides {name, description, keywords, body}.
+	// Vet order: slugify → body cap → keywords → description sanitize →
+	// cap-3 → batch dedupe → scanSkills conflict.
+	existingSkills := scanSkills(projectRoot)
+	skillByName := map[string]string{} // name → scope for conflict text
+	for _, e := range existingSkills {
+		skillByName[e.info.Name] = e.info.Scope
+	}
+	seenNames := map[string]bool{}
+	for _, proc := range res.Procedures {
+		name := slugifySkillName(proc.Name)
+		if name == "" {
+			stats.ProceduresDropped++
+			continue
+		}
+		if len(proc.Body) > procedureBodyCap {
+			stats.ProceduresDropped++
+			continue
+		}
+		// Keywords: non-empty, single-token (no commas, no spaces, no quotes).
+		var kws []string
+		badKw := false
+		for _, k := range proc.Keywords {
+			if !isSingleTokenKeyword(k) {
+				badKw = true
+				break
+			}
+			kws = append(kws, k)
+		}
+		if badKw || len(kws) == 0 {
+			stats.ProceduresDropped++
+			continue
+		}
+		// Description: strip control chars, force single-line.
+		desc := sanitizeSingleLine(proc.Description)
+		if desc == "" {
+			stats.ProceduresDropped++
+			continue
+		}
+		// Cap-at-3 (hard limit, keep first 3, drop rest).
+		if len(procedures) >= procedureMaxCount {
+			stats.ProceduresDropped++
+			continue
+		}
+		// Batch-internal name dedupe (first wins).
+		if seenNames[name] {
+			stats.ProceduresDropped++
+			continue
+		}
+		seenNames[name] = true
+		// scanSkills conflict check.
+		var contradicts string
+		if scope, ok := skillByName[name]; ok {
+			contradicts = fmt.Sprintf("overwrites existing skill: %s (%s)", name, scope)
+		}
+		procedures = append(procedures, vettedProcedure{
+			Name:        name,
+			Description: desc,
+			Keywords:    kws,
+			Body:        proc.Body,
+			Contradicts: contradicts,
+		})
+		stats.ProceduresKept++
+	}
+
+	return proposals, procedures, reaffirm, stats
 }
 
 // learnerPrompt renders the learner one-shot prompt with inputs in the
 // spec's stable order: new note → own memory.md → siblings → user.md.
 func learnerPrompt(noteName, noteContent, ownMem string, siblings []siblingMemory, userMem string) string {
 	var b strings.Builder
-	b.WriteString(`You are running odo's memory learner pass. Extract behavior-shaping rules from the newly distilled epoch note below. A rule is an imperative statement that changes what an agent DOES on every future run ("always run go test before claiming done", "prefer compact output") — not a record, fact, or narrative.
+	b.WriteString(`You are running odo's memory learner pass. Extract behavior-shaping rules and reusable procedures from the newly distilled epoch note below. A rule is an imperative statement that changes what an agent DOES on every future run ("always run go test before claiming done", "prefer compact output") — not a record, fact, or narrative.
 
 Output JSON ONLY (no prose, no markdown fence), exactly this shape:
-{"memory":[{"rule":"<imperative>","evidence":"` + noteName + `","contradicts":""}],"user":[{"rule":"<imperative>","projects":["<p1>","<p2>"]}],"reaffirm":["<existing rule text>"]}
+{"memory":[{"rule":"<imperative>","evidence":"` + noteName + `","contradicts":""}],"user":[{"rule":"<imperative>","projects":["<p1>","<p2>"]}],"procedures":[{"name":"<kebab-case>","description":"<one line>","keywords":["k1","k2"],"body":"# Title\n\nSteps..."}],"reaffirm":["<existing rule text>"]}
 
 Rules:
 - memory: behavioral rules from the NEW note only, absent from the current memory.md. "evidence" must be exactly "` + noteName + `". "contradicts" is optional: the verbatim text of one existing memory.md rule the new rule contradicts ("" otherwise).
 - user: a rule proposing promotion to the global user.md is allowed ONLY when the same rule (same meaning, any wording) already appears in at least 2 registered projects' inputs below (this project's memory.md or new note, plus sibling memory.md files). Name those projects in "projects". If fewer than 2 projects are shown, "user" must be [].
+- procedures: reusable workflows discovered in this epoch that would help future sessions. Each must be a multi-step how-to with clear trigger conditions. Name must be kebab-case [a-z0-9-]+. Max 3 procedures. Keywords must be single tokens (no commas, no spaces). Body is markdown starting with a "# Title" heading. Do NOT include YAML frontmatter — the daemon composes it.
 - reaffirm: optional list of memory.md rule texts from the CURRENT memory.md that the new note shows still being followed.
 - Use empty arrays when nothing qualifies. Output the JSON object and nothing else.
 
@@ -280,17 +414,21 @@ func orEmpty(s string) string {
 	return s
 }
 
-// runLearner executes the learner one-shot for the just-distilled note and
-// journals the outcome (spec §2). It returns the number of pending proposals
-// in the new batch (0 when the learner failed or nothing survived the veto).
+// runLearner executes the learner one-shot for the just-distilled note (M9
+// refactor: no longer journals memory_propose internally). It returns the
+// vetted proposals (memory + user + skills), reaffirm targets, and veto
+// stats. handleDistill journals the memory_propose after gating the skill
+// proposals. On failure it journals memory_update{layer:"learner",
+// cause:"failed"} and returns empty results.
+//
 // epoch is the distilled note's epoch (conversation epoch BEFORE the
 // increment), so batch identity is `latest distill newEpoch − 1` (spec §5).
-func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int) int {
-	fail := func(err error) {
+func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int) (proposals []MemoryProposal, reaffirm []string, stats vetoStats, err error) {
+	fail := func(ferr error) {
 		_, _ = s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":  "learner",
 			"cause":  "failed",
-			"detail": err.Error(),
+			"detail": ferr.Error(),
 		}))
 	}
 
@@ -307,32 +445,30 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 	raw, err := runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, sibs, userMem), learnerTimeout)
 	if err != nil {
 		fail(fmt.Errorf("learner run: %w", err))
-		return 0
+		return nil, nil, vetoStats{}, nil // learner failure never fails the distill
 	}
 	res, err := parseLearnerOutput(raw)
 	if err != nil {
 		fail(err)
-		return 0
+		return nil, nil, vetoStats{}, nil
 	}
-	proposals, reaffirm, stats := vetLearnerOutput(res, noteName, ownMem, noteContent, ownName, sibs)
-	if len(proposals) == 0 {
-		// Zero proposals after the veto = no batch this distill; any older
-		// pending batch is superseded (spec §5). Nothing to journal (a
-		// zero-length propose would leave a reviewable "batch" of nothing).
-		return 0
+	proposals, procedures, reaffirm, stats := vetLearnerOutput(res, noteName, ownMem, noteContent, ownName, sibs, s.projectRoot)
+
+	// M9: compose SKILL.md for each surviving procedure. The daemon
+	// assembles the frontmatter — the LLM never produces YAML.
+	for _, proc := range procedures {
+		skillMD := composeSkillMD(proc.Name, proc.Description, proc.Keywords, proc.Body)
+		proposals = append(proposals, MemoryProposal{
+			Target:      "skills",
+			Rule:        skillMD,
+			Name:        proc.Name,
+			Evidence:    noteName,
+			Contradicts: proc.Contradicts,
+			// Reviews set later by gateSkillProposals
+		})
 	}
-	payload := map[string]interface{}{
-		"action":    "memory_propose",
-		"epoch":     epoch,
-		"proposals": proposals,
-		"reaffirm":  reaffirm,
-		"stats":     stats,
-	}
-	if _, err := s.store.AppendEvent(ctx, conversationID, store.EventReviewAction, mustJSON(payload)); err != nil {
-		fail(fmt.Errorf("journal memory_propose: %w", err))
-		return 0
-	}
-	return len(proposals)
+
+	return proposals, reaffirm, stats, nil
 }
 
 // siblingMemories returns up to 3 registered sibling projects' memory.md

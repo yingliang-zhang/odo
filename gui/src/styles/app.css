@@ -2592,6 +2592,35 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--warn);
 }
 
+/* M9: skill proposal row */
+.mem-skill-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.mem-verdicts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.mem-skill-details {
+  margin-top: 6px;
+}
+
+.mem-skill-details summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mem-skill-details pre {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 .mem-decisions {
   display: flex;
   gap: 4px;

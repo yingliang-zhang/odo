@@ -18,6 +18,7 @@ import type {
   ListTopicsResponse,
   ListWikiResponse,
   ListWorkstreamsResponse,
+  MemoryProposal,
   MemoryProposalsResponse,
   OdoEvent,
   PendingCountsResponse,
@@ -374,12 +375,28 @@ export const pinsContent = `# Pins
 
 // ---------- Memory proposals ----------
 
+// M9: skill proposals with tri-model gate reviews.
+export const skillProposals: MemoryProposal[] = [
+  {
+    target: "skills",
+    rule: "---\nname: run-tests-before-commit\ndescription: Use when claiming work is done.\nkeywords: [test, commit, verify]\norigin: agent-authored\n---\n\n# Run Tests Before Commit\n\n1. Run `go test ./...`\n2. Run `npx tsc --noEmit`\n3. Only commit if both pass",
+    name: "run-tests-before-commit",
+    evidence: "main-epoch-2.md",
+    reviews: [
+      { model: "kimi-k3@sudo", verdict: "accept", comments: "Clear and actionable" },
+      { model: "glm-5.2@sudo", verdict: "accept", comments: "Good trigger conditions" },
+      { model: "deepseek-v4-flash@sudo", verdict: "reject", comments: "Too rigid for exploratory work" },
+    ],
+  },
+];
+
 export const memoryProposals = {
   epoch: 2,
   seq: 10,
   proposals: [
     { target: "memory.md" as const, rule: "Odo sidebar uses CSS tree view for project/workstream hierarchy", evidence: "Sidebar.tsx tree implementation" },
     { target: "user.md" as const, rule: "User prefers browser dev mode with mock fixtures for GUI iteration" },
+    ...skillProposals,
   ],
   reaffirm: ["Odo: Tauri 2+React+Go"],
 };

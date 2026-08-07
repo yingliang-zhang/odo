@@ -345,17 +345,23 @@ export interface PendingCountsResponse {
 // ---------- M4: learning (memory.md / user.md proposals + apply) ----------
 
 // The daemon tags every proposal with the file it targets.
-export type MemoryTarget = "memory.md" | "user.md";
+export type MemoryTarget = "memory.md" | "user.md" | "skills";
 
 // One learner-proposed rule from the pending memory_propose batch. evidence
 // is optional — user-target proposals have no note evidence; projects is the
 // daemon-verified recurrence set (display-only, never the LLM's own tags).
+//
+// M9: when target is "skills", rule holds the full composed SKILL.md content,
+// name is the vetted kebab-case skill name, and reviews carries the tri-model
+// gate verdicts.
 export interface MemoryProposal {
   target: MemoryTarget;
   rule: string;
+  name?: string;    // M9: vetted skill name (skills target only)
   evidence?: string;
   contradicts?: string;
   projects?: string[];
+  reviews?: ReviewResult[]; // M9: tri-model gate verdicts (skills target only)
 }
 
 // One pending proposal batch (journal-only daemon storage: the

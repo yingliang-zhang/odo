@@ -1389,7 +1389,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reviews[i] = s.reviewWithModel(ctx, m, string(content))
+			reviews[i] = s.reviewWithModel(ctx, m, reviewPrompt(string(content)))
 		}()
 	}
 	wg.Wait()
@@ -1404,14 +1404,16 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 	return Response{Reviews: reviews}, nil
 }
 
-// reviewWithModel runs the review prompt through one explicit-model OMP
-// adapter and parses the verdict. A failed run degrades to needs_fixes with
+// reviewWithModel runs a review prompt through one explicit-model OMP
+// adapter and parses the verdict. The prompt is pre-built by the caller
+// (handleReviewDiff wraps with reviewPrompt; gateSkillProposals wraps
+// with skillReviewPrompt). A failed run degrades to needs_fixes with
 // the error as comments: a review that never happened must not read as an
 // accept.
-func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, diffContent string) ReviewResult {
+func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt string) ReviewResult {
 	label := m.model + "@" + m.provider
 	ad := adapter.NewOMPExplicit(s.mgr.StateDir(), m.model, m.provider)
-	text, err := runOneShot(ctx, ad, reviewPrompt(diffContent), moaReviewTimeout)
+	text, err := runOneShot(ctx, ad, prompt, moaReviewTimeout)
 	if err != nil {
 		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error()}
 	}
@@ -1568,12 +1570,60 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	noteName := fmt.Sprintf("%s-epoch-%d", w.Name, c.Epoch)
 	contradictions := s.runContradictionPass(ctx, c.ID, noteName, note, c.Epoch)
 
-	// Learner pass (M4 §2): propose behavior rules from the note just
-	// written, journaled before the epoch moves so the propose event's epoch
-	// is the distilled note's epoch (c.Epoch pre-increment, not newEpoch).
-	// A learner failure degrades to a journaled memory_update and never
-	// fails the distill.
-	proposals := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
+	// Learner pass (M4 §2 + M9): propose behavior rules and skill procedures
+	// from the note just written. runLearner no longer journals —
+	// handleDistill journals after gating the skill proposals. A learner
+	// failure degrades to a journaled memory_update and never fails the
+	// distill.
+	proposals, reaffirm, stats, _ := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
+
+	// M9: gate skill proposals through tri-model review. Non-skill proposals
+	// (memory.md, user.md) go straight to the batch; skills are partitioned
+	// by the gate into auto_discard (dropped + journaled) and human_gate
+	// (kept with reviews, included in the batch).
+	nonSkills, skillProposals := splitSkillProposals(proposals)
+	var humanGateSkills []MemoryProposal
+	if len(skillProposals) > 0 {
+		models := parseReviewModels(adapter.LoadPrefsRaw("review"))
+		gateResults := s.gateSkillProposals(ctx, skillProposals, models, note)
+		for _, gr := range gateResults {
+			if gr.Tier == "auto_discard" {
+				// Journaled as skill_gate event (auditable, never in the batch).
+				_, _ = s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+					"action":  "skill_gate",
+					"epoch":   c.Epoch,
+					"name":    gr.Proposal.Name,
+					"tier":    "auto_discard",
+					"reviews": gr.Reviews,
+				}))
+			} else {
+				// human_gate: attach reviews, include in the batch.
+				p := gr.Proposal
+				p.Reviews = gr.Reviews
+				humanGateSkills = append(humanGateSkills, p)
+			}
+		}
+	}
+
+	// Journal memory_propose with non-skills + human_gate skills.
+	// If zero surviving proposals total, skip (same as today's len==0 check).
+	batchProposals := append(nonSkills, humanGateSkills...)
+	if len(batchProposals) > 0 {
+		payload := map[string]interface{}{
+			"action":    "memory_propose",
+			"epoch":     c.Epoch,
+			"proposals": batchProposals,
+			"reaffirm":  reaffirm,
+			"stats":     stats,
+		}
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(payload)); err != nil {
+			_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+				"layer":  "learner",
+				"cause":  "failed",
+				"detail": fmt.Sprintf("journal memory_propose: %s", err.Error()),
+			}))
+		}
+	}
 
 	newEpoch, err := s.store.IncrementEpoch(ctx, c.ID)
 	if err != nil {
@@ -1594,7 +1644,7 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	// citable). Section header uses c.Epoch — the distilled note's epoch,
 	// not newEpoch (the counter after increment).
 	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
-	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: proposals}, nil
+	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: len(batchProposals)}, nil
 }
 
 // journalDistillLedger appends the distill's section to .odo/ledger.md from
@@ -1915,6 +1965,7 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 	accepted := make([]bool, len(batch.proposals))
 	var memAccepted []acceptedRule
 	var userAccepted []acceptedUserRule
+	var skillWrites []skillWrite // M9: pre-computed skill file writes
 	for _, a := range req.Accepted {
 		if a.Index < 0 || a.Index >= len(batch.proposals) {
 			return Response{}, fmt.Errorf("apply_memory: proposal index %d out of range (%d proposals)", a.Index, len(batch.proposals))
@@ -1933,13 +1984,28 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 				rule: p.Rule, evidence: p.Evidence, contradicts: p.Contradicts,
 			})
 		case "user.md":
-			// Projects on the proposal are the daemon-verified recurrence set
-			// (the LLM's self-tagged list was replaced at vet time).
-			userAccepted = append(userAccepted, acceptedUserRule{
-				rule: p.Rule, projects: p.Projects,
-			})
-		default:
-			return Response{}, fmt.Errorf("apply_memory: unknown proposal target %q", p.Target)
+				// Projects on the proposal are the daemon-verified recurrence set
+				// (the LLM's self-tagged list was replaced at vet time).
+				userAccepted = append(userAccepted, acceptedUserRule{
+					rule: p.Rule, projects: p.Projects,
+				})
+			case "skills":
+				// M9: skill proposals write to .odo/skills/<name>.md. Use the
+				// vetted p.Name directly (NOT re-parsed frontmatter — TOCTOU risk).
+				if p.Name == "" {
+					return Response{}, fmt.Errorf("apply_memory: skill proposal %d has empty name", a.Index)
+				}
+				fname := filepath.Base(p.Name)
+				if !strings.HasSuffix(fname, ".md") {
+					fname += ".md"
+				}
+				if fname == "" || strings.Contains(fname, "..") {
+					return Response{}, fmt.Errorf("apply_memory: invalid skill name: %s", p.Name)
+				}
+				target := filepath.Join(s.projectRoot, ".odo", "skills", fname)
+				skillWrites = append(skillWrites, skillWrite{path: target, content: p.Rule})
+			default:
+				return Response{}, fmt.Errorf("apply_memory: unknown proposal target %q", p.Target)
 		}
 	}
 	// Rejected refs are daemon-computed (every proposal not accepted).
@@ -1992,6 +2058,14 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 	if userChanged {
 		if err := writeFileAtomic(userPath, newUser, 0o600); err != nil {
 			return Response{}, fmt.Errorf("apply_memory: write user.md: %w", err)
+		}
+	}
+	// M9: write skill files before memory.md (memory.md is still last for
+	// convergence). Skill writes are idempotent by overwrite (atomic rename,
+	// same content = no-op).
+	for _, sw := range skillWrites {
+		if err := writeFileAtomic(sw.path, sw.content, 0o644); err != nil {
+			return Response{}, fmt.Errorf("apply_memory: write skill %s: %w", sw.path, err)
 		}
 	}
 	if memChanged {
@@ -2059,6 +2133,16 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 			"before_sha": sha16([]byte(oldUser)),
 			"after_sha":  sha16([]byte(newUser)),
 			"detail":     fmt.Sprintf("accepted %d rule(s)", len(userAccepted)),
+		})); err != nil {
+			return Response{}, err
+		}
+	}
+	// M9: journal one memory_update per skill write.
+	for _, sw := range skillWrites {
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer": "skills",
+			"cause": "applied",
+			"detail": fmt.Sprintf("wrote %s", filepath.Base(sw.path)),
 		})); err != nil {
 			return Response{}, err
 		}
