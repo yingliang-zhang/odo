@@ -3149,7 +3149,7 @@ mark {
   left: 0;
   top: 0;
   bottom: 0;
-  z-index: 1;
+  z-index: 0;
   pointer-events: auto;
   touch-action: none;
 }
@@ -3162,29 +3162,31 @@ mark {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 0 8px 0 4px;
+  padding: 0 8px 0 8px;
   height: 32px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
+  overflow: hidden;
 }
 
 .panel-tabs {
   display: flex;
-  gap: 2px;
+  gap: 1px;
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .panel-tab {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   background: none;
   border: 1px solid transparent;
   border-radius: 4px;
   color: var(--text-dim);
-  font-size: 12px;
-  padding: 4px 8px;
+  font-size: 11px;
+  padding: 3px 5px;
   cursor: pointer;
   white-space: nowrap;
 }

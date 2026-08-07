@@ -162,9 +162,9 @@ Completed all 7 features from the Hermes UX borrowing action list:
 // ---------- Settings ----------
 
 export const defaultSettings: Settings = {
-  coding_model: "kimi-k3",
+  coding_model: "t9s/kimi-k3",
   coding_provider: "sudo",
-  orchestrator_model: "glm-5.2",
+  orchestrator_model: "t9s/glm-5.2",
   orchestrator_provider: "sudo",
   omp_timeout: "600",
   default_adapter: "omp",
