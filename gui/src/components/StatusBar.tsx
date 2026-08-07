@@ -1,6 +1,6 @@
-// M9 Phase 5: StatusBar — 24px bar with session facts, adapter selector,
-// clickable badges, and run indicator. Absorbs everything System-ish that
-// used to weigh down the sidebar.
+// M9 Phase 5: StatusBar — 24px bar with session facts, clickable badges,
+// and run indicator. Absorbs everything System-ish that used to weigh down
+// the sidebar.
 
 import { LoaderCircle, GitCompareArrows, FileText, MapPin } from "lucide-react";
 
@@ -11,9 +11,6 @@ interface Props {
   projectRoot: string | null;
   agentRunning: boolean;
   runningCount: number;
-  // Adapter selector (moved from sidebar)
-  adapter: string;
-  onAdapterChange: (adapter: string) => void;
   // Clickable badges → open panel on the matching tab
   pendingDiffs: number;
   wikiNoteCount: number | null;
@@ -28,8 +25,6 @@ export default function StatusBar({
   projectRoot,
   agentRunning,
   runningCount,
-  adapter,
-  onAdapterChange,
   pendingDiffs,
   wikiNoteCount,
   pendingMemoryProposals,
@@ -87,17 +82,6 @@ export default function StatusBar({
           <MapPin size={11} /> {pendingMemoryProposals}
         </button>
       )}
-      {/* Adapter selector */}
-      <select
-        className="status-adapter"
-        value={adapter}
-        onChange={(e) => onAdapterChange(e.target.value)}
-        aria-label="Adapter"
-        title="Agent adapter"
-      >
-        <option value="omp">OMP</option>
-        <option value="pi">Pi</option>
-      </select>
     </footer>
   );
 }

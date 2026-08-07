@@ -12,7 +12,6 @@ import type {
   CurateResponse,
   Diff,
   DistillResponse,
-  FanoutSendResponse,
   GetSettingsResponse,
   LedgerResponse,
   ListTopicsResponse,
@@ -31,7 +30,6 @@ import type {
   ReadWikiResponse,
   RejectDiffResponse,
   ReviewDiffResponse,
-  RunInfo,
   SearchResult,
   SearchEventsResponse,
   SendMessageResponse,
@@ -167,7 +165,6 @@ export const defaultSettings: Settings = {
   orchestrator_model: "t9s/glm-5.2",
   orchestrator_provider: "sudo",
   omp_timeout: "600",
-  default_adapter: "omp",
   review_models: "t9s/kimi-k3@sudo,t9s/glm-5.2@sudo,t9s/deepseek-v4-flash@sudo",
   auto_distill: "on_idle",
   auto_distill_idle_seconds: "300",
@@ -343,10 +340,6 @@ origin: human
 `,
 };
 
-// ---------- Runs ----------
-
-export const runs: RunInfo[] = [];
-
 // ---------- Topics ----------
 
 export const topics: WikiNoteInfo[] = [
@@ -428,7 +421,6 @@ export function makePollResponse(convId: number): PollEventsResponse {
     streaming: false,
     diff: convId === 1 ? pendingDiff : null,
     diffs: convId === 1 ? [pendingDiff] : [],
-    runs,
   };
 }
 
@@ -453,7 +445,6 @@ export {
   type CreateWorkstreamResponse,
   type CurateResponse,
   type DistillResponse,
-  type FanoutSendResponse,
   type GetSettingsResponse,
   type LedgerResponse,
   type ListTopicsResponse,

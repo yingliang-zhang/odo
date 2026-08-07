@@ -10,7 +10,6 @@ import {
   deleteWorkstream,
   distill,
   errorMessage,
-  fanoutSend,
   getSettings,
   listProjects,
   listTopics,
@@ -24,7 +23,6 @@ import {
   rejectDiff,
   sendMessage,
   unwrap,
-  updateSettings,
 } from "./api";
 import ChatSurface from "./components/ChatSurface";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
@@ -40,7 +38,7 @@ import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { notifyRunDone } from "./notify";
-import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, ProjectEntry, RunInfo, Workstream } from "./types";
+import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, ProjectEntry, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -118,10 +116,7 @@ export default function App() {
   // M7: transient streaming preview (never journaled), rebuilt every poll.
   const [preview, setPreview] = useState<PreviewEvent | null>(null);
   const [diff, setDiff] = useState<Diff | null>(null);
-  // M8: fan-out per-run state from the daemon (resp.runs + resp.diffs).
-  const [runs, setRuns] = useState<RunInfo[]>([]);
   const [diffs, setDiffs] = useState<Diff[]>([]);
-  const [adapter, setAdapter] = useState("omp");
   // Belt A: sidebar collapse (⌘B) and the settings modal, lifted out of the
   // Sidebar so ⌘, opens it regardless of sidebar visibility. The collapse
   // state persists across launches.
@@ -339,7 +334,6 @@ export default function App() {
       setAgentRunning(resp.agent_running ?? false);
       setPreview(null); // bootstrap carries no preview; the next poll restores it
       setDiff(resp.diff ?? null);
-      setRuns([]);
       setDiffs([]);
       // M9 P2: reset the bootstrap latch so the first poll after a new
       // bootstrap (switch workstream, session restore) doesn't auto-open.
@@ -403,27 +397,6 @@ export default function App() {
     };
   }, [applyBootstrap]);
 
-  // K3 review P1: read the daemon's default_adapter on bootstrap so sends
-  // use the persisted setting instead of hardcoded "omp" (the adapter
-  // selector itself moves to the StatusBar in M9 P5).
-  useEffect(() => {
-    if (!booted) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const resp = unwrap(await getSettings(projectRootRef.current ?? undefined));
-        if (!cancelled && resp.settings?.default_adapter) {
-          setAdapter(resp.settings.default_adapter);
-        }
-      } catch {
-        // Degrade silently — the hardcoded "omp" default stays.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [booted]);
-
   // Poll the daemon for new journal events after the last seen seq.
   useEffect(() => {
     if (!booted) return;
@@ -448,8 +421,6 @@ export default function App() {
         // The daemon always reports the latest diff (any status); only a
         // pending one is actionable in the UI.
         if (resp.diff) setDiff(resp.diff);
-        // M8: store per-run state from the daemon.
-        setRuns(resp.runs ?? []);
         const newDiffs = resp.diffs ?? [];
         setDiffs(newDiffs);
         // M9 P2: auto-open the panel on a genuine 0→1 pending-diff
@@ -546,7 +517,6 @@ export default function App() {
         const resp = unwrap(
           await sendMessage(cid, text, attachments, {
             steer,
-            adapter,
             projectRoot: projectRootRef.current ?? undefined,
           }),
         );
@@ -560,26 +530,8 @@ export default function App() {
         throw e; // let the composer keep the draft
       }
     },
-    [recordEvents, adapter],
+    [recordEvents],
   );
-
-  // M2 fan-out: N parallel runs on one prompt. Resolves to the number of
-  // runs the daemon started so the composer can show the indicator.
-  const handleFanout = useCallback(async (text: string, n: number): Promise<number> => {
-    const cid = conversationRef.current;
-    if (cid == null) throw new Error("no active conversation yet");
-    cancelAutoDistill(); // M10: cancel pending auto-distill
-    try {
-      const resp = unwrap(await fanoutSend(cid, text, n, projectRootRef.current ?? undefined));
-      const started = resp.runs?.length ?? 0;
-      if (started > 0) setAgentRunning(true);
-      setError(null);
-      return started;
-    } catch (e) {
-      setError(`fan-out failed: ${errorMessage(e)}`);
-      throw e; // let the composer keep the draft
-    }
-  }, []);
 
   // Belt A: stop the running agent. ok:false ("no active run") is the
   // expected race against a run that finished on its own — the next poll
@@ -1220,18 +1172,7 @@ export default function App() {
         <SettingsPanel
           projectRoot={project?.root_path ?? null}
           onClose={() => setSettingsOpen(false)}
-          onSaved={() => {
-            // M9 P4: re-read adapter from daemon after settings save
-            // (the sidebar adapter selector was removed; SettingsPanel
-            // is now the only mid-session path to change it until P5
-            // adds the StatusBar selector).
-            void (async () => {
-              try {
-                const resp = unwrap(await getSettings(projectRootRef.current ?? undefined));
-                if (resp.settings?.default_adapter) setAdapter(resp.settings.default_adapter);
-              } catch { /* degrade silently */ }
-            })();
-          }}
+          onSaved={() => {}}
         />
       )}
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} initialActionId={paletteInitialAction} />}
@@ -1314,10 +1255,8 @@ export default function App() {
           events={events}
           agentRunning={agentRunning}
           preview={preview}
-          runs={runs}
           sendDisabled={!booted}
           onSend={handleSend}
-          onFanout={handleFanout}
           onCancel={handleCancel}
           epoch={conversation?.epoch ?? 1}
           distilledTo={lastDistillPath}
@@ -1341,7 +1280,6 @@ export default function App() {
               <DiffViewer
                 key={`${projectRootRef.current ?? ""}:${d.id}`}
                 diff={d}
-                runLabel={d.run_index != null ? `Run ${d.run_index + 1}` : undefined}
                 onAccept={handleAccept}
                 onReject={handleReject}
                 onSendComments={(text) => handleSend(text, [], agentRunning)}
@@ -1400,18 +1338,7 @@ export default function App() {
         epoch={conversation?.epoch ?? 1}
         projectRoot={project?.root_path ?? null}
         agentRunning={agentRunning}
-        runningCount={runs.filter((r) => r.status === "running").length}
-        adapter={adapter}
-        onAdapterChange={async (a) => {
-          setAdapter(a);
-          // M9 P5: persist to daemon so the choice survives relaunch.
-          try {
-            const s = unwrap(await getSettings(projectRootRef.current ?? undefined));
-            unwrap(
-              await updateSettings({ ...s, default_adapter: a }, projectRootRef.current ?? undefined),
-            );
-          } catch { /* degrade silently */ }
-        }}
+        runningCount={agentRunning ? 1 : 0}
         pendingDiffs={diffs.length}
         wikiNoteCount={wikiNoteCount}
         pendingMemoryProposals={pendingMemoryProposals}

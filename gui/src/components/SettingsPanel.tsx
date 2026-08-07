@@ -76,14 +76,14 @@ type Theme = "dark" | "light";
 
 interface Props {
   onClose: () => void;
-  // M9 P4: fired after a successful save so App can re-read the adapter.
+  // M9 P4: fired after a successful save so App can react.
   onSaved?: () => void;
   // M11 P1: settings belong to this project's daemon; null = bridge default.
   projectRoot?: string | null;
 }
 
 // M2 settings modal: loads the daemon's project settings on mount, edits a
-// curated subset (coding/orchestrator model, OMP timeout, default adapter,
+// curated subset (coding/orchestrator model, OMP timeout,
 // review models), and saves the full object back so untouched keys
 // (providers) survive the round trip.
 export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) {
@@ -232,17 +232,7 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
               />
             </label>
             <label className="settings-field">
-              <span>Default adapter</span>
-              <select
-                value={settings.default_adapter}
-                onChange={(e) => set("default_adapter", e.target.value)}
-              >
-                <option value="omp">OMP</option>
-                <option value="pi">Pi</option>
-              </select>
-            </label>
-            <label className="settings-field">
-              <span>Review models</span>
+              <span>Review Models</span>
               <ReviewModelsInput
                 value={settings.review_models}
                 onChange={(v) => set("review_models", v)}

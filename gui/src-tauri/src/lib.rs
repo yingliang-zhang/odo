@@ -283,7 +283,7 @@ async fn send_message(
         req["attachments"] = json!(paths);
     }
     // M1: steer journals the message for the running agent without starting
-    // a new run; adapter selects the backend ("omp" | "pi").
+    // a new run; adapter selects the backend ("omp").
     if let Some(steer) = steer {
         req["steer"] = json!(steer);
     }
@@ -391,20 +391,6 @@ async fn get_settings(project_root: Option<String>) -> Result<Value, String> {
 async fn update_settings(project_root: Option<String>, settings: Value) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     let req = json!({"cmd": "update_settings", "project_root": root, "settings": settings});
-    run_command(root, req, READ_TIMEOUT).await
-}
-
-// M2 fan-out: start N parallel agent runs on one prompt. The daemon returns
-// immediately with the run list; progress arrives through the poll loop.
-#[tauri::command]
-async fn fanout_send(
-    conversation_id: i64,
-    text: String,
-    n: i64,
-    project_root: Option<String>,
-) -> Result<Value, String> {
-    let root = resolve_root(project_root)?;
-    let req = json!({"cmd": "fanout_send", "conversation_id": conversation_id, "text": text, "n": n});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -749,7 +735,7 @@ mod tests {
     }
 
     /// M1 flow end to end over the socket layer: workstream create/list,
-    /// bootstrap switch, adapter selection, steering, distill. The request
+    /// bootstrap switch, steering, distill. The request
     /// shapes mirror the JSON the Tauri commands above assemble.
     #[test]
     fn m1_workstream_steer_distill() {
@@ -790,10 +776,10 @@ mod tests {
         let cid = switched["conversation"]["id"].as_i64().unwrap();
         assert_eq!(switched["conversation"]["epoch"], 1);
 
-        // Start a run on the Pi adapter.
+        // Start a run on the OMP adapter.
         let sent = send_to_daemon(
             &root,
-            &json!({"cmd": "send_message", "conversation_id": cid, "text": "smoke m1", "adapter": "pi"}),
+            &json!({"cmd": "send_message", "conversation_id": cid, "text": "smoke m1", "adapter": "omp"}),
             READ_TIMEOUT,
         )
         .unwrap();
@@ -891,7 +877,6 @@ pub fn run() {
             review_diff,
             get_settings,
             update_settings,
-            fanout_send,
             list_wiki,
             read_wiki,
             pending_counts,

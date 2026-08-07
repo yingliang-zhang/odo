@@ -6,34 +6,35 @@ import (
 	"testing"
 )
 
-// TestDefaultAdapterFallback covers the M2 F5 follow-up (M3 3d): an empty
-// adapter name resolves the prefs.md default_adapter key, falling back to
-// the compiled-in "omp" when the key (or the file) is absent. A non-empty
-// name passes through unchanged.
-func TestDefaultAdapterFallback(t *testing.T) {
+// TestSettingsNoDefaultAdapter covers the removal of the default_adapter
+// setting: prefs.md no longer carries a default_adapter key, and the
+// daemon always uses "omp". This test verifies that ReadSettings and
+// UpdateSettings work correctly without the field — prefs with an
+// old default_adapter line simply ignore it.
+func TestSettingsNoDefaultAdapter(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	// No prefs.md at all: compiled-in default.
-	if got := ResolveAdapter(""); got != "omp" {
-		t.Errorf("ResolveAdapter(\"\") = %q, want %q (no prefs.md)", got, "omp")
+	// No prefs.md at all: settings fall back to defaults.
+	s := ReadSettings()
+	if s.CodingModel != defaultModel {
+		t.Errorf("CodingModel = %q, want %q (no prefs.md)", s.CodingModel, defaultModel)
 	}
 
-	// prefs.md without the key: still the compiled-in default.
+	// prefs.md without a default_adapter key: settings still work.
 	writePrefsForTest(t, home, "coding: glm-5.2@sudo\n")
-	if got := ResolveAdapter(""); got != "omp" {
-		t.Errorf("ResolveAdapter(\"\") = %q, want %q (key absent)", got, "omp")
+	s = ReadSettings()
+	if s.CodingModel != "glm-5.2" || s.CodingProvider != "sudo" {
+		t.Errorf("from prefs = %s@%s, want glm-5.2@sudo", s.CodingModel, s.CodingProvider)
 	}
 
-	// prefs.md with the key: the empty name resolves it.
-	writePrefsForTest(t, home, "default_adapter: pi\n")
-	if got := ResolveAdapter(""); got != "pi" {
-		t.Errorf("ResolveAdapter(\"\") = %q, want %q (prefs default_adapter)", got, "pi")
-	}
-
-	// A non-empty name is returned unchanged.
-	if got := ResolveAdapter("pi"); got != "pi" {
-		t.Errorf("ResolveAdapter(%q) = %q, want %q", "pi", got, "pi")
+	// prefs.md with an old default_adapter line: it is ignored (not
+	// read into Settings, which no longer has the field). Other keys
+	// still parse correctly.
+	writePrefsForTest(t, home, "default_adapter: pi\ncoding: glm-5.2@sudo\n")
+	s = ReadSettings()
+	if s.CodingModel != "glm-5.2" || s.CodingProvider != "sudo" {
+		t.Errorf("from prefs with old default_adapter = %s@%s, want glm-5.2@sudo", s.CodingModel, s.CodingProvider)
 	}
 }
 

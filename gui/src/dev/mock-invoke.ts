@@ -71,15 +71,6 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
     case "poll_events": {
       return fx.makePollResponse(args?.conversationId ?? 1);
     }
-    case "fanout_send": {
-      const n = args?.n ?? 2;
-      const newRuns = Array.from({ length: n }, (_, i) => ({
-        run_id: `mock-run-${Date.now()}-${i}`,
-        status: "running" as const,
-        index: i,
-      }));
-      return { ok: true, runs: newRuns };
-    }
 
     // ---------- Diffs ----------
     case "accept_diff": {

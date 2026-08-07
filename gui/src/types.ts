@@ -102,11 +102,6 @@ export interface EventPayload {
   // human-readable summary.
   layer?: string;
   cause?: string;
-  // M8 multi-run: fan-out event attribution. Absent on single-run events
-  // (byte-identical journals). run_id = runDirID; run_index = 0-based
-  // batch ordinal.
-  run_id?: string;
-  run_index?: number;
   detail?: string;
   // review_action when action == "distill" (M1 memory distiller).
   epoch?: number;
@@ -146,10 +141,6 @@ export interface Diff {
   status: DiffStatus;
   path: string;
   content: string;
-  // M8: fan-out run attribution (omitempty on the wire; absent for
-  // single-run diffs and old journals).
-  run_id?: string;
-  run_index?: number;
 }
 
 export interface BootstrapResponse {
@@ -169,7 +160,7 @@ export type SendMessageRequest = {
   text: string;
   attachments?: string[];
   // M1: steer journals the message for a running agent instead of starting
-  // a new run; adapter selects the backend ("omp" | "pi").
+  // a new run; adapter selects the backend ("omp").
   steer?: boolean;
   adapter?: string;
   // M11 P1: routes to that project's daemon; null = bridge default.
@@ -198,9 +189,7 @@ export interface PollEventsResponse {
   preview?: PreviewEvent | null;
   streaming?: boolean;
   diff?: Diff | null;
-  // M8: all pending diffs (one per fan-out lane), newest-first.
   diffs?: Diff[];
-  runs?: RunInfo[];
 }
 
 export interface AcceptDiffResponse {
@@ -237,7 +226,7 @@ export interface DistillResponse {
   epoch?: number;
 }
 
-// ---------- M2: review panel, settings, fan-out ----------
+// ---------- M2: review panel, settings ----------
 
 export type ReviewVerdict = "accept" | "reject" | "needs_fixes" | (string & {});
 
@@ -261,7 +250,6 @@ export interface Settings {
   orchestrator_model: string;
   orchestrator_provider: string;
   omp_timeout: string;
-  default_adapter: string;
   review_models: string;
   auto_distill: string;
   auto_distill_idle_seconds: string;
@@ -296,31 +284,6 @@ export interface UpdateSettingsResponse {
 export type UpdateSettingsRequest = {
   settings: Partial<Settings>;
 };
-
-// One parallel run started by `fanout_send`. run_id is the daemon's runDirID
-// (joins events → worktree → diff). index is the 0-based batch ordinal.
-// diff_id is set when the run has produced a pending diff. preview carries
-// the run's M7 streaming preview (partial:true, never journaled).
-export interface RunInfo {
-  run_id: string;
-  status: "running" | "done" | "error" | (string & {});
-  index: number;
-  diff_id?: number;
-  preview?: PreviewEvent | null;
-}
-
-// Type alias (not interface) so it is assignable to Tauri's InvokeArgs.
-export type FanoutSendRequest = {
-  conversationId: number;
-  text: string;
-  n: number;
-};
-
-export interface FanoutSendResponse {
-  ok: boolean;
-  error?: string;
-  runs?: RunInfo[];
-}
 
 // ---------- M3: wiki browser + visibility ----------
 

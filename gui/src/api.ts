@@ -35,8 +35,6 @@ import type {
   CreateWorkstreamResponse,
   CurateResponse,
   DistillResponse,
-  FanoutSendRequest,
-  FanoutSendResponse,
   GetSettingsResponse,
   LedgerResponse,
   ListTopicsResponse,
@@ -90,7 +88,7 @@ export async function addProject(): Promise<ProjectEntry | null> {
 export interface SendOptions {
   // steer: journal the message for the running agent (no new run started).
   steer?: boolean;
-  // adapter: backend to run with ("omp" | "pi"); ignored for steering.
+  // adapter: backend to run with ("omp"); ignored for steering.
   adapter?: string;
   // M11 P1: route to that project's daemon; null keeps the bridge default.
   projectRoot?: string;
@@ -198,17 +196,6 @@ export function updateSettings(
     projectRoot: projectRoot ?? null,
     ...req,
   });
-}
-
-// M2 fan-out: run the same prompt through N parallel agent runs.
-export function fanoutSend(
-  conversationId: number,
-  text: string,
-  n: number,
-  projectRoot?: string,
-): Promise<FanoutSendResponse> {
-  const req: FanoutSendRequest = { conversationId, text, n };
-  return invoke<FanoutSendResponse>("fanout_send", { ...req, projectRoot: projectRoot ?? null });
 }
 
 // M3 wiki browser: read-only, served from the project's daemon.

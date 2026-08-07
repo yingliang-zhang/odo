@@ -71,13 +71,6 @@ printf 'Created hello.txt as requested.\n' > "$output_file"
 exit 0
 `
 
-// stubPiSlow mimics the pi CLI: it sleeps, prints to stdout, exits 0.
-const stubPi = `#!/bin/sh
-sleep 3
-printf 'Pi summary of the task.\n'
-exit 0
-`
-
 type testRig struct {
 	root    string // temp project repo
 	sock    string
@@ -527,7 +520,7 @@ func TestBootstrapByWorkstream(t *testing.T) {
 
 // TestSteering covers steer=true messages: they journal a user_message
 // without starting a run, reach a running OMP agent via the steering file,
-// surface a friendly agent_error on adapters without steering (Pi), and are
+// surface a friendly agent_error on adapters without steering, and are
 // journaled silently when no agent is active.
 func TestSteering(t *testing.T) {
 	t.Run("supported writes the steering file", func(t *testing.T) {
@@ -564,41 +557,6 @@ func TestSteering(t *testing.T) {
 		if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
 			"[user_message user_message agent_text agent_done]"; got != want {
 			t.Errorf("events = %s, want %s", got, want)
-		}
-	})
-
-	t.Run("unsupported adapter surfaces agent_error", func(t *testing.T) {
-		root := initRepo(t)
-		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
-		t.Setenv("ODO_PI_COMMAND", writeStub(t, stubPi))
-		rig := startRig(t, root)
-		defer rig.stop(t)
-		pi := adapter.NewPi(worktree.NewManager(root).StateDir())
-		defer pi.CloseAll()
-		rig.server.RegisterAdapter("pi", pi)
-
-		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-		convID := boot.Conversation.ID
-		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Do work", Adapter: "pi"})
-
-		// Pi has no steering (M1): the message is journaled AND the user is
-		// told via agent_error instead of a failed response.
-		steered := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "steer", Steer: true})
-		if steered.Event == nil || steered.Event.Type != store.EventUserMessage {
-			t.Fatalf("steer event = %+v", steered.Event)
-		}
-		rig.pollUntilDone(t, convID)
-		if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
-			"[user_message user_message agent_error agent_text agent_done]"; got != want {
-			t.Fatalf("events = %s, want %s", got, want)
-		}
-		events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
-		var payload map[string]interface{}
-		if err := json.Unmarshal(events[2].Payload, &payload); err != nil {
-			t.Fatalf("agent_error payload: %v", err)
-		}
-		if payload["error"] != "Steering not supported by current adapter." {
-			t.Errorf("agent_error = %v", payload["error"])
 		}
 	})
 
@@ -820,50 +778,6 @@ func TestDistill(t *testing.T) {
 	}
 }
 
-// TestPiRunIPC runs a full send->poll cycle through the daemon with the Pi
-// adapter selected by the send_message "adapter" field, verifying the
-// adapter routing (start, drain, events) end to end.
-func TestPiRunIPC(t *testing.T) {
-	root := initRepo(t)
-	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
-	t.Setenv("ODO_PI_COMMAND", writeStub(t, stubPi))
-	rig := startRig(t, root)
-	defer rig.stop(t)
-	pi := adapter.NewPi(worktree.NewManager(root).StateDir())
-	defer pi.CloseAll()
-	rig.server.RegisterAdapter("pi", pi)
-
-	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	convID := boot.Conversation.ID
-
-	// Unknown adapter names are rejected.
-	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "x", Adapter: "bogus"})
-	if !strings.Contains(resp.Error, "unknown adapter") {
-		t.Errorf("bogus adapter: error = %q", resp.Error)
-	}
-
-	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Summarize the repo", Adapter: "pi"})
-	if sent.Event == nil || sent.Event.Type != store.EventUserMessage {
-		t.Fatalf("send event = %+v", sent.Event)
-	}
-	done := rig.pollUntilDone(t, convID)
-	if got, want := fmt.Sprint(eventTypes(done.Events)), "[agent_text agent_done]"; got != want {
-		t.Fatalf("pi events = %s, want %s", got, want)
-	}
-	var payload map[string]interface{}
-	if err := json.Unmarshal(done.Events[0].Payload, &payload); err != nil {
-		t.Fatalf("agent_text payload: %v", err)
-	}
-	if payload["text"] != "Pi summary of the task." {
-		t.Errorf("pi agent_text = %v", payload["text"])
-	}
-	// The stub changed no files, so no diff was produced — but the run
-	// drained through the Pi adapter without an error event.
-	if done.Diff != nil {
-		t.Errorf("unexpected diff from no-op pi run: %+v", done.Diff)
-	}
-}
-
 // TestAttachmentsJournal verifies that attachments sent with send_message
 // are journaled in the user_message event payload.
 func TestAttachmentsJournal(t *testing.T) {
@@ -1080,7 +994,6 @@ func TestGetSettings(t *testing.T) {
 		OrchestratorModel:       "t9s/kimi-k3",
 		OrchestratorProvider:    "sudo",
 		OMPTimeout:              "600",
-		DefaultAdapter:          "omp",
 		ReviewModels:            "",
 		AutoDistill:             "never",
 		AutoDistillIdleSeconds:  "30",
@@ -1092,7 +1005,7 @@ func TestGetSettings(t *testing.T) {
 	}
 
 	// A full prefs.md overrides every field.
-	writePrefs(t, home, "# my prefs\ncoding: glm-5.2@sudo\norchestrator: orch-model@orch-prov\nreview: rm1@test,rm2@test\nomp_timeout: 900\ndefault_adapter: pi\n")
+	writePrefs(t, home, "# my prefs\ncoding: glm-5.2@sudo\norchestrator: orch-model@orch-prov\nreview: rm1@test,rm2@test\nomp_timeout: 900\n")
 	got = rig.call(t, Request{Cmd: CmdGetSettings, ProjectRoot: root})
 	want = Settings{
 		CodingModel:             "glm-5.2",
@@ -1100,7 +1013,6 @@ func TestGetSettings(t *testing.T) {
 		OrchestratorModel:       "orch-model",
 		OrchestratorProvider:    "orch-prov",
 		OMPTimeout:              "900",
-		DefaultAdapter:          "pi",
 		ReviewModels:            "rm1@test,rm2@test",
 		AutoDistill:             "never",
 		AutoDistillIdleSeconds:  "30",
@@ -1137,14 +1049,13 @@ func TestUpdateSettings(t *testing.T) {
 			CodingModel:    "t9s/kimi-k3", // provider keeps the file's "sudo"
 			ReviewModels:   "rm1@test,rm2@test",
 			OMPTimeout:     "900",
-			DefaultAdapter: "pi",
 		},
 	})
 	s := *upd.Settings
 	if s.CodingModel != "t9s/kimi-k3" || s.CodingProvider != "sudo" {
 		t.Errorf("coding after update = %s@%s", s.CodingModel, s.CodingProvider)
 	}
-	if s.ReviewModels != "rm1@test,rm2@test" || s.OMPTimeout != "900" || s.DefaultAdapter != "pi" {
+	if s.ReviewModels != "rm1@test,rm2@test" || s.OMPTimeout != "900" {
 		t.Errorf("settings after update = %+v", s)
 	}
 
@@ -1153,7 +1064,7 @@ func TestUpdateSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "# my prefs\ncoding: t9s/kimi-k3@sudo\nreview: rm1@test,rm2@test\nomp_timeout: 900\ndefault_adapter: pi\n"
+	want := "# my prefs\ncoding: t9s/kimi-k3@sudo\nreview: rm1@test,rm2@test\nomp_timeout: 900\n"
 	if string(content) != want {
 		t.Errorf("prefs.md = %q, want %q", content, want)
 	}
@@ -1168,130 +1079,12 @@ func TestUpdateSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = "# my prefs\ncoding: t9s/kimi-k3@sudo\nreview: rm1@test,rm2@test\nomp_timeout: 1200\ndefault_adapter: pi\n"
+	want = "# my prefs\ncoding: t9s/kimi-k3@sudo\nreview: rm1@test,rm2@test\nomp_timeout: 1200\n"
 	if string(content) != want {
 		t.Errorf("prefs.md after second update = %q, want %q", content, want)
 	}
 }
 
-// TestFanoutSend covers parallel agent fan-out: one message starts N runs,
-// each producing its own diff in its own worktree; the runs are tracked in
-// poll_events while active, and reviewing one diff retires only its own
-// run, leaving sibling diffs reviewable.
-func TestFanoutSend(t *testing.T) {
-	root := initRepo(t)
-	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
-	rig := startRig(t, root)
-	defer rig.stop(t)
-
-	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	convID := boot.Conversation.ID
-
-	sent := rig.call(t, Request{Cmd: CmdFanoutSend, ConversationID: convID, Text: "Create hello.txt", N: 2})
-	if sent.Event == nil || sent.Event.Type != store.EventUserMessage {
-		t.Fatalf("fanout_send: bad event %+v", sent.Event)
-	}
-	if len(sent.Runs) != 2 {
-		t.Fatalf("fanout_send: runs = %d, want 2", len(sent.Runs))
-	}
-	for _, r := range sent.Runs {
-		if r.Status != "running" {
-			t.Errorf("run %s status = %q, want running", r.RunID, r.Status)
-		}
-	}
-	if sent.Runs[0].RunID == sent.Runs[1].RunID {
-		t.Error("fanout runs share a run id")
-	}
-
-	// A plain send is refused while the fan-out runs.
-	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "more work"})
-	if !strings.Contains(resp.Error, "already running") {
-		t.Errorf("send during fanout: error = %q", resp.Error)
-	}
-
-	// Both runs finish and report done; each journaled its own agent events.
-	done := rig.pollUntilDone(t, convID)
-	if len(done.Runs) != 2 {
-		t.Fatalf("final poll: runs = %d, want 2", len(done.Runs))
-	}
-	for _, r := range done.Runs {
-		if r.Status != "done" {
-			t.Errorf("run %s final status = %q, want done", r.RunID, r.Status)
-		}
-	}
-	var texts, dones int
-	for _, e := range rig.allEventTypes(t, convID) {
-		switch e {
-		case store.EventAgentText:
-			texts++
-		case store.EventAgentDone:
-			dones++
-		}
-	}
-	if texts != 2 || dones != 2 {
-		t.Errorf("agent events: %d texts, %d dones; want 2 each", texts, dones)
-	}
-
-	// Each run produced its own pending diff (distinct files, both real).
-	rows, err := rig.store.DB().QueryContext(context.Background(),
-		`SELECT id, path_on_disk, status FROM diffs WHERE conversation_id = ? ORDER BY id`, convID)
-	if err != nil {
-		t.Fatalf("list diffs: %v", err)
-	}
-	defer rows.Close()
-	var diffIDs []int64
-	var diffPaths []string
-	for rows.Next() {
-		var id int64
-		var path, status string
-		if err := rows.Scan(&id, &path, &status); err != nil {
-			t.Fatal(err)
-		}
-		if status != store.DiffPending {
-			t.Errorf("diff %d status = %q, want pending", id, status)
-		}
-		diffIDs = append(diffIDs, id)
-		diffPaths = append(diffPaths, path)
-	}
-	if len(diffIDs) != 2 {
-		t.Fatalf("diffs = %d, want 2", len(diffIDs))
-	}
-	if diffPaths[0] == diffPaths[1] {
-		t.Error("both diffs share a path")
-	}
-	for _, p := range diffPaths {
-		b, err := os.ReadFile(p)
-		if err != nil || !strings.Contains(string(b), "hello.txt") {
-			t.Errorf("diff %s missing hello.txt (err=%v)", p, err)
-		}
-	}
-
-	// Accepting one diff auto-rejects all sibling diffs and retires
-	// all fan-out runs/worktrees (spec: "accept one → auto-reject others").
-	acc := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: diffIDs[0]})
-	if !acc.Applied {
-		t.Error("accept_diff: applied must be true")
-	}
-	poll := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
-	if len(poll.Runs) != 0 {
-		t.Fatalf("runs after accept = %d, want 0 (auto-reject siblings)", len(poll.Runs))
-	}
-	entries, err := os.ReadDir(filepath.Join(root, ".odo", "worktrees"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("worktrees after accept = %d, want 0 (auto-reject siblings)", len(entries))
-	}
-	// Sibling diff should be auto-rejected.
-	d, err := rig.store.GetDiff(context.Background(), diffIDs[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Status != store.DiffRejected {
-		t.Errorf("sibling diff status = %q, want rejected (auto-reject)", d.Status)
-	}
-}
 
 // --- M3: memory recall (~/.odo/user.md + wiki notes) + wiki browser IPC ---
 //
@@ -1572,61 +1365,6 @@ func TestRecallCapsSize(t *testing.T) {
 	}
 }
 
-// TestFanoutRecall verifies the shared buildPrompt call site serves
-// fanout_send: every run's prompt carries the recalled wiki note.
-func TestFanoutRecall(t *testing.T) {
-	root := initRepo(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
-	rig := startRig(t, root)
-	defer rig.stop(t)
-
-	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	convID := boot.Conversation.ID
-
-	sentinel := "FANOUT RECALL SENTINEL: distilled epoch knowledge"
-	notePath := filepath.Join(root, "wiki", "main-epoch-1.md")
-	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(notePath, []byte("# Epoch 1\n\n"+sentinel+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	sent := rig.call(t, Request{Cmd: CmdFanoutSend, ConversationID: convID, Text: "compete on this", N: 2})
-	if len(sent.Runs) != 2 {
-		t.Fatalf("fanout runs = %d, want 2", len(sent.Runs))
-	}
-	if recall := recallPathsFromEvent(t, sent.Event); len(recall) != 1 || recall[0] != notePath {
-		t.Fatalf("fanout recall = %v, want [%s]", recall, notePath)
-	}
-	rig.pollUntilDone(t, convID)
-
-	// Every fan-out run's diff (i.e. its prompt) contains the sentinel.
-	rows, err := rig.store.DB().QueryContext(context.Background(),
-		`SELECT path_on_disk FROM diffs WHERE conversation_id = ?`, convID)
-	if err != nil {
-		t.Fatalf("list diffs: %v", err)
-	}
-	var diffPaths []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			t.Fatal(err)
-		}
-		diffPaths = append(diffPaths, p)
-	}
-	rows.Close()
-	if len(diffPaths) != 2 {
-		t.Fatalf("diffs = %d, want 2", len(diffPaths))
-	}
-	for _, p := range diffPaths {
-		b, err := os.ReadFile(p)
-		if err != nil || !strings.Contains(string(b), sentinel) {
-			t.Errorf("fanout diff %s is missing the recall sentinel (err=%v)", p, err)
-		}
-	}
-}
 
 // TestListWiki verifies the list_wiki IPC: notes come back newest-epoch
 // first with parsed name/epoch and a non-empty modified_at; a fresh

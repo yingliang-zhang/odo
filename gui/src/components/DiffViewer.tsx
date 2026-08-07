@@ -5,8 +5,6 @@ import type { Diff, ReviewResult } from "../types";
 
 interface Props {
   diff: Diff;
-  // M8: optional label for fan-out per-run diff cards ("Run 1", "Run 2").
-  runLabel?: string;
   // M11 P1: review routes to this project's daemon; null = bridge default.
   projectRoot?: string | null;
   onAccept: (diffId: number) => Promise<void>;
@@ -210,7 +208,7 @@ function renderCode(prefix: string, code: string, lang: Language | null): ReactN
 
 // Presents one diff from the daemon with Accept/Reject review actions.
 // Only a `pending` diff is actionable; afterwards this becomes a record card.
-export default function DiffViewer({ diff, runLabel, onAccept, onReject, projectRoot, onSendComments }: Props) {
+export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments }: Props) {
   const [acting, setActing] = useState(false);
   const [reviews, setReviews] = useState<ReviewResult[] | null>(null);
   const [reviewing, setReviewing] = useState(false);
@@ -374,7 +372,6 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
     <section className={`diff-card${hasReject ? " review-rejected" : ""}`}>
       <header className="diff-header">
         <span className="diff-title">
-          {runLabel && <span className="diff-run-label">{runLabel}</span>}
           Diff #{diff.id}
         </span>
         {diff.content !== "" && (

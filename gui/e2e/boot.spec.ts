@@ -35,15 +35,11 @@ test("app boots with chat surface and composer", async ({ page }) => {
   // Composer textarea visible
   await expect(page.getByPlaceholder("Describe the change you want…")).toBeVisible();
 
-  // Send and Fan-out buttons exist
+  // Send button exists
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Fan-out" })).toBeVisible();
 
   // Keyboard hint visible
   await expect(page.locator("text=⌘↵ send")).toBeVisible();
-
-  // Adapter selector in status bar
-  await expect(page.locator(".app-statusbar")).toContainText("OMP");
 });
 
 test("app boots with TopBar actions", async ({ page }) => {

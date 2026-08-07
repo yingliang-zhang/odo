@@ -57,7 +57,7 @@ M0–M11 complete. 147 commits, ~27K lines (15.6K Go + 11.6K TS/CSS/Rust).
 - **Markdown rendering**: agent text renders as markdown with syntax-highlighted code blocks
 - **Skills**: global (`~/.odo/skills/`) and project-local (`.odo/skills/`) markdown skills, keyword-matched for prompt injection, full CRUD via GUI
 - **Skill distillation**: learner proposes skills from conversation patterns; three-tier gating (auto-discard / human-gate / auto-accept) with MoA review
-- **MoA fan-out**: run a prompt through N parallel agents, results journal independently
+- **MoA review**: run a diff through N parallel models, results journal as one review_action event
 - **Diff comments**: inline 💬 per code line, "Send comments" routes feedback to agent via `send_message`
 - **Theme**: dark/light, persisted to localStorage
 - **Keyboard shortcuts**: ⌘↵ send, ⌘B sidebar, ⌘F search, ⌘K palette, ⌘, settings, Esc stop/clear
@@ -132,7 +132,7 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 │  Go daemon                                         │
 │  ┌──────────┐ ┌──────────┐ ┌────────────────────┐ │
 │  │ SQLite   │ │ Adapter  │ │ Memory Distiller   │ │
-│  │ Journal  │ │ (OMP/Pi) │ │ (epoch → wiki)      │ │
+│  │ Journal  │ │ (OMP)    │ │ (epoch → wiki)      │ │
 │  │ (events) │ │ --mode   │ │ Curator (M5)        │ │
 │  │          │ │  json    │ │ Learner (M4)        │ │
 │  │          │ │ ↗stream  │ │ Ledger (M6)         │ │
@@ -153,7 +153,7 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 └──────────────────────────────────────────────────┘
         │
         ▼
-  OMP / Pi (headless CLI agents)
+  OMP (headless CLI agents)
   --mode json → JSONL event stream (M7)
 ```
 
@@ -223,7 +223,7 @@ Memory is layered, scoped, and journal-anchored (full rationale:
 | `user.md` | `~/.odo/user.md` | always ≤4 KB | global durable principles |
 | `ledger.md` | `.odo/ledger.md` (M6) | never (pulled) | verbatim metrics, daemon-written |
 
-Core rules: agents (OMP/Pi) never write any memory layer — the distiller
+Core rules: agents (OMP) never write any memory layer — the distiller
 harvests behavioral signals from the journal instead. Rules live in
 `memory.md`/`user.md`; records live in the wiki; numbers live in the ledger
 with verbatim quotes the daemon verifies mechanically — no LLM in the

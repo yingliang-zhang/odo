@@ -40,7 +40,7 @@ func CreateWorktree(repoPath, worktreePath string) error {
 // diffs always land on the main working tree first (see AdvanceBranch).
 //
 // Git refuses -B when branch is already checked out in another worktree, so
-// concurrent runs of one workstream (fan-out lanes, cross-conversation runs)
+// concurrent runs of one workstream (cross-conversation runs)
 // fall back to checking the existing ref out in place (-f), which never moves
 // the ref out from under a live worktree.
 func CreateWorktreeOnBranch(repoPath, worktreePath, branch string) error {

@@ -412,15 +412,5 @@ func TestCapRejectsSecondSend(t *testing.T) {
 		t.Fatalf("expected cap error, got: %s", r2.Error)
 	}
 
-	// Fan-out (n=2) must also be rejected when cap=1.
-	r3, err := rig.roundTrip(Request{Cmd: CmdFanoutSend, ConversationID: conv2, Text: "fix", N: 2})
-	if err != nil {
-		t.Fatalf("fanout: transport: %v", err)
-	}
-	if r3.OK {
-		t.Fatal("fanout_send should have been rejected at cap=1, got OK")
-	}
-	if !strings.Contains(r3.Error, "cap") {
-		t.Fatalf("expected cap error for fanout, got: %s", r3.Error)
-	}
+
 }

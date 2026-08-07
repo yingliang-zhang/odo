@@ -55,7 +55,3 @@ test("Shift+Enter inserts newline", async ({ page }) => {
   expect(value).toContain("Line 2");
   expect(value).toContain("\n");
 });
-
-test("Fan-out button is visible and labeled", async ({ page }) => {
-  await expect(page.getByRole("button", { name: "Fan-out" })).toBeVisible();
-});

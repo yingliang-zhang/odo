@@ -1,6 +1,6 @@
-// Package adapter defines the 5-verb agent adapter contract. M0 ships the
-// OMP implementation only; the interface exists so a Pi adapter (M1) drops in
-// without touching the daemon.
+// Package adapter defines the 5-verb agent adapter contract. The OMP
+// implementation is the production adapter; the interface exists so test
+// stubs drop in without touching the daemon.
 package adapter
 
 import "context"

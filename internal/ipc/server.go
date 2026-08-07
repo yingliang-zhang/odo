@@ -42,10 +42,6 @@ type runMeta struct {
 	// partial:true), rebuilt by each drainRun while the run is live. Never
 	// journaled; handlePollEvents passes it through verbatim.
 	previewEvent *adapter.AgentEvent
-	// M8 multi-run: batch ordinal (0-based). -1 = not a fan-out run
-	// (single-run events stay unattributed, preserving byte-identical
-	// journals for the common case).
-	fanoutIndex int
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -59,7 +55,7 @@ type Server struct {
 	mgr            *worktree.Manager
 
 	// mu (M11 P0) guards every piece of in-memory run bookkeeping below it:
-	// runs, byConv, fanoutRuns, distilling, curating, and each runMeta's
+	// runs, byConv, distilling, curating, and each runMeta's
 	// consumed/previewEvent/finished/errored fields. Handlers doing only
 	// store/filesystem work don't take it; distill and curate explicitly
 	// drop it around their multi-minute agent runs. wg tracks handleConn
@@ -67,7 +63,6 @@ type Server struct {
 	mu         sync.Mutex
 	runs       map[string]*runMeta // adapter runID -> meta
 	byConv     map[int64]string    // conversationID -> adapter runID (active run)
-	fanoutRuns map[int64][]string  // conversationID -> fan-out adapter runIDs (kept until their diffs are reviewed)
 
 	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
 	curating   bool               // a curate pass is in flight (M11 P0)
@@ -91,7 +86,6 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		mgr:          mgr,
 		runs:         make(map[string]*runMeta),
 		byConv:       make(map[int64]string),
-		fanoutRuns:   make(map[int64][]string),
 		distilling:   make(map[int64]struct{}),
 	}
 	s.adapters[""] = ad
@@ -101,7 +95,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 }
 
 // RegisterAdapter makes ad selectable via the send_message "adapter" field
-// under the given name (e.g. "pi").
+// under the given name (e.g. "omp-alt" in tests).
 func (s *Server) RegisterAdapter(name string, ad adapter.Adapter) {
 	s.adapters[name] = ad
 }
@@ -204,8 +198,6 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleGetSettings(ctx, req)
 	case CmdUpdateSettings:
 		resp, err = s.handleUpdateSettings(ctx, req)
-	case CmdFanoutSend:
-		resp, err = s.handleFanoutSend(ctx, req)
 	case CmdDistill:
 		resp, err = s.handleDistill(ctx, req)
 	case CmdListWiki:
@@ -424,7 +416,7 @@ func workstreamGitBranch(w store.Workstream) string {
 // handleSendMessage journals the user message, creates a run worktree, and
 // starts the agent in it.
 func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, error) {
-	// Held for the entire handler (M11 P0): the byConv/fanoutActive check and
+	// Held for the entire handler (M11 P0): the byConv check and
 	// the run-table insert must be one critical section, and adapter.Start is
 	// non-blocking so the hold stays short (~200ms).
 	s.mu.Lock()
@@ -436,29 +428,27 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
-	// M8: steering during fan-out broadcasts to all live lanes.
-	// When a fan-out is active, a non-steer send_message should error
-	// (below), but an explicit steer goes through handleSteering.
+	// M8: steering is handled by handleSteering when req.Steer is set.
 	if req.Steer {
 		return s.handleSteering(ctx, c, req)
 	}
-	adName := adapter.ResolveAdapter(req.Adapter)
+	adName := req.Adapter
+	if adName == "" {
+		adName = "omp"
+	}
 	ad, ok := s.adapters[adName]
 	if !ok {
 		if req.Adapter != "" {
 			return Response{}, fmt.Errorf("send_message: unknown adapter %q", req.Adapter)
 		}
-		// The name came from prefs resolution; a prefs typo must never wedge
-		// the daemon, so fall back to the compiled-in default.
+		// Should not happen — "omp" is always registered — but fall back
+		// to the default adapter for safety.
 		adName, ad = "", s.adapters[""]
 	}
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 		}
-	}
-	if s.fanoutActive(c.ID) {
-		return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 	}
 	// M11 P0 (DS review): reject sends during distill — the distill's
 	// unlocked 10-min window would let a new run journal events into
@@ -521,7 +511,6 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		conversationID: c.ID,
 		workstreamID:   c.WorkstreamID,
 		worktreePath:   wtPath,
-		fanoutIndex:    -1, // not a fan-out run
 	}
 	s.runs[runID] = meta
 	s.byConv[c.ID] = runID
@@ -668,139 +657,6 @@ func buildPrompt(text string, attachments []string, userMem, projectMem, pins, i
 	return b.String()
 }
 
-// handleFanoutSend journals the user message once and starts N parallel
-// agent runs sharing the conversation, each in its own worktree. Polling
-// drains and reviews each run independently, producing one diff per run.
-func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, error) {
-	// Held for the entire handler, same rationale as handleSendMessage (M11
-	// P0): N quick non-blocking Starts, and the run-table inserts must not
-	// interleave with a concurrent send to the same conversation.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if req.Text == "" {
-		return Response{}, fmt.Errorf("fanout_send: text is required")
-	}
-	n := req.N
-	if n < 1 {
-		n = 2 // default fan-out width when the client sends no count
-	}
-	if n > 8 {
-		return Response{}, fmt.Errorf("fanout_send: n must be ≤ 8, got %d", n)
-	}
-	c, err := s.checkConversation(ctx, req.ConversationID)
-	if err != nil {
-		return Response{}, err
-	}
-	adName := adapter.ResolveAdapter(req.Adapter)
-	ad, ok := s.adapters[adName]
-	if !ok {
-		if req.Adapter != "" {
-			return Response{}, fmt.Errorf("fanout_send: unknown adapter %q", req.Adapter)
-		}
-		// The name came from prefs resolution; a prefs typo must never wedge
-		// the daemon, so fall back to the compiled-in default.
-		adName, ad = "", s.adapters[""]
-	}
-	if runID, ok := s.byConv[c.ID]; ok {
-		if meta := s.runs[runID]; meta != nil && !meta.finished {
-			return Response{}, fmt.Errorf("fanout_send: agent already running for conversation %d", c.ID)
-		}
-	}
-	if s.fanoutActive(c.ID) {
-		return Response{}, fmt.Errorf("fanout_send: agent already running for conversation %d", c.ID)
-	}
-	// M11 P0 (DS review): reject fan-out during distill.
-	if _, ok := s.distilling[c.ID]; ok {
-		return Response{}, fmt.Errorf("fanout_send: distill in progress for conversation %d", c.ID)
-	}
-	// M11 P3: parallelism cap — reject when too many concurrent runs.
-	// Fan-out counts its N lanes against the cap, so check n + current.
-	if cap := resolveMaxConcurrent(); s.activeRunCount()+n > cap {
-		return Response{}, fmt.Errorf("fanout_send: %d active + %d requested > cap %d", s.activeRunCount(), n, cap)
-	}
-
-	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
-	if err != nil {
-		return Response{}, err
-	}
-	ml := s.memoryLayers(ctx, w.Name, c.ID, req.Text)
-
-	msgPayload := map[string]interface{}{"text": req.Text}
-	if len(req.Attachments) > 0 {
-		msgPayload["attachments"] = req.Attachments
-	}
-	if jr := ml.journalRecall(); len(jr) > 0 {
-		msgPayload["recall"] = jr
-	}
-	if len(ml.receipt) > 0 {
-		msgPayload["receipt"] = ml.receipt
-	}
-	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
-	if err != nil {
-		return Response{}, err
-	}
-
-	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki, ml.skills)
-
-	// All-or-nothing: a failed setup cancels every run started so far so no
-	// orphan agent process or worktree is left behind.
-	runs := make([]RunInfo, 0, n)
-	started := make([]*runMeta, 0, n)
-	for range n {
-		runDirID := worktree.NewRunID()
-		wtPath, err := s.mgr.Create(runDirID, workstreamGitBranch(w))
-		if err != nil {
-			s.cancelFanout(ctx, ad, started)
-			return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("fanout_send: create worktree: %w", err))
-		}
-		runID, err := ad.Start(ctx, wtPath, prompt)
-		if err != nil {
-			_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
-			s.cancelFanout(ctx, ad, started)
-			return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("fanout_send: start agent: %w", err))
-		}
-		meta := &runMeta{
-			runID:          runID,
-			runDirID:       runDirID,
-			adapter:        adName,
-			conversationID: c.ID,
-			workstreamID:   c.WorkstreamID,
-			worktreePath:   wtPath,
-			fanoutIndex:    len(started), // 0-based batch ordinal
-		}
-		s.runs[runID] = meta
-		s.fanoutRuns[c.ID] = append(s.fanoutRuns[c.ID], runID)
-		started = append(started, meta)
-		runs = append(runs, RunInfo{RunID: runDirID, Status: "running", Index: len(started) - 1})
-	}
-	return Response{Event: &ev, Runs: runs}, nil
-}
-
-// cancelFanout unwinds the fan-out runs that already started after a sibling
-// run's setup failed. Caller holds s.mu (called from handleFanoutSend).
-func (s *Server) cancelFanout(ctx context.Context, ad adapter.Adapter, started []*runMeta) {
-	for _, meta := range started {
-		_ = ad.Cancel(ctx, meta.runID)
-		_ = ad.Close(ctx, meta.runID)
-		delete(s.runs, meta.runID)
-		ids := s.fanoutRuns[meta.conversationID]
-		for i, id := range ids {
-			if id == meta.runID {
-				ids = append(ids[:i], ids[i+1:]...)
-				break
-			}
-		}
-		if len(ids) == 0 {
-			delete(s.fanoutRuns, meta.conversationID)
-		} else {
-			s.fanoutRuns[meta.conversationID] = ids
-		}
-		if err := s.mgr.Remove(meta.worktreePath); err != nil {
-			log.Printf("fanout_send: remove worktree %s: %v", meta.worktreePath, err)
-		}
-	}
-}
-
 // handleSteering journals a steering message for a conversation without
 // starting a new run. An active run receives the text via the owning
 // adapter's Send; adapters without steering support get a journaled
@@ -831,22 +687,7 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 		}
 		return Response{Event: &ev}, nil
 	}
-	// M8: fan-out — broadcast steering to all live lanes.
-	ids := s.fanoutRuns[c.ID]
-	steered := false
-	for _, id := range ids {
-		m := s.runs[id]
-		if m == nil || m.finished {
-			continue
-		}
-		if err := s.adapterFor(m.adapter).Send(ctx, id, req.Text); err != nil {
-			log.Printf("steering: send to fan-out lane %s: %v", id, err)
-		}
-		steered = true
-	}
-	if !steered {
-		return Response{Event: &ev}, nil // no active run: journaled only
-	}
+	// No active run: the steering message is journaled only.
 	return Response{Event: &ev}, nil
 }
 
@@ -878,38 +719,11 @@ func (s *Server) handleCancel(ctx context.Context, req Request) (Response, error
 		}
 		return Response{}, nil
 	}
-	// M8: fan-out — cancel all live lanes. Each gets an attributed
-	// agent_error so the per-lane transcript records the stop.
-	ids := s.fanoutRuns[c.ID]
-	cancelled := false
-	for _, id := range ids {
-		m := s.runs[id]
-		if m == nil || m.finished {
-			continue
-		}
-		if err := s.adapterFor(m.adapter).Cancel(ctx, id); err != nil {
-			log.Printf("cancel: fan-out lane %s: %v", id, err)
-		}
-		payload := map[string]interface{}{"error": "cancelled by user"}
-		if m.fanoutIndex >= 0 {
-			payload["run_id"] = m.runDirID
-			payload["run_index"] = m.fanoutIndex
-		}
-		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentError, mustJSON(payload)); err != nil {
-			return Response{}, err
-		}
-		cancelled = true
-	}
-	if !cancelled {
-		return Response{}, fmt.Errorf("cancel: no active run for conversation %d", c.ID)
-	}
-	return Response{}, nil
+	return Response{}, fmt.Errorf("cancel: no active run for conversation %d", c.ID)
 }
 
 // handlePollEvents drains finished-run adapter events into the journal,
 // extracts each run's diff once, then returns journal events after afterSeq.
-// Fan-out conversations drain every tracked run and report all of them in
-// the runs field.
 func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, error) {
 	// Held for the entire handler (M11 P0): drainRun advances the consumed
 	// cursor and sets finished, so concurrent pollers of the same run must
@@ -928,19 +742,12 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 			}
 		}
 	}
-	for _, id := range s.fanoutRuns[c.ID] {
-		if meta := s.runs[id]; meta != nil && !meta.finished {
-			if err := s.drainRun(ctx, meta); err != nil {
-				return Response{}, err
-			}
-		}
-	}
 
 	events, err := s.store.ListEvents(ctx, c.ID, req.AfterSeq)
 	if err != nil {
 		return Response{}, err
 	}
-	agentRunning := s.fanoutActive(c.ID)
+	agentRunning := false
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			agentRunning = true
@@ -952,7 +759,6 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 			preview = meta.previewEvent
 		}
 	}
-	runs := s.runInfos(ctx, c.ID)
 	return Response{
 		Events:       events,
 		AgentRunning: new(agentRunning),
@@ -960,19 +766,7 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 		Streaming:    preview != nil,
 		Diff:         s.latestDiffInfo(ctx, c.ID),
 		Diffs:        s.pendingDiffInfos(ctx, c.ID),
-		Runs:         runs,
 	}, nil
-}
-
-// fanoutActive reports whether any fan-out run for the conversation is still
-// unfinished. Caller holds s.mu (M11 P0).
-func (s *Server) fanoutActive(conversationID int64) bool {
-	for _, id := range s.fanoutRuns[conversationID] {
-		if meta := s.runs[id]; meta != nil && !meta.finished {
-			return true
-		}
-	}
-	return false
 }
 
 // activeRunCount returns the number of non-finished runs across all
@@ -1005,57 +799,6 @@ func resolveMaxConcurrent() int {
 	return n
 }
 
-// runInfos snapshots all tracked fan-out runs for the conversation — running,
-// done, and errored alike. A run leaves the list only when its diff is
-// reviewed (retireRunForDiff drops it). RunID is the runDirID (not the
-// adapter's internal ID) so it joins to event payloads and diff basenames.
-// Caller holds s.mu (called from handlePollEvents).
-func (s *Server) runInfos(ctx context.Context, conversationID int64) []RunInfo {
-	ids := s.fanoutRuns[conversationID]
-	if len(ids) == 0 {
-		return nil
-	}
-	// One ListPendingDiffs call per poll — same cost class as latestDiffInfo.
-	pendingDiffs, _ := s.store.ListPendingDiffs(ctx, conversationID)
-	diffByRun := make(map[string]int64, len(pendingDiffs))
-	for _, d := range pendingDiffs {
-		runDir := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
-		diffByRun[runDir] = d.ID
-	}
-	infos := make([]RunInfo, 0, len(ids))
-	for _, id := range ids {
-		status := "done"
-		var idx int
-		var diffID *int64
-		var preview *adapter.AgentEvent
-		if meta := s.runs[id]; meta != nil {
-			switch {
-			case !meta.finished:
-				status = "running"
-			case meta.errored:
-				status = "error"
-			}
-			idx = meta.fanoutIndex
-			if dID, ok := diffByRun[meta.runDirID]; ok {
-				diffID = &dID
-			}
-			preview = meta.previewEvent
-		}
-		runID := id
-		if meta := s.runs[id]; meta != nil {
-			runID = meta.runDirID
-		}
-		infos = append(infos, RunInfo{
-			RunID:   runID,
-			Status:  status,
-			Index:   idx,
-			DiffID:  diffID,
-			Preview: preview,
-		})
-	}
-	return infos
-}
-
 // drainRun pulls new adapter events into the journal once. When the terminal
 // event arrives it extracts the worktree diff exactly once and records it.
 // Caller holds s.mu (called from handlePollEvents): consumed/finished must
@@ -1076,16 +819,6 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		evs = evs[:n-1]
 	}
 	for _, ev := range evs {
-		// M8: stamp fan-out events with run_id + run_index for per-lane
-		// attribution. Single-run events (fanoutIndex == -1) stay
-		// byte-identical — the common case is unaffected.
-		if meta.fanoutIndex >= 0 {
-			if ev.Payload == nil {
-				ev.Payload = make(map[string]interface{})
-			}
-			ev.Payload["run_id"] = meta.runDirID
-			ev.Payload["run_index"] = meta.fanoutIndex
-		}
 		if _, err := s.store.AppendEvent(ctx, meta.conversationID, ev.Type, mustJSON(ev.Payload)); err != nil {
 			return err
 		}
@@ -1186,20 +919,14 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 		return Response{}, err
 	}
 
-	// Retire the reviewed run — and on accept, its fan-out siblings — under
-	// the mutex (M11 P0): map deletes, adapter.Close, and worktree removal
-	// must not interleave with concurrent poll drains of the same runs.
+	// Retire the reviewed run under the mutex (M11 P0): map deletes,
+	// adapter.Close, and worktree removal must not interleave with
+	// concurrent poll drains of the same run.
 	s.mu.Lock()
 	s.retireRunForDiff(ctx, d)
-
-	// Fan-out auto-reject: when one diff from a fan-out is accepted,
-	// auto-reject all sibling pending diffs from the same fan-out batch.
-	// This prevents worktree leaks and unreviewable sibling diffs.
 	if action == "accept" {
-		s.autoRejectFanoutSiblings(ctx, d)
-		// M11c: the run's worktree (and fan-out siblings', which share the
-		// branch) is retired, so no live worktree holds the workstream
-		// branch — advance it past the accept commit.
+		// M11c: the run's worktree is retired, so no live worktree holds the
+		// workstream branch — advance it past the accept commit.
 		s.advanceWorkstreamBranch(ctx, d)
 	}
 	s.mu.Unlock()
@@ -1233,85 +960,9 @@ func (s *Server) advanceWorkstreamBranch(ctx context.Context, d store.Diff) {
 	}
 }
 
-// retireRunForDiff releases resources after a diff review. A fan-out run is
-// retired individually — only the run whose diff was reviewed is closed and
-// its worktree removed, leaving sibling runs reviewable. Everything else
-// takes the whole-conversation retirement. (Fan-out run tracking is
-// in-memory only: after a daemon restart a reviewed fan-out diff leaves its
-// worktree to `git worktree prune`, same as any crash-orphaned worktree.)
-
-// autoRejectFanoutSiblings rejects all other pending diffs from the same
-// fan-out batch when one diff is accepted. This prevents worktree leaks and
-// ensures the user isn't stuck with unreviewable sibling diffs. Caller holds
+// retireRunForDiff releases resources after a diff review. Caller holds
 // s.mu (handleDiffAction's locked section).
-func (s *Server) autoRejectFanoutSiblings(ctx context.Context, accepted store.Diff) {
-	ids, ok := s.fanoutRuns[accepted.ConversationID]
-	if !ok {
-		return // not a fan-out run, nothing to clean up
-	}
-	acceptedRunDir := strings.TrimSuffix(filepath.Base(accepted.PathOnDisk), ".diff")
-	// Get all pending diffs for this conversation.
-	pendingDiffs, err := s.store.ListPendingDiffs(ctx, accepted.ConversationID)
-	if err != nil {
-		log.Printf("auto-reject: list pending diffs: %v", err)
-		return
-	}
-	for _, sd := range pendingDiffs {
-		if sd.ID == accepted.ID {
-			continue // skip the accepted diff itself
-		}
-		// Reject the sibling diff.
-		if err := s.store.UpdateDiffStatus(ctx, sd.ID, store.DiffRejected); err != nil {
-			log.Printf("auto-reject: update diff %d status: %v", sd.ID, err)
-			continue
-		}
-		_, _ = s.store.AppendEvent(ctx, accepted.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
-			"action":  "reject",
-			"diff_id": sd.ID,
-		}))
-	}
-	// Close all fan-out runs and remove worktrees (except the accepted one
-	// which was already retired by retireRunForDiff).
-	for _, id := range ids {
-		meta := s.runs[id]
-		if meta == nil {
-			continue
-		}
-		if meta.runDirID == acceptedRunDir {
-			continue // already retired
-		}
-		_ = s.adapterFor(meta.adapter).Close(ctx, id)
-		delete(s.runs, id)
-		if err := s.mgr.Remove(meta.worktreePath); err != nil {
-			log.Printf("auto-reject: remove worktree %s: %v", meta.worktreePath, err)
-		}
-	}
-	// Clear the fan-out tracking for this conversation.
-	delete(s.fanoutRuns, accepted.ConversationID)
-}
-
-// Caller holds s.mu (handleDiffAction's locked section).
 func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
-	// The diff file basename is the run's runDirID (see worktree.DiffPath).
-	runDirID := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
-	if ids, ok := s.fanoutRuns[d.ConversationID]; ok {
-		for i, id := range ids {
-			meta := s.runs[id]
-			if meta == nil || meta.runDirID != runDirID {
-				continue
-			}
-			_ = s.adapterFor(meta.adapter).Close(ctx, id)
-			delete(s.runs, id)
-			s.fanoutRuns[d.ConversationID] = append(ids[:i], ids[i+1:]...)
-			if len(s.fanoutRuns[d.ConversationID]) == 0 {
-				delete(s.fanoutRuns, d.ConversationID)
-			}
-			if err := s.mgr.Remove(meta.worktreePath); err != nil {
-				log.Printf("ipc: retire fanout run: remove worktree %s: %v", meta.worktreePath, err)
-			}
-			return
-		}
-	}
 	s.retireRun(ctx, d.ConversationID)
 }
 
@@ -1530,10 +1181,6 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 			s.mu.Unlock()
 			return Response{}, fmt.Errorf("distill: agent still running for conversation %d", c.ID)
 		}
-	}
-	if s.fanoutActive(c.ID) {
-		s.mu.Unlock()
-		return Response{}, fmt.Errorf("distill: agent still running for conversation %d", c.ID)
 	}
 	s.distilling[c.ID] = struct{}{}
 	s.mu.Unlock()
@@ -2197,7 +1844,7 @@ func (s *Server) runDistillAgent(ctx context.Context, events []store.Event) (str
 
 // runOneShot runs prompt through ad in a throwaway directory, blocking until
 // the run's terminal event or timeout, and returns the concatenated
-// agent_text output. Distill and the MoA review fan-out both use it.
+// agent_text output. Distill and the MoA review both use it.
 func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout time.Duration) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "odo-oneshot-")
 	if err != nil {
@@ -2284,34 +1931,18 @@ func (s *Server) latestDiffInfo(ctx context.Context, conversationID int64) *Diff
 	return info
 }
 
-// pendingDiffInfos returns all pending diffs for the conversation, each
-// enriched with run_id/run_index when the diff was produced by a fan-out
-// run. The join key is the diff file basename (== runDirID, per
-// worktree.DiffPath). Newest-first ordering matches the review flow.
+// pendingDiffInfos returns all pending diffs for the conversation with
+// their content. Newest-first ordering matches the review flow.
 func (s *Server) pendingDiffInfos(ctx context.Context, conversationID int64) []DiffInfo {
 	diffs, err := s.store.ListPendingDiffs(ctx, conversationID)
 	if err != nil || len(diffs) == 0 {
 		return nil
-	}
-	// Build a runDirID → {runID, index} lookup from fan-out runs.
-	runByDir := make(map[string]*runMeta, len(s.fanoutRuns[conversationID]))
-	for _, id := range s.fanoutRuns[conversationID] {
-		if meta := s.runs[id]; meta != nil {
-			runByDir[meta.runDirID] = meta
-		}
 	}
 	out := make([]DiffInfo, 0, len(diffs))
 	for _, d := range diffs {
 		info := DiffInfo{ID: d.ID, Status: d.Status, Path: d.PathOnDisk}
 		if b, err := os.ReadFile(d.PathOnDisk); err == nil {
 			info.Content = string(b)
-		}
-		// Join to fan-out run via basename.
-		runDir := strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")
-		if meta, ok := runByDir[runDir]; ok {
-			info.RunID = meta.runDirID
-			idx := meta.fanoutIndex
-			info.RunIndex = &idx
 		}
 		out = append(out, info)
 	}

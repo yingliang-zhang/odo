@@ -19,7 +19,6 @@ type Settings struct {
 	OrchestratorModel    string `json:"orchestrator_model"`
 	OrchestratorProvider string `json:"orchestrator_provider"`
 	OMPTimeout           string `json:"omp_timeout"`
-	DefaultAdapter       string `json:"default_adapter"`
 	ReviewModels         string `json:"review_models"` // comma-separated model@provider entries
 	// M10: auto-distill settings (opt-in, default "never")
 	AutoDistill              string `json:"auto_distill"`               // "never" | "on_idle"
@@ -28,9 +27,6 @@ type Settings struct {
 	// M11 P3: parallelism cap (default 4)
 	MaxConcurrentRuns string `json:"max_concurrent_runs"` // e.g. "4"
 }
-
-// defaultAdapterName is used when prefs.md has no default_adapter line.
-const defaultAdapterName = "omp"
 
 // prefsPath returns ~/.odo/prefs.md.
 func prefsPath() (string, error) {
@@ -61,20 +57,6 @@ func LoadPrefsRaw(key string) string {
 		}
 	}
 	return ""
-}
-
-// ResolveAdapter returns the adapter name a run should use when the request
-// left the adapter field empty: the prefs.md `default_adapter` value, or the
-// compiled-in default ("omp") when the key is absent. A non-empty name is
-// returned unchanged.
-func ResolveAdapter(name string) string {
-	if name != "" {
-		return name
-	}
-	if v := LoadPrefsRaw("default_adapter"); v != "" {
-		return v
-	}
-	return defaultAdapterName
 }
 
 // ParseModelProvider splits a `model@provider` value at the last `@` (model
@@ -115,7 +97,6 @@ func resolveTimeout(def string) string {
 func ReadSettings() Settings {
 	s := Settings{
 		OMPTimeout:     resolveTimeout(defaultTimeoutSeconds),
-		DefaultAdapter: defaultAdapterName,
 		ReviewModels:   LoadPrefsRaw("review"),
 	}
 	s.CodingModel, s.CodingProvider = LoadPrefsByKey("coding")
@@ -131,9 +112,6 @@ func ReadSettings() Settings {
 	}
 	if s.OrchestratorProvider == "" {
 		s.OrchestratorProvider = defaultProvider
-	}
-	if v := LoadPrefsRaw("default_adapter"); v != "" {
-		s.DefaultAdapter = v
 	}
 	// M10: auto-distill settings (opt-in, default "never")
 	s.AutoDistill = LoadPrefsRaw("auto_distill")
@@ -194,9 +172,6 @@ func UpdateSettings(up Settings) error {
 	}
 	if up.OMPTimeout != "" {
 		set("omp_timeout", up.OMPTimeout)
-	}
-	if up.DefaultAdapter != "" {
-		set("default_adapter", up.DefaultAdapter)
 	}
 	// M10: auto-distill settings
 	if up.AutoDistill != "" {
