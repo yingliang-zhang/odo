@@ -3135,6 +3135,28 @@ mark {
 
 /* ---------- M8: Skills Panel ---------- */
 
+.skill-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  font-size: var(--text-caption);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.skill-error-dismiss {
+  background: none;
+  border: none;
+  color: #f87171;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
 .skills-panel {
   display: flex;
   flex-direction: column;

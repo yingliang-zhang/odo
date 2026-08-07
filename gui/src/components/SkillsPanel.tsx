@@ -27,6 +27,7 @@ export default function SkillsPanel({ projectRoot }: Props) {
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const resp = await listSkills(projectRoot ?? undefined);
       setSkills(resp.skills ?? []);
@@ -92,10 +93,15 @@ export default function SkillsPanel({ projectRoot }: Props) {
   };
 
   if (loading) return <LoadingInline />;
-  if (error) return <div className="panel-empty">{error}</div>;
 
   return (
     <div className="skills-panel">
+      {error && (
+        <div className="skill-error-banner">
+          {error}
+          <button type="button" className="skill-error-dismiss" onClick={() => setError(null)}>✕</button>
+        </div>
+      )}
       <div className="skills-list">
         <div className="skills-list-head">
           <span className="skills-count">{skills.length} skill{skills.length !== 1 ? "s" : ""}</span>

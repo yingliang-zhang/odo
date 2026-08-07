@@ -1,0 +1,250 @@
+package ipc
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// M8 (Skills) unit tests: parseFrontmatter, matchSkills, formatSkillsForInjection,
+// scanSkills. Covers edge cases including BOM, no-trailing-newline, block-list
+// keywords, and injection cap boundary.
+
+func TestParseFrontmatter_Standard(t *testing.T) {
+	content := "---\nname: my-skill\ndescription: Use when testing.\nkeywords: [tdd, test, refactor]\norigin: ported\n---\n\n# My Skill\n\nBody text here.\n"
+	name, desc, origin, keywords, body := parseFrontmatter(content)
+	if name != "my-skill" {
+		t.Errorf("name = %q, want %q", name, "my-skill")
+	}
+	if desc != "Use when testing." {
+		t.Errorf("desc = %q", desc)
+	}
+	if origin != "ported" {
+		t.Errorf("origin = %q, want %q", origin, "ported")
+	}
+	if len(keywords) != 3 || keywords[0] != "tdd" || keywords[2] != "refactor" {
+		t.Errorf("keywords = %v", keywords)
+	}
+	if body != "# My Skill\n\nBody text here." {
+		t.Errorf("body = %q", body)
+	}
+}
+
+func TestParseFrontmatter_BlockListKeywords(t *testing.T) {
+	content := "---\nname: list-skill\nkeywords:\n  - alpha\n  - beta\n  - gamma\n---\n\nBody\n"
+	_, _, _, keywords, _ := parseFrontmatter(content)
+	if len(keywords) != 3 || keywords[0] != "alpha" || keywords[2] != "gamma" {
+		t.Errorf("keywords = %v, want [alpha beta gamma]", keywords)
+	}
+}
+
+func TestParseFrontmatter_NoFrontmatter(t *testing.T) {
+	content := "# Just a title\n\nNo frontmatter here."
+	name, _, origin, keywords, body := parseFrontmatter(content)
+	if name != "" {
+		t.Errorf("name = %q, want empty", name)
+	}
+	if origin != "human" {
+		t.Errorf("origin = %q, want human", origin)
+	}
+	if len(keywords) != 0 {
+		t.Errorf("keywords = %v, want empty", keywords)
+	}
+	if body != content {
+		t.Errorf("body should be trimmed content")
+	}
+}
+
+func TestParseFrontmatter_BOMPrefix(t *testing.T) {
+	content := "\uFEFF---\nname: bom-skill\ndescription: BOM test\n---\n\nBody"
+	name, _, _, _, _ := parseFrontmatter(content)
+	if name != "bom-skill" {
+		t.Errorf("name = %q, want bom-skill (BOM should be stripped)", name)
+	}
+}
+
+func TestParseFrontmatter_NoTrailingNewline(t *testing.T) {
+	content := "---\nname: eof-skill\ndescription: EOF test\n---"
+	name, _, _, _, _ := parseFrontmatter(content)
+	if name != "eof-skill" {
+		t.Errorf("name = %q, want eof-skill (closing --- without trailing newline should match)", name)
+	}
+}
+
+func TestParseFrontmatter_EmptyKeywords(t *testing.T) {
+	content := "---\nname: no-kw\ndescription: No keywords\nkeywords: []\n---\n\nBody\n"
+	_, _, _, keywords, _ := parseFrontmatter(content)
+	if len(keywords) != 0 {
+		t.Errorf("keywords = %v, want empty", keywords)
+	}
+}
+
+func TestParseFrontmatter_OriginDefault(t *testing.T) {
+	content := "---\nname: test\n---\n\nBody"
+	_, _, origin, _, _ := parseFrontmatter(content)
+	if origin != "human" {
+		t.Errorf("origin = %q, want human (default)", origin)
+	}
+}
+
+func TestParseFrontmatter_QuotedValues(t *testing.T) {
+	content := "---\nname: \"quoted-name\"\ndescription: \"Use when quoted\"\n---\n\nBody"
+	name, desc, _, _, _ := parseFrontmatter(content)
+	if name != "quoted-name" {
+		t.Errorf("name = %q, want quoted-name (quotes stripped)", name)
+	}
+	if desc != "Use when quoted" {
+		t.Errorf("desc = %q", desc)
+	}
+}
+
+func TestParseFrontmatter_CRLF(t *testing.T) {
+	content := "---\r\nname: crlf-skill\r\ndescription: CRLF test\r\n---\r\n\r\nBody\r\n"
+	name, _, _, _, _ := parseFrontmatter(content)
+	if name != "crlf-skill" {
+		t.Errorf("name = %q, want crlf-skill (CRLF should be handled)", name)
+	}
+}
+
+func TestMatchSkills_KeywordMatch(t *testing.T) {
+	entries := []skillEntry{
+		{info: SkillInfo{Name: "tdd-workflow", Keywords: []string{"tdd", "test"}}},
+		{info: SkillInfo{Name: "deploy-checklist", Keywords: []string{"deploy", "ship"}}},
+	}
+	matched := matchSkills("tdd test", entries)
+	if len(matched) != 1 || matched[0].info.Name != "tdd-workflow" {
+		t.Errorf("expected only tdd-workflow, got %v", matched)
+	}
+}
+
+func TestMatchSkills_ScoringOrder(t *testing.T) {
+	entries := []skillEntry{
+		{info: SkillInfo{Name: "low-match", Keywords: []string{"test"}}},        // score 2 (keyword)
+		{info: SkillInfo{Name: "high-match", Keywords: []string{"test", "tdd"}}}, // score 4 (2 keywords)
+	}
+	matched := matchSkills("tdd test", entries)
+	if len(matched) != 2 {
+		t.Fatalf("expected 2 matched, got %d", len(matched))
+	}
+	if matched[0].info.Name != "high-match" {
+		t.Errorf("expected high-match first (higher score), got %s", matched[0].info.Name)
+	}
+}
+
+func TestMatchSkills_UnmatchedExcluded(t *testing.T) {
+	entries := []skillEntry{
+		{info: SkillInfo{Name: "tdd-workflow", Keywords: []string{"tdd"}}},
+		{info: SkillInfo{Name: "unrelated-skill", Keywords: []string{"cooking"}}},
+	}
+	matched := matchSkills("tdd", entries)
+	if len(matched) != 1 || matched[0].info.Name != "tdd-workflow" {
+		t.Errorf("expected only tdd-workflow, got %v", matched)
+	}
+}
+
+func TestMatchSkills_EmptyQueryReturnsNil(t *testing.T) {
+	entries := []skillEntry{
+		{info: SkillInfo{Name: "skill-1"}},
+		{info: SkillInfo{Name: "skill-2"}},
+	}
+	matched := matchSkills("", entries)
+	if len(matched) != 0 {
+		t.Errorf("empty query should return nil, got %d entries", len(matched))
+	}
+}
+
+func TestMatchSkills_StopWordOnlyQueryReturnsNil(t *testing.T) {
+	entries := []skillEntry{
+		{info: SkillInfo{Name: "skill-1", Keywords: []string{"test"}}},
+	}
+	matched := matchSkills("how do I", entries)
+	if len(matched) != 0 {
+		t.Errorf("stop-word-only query should return nil, got %d entries", len(matched))
+	}
+}
+
+func TestFormatSkillsForInjection_CapBoundary(t *testing.T) {
+	entries := []skillEntry{
+		{info: SkillInfo{Name: "big-skill"}, body: string(make([]byte, 3000))},
+		{info: SkillInfo{Name: "second-skill"}, body: string(make([]byte, 3000))},
+		{info: SkillInfo{Name: "third-skill"}, body: string(make([]byte, 3000))},
+	}
+	// Cap at 8192 bytes. Each block is ~3020 bytes (header + body + separator).
+	// Only 2 should fit; the 3rd must be cut on skill boundary.
+	block, receipts := formatSkillsForInjection(entries, 8192)
+	if len(receipts) > 2 {
+		t.Errorf("expected at most 2 skills under 8KB cap, got %d", len(receipts))
+	}
+	if len(receipts) == 0 {
+		t.Error("expected at least 1 skill")
+	}
+	if block == "" {
+		t.Error("expected non-empty block")
+	}
+}
+
+func TestFormatSkillsForInjection_EmptyInput(t *testing.T) {
+	block, receipts := formatSkillsForInjection(nil, 8192)
+	if block != "" {
+		t.Errorf("empty input should return empty block, got %q", block)
+	}
+	if len(receipts) != 0 {
+		t.Errorf("empty input should return no receipts, got %d", len(receipts))
+	}
+}
+
+func TestFormatSkillsForInjection_SingleUnderCap(t *testing.T) {
+	entries := []skillEntry{
+		{info: SkillInfo{Name: "small-skill", Path: ".odo/skills/small.md"}, body: "Small body"},
+	}
+	block, receipts := formatSkillsForInjection(entries, 8192)
+	if len(receipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(receipts))
+	}
+	if receipts[0].path != ".odo/skills/small.md" {
+		t.Errorf("receipt path = %q, want .odo/skills/small.md", receipts[0].path)
+	}
+	if receipts[0].blockHash == "" {
+		t.Error("block hash should not be empty")
+	}
+	if block == "" {
+		t.Error("block should not be empty")
+	}
+}
+
+func TestScanSkills_ProjectOverridesGlobal(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	tmpProject := t.TempDir()
+
+	// Create a global skill
+	globalDir := filepath.Join(tmpHome, ".odo", "skills")
+	os.MkdirAll(globalDir, 0o755)
+	os.WriteFile(filepath.Join(globalDir, "shared.md"), []byte("---\nname: shared\ndescription: global version\n---\n\nGlobal body"), 0o644)
+
+	// Create a project skill with the same name
+	projDir := filepath.Join(tmpProject, ".odo", "skills")
+	os.MkdirAll(projDir, 0o755)
+	os.WriteFile(filepath.Join(projDir, "shared.md"), []byte("---\nname: shared\ndescription: project version\n---\n\nProject body"), 0o644)
+
+	entries := scanSkills(tmpProject)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (override), got %d", len(entries))
+	}
+	if entries[0].info.Scope != "project" {
+		t.Errorf("expected project scope (override), got %s", entries[0].info.Scope)
+	}
+	if entries[0].info.Description != "project version" {
+		t.Errorf("expected project version body, got %s", entries[0].info.Description)
+	}
+}
+
+func TestScanSkills_EmptyDirs(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	tmpProject := t.TempDir()
+	entries := scanSkills(tmpProject)
+	if len(entries) != 0 {
+		t.Errorf("empty dirs should return no entries, got %d", len(entries))
+	}
+}

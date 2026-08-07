@@ -41,13 +41,15 @@ type skillEntry struct {
 const skillsInjectionCap = 8 * 1024
 
 // frontmatterRe matches the YAML frontmatter block at the start of a file:
-// ---\n key: value\n ... \n---\n
-var frontmatterRe = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---\r?\n`)
+// ---\n key: value\n ... \n---\n  (trailing newline optional for EOF-terminated files).
+var frontmatterRe = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---(?:\r?\n|$)`)
 
 // parseFrontmatter extracts the YAML frontmatter and body from a SKILL.md
 // file. Minimal parser: handles `key: value`, `key: [a, b, c]`, and list
 // syntax (`key:\n  - a\n  - b`). No external YAML dependency.
 func parseFrontmatter(content string) (name, desc, origin string, keywords []string, body string) {
+	// L1 fix: strip UTF-8 BOM if present so ^--- can anchor.
+	content = strings.TrimPrefix(content, "\uFEFF")
 	body = strings.TrimSpace(content)
 	m := frontmatterRe.FindStringSubmatch(content)
 	if m == nil {
@@ -185,7 +187,7 @@ func scanSkills(projectRoot string) []skillEntry {
 func matchSkills(query string, entries []skillEntry) []skillEntry {
 	tokens := tokenizeQuery(query)
 	if len(tokens) == 0 {
-		return entries // no query = all skills, capped by formatter
+		return nil // no query = no skills (avoid injecting all for stop-word-only messages)
 	}
 
 	type scored struct {
@@ -224,10 +226,21 @@ func matchSkills(query string, entries []skillEntry) []skillEntry {
 	return result
 }
 
+// skillReceiptItem is one injected skill's display path and the exact block
+// bytes that were injected (header + body + separator). Used by
+// memoryLayers to build the injection receipt (ADR-0003 invariant 5).
+type skillReceiptItem struct {
+	path      string
+	blockHash string
+}
+
 // formatSkillsForInjection formats matched skills into a prompt block.
 // Caps total size at maxBytes on a skill boundary (no half-skill injection).
-func formatSkillsForInjection(entries []skillEntry, maxBytes int) string {
+// Returns the concatenated block and per-skill receipt items (path + sha16
+// of the exact block bytes injected).
+func formatSkillsForInjection(entries []skillEntry, maxBytes int) (string, []skillReceiptItem) {
 	var b strings.Builder
+	var receipts []skillReceiptItem
 	for _, e := range entries {
 		header := "### Skill: " + e.info.Name + "\n\n"
 		block := header + e.body + "\n\n---\n\n"
@@ -235,16 +248,21 @@ func formatSkillsForInjection(entries []skillEntry, maxBytes int) string {
 			break
 		}
 		b.WriteString(block)
+		receipts = append(receipts, skillReceiptItem{
+			path:      e.info.Path,
+			blockHash: sha16([]byte(block)),
+		})
 	}
-	return b.String()
+	return b.String(), receipts
 }
 
 // loadSkillsForPrompt scans, matches, and formats skills for injection into
-// buildPrompt. Called from memoryLayers() on every send_message.
-func loadSkillsForPrompt(projectRoot, query string) string {
+// buildPrompt. Called from memoryLayers() on every send_message. Returns the
+// formatted block and per-skill receipt items for journal hashing.
+func loadSkillsForPrompt(projectRoot, query string) (string, []skillReceiptItem) {
 	entries := scanSkills(projectRoot)
 	if len(entries) == 0 {
-		return ""
+		return "", nil
 	}
 	matched := matchSkills(query, entries)
 	return formatSkillsForInjection(matched, skillsInjectionCap)

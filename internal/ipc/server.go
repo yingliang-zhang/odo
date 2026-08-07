@@ -530,14 +530,15 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 // injected layer bodies, the recall path list, and the injection receipt
 // (ADR-0003 inv 5: content hashes of exactly what was injected).
 type memoryLayers struct {
-	user    string       // ~/.odo/user.md (global principles)
-	project string       // .odo/memory.md (project behavior rules)
-	pins    string       // .odo/pins.md (M5: user-authored, verbatim)
-	skills  string       // M8: matched skill procedures (keyword-selected)
-	index   string       // wiki/index.md (M5: always-injected)
-	wiki    string       // recalled epoch notes block
-	recall  []recallItem // M6: was []string, now per-note with matched terms
-	receipt map[string]string
+	user          string             // ~/.odo/user.md (global principles)
+	project       string             // .odo/memory.md (project behavior rules)
+	pins          string             // .odo/pins.md (M5: user-authored, verbatim)
+	skills        string             // M8: matched skill procedures (keyword-selected)
+	skillReceipts []skillReceiptItem // M8: per-skill path + block hash for receipt
+	index         string             // wiki/index.md (M5: always-injected)
+	wiki          string             // recalled epoch notes block
+	recall        []recallItem       // M6: was []string, now per-note with matched terms
+	receipt       map[string]string
 }
 
 // memoryLayers reads the current memory layers for the workstream and builds
@@ -547,13 +548,16 @@ type memoryLayers struct {
 // retracted notes (the journal's note-layer retraction set) are excluded.
 // Layers absent/empty appear in neither.
 func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID int64, query string) memoryLayers {
+	pins := readPins(s.projectRoot)
+	sk, skReceipts := loadSkillsForPrompt(s.projectRoot, query)
 	ml := memoryLayers{
-		user:    readUserMemory(),
-		project: readProjectMemory(s.projectRoot),
-		pins:    readPins(s.projectRoot),
-		skills:  loadSkillsForPrompt(s.projectRoot, query),
-		index:   readIndex(s.projectRoot),
-		receipt: map[string]string{},
+		user:          readUserMemory(),
+		project:       readProjectMemory(s.projectRoot),
+		pins:          pins,
+		skills:        sk,
+		skillReceipts: skReceipts,
+		index:         readIndex(s.projectRoot),
+		receipt:       map[string]string{},
 	}
 	retracted := s.retractedNotes(ctx, conversationID)
 	m, items, noteBytes := recallWikiNotes(s.projectRoot, wsName, query, retracted)
@@ -566,6 +570,10 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 	}
 	if ml.pins != "" {
 		ml.receipt[".odo/pins.md"] = sha16([]byte(ml.pins))
+	}
+	// M8: per-skill receipt entries (ADR-0003 inv 5).
+	for _, sr := range ml.skillReceipts {
+		ml.receipt[sr.path] = sr.blockHash
 	}
 	if ml.index != "" {
 		ml.receipt["wiki/index.md"] = sha16([]byte(ml.index))
@@ -595,6 +603,10 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 	}
 	if ml.pins != "" {
 		add(".odo/pins.md")
+	}
+	// M8: skill paths injected between pins and wiki index (matching buildPrompt order).
+	for _, sr := range ml.skillReceipts {
+		add(sr.path)
 	}
 	if ml.index != "" {
 		add("wiki/index.md")
