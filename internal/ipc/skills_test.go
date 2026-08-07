@@ -3,6 +3,7 @@ package ipc
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -246,5 +247,79 @@ func TestScanSkills_EmptyDirs(t *testing.T) {
 	entries := scanSkills(tmpProject)
 	if len(entries) != 0 {
 		t.Errorf("empty dirs should return no entries, got %d", len(entries))
+	}
+}
+
+// TestHandleDeleteSkill_PathTraversal verifies that delete_skill rejects
+// traversal attempts in the name field, mirroring the update_skill guard.
+func TestHandleDeleteSkill_PathTraversal(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	// Create a target file to try to escape with traversal
+	escapeDir := t.TempDir()
+	target := filepath.Join(escapeDir, "escape.md")
+	os.WriteFile(target, []byte("should not be deleted"), 0o644)
+
+	// Attempt: delete a path outside skills dirs — should error because Base
+	// strips the directory, leaving a non-existent name.
+	resp := rig.callExpectErr(t, Request{
+		Cmd:   CmdDeleteSkill,
+		Name:  "../../../../" + strings.TrimPrefix(target, "/"),
+		Scope: "project",
+	})
+	if resp.Error == "" {
+		t.Error("expected error for traversal-stripped delete")
+	}
+	// Verify the file still exists
+	if _, statErr := os.Stat(target); os.IsNotExist(statErr) {
+		t.Error("target file was deleted — path traversal succeeded!")
+	}
+}
+
+// TestHandleDeleteSkill_HappyPath verifies a normal delete works.
+func TestHandleDeleteSkill_HappyPath(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	// Create a project skill to delete
+	skillDir := filepath.Join(root, ".odo", "skills")
+	os.MkdirAll(skillDir, 0o755)
+	skillPath := filepath.Join(skillDir, "to-delete.md")
+	os.WriteFile(skillPath, []byte("---\nname: to-delete\n---\n\nBody"), 0o644)
+
+	resp := rig.call(t, Request{
+		Cmd:   CmdDeleteSkill,
+		Name:  "to-delete",
+		Scope: "project",
+	})
+	if !resp.OK {
+		t.Error("delete_skill should return OK")
+	}
+	if _, statErr := os.Stat(skillPath); !os.IsNotExist(statErr) {
+		t.Error("skill file should be deleted")
+	}
+}
+
+// TestHandleDeleteSkill_MissingName verifies name is required.
+func TestHandleDeleteSkill_MissingName(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	resp := rig.callExpectErr(t, Request{
+		Cmd:   CmdDeleteSkill,
+		Scope: "project",
+	})
+	if resp.Error == "" {
+		t.Error("expected error when name is missing")
+	}
+	if !strings.Contains(resp.Error, "name is required") {
+		t.Errorf("wrong error: %s", resp.Error)
 	}
 }
