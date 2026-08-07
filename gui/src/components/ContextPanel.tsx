@@ -42,12 +42,12 @@ export default function ContextPanel({
   ledgerBadge,
   children,
 }: Props) {
-  if (!open) return null;
-
   const MIN_WIDTH = 280;
   const MAX_WIDTH = 600;
   const [panelWidth, setPanelWidth] = useState(380);
   const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+
+  if (!open) return null;
 
   const onResizePointerDown = (e: ReactPointerEvent) => {
     dragRef.current = { startX: e.clientX, startW: panelWidth };
@@ -56,7 +56,9 @@ export default function ContextPanel({
   const onResizePointerMove = (e: ReactPointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
-    setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, d.startW + (e.clientX - d.startX))));
+    // Grip is on the left edge of a right-docked panel: dragging left
+    // (clientX decreases) must widen the panel.
+    setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, d.startW + (d.startX - e.clientX))));
   };
   const onResizePointerUp = () => {
     dragRef.current = null;
