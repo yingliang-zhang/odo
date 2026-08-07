@@ -18,7 +18,7 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-M0–M7 complete. M10 (Auto-Distill) is designed, not shipped. 76 commits, ~21K lines (12.5K Go + 8.1K TS/CSS/Rust).
+M0–M11 complete. 147 commits, ~27K lines (15.6K Go + 11.6K TS/CSS/Rust).
 
 | Milestone | What it delivers | Tests |
 |---|---|---|
@@ -30,13 +30,20 @@ M0–M7 complete. M10 (Auto-Distill) is designed, not shipped. 76 commits, ~21K 
 | M5 Curation | Topic pages + index.md rewrite, pin memory, curator pass | 17 Go + 32 E2E |
 | M6 Precision + Ledger | Contradiction detection, note retraction, verified metrics ledger | 14 Go + 19 E2E |
 | M7 Live Streaming | Block-level streaming via OMP `--mode json`, preview bubble, adaptive poll | 7 adapter + 1 E2E + integration |
+| M8 Skills | Skills panel (CRUD), path traversal security, scope selector, BOM/EOF parser | 12 Go + 11 E2E |
+| M9 Skill Distillation | Skill distillation + three-tier gating (auto-discard / human-gate / auto-accept) + MoA review | 20 Go + 6 E2E |
+| M10 Auto-Distill | Settings UI, idle gate, auto-curate chain, `auto_distill: on_idle` | 44 E2E (full suite) |
+| M11 Multi-Project | Sidebar project list, per-project daemon, folder picker | GUI |
 | Sidebar Redesign | 48px icon rail, 4 sections, toast viewport, collapse (⌘B) | computer-use E2E |
 | GUI Belt A–D | Abort, scroll, textarea, shortcuts, markdown, search, palette, split diff, theme, empty state, a11y | 58 E2E |
 | Hardening | 8 tri-model review items (path guard, retraction dedup, CSS var, palette trap) | 3 Go |
+| GUI Audit | P0+P1 fixes: CSS tokens, model picker (datalist+chips), diff comments, focus ring, panel resize, tablist, verdict badges | 44 E2E (tri-model MoA reviewed) |
 
 ### Planned
 
-- **M10 — Auto-Distill / Auto-Curate** — design in `docs/milestones/m10-auto-distill.md`. Distill and curate stay manual by default; optional `auto_distill: on_idle | on_run_end` with an idle gate and an optional `auto_curate: after_distill` chain, all client-driven through the existing distill/curate IPC (no daemon changes, no new commands).
+- **Cross-examiner** — one-shot mid-discussion second opinion at decision points (config in `prefs.md`, handler not yet wired)
+- **P2 polish** — WCAG AA contrast, aria-busy spinners, in-app confirm dialogs, command palette combobox wiring, fuzzy search
+- **Experiment ledger** — `docs/experiment-ledger.md` for cross-session experiment tracking
 
 ### Features
 
@@ -48,7 +55,10 @@ M0–M7 complete. M10 (Auto-Distill) is designed, not shipped. 76 commits, ~21K 
 - **Command palette** (⌘K): distill, curate, pin, open wiki, settings, switch workstream
 - **Chat search** (⌘F): in-conversation text search with jump-to-match
 - **Markdown rendering**: agent text renders as markdown with syntax-highlighted code blocks
+- **Skills**: global (`~/.odo/skills/`) and project-local (`.odo/skills/`) markdown skills, keyword-matched for prompt injection, full CRUD via GUI
+- **Skill distillation**: learner proposes skills from conversation patterns; three-tier gating (auto-discard / human-gate / auto-accept) with MoA review
 - **MoA fan-out**: run a prompt through N parallel agents, results journal independently
+- **Diff comments**: inline 💬 per code line, "Send comments" routes feedback to agent via `send_message`
 - **Theme**: dark/light, persisted to localStorage
 - **Keyboard shortcuts**: ⌘↵ send, ⌘B sidebar, ⌘F search, ⌘K palette, ⌘, settings, Esc stop/clear
 
@@ -126,6 +136,7 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 │  │ (events) │ │ --mode   │ │ Curator (M5)        │ │
 │  │          │ │  json    │ │ Learner (M4)        │ │
 │  │          │ │ ↗stream  │ │ Ledger (M6)         │ │
+│  │          │ │          │ │ Skill Gate (M9)     │ │
 │  └──────────┘ └──────────┘ └────────────────────┘ │
 │       │            │                               │
 │       │            ▼                               │
