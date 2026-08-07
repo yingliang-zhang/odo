@@ -3451,3 +3451,104 @@ mark {
   resize: none;
   outline: none;
 }
+
+/* M8-r3: Scope selector (create mode only) */
+.skill-scope-selector {
+  display: flex;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--stroke-tertiary);
+}
+
+.skill-scope-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid var(--stroke-tertiary);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font: inherit;
+  font-size: var(--text-caption);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.skill-scope-opt.active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--raised);
+}
+
+.skill-scope-path {
+  font-size: var(--text-micro);
+  color: var(--text-dim);
+  margin-left: 2px;
+}
+
+/* M8-r3: Delete button + confirmation */
+.skill-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: 1px solid var(--stroke-secondary);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.skill-delete-btn:hover {
+  color: #f87171;
+  border-color: #f87171;
+}
+
+.skill-delete-confirm {
+  padding: 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: var(--text-caption);
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.skill-delete-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.skill-delete-confirm-btn {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  font: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+
+.skill-delete-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.skill-delete-cancel-btn {
+  background: none;
+  border: 1px solid var(--stroke-secondary);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  font: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+
+.skill-delete-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

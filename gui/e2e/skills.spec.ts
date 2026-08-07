@@ -95,3 +95,94 @@ test("skills count shows total", async ({ page }) => {
   // Should show "3 skills"
   await expect(page.locator(".skills-count")).toContainText("3");
 });
+
+test("save new skill appears in list", async ({ page }) => {
+  await openSkillsTab(page);
+
+  // Click New
+  await page.locator(".skills-add-btn").click();
+  await expect(page.locator(".skill-editor-textarea")).toBeVisible();
+
+  // Clear and type a new skill
+  await page.locator(".skill-editor-textarea").fill("---\nname: e2e-test-skill\ndescription: Created by E2E test\nkeywords: [e2e]\norigin: human\n---\n\n# E2E Test Skill\n\nThis skill was created by an E2E test.");
+
+  // Click Save
+  await page.locator(".skill-save-btn").click();
+
+  // Editor closes and skill appears in list
+  await expect(page.locator(".skill-editor-textarea")).toBeHidden({ timeout: 3000 });
+  await expect(page.locator(".skill-row", { hasText: "e2e-test-skill" })).toBeVisible();
+  await expect(page.locator(".skills-count")).toContainText("4");
+});
+
+test("delete skill removes from list", async ({ page }) => {
+  await openSkillsTab(page);
+
+  // First create a skill to delete
+  await page.locator(".skills-add-btn").click();
+  await page.locator(".skill-editor-textarea").fill("---\nname: to-delete-e2e\ndescription: Will be deleted\n---\n\nBody");
+  await page.locator(".skill-save-btn").click();
+  await expect(page.locator(".skill-row", { hasText: "to-delete-e2e" })).toBeVisible();
+
+  // Select the skill
+  await page.locator(".skill-row", { hasText: "to-delete-e2e" }).click();
+  await expect(page.locator(".skill-preview-name")).toContainText("to-delete-e2e");
+
+  // Click Delete
+  await page.locator(".skill-delete-btn").click();
+
+  // Confirmation appears
+  await expect(page.locator(".skill-delete-confirm")).toBeVisible();
+
+  // Confirm deletion
+  await page.locator(".skill-delete-confirm-btn").click();
+
+  // Skill removed from list
+  await expect(page.locator(".skill-row", { hasText: "to-delete-e2e" })).toBeHidden({ timeout: 3000 });
+  await expect(page.locator(".skills-count")).toContainText("3"); // back to original 3
+});
+
+test("scope selector visible on create", async ({ page }) => {
+  await openSkillsTab(page);
+
+  // Click New
+  await page.locator(".skills-add-btn").click();
+
+  // Scope selector should be visible (only in create mode)
+  await expect(page.locator(".skill-scope-selector")).toBeVisible();
+  await expect(page.locator(".skill-scope-opt", { hasText: "Project" })).toBeVisible();
+  await expect(page.locator(".skill-scope-opt", { hasText: "Global" })).toBeVisible();
+
+  // Default is Project
+  await expect(page.locator(".skill-scope-opt.active", { hasText: "Project" })).toBeVisible();
+});
+
+test("scope selector not visible when editing", async ({ page }) => {
+  await openSkillsTab(page);
+
+  // Click a skill and edit
+  await page.locator(".skill-row", { hasText: "tdd-workflow" }).click();
+  await page.locator(".skill-edit-btn").click();
+
+  // Scope selector should NOT be visible in edit mode
+  await expect(page.locator(".skill-scope-selector")).toBeHidden();
+});
+
+test("cancel delete returns to preview", async ({ page }) => {
+  await openSkillsTab(page);
+
+  // Select a skill
+  await page.locator(".skill-row", { hasText: "tdd-workflow" }).click();
+  await expect(page.locator(".skill-preview-name")).toContainText("tdd-workflow");
+
+  // Click Delete
+  await page.locator(".skill-delete-btn").click();
+  await expect(page.locator(".skill-delete-confirm")).toBeVisible();
+
+  // Click Cancel
+  await page.locator(".skill-delete-cancel-btn").click();
+
+  // Confirmation gone, preview back
+  await expect(page.locator(".skill-delete-confirm")).toBeHidden();
+  await expect(page.locator(".skill-preview-name")).toContainText("tdd-workflow");
+});

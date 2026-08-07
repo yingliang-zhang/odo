@@ -371,3 +371,15 @@ export async function updateSkill(
     projectRoot: projectRoot ?? null,
   }));
 }
+
+export async function deleteSkill(
+  name: string,
+  scope?: string,
+  projectRoot?: string,
+): Promise<UpdateSkillResponse> {
+  return unwrap(await invoke<UpdateSkillResponse>("delete_skill", {
+    name,
+    scope: scope ?? "project",
+    projectRoot: projectRoot ?? null,
+  }));
+}

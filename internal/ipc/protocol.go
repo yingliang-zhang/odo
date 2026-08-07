@@ -53,6 +53,7 @@ const (
 	CmdListSkills  = "list_skills"
 	CmdReadSkill   = "read_skill"
 	CmdUpdateSkill = "update_skill"
+	CmdDeleteSkill = "delete_skill"
 )
 
 // Request is one command line on the socket.

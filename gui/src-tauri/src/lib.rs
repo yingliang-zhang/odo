@@ -546,6 +546,23 @@ async fn update_skill(
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M8 (Skills): delete a skill file. Scope is explicit on the wire.
+#[tauri::command]
+async fn delete_skill(
+    name: String,
+    scope: Option<String>,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({
+        "cmd": "delete_skill",
+        "name": name,
+        "scope": scope.unwrap_or_default(),
+        "project_root": root,
+    });
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M5 curation: list wiki/topics/*.md pages (title parsed from the first `# `
 // line) through the daemon's list_topics command.
 #[tauri::command]
@@ -886,6 +903,7 @@ pub fn run() {
             list_skills,
             read_skill,
             update_skill,
+            delete_skill,
             list_topics,
             ledger,
             contradictions,

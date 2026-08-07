@@ -157,7 +157,7 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- M8 Skills ----------
     case "list_skills": {
-      return { ok: true, skills: fx.skills };
+      return { ok: true, skills: fx.getMockSkillsList() };
     }
     case "read_skill": {
       const path = args?.path ?? "";
@@ -166,6 +166,26 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true, skill_content: content };
     }
     case "update_skill": {
+      const name = args?.name ?? "untitled";
+      const text = args?.text ?? "";
+      const scope = args?.scope ?? "project";
+      const path = scope === "global"
+        ? `~/.odo/skills/${name}.md`
+        : `.odo/skills/${name}.md`;
+      fx.addMockSkill({
+        name,
+        description: text.match(/^description:\s*(.+)$/m)?.[1]?.trim() ?? "",
+        keywords: [],
+        path,
+        origin: "human",
+        scope,
+      }, text);
+      return { ok: true };
+    }
+    case "delete_skill": {
+      const name = args?.name ?? "";
+      const scope = args?.scope ?? "project";
+      fx.removeMockSkill(name, scope);
       return { ok: true };
     }
 

@@ -225,6 +225,39 @@ export const skills: SkillInfo[] = [
   },
 ];
 
+// Stateful skills store for mock — supports create/delete round-trip in E2E.
+let mockSkills: SkillInfo[] | null = null;
+function getMockSkills(): SkillInfo[] {
+  if (!mockSkills) {
+    mockSkills = [...skills]; // clone the fixture array
+  }
+  return mockSkills;
+}
+export function resetMockSkills() {
+  mockSkills = null;
+}
+export function getMockSkillsList(): SkillInfo[] {
+  return getMockSkills();
+}
+export function addMockSkill(skill: SkillInfo, content: string) {
+  const list = getMockSkills();
+  // Replace if name+scope exists, else add
+  const idx = list.findIndex((s) => s.name === skill.name && s.scope === skill.scope);
+  if (idx >= 0) {
+    list[idx] = skill;
+  } else {
+    list.push(skill);
+  }
+  skillContent[skill.name + ".md"] = content;
+}
+export function removeMockSkill(name: string, scope: string) {
+  const list = getMockSkills();
+  const idx = list.findIndex((s) => s.name === name && s.scope === scope);
+  if (idx >= 0) {
+    list.splice(idx, 1);
+  }
+}
+
 export const skillContent: Record<string, string> = {
   "tdd-workflow.md": `---
 name: tdd-workflow

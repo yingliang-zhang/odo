@@ -1,14 +1,14 @@
 import { useEffect, useState, useCallback } from "react";
-import { BookMarked, Plus, Pencil, X } from "lucide-react";
-import { listSkills, readSkill, updateSkill, errorMessage } from "../api";
+import { BookMarked, Plus, Pencil, Trash2, X } from "lucide-react";
+import { listSkills, readSkill, updateSkill, deleteSkill, errorMessage } from "../api";
 import type { SkillInfo } from "../types";
 import LoadingInline from "./LoadingInline";
 
-// M8 (Skills): skills panel — list, preview, create, edit.
+// M8 (Skills): skills panel — list, preview, create, edit, delete.
 // Skills are markdown files in ~/.odo/skills/ (global) and .odo/skills/
 // (project-local). The daemon scans and keyword-matches them for prompt
 // injection. This panel is the human-in-the-loop write path: the user
-// creates and edits skills here; the daemon never auto-writes skills.
+// creates, edits, and deletes skills here; the daemon never auto-writes.
 
 interface Props {
   projectRoot?: string | null;
@@ -24,6 +24,9 @@ export default function SkillsPanel({ projectRoot }: Props) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [saving, setSaving] = useState(false);
+  const [newScope, setNewScope] = useState<"project" | "global">("project");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -46,6 +49,7 @@ export default function SkillsPanel({ projectRoot }: Props) {
   const selectSkill = async (skill: SkillInfo) => {
     setSelected(skill);
     setEditing(false);
+    setConfirmingDelete(false);
     setContentLoading(true);
     try {
       const resp = await readSkill(skill.path, projectRoot ?? undefined);
@@ -60,23 +64,24 @@ export default function SkillsPanel({ projectRoot }: Props) {
   const startEdit = () => {
     setEditText(content);
     setEditing(true);
+    setConfirmingDelete(false);
   };
 
   const startCreate = () => {
     setSelected(null);
     setContent("");
+    setNewScope("project");
     setEditText("---\nname: new-skill\ndescription: Use when ...\nkeywords: []\norigin: human\n---\n\n# New Skill\n\nDescribe the procedure here.\n");
     setEditing(true);
+    setConfirmingDelete(false);
   };
 
   const saveSkill = async () => {
     setSaving(true);
     try {
-      // Extract name from frontmatter for new skills
       const nameMatch = editText.match(/^name:\s*(.+)$/m);
       const name = nameMatch?.[1]?.trim() ?? "untitled";
-      // Pass scope: use selected skill's scope if editing, default to project for new
-      const scope = selected?.scope ?? "project";
+      const scope = selected?.scope ?? newScope;
       await updateSkill(name, editText, scope, selected?.path, projectRoot ?? undefined);
       setEditing(false);
       setContent(editText);
@@ -89,6 +94,23 @@ export default function SkillsPanel({ projectRoot }: Props) {
       setError(errorMessage(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!selected) return;
+    setDeleting(true);
+    try {
+      await deleteSkill(selected.name, selected.scope, projectRoot ?? undefined);
+      setConfirmingDelete(false);
+      setSelected(null);
+      setContent("");
+      await refresh();
+      setError(null);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -174,6 +196,26 @@ export default function SkillsPanel({ projectRoot }: Props) {
               </button>
             </div>
           </div>
+          {!selected && (
+            <div className="skill-scope-selector">
+              <button
+                type="button"
+                className={`skill-scope-opt${newScope === "project" ? " active" : ""}`}
+                onClick={() => setNewScope("project")}
+              >
+                <span className="skill-scope-dot scope-project" /> Project
+                <span className="skill-scope-path">.odo/skills/</span>
+              </button>
+              <button
+                type="button"
+                className={`skill-scope-opt${newScope === "global" ? " active" : ""}`}
+                onClick={() => setNewScope("global")}
+              >
+                <span className="skill-scope-dot scope-global" /> Global
+                <span className="skill-scope-path">~/.odo/skills/</span>
+              </button>
+            </div>
+          )}
           <textarea
             className="skill-editor-textarea"
             value={editText}
@@ -195,28 +237,62 @@ export default function SkillsPanel({ projectRoot }: Props) {
             >
               <Pencil size={11} /> Edit
             </button>
+            <button
+              type="button"
+              className="skill-delete-btn"
+              title="Delete this skill"
+              onClick={() => setConfirmingDelete(true)}
+            >
+              <Trash2 size={11} /> Delete
+            </button>
           </div>
-          <div className="skill-meta">
-            {selected.scope === "project" ? (
-              <span className="skill-scope-tag project">project</span>
-            ) : (
-              <span className="skill-scope-tag global">global</span>
-            )}
-            {selected.origin !== "human" && (
-              <span className="skill-origin-tag">{selected.origin}</span>
-            )}
-            {selected.keywords && selected.keywords.length > 0 && (
-              <span className="skill-kw-list">
-                {selected.keywords.map((k) => (
-                  <span key={k} className="skill-kw">{k}</span>
-                ))}
-              </span>
-            )}
-          </div>
-          {contentLoading ? (
-            <LoadingInline />
+          {confirmingDelete ? (
+            <div className="skill-delete-confirm">
+              <span>Delete <strong>{selected.name}</strong> ({selected.scope})? This cannot be undone.</span>
+              <div className="skill-delete-confirm-actions">
+                <button
+                  type="button"
+                  className="skill-delete-confirm-btn"
+                  disabled={deleting}
+                  onClick={() => void confirmDelete()}
+                >
+                  {deleting ? "Deleting…" : "Delete"}
+                </button>
+                <button
+                  type="button"
+                  className="skill-delete-cancel-btn"
+                  disabled={deleting}
+                  onClick={() => setConfirmingDelete(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
           ) : (
-            <pre className="skill-body">{content}</pre>
+            <>
+              <div className="skill-meta">
+                {selected.scope === "project" ? (
+                  <span className="skill-scope-tag project">project</span>
+                ) : (
+                  <span className="skill-scope-tag global">global</span>
+                )}
+                {selected.origin !== "human" && (
+                  <span className="skill-origin-tag">{selected.origin}</span>
+                )}
+                {selected.keywords && selected.keywords.length > 0 && (
+                  <span className="skill-kw-list">
+                    {selected.keywords.map((k) => (
+                      <span key={k} className="skill-kw">{k}</span>
+                    ))}
+                  </span>
+                )}
+              </div>
+              {contentLoading ? (
+                <LoadingInline />
+              ) : (
+                <pre className="skill-body">{content}</pre>
+              )}
+            </>
           )}
         </div>
       ) : (

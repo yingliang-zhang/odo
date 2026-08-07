@@ -234,6 +234,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleReadSkill(ctx, req)
 	case CmdUpdateSkill:
 		resp, err = s.handleUpdateSkill(ctx, req)
+	case CmdDeleteSkill:
+		resp, err = s.handleDeleteSkill(ctx, req)
 	case CmdLedger:
 		resp, err = s.handleLedger(ctx, req)
 	case CmdContradictions:
@@ -2341,6 +2343,38 @@ func (s *Server) handleUpdateSkill(ctx context.Context, req Request) (Response, 
 	target := filepath.Join(dir, fname)
 	if err := writeFileAtomic(target, req.Text, 0o644); err != nil {
 		return Response{}, fmt.Errorf("update_skill: write: %w", err)
+	}
+	return Response{OK: true}, nil
+}
+
+// handleDeleteSkill removes a skill file. The scope ("global" or "project")
+// is passed explicitly on the wire. The filename is sanitized via
+// filepath.Base to prevent path traversal. Only known skills directories
+// are targeted.
+func (s *Server) handleDeleteSkill(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("delete_skill: %w", err)
+	}
+	if req.Name == "" {
+		return Response{}, fmt.Errorf("delete_skill: name is required")
+	}
+	var dir string
+	if req.Scope == "global" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".odo", "skills")
+	} else {
+		dir = filepath.Join(s.projectRoot, ".odo", "skills")
+	}
+	fname := filepath.Base(req.Name)
+	if !strings.HasSuffix(fname, ".md") {
+		fname += ".md"
+	}
+	if strings.Contains(fname, "..") {
+		return Response{}, fmt.Errorf("delete_skill: invalid name: %s", req.Name)
+	}
+	target := filepath.Join(dir, fname)
+	if err := os.Remove(target); err != nil {
+		return Response{}, fmt.Errorf("delete_skill: %w", err)
 	}
 	return Response{OK: true}, nil
 }
