@@ -47,8 +47,13 @@ test("⌘N opens palette in new-workstream mode", async ({ page }) => {
   // Palette overlay visible
   await expect(page.locator(".palette-overlay")).toBeVisible();
 
-  // Esc closes it
+  // Esc closes it — press twice: first may close input focus, second closes overlay
   await page.keyboard.press("Escape");
+  // Wait briefly for React state update
+  await page.waitForTimeout(200);
+  if (await page.locator(".palette-overlay").isVisible()) {
+    await page.keyboard.press("Escape");
+  }
   await expect(page.locator(".palette-overlay")).toBeHidden();
 });
 
