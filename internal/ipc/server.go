@@ -20,6 +20,7 @@ import (
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/git"
+	"github.com/yingliang-zhang/odo/internal/moa"
 	"github.com/yingliang-zhang/odo/internal/store"
 	"github.com/yingliang-zhang/odo/internal/worktree"
 )
@@ -431,6 +432,10 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// M8: steering is handled by handleSteering when req.Steer is set.
 	if req.Steer {
 		return s.handleSteering(ctx, c, req)
+	}
+	// /panel slash command: route to MoA thinking (3 models via direct API).
+	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/panel"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
+		return s.handlePanelQuery(ctx, &c, strings.TrimSpace(rest))
 	}
 	adName := req.Adapter
 	if adName == "" {
@@ -1063,8 +1068,9 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 // accept.
 func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt string) ReviewResult {
 	label := m.model + "@" + m.provider
-	ad := adapter.NewOMPExplicit(s.mgr.StateDir(), m.model, m.provider)
-	text, err := runOneShot(ctx, ad, prompt, moaReviewTimeout)
+	client := moa.NewClientFromEnv("", "")
+	system := "You are a code reviewer. Review the following diff and provide your verdict."
+	text, err := client.Query(ctx, m.model, system, prompt)
 	if err != nil {
 		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error()}
 	}
@@ -1093,6 +1099,91 @@ func parseReviewModels(raw string) []reviewModel {
 func reviewPrompt(diffContent string) string {
 	return "Review the following diff. Provide your verdict and comments.\n\n" +
 		"Verdict must be one of: ACCEPT, REJECT, NEEDS_FIXES\n\n" + diffContent
+}
+
+// handlePanelQuery routes a /panel prompt to N MoA models via the direct API
+// client. It journals the user message and all model replies as events, then
+// returns the combined replies. No worktree, no diff — read-only thinking.
+func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, text string) (Response, error) {
+	if text == "" {
+		return Response{}, fmt.Errorf("/panel: prompt text is required after /panel")
+	}
+	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
+	if len(models) == 0 {
+		return Response{}, errors.New("No review models configured for /panel. Set the 'review:' line in prefs.md.")
+	}
+
+	// Journal the user message.
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(map[string]interface{}{
+		"text": "/panel " + text,
+	})); err != nil {
+		return Response{}, err
+	}
+
+	// Fan out to N models via direct API (parallel, no OMP process).
+	client := moa.NewClientFromEnv("", "")
+	results := make([]PanelResult, len(models))
+	var wg sync.WaitGroup
+	for i, m := range models {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			label := m.model + "@" + m.provider
+			resp, err := client.Query(ctx, m.model, "You are an expert advisor. Provide a thorough, independent analysis.", text)
+			if err != nil {
+				results[i] = PanelResult{Model: label, Error: err.Error()}
+				return
+			}
+			results[i] = PanelResult{Model: label, Text: resp}
+		}()
+	}
+	wg.Wait()
+
+	// Journal the panel responses as an agent_text event.
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentText, mustJSON(map[string]interface{}{
+		"text":   formatPanelResults(results),
+		"panel":  true,
+		"models": results,
+	})); err != nil {
+		return Response{}, err
+	}
+	// Journal agent_done so the GUI knows the run is complete.
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentDone, mustJSON(map[string]interface{}{
+		"panel": true,
+	})); err != nil {
+		return Response{}, err
+	}
+
+	return Response{OK: true}, nil
+}
+
+// PanelResult is one model's response from a /panel query.
+type PanelResult struct {
+	Model string `json:"model"`
+	Text  string `json:"text"`
+	Error string `json:"error,omitempty"`
+}
+
+// formatPanelResults renders the N model responses as readable text for the
+// journal's agent_text event.
+func formatPanelResults(results []PanelResult) string {
+	var b strings.Builder
+	for i, r := range results {
+		if i > 0 {
+			b.WriteString("\n\n---\n\n")
+		}
+		b.WriteString("## ")
+		b.WriteString(r.Model)
+		b.WriteString("\n\n")
+		if r.Error != "" {
+			b.WriteString("(error: ")
+			b.WriteString(r.Error)
+			b.WriteString(")")
+		} else {
+			b.WriteString(r.Text)
+		}
+	}
+	return b.String()
 }
 
 // parseVerdict extracts the verdict (the first line that IS or STARTS WITH

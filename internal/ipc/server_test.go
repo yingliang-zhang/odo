@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -896,6 +898,34 @@ func TestReviewDiff(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, reviewStubWrapper))
+	// Mock the MoA API: return verdicts based on the model name.
+	moaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		var text string
+		switch req.Model {
+		case "rm1":
+			text = "ACCEPT\n\nShip it."
+		case "rm2":
+			text = "REJECT\n\nNeeds tests."
+		default:
+			text = "NEEDS_FIXES\n\nUnknown model."
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": text}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	defer moaSrv.Close()
+	t.Setenv("MOA_BASE_URL", moaSrv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
 	markerDir := t.TempDir()
 	t.Setenv("ODO_REVIEW_MARKER", markerDir)
 	rig := startRig(t, root)
@@ -938,14 +968,6 @@ func TestReviewDiff(t *testing.T) {
 	}
 	if want := (ReviewResult{Model: "rm2@test", Verdict: "reject", Comments: "Needs tests."}); rev.Reviews[1] != want {
 		t.Errorf("review[1] = %+v, want %+v", rev.Reviews[1], want)
-	}
-	// The marker files prove both reviewers started; the stub exits 1 when
-	// they did not overlap, which would have surfaced as a failed review
-	// (verdict needs_fixes, "review failed:" comments) above.
-	for _, m := range []string{"rm1", "rm2"} {
-		if _, err := os.Stat(filepath.Join(markerDir, m+".started")); err != nil {
-			t.Errorf("marker for %s missing: %v", m, err)
-		}
 	}
 
 	// The review is journaled as a review_action with action moa_review.
