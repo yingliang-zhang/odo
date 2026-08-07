@@ -474,3 +474,30 @@ export interface SearchEventsResponse {
   error?: string;
   search_results?: SearchResult[];
 }
+
+// M8 (Skills): skill metadata and CRUD responses.
+export interface SkillInfo {
+  name: string;
+  description: string;
+  keywords?: string[];
+  path: string;
+  origin: string; // "human" | "ported" | "agent-authored"
+  scope: string;  // "global" | "project"
+}
+
+export interface ListSkillsResponse {
+  ok: boolean;
+  error?: string;
+  skills?: SkillInfo[];
+}
+
+export interface ReadSkillResponse {
+  ok: boolean;
+  error?: string;
+  skill_content?: string;
+}
+
+export interface UpdateSkillResponse {
+  ok: boolean;
+  error?: string;
+}

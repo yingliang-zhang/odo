@@ -155,6 +155,20 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return fx.makeSearchResults(args?.text ?? "");
     }
 
+    // ---------- M8 Skills ----------
+    case "list_skills": {
+      return { ok: true, skills: fx.skills };
+    }
+    case "read_skill": {
+      const path = args?.path ?? "";
+      const filename = path.split("/").pop() ?? path;
+      const content = fx.skillContent[filename] ?? `---\nname: ${filename.replace(".md", "")}\n---\n\nSkill content for ${filename}`;
+      return { ok: true, skill_content: content };
+    }
+    case "update_skill": {
+      return { ok: true };
+    }
+
     // ---------- Distill ----------
     case "distill": {
       return { ok: true, wiki_path: "wiki/epoch-3.md", epoch: 3 };

@@ -58,6 +58,9 @@ import type {
   Settings,
   UpdateSettingsRequest,
   UpdateSettingsResponse,
+  ListSkillsResponse,
+  ReadSkillResponse,
+  UpdateSkillResponse,
 } from "./types";
 
 // Tauri v2 maps JS camelCase args onto the Rust snake_case parameters.
@@ -337,4 +340,32 @@ export function errorMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   return String(e);
+}
+
+// M8 (Skills): list/read/update skill files via the daemon.
+export async function listSkills(projectRoot?: string): Promise<ListSkillsResponse> {
+  return unwrap(await invoke<ListSkillsResponse>("list_skills", {
+    projectRoot: projectRoot ?? null,
+  }));
+}
+
+export async function readSkill(path: string, projectRoot?: string): Promise<ReadSkillResponse> {
+  return unwrap(await invoke<ReadSkillResponse>("read_skill", {
+    path,
+    projectRoot: projectRoot ?? null,
+  }));
+}
+
+export async function updateSkill(
+  name: string,
+  text: string,
+  path?: string,
+  projectRoot?: string,
+): Promise<UpdateSkillResponse> {
+  return unwrap(await invoke<UpdateSkillResponse>("update_skill", {
+    name,
+    text,
+    path: path ?? "",
+    projectRoot: projectRoot ?? null,
+  }));
 }

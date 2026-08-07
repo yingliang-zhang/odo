@@ -35,6 +35,7 @@ import type {
   SearchEventsResponse,
   SendMessageResponse,
   Settings,
+  SkillInfo,
   UpdateSettingsResponse,
   WikiNoteInfo,
   Workstream,
@@ -194,6 +195,119 @@ export const userContent = `# USER.md
 
 export const pendingCounts: Record<string, number> = { 1: 1, 2: 0, 3: 0, 10: 0 };
 export const runningWorkstreams: number[] = [];
+
+// ---------- M8 Skills ----------
+
+export const skills: SkillInfo[] = [
+  {
+    name: "tdd-workflow",
+    description: "Use when writing new features or fixing bugs. Enforces RED-GREEN-REFACTOR.",
+    keywords: ["tdd", "test", "testing", "red-green", "refactor"],
+    path: "~/.odo/skills/tdd-workflow.md",
+    origin: "ported",
+    scope: "global",
+  },
+  {
+    name: "systematic-debugging",
+    description: "Use when debugging a non-trivial issue. 4-phase root cause methodology.",
+    keywords: ["debug", "debugging", "root-cause", "trace", "fix"],
+    path: "~/.odo/skills/systematic-debugging.md",
+    origin: "ported",
+    scope: "global",
+  },
+  {
+    name: "deploy-checklist",
+    description: "Use when deploying to production. Pre-deploy verification steps.",
+    keywords: ["deploy", "production", "release", "ship", "verify"],
+    path: ".odo/skills/deploy-checklist.md",
+    origin: "human",
+    scope: "project",
+  },
+];
+
+export const skillContent: Record<string, string> = {
+  "tdd-workflow.md": `---
+name: tdd-workflow
+description: Use when writing new features or fixing bugs. Enforces RED-GREEN-REFACTOR.
+keywords: [tdd, test, testing, red-green, refactor]
+origin: ported
+---
+
+# TDD Workflow
+
+## RED — Write a failing test first
+1. Write one test that describes the desired behavior
+2. Run it — it must fail for the right reason (not a compile error)
+3. Commit the test
+
+## GREEN — Make it pass with minimal code
+1. Write the simplest code that passes the test
+2. Run all tests — confirm green
+3. Commit the implementation
+
+## REFACTOR — Improve the code without changing behavior
+1. Extract duplication, rename, simplify
+2. Run all tests — confirm still green
+3. Commit the refactor
+
+## Pitfalls
+- Don't skip RED — a test that passes before code exists is testing the wrong thing
+- Don't combine GREEN and REFACTOR — they're separate commits for bisect
+- Don't write more than one test at a time — incremental is the point
+`,
+  "systematic-debugging.md": `---
+name: systematic-debugging
+description: Use when debugging a non-trivial issue. 4-phase root cause methodology.
+keywords: [debug, debugging, root-cause, trace, fix]
+origin: ported
+---
+
+# Systematic Debugging
+
+## Phase 1: Reproduce
+- Find the minimal, deterministic reproduction
+- If you can't reproduce it, you can't fix it
+
+## Phase 2: Localize
+- Binary search the cause: bisect commits, comment out code, add prints
+- Narrow to the smallest change that triggers the bug
+
+## Phase 3: Root Cause
+- Ask "why?" 5 times — surface symptoms are not root causes
+- Fix the cause, not the symptom — check sibling call paths for the same flaw
+
+## Phase 4: Verify
+- Write a regression test that fails without your fix
+- Run the full test suite
+- Check for similar bugs in the same area
+`,
+  "deploy-checklist.md": `---
+name: deploy-checklist
+description: Use when deploying to production. Pre-deploy verification steps.
+keywords: [deploy, production, release, ship, verify]
+origin: human
+---
+
+# Deploy Checklist
+
+## Pre-deploy
+- [ ] All tests pass (unit + integration)
+- [ ] No uncommitted changes in the working tree
+- [ ] Linter clean (golangci-lint, eslint)
+- [ ] Version bumped in go.mod / package.json
+
+## Deploy
+- [ ] Build artifact: \`go build -o odo ./cmd/odo\`
+- [ ] Dry-run the deployment command
+- [ ] Deploy to staging first, verify
+- [ ] Deploy to production
+
+## Post-deploy
+- [ ] Health check passes
+- [ ] Monitor logs for 10 minutes
+- [ ] Tag the release: \`git tag v0.x.x\`
+`,
+};
 
 // ---------- Runs ----------
 

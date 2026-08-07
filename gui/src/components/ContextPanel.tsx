@@ -4,9 +4,9 @@
 // Phase 3: Wiki/Memory/Ledger tabs get their content.
 
 import { type ReactNode } from "react";
-import { GitCompareArrows, FileText, MapPin, BookOpen, X } from "lucide-react";
+import { GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, X } from "lucide-react";
 
-export type PanelTab = "changes" | "wiki" | "memory" | "ledger";
+export type PanelTab = "changes" | "wiki" | "memory" | "ledger" | "skills";
 
 interface Props {
   open: boolean;
@@ -26,6 +26,7 @@ const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
   { id: "changes", label: "Changes", icon: <GitCompareArrows size={12} /> },
   { id: "wiki", label: "Wiki", icon: <FileText size={12} /> },
   { id: "memory", label: "Memory", icon: <MapPin size={12} /> },
+  { id: "skills", label: "Skills", icon: <BookMarked size={12} /> },
   { id: "ledger", label: "Ledger", icon: <BookOpen size={12} /> },
 ];
 
@@ -46,6 +47,7 @@ export default function ContextPanel({
     changes: changesBadge,
     wiki: wikiBadge,
     memory: memoryBadge,
+    skills: undefined,
     ledger: ledgerBadge,
   };
 

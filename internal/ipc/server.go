@@ -228,6 +228,12 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleReadPins(ctx, req)
 	case CmdListTopics:
 		resp, err = s.handleListTopics(ctx, req)
+	case CmdListSkills:
+		resp, err = s.handleListSkills(ctx, req)
+	case CmdReadSkill:
+		resp, err = s.handleReadSkill(ctx, req)
+	case CmdUpdateSkill:
+		resp, err = s.handleUpdateSkill(ctx, req)
 	case CmdLedger:
 		resp, err = s.handleLedger(ctx, req)
 	case CmdContradictions:
@@ -485,7 +491,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki)
+	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki, ml.skills)
 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
@@ -527,6 +533,7 @@ type memoryLayers struct {
 	user    string       // ~/.odo/user.md (global principles)
 	project string       // .odo/memory.md (project behavior rules)
 	pins    string       // .odo/pins.md (M5: user-authored, verbatim)
+	skills  string       // M8: matched skill procedures (keyword-selected)
 	index   string       // wiki/index.md (M5: always-injected)
 	wiki    string       // recalled epoch notes block
 	recall  []recallItem // M6: was []string, now per-note with matched terms
@@ -544,6 +551,7 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 		user:    readUserMemory(),
 		project: readProjectMemory(s.projectRoot),
 		pins:    readPins(s.projectRoot),
+		skills:  loadSkillsForPrompt(s.projectRoot, query),
 		index:   readIndex(s.projectRoot),
 		receipt: map[string]string{},
 	}
@@ -606,7 +614,7 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 // projectMem (.odo/memory.md behavior rules), pins (.odo/pins.md, verbatim),
 // index (wiki/index.md, always-injected), then recalled wiki notes,
 // attachment hints, and the user's text last (cache-friendly stable prefix).
-func buildPrompt(text string, attachments []string, userMem, projectMem, pins, index, memory string) string {
+func buildPrompt(text string, attachments []string, userMem, projectMem, pins, index, memory, skills string) string {
 	var b strings.Builder
 	if userMem != "" {
 		b.WriteString("## User memory (durable cross-project principles)\n\n")
@@ -621,6 +629,11 @@ func buildPrompt(text string, attachments []string, userMem, projectMem, pins, i
 	if pins != "" {
 		b.WriteString("## Pins (user-authored, verbatim)\n\n")
 		b.WriteString(pins)
+		b.WriteString("\n\n---\n\n")
+	}
+	if skills != "" {
+		b.WriteString("## Relevant skills (procedures)\n\n")
+		b.WriteString(skills)
 		b.WriteString("\n\n---\n\n")
 	}
 	if index != "" {
@@ -713,7 +726,7 @@ func (s *Server) handleFanoutSend(ctx context.Context, req Request) (Response, e
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki)
+	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki, ml.skills)
 
 	// All-or-nothing: a failed setup cancels every run started so far so no
 	// orphan agent process or worktree is left behind.
@@ -2239,4 +2252,78 @@ func mustJSON(v interface{}) string {
 		return `{"error":"payload marshal failed"}`
 	}
 	return string(b)
+}
+
+// M8 (Skills): handleListSkills returns metadata for all discovered skills
+// (global ~/.odo/skills/*.md + project .odo/skills/*.md). Read-only.
+func (s *Server) handleListSkills(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("list_skills: %w", err)
+	}
+	entries := scanSkills(s.projectRoot)
+	var infos []SkillInfo
+	for _, e := range entries {
+		infos = append(infos, e.info)
+	}
+	return Response{OK: true, Skills: infos}, nil
+}
+
+// handleReadSkill returns the full markdown body of one skill file.
+func (s *Server) handleReadSkill(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("read_skill: %w", err)
+	}
+	if req.Path == "" {
+		return Response{}, fmt.Errorf("read_skill: path is required")
+	}
+	// Resolve the path: try project skills dir first, then global.
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(s.projectRoot, ".odo", "skills", req.Path),
+		filepath.Join(home, ".odo", "skills", req.Path),
+		req.Path, // allow absolute paths too
+	}
+	for _, c := range candidates {
+		b, err := os.ReadFile(c)
+		if err == nil {
+			return Response{OK: true, SkillContent: string(b)}, nil
+		}
+	}
+	return Response{}, fmt.Errorf("read_skill: skill file not found: %s", req.Path)
+}
+
+// handleUpdateSkill writes (creates or overwrites) a skill file. The skill
+// is written to the project skills dir (.odo/skills/) unless req.Path starts
+// with "~/.odo/" (global). This is the human-in-the-loop write path — the
+// daemon never auto-writes skills (ADR-0003 invariant).
+func (s *Server) handleUpdateSkill(ctx context.Context, req Request) (Response, error) {
+	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+		return Response{}, fmt.Errorf("update_skill: %w", err)
+	}
+	if req.Name == "" {
+		return Response{}, fmt.Errorf("update_skill: name is required")
+	}
+	if req.Text == "" {
+		return Response{}, fmt.Errorf("update_skill: content is required")
+	}
+	// Determine target dir: global if path starts with ~/.odo/, else project.
+	var dir string
+	if strings.HasPrefix(req.Path, "~/.odo/skills/") {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".odo", "skills")
+	} else {
+		dir = filepath.Join(s.projectRoot, ".odo", "skills")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return Response{}, fmt.Errorf("update_skill: mkdir: %w", err)
+	}
+	fname := req.Name + ".md"
+	if !strings.HasSuffix(req.Name, ".md") && req.Path != "" && strings.HasSuffix(req.Path, ".md") {
+		fname = filepath.Base(req.Path)
+	}
+	target := filepath.Join(dir, fname)
+	if err := os.WriteFile(target, []byte(req.Text), 0o644); err != nil {
+		return Response{}, fmt.Errorf("update_skill: write: %w", err)
+	}
+	return Response{OK: true}, nil
 }

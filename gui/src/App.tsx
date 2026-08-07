@@ -32,6 +32,7 @@ import ContextPanel, { type PanelTab } from "./components/ContextPanel";
 import DiffViewer from "./components/DiffViewer";
 import LedgerPanel from "./components/LedgerPanel";
 import MemoryPanel from "./components/MemoryPanel";
+import SkillsPanel from "./components/SkillsPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
@@ -133,7 +134,7 @@ export default function App() {
   );
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     const stored = localStorage.getItem("odo-panel-tab");
-    const VALID: PanelTab[] = ["changes", "wiki", "memory", "ledger"];
+    const VALID: PanelTab[] = ["changes", "wiki", "memory", "ledger", "skills"];
     return stored && (VALID as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
   });
   // M9 P3: memory sub-tab for toast click-throughs (files vs proposals).
@@ -1384,6 +1385,12 @@ export default function App() {
         ) : (
           <div className="panel-empty">No active conversation.</div>
         ))}
+        {panelTab === "skills" && (
+          <SkillsPanel
+            key={project?.root_path ?? "default"}
+            projectRoot={project?.root_path ?? null}
+          />
+        )}
       </ContextPanel>
       </div>
       <StatusBar

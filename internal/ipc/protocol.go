@@ -47,6 +47,12 @@ const (
 	CmdLedger         = "ledger"
 	CmdContradictions = "contradictions"
 	CmdSearchEvents    = "search_events"
+	// M8 (Skills): skills are plain markdown files in ~/.odo/skills/ and
+	// .odo/skills/. list_skills returns metadata; read_skill returns the
+	// full body; update_skill writes (creates or overwrites) a skill file.
+	CmdListSkills  = "list_skills"
+	CmdReadSkill   = "read_skill"
+	CmdUpdateSkill = "update_skill"
 )
 
 // Request is one command line on the socket.
@@ -175,4 +181,8 @@ type Response struct {
 	RunningWorkstreams []int64                   `json:"running_workstreams,omitempty"`
 	// search_events: cross-conversation search results.
 	SearchResults []store.SearchResult           `json:"search_results,omitempty"`
+	// M8 (Skills): list_skills returns all discovered skill metadata;
+	// read_skill returns the full markdown body of one skill.
+	Skills       []SkillInfo `json:"skills,omitempty"`
+	SkillContent string      `json:"skill_content,omitempty"`
 }
