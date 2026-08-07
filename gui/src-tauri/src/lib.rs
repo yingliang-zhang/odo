@@ -505,6 +505,47 @@ async fn read_pins(project_root: Option<String>) -> Result<Value, String> {
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M8 (Skills): list all discovered skill metadata (global ~/.odo/skills/
+// + project .odo/skills/). Read-only, generic READ_TIMEOUT.
+#[tauri::command]
+async fn list_skills(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "list_skills", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M8 (Skills): read the full markdown body of one skill file. The path is
+// the SkillInfo.path from list_skills (filename only after sanitization).
+#[tauri::command]
+async fn read_skill(path: String, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "read_skill", "path": path, "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M8 (Skills): create or overwrite a skill file (human-in-the-loop write
+// path). The daemon routes to project (.odo/skills/) or global
+// (~/.odo/skills/) based on the scope field.
+#[tauri::command]
+async fn update_skill(
+    name: String,
+    text: String,
+    path: Option<String>,
+    scope: Option<String>,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({
+        "cmd": "update_skill",
+        "name": name,
+        "text": text,
+        "path": path.unwrap_or_default(),
+        "scope": scope.unwrap_or_default(),
+        "project_root": root,
+    });
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M5 curation: list wiki/topics/*.md pages (title parsed from the first `# `
 // line) through the daemon's list_topics command.
 #[tauri::command]
@@ -842,6 +883,9 @@ pub fn run() {
             curate,
             pin,
             read_pins,
+            list_skills,
+            read_skill,
+            update_skill,
             list_topics,
             ledger,
             contradictions,

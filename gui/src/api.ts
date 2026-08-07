@@ -359,12 +359,14 @@ export async function readSkill(path: string, projectRoot?: string): Promise<Rea
 export async function updateSkill(
   name: string,
   text: string,
+  scope?: string,
   path?: string,
   projectRoot?: string,
 ): Promise<UpdateSkillResponse> {
   return unwrap(await invoke<UpdateSkillResponse>("update_skill", {
     name,
     text,
+    scope: scope ?? "project",
     path: path ?? "",
     projectRoot: projectRoot ?? null,
   }));

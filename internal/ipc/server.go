@@ -2292,10 +2292,11 @@ func (s *Server) handleReadSkill(ctx context.Context, req Request) (Response, er
 	return Response{}, fmt.Errorf("read_skill: skill file not found: %s", req.Path)
 }
 
-// handleUpdateSkill writes (creates or overwrites) a skill file. The skill
-// is written to the project skills dir (.odo/skills/) unless req.Path starts
-// with "~/.odo/" (global). This is the human-in-the-loop write path — the
-// daemon never auto-writes skills (ADR-0003 invariant).
+// handleUpdateSkill writes (creates or overwrites) a skill file. The scope
+// ("global" or "project") is passed explicitly on the wire — the daemon
+// never infers scope from path prefix (K3 H3 fix). This is the
+// human-in-the-loop write path — the daemon never auto-writes skills
+// (ADR-0003 invariant).
 func (s *Server) handleUpdateSkill(ctx context.Context, req Request) (Response, error) {
 	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
 		return Response{}, fmt.Errorf("update_skill: %w", err)
@@ -2306,9 +2307,9 @@ func (s *Server) handleUpdateSkill(ctx context.Context, req Request) (Response, 
 	if req.Text == "" {
 		return Response{}, fmt.Errorf("update_skill: content is required")
 	}
-	// Determine target dir: global if path starts with ~/.odo/, else project.
+	// Determine target dir by explicit scope (not path inference).
 	var dir string
-	if strings.HasPrefix(req.Path, "~/.odo/skills/") {
+	if req.Scope == "global" {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".odo", "skills")
 	} else {
@@ -2317,12 +2318,16 @@ func (s *Server) handleUpdateSkill(ctx context.Context, req Request) (Response, 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Response{}, fmt.Errorf("update_skill: mkdir: %w", err)
 	}
-	fname := req.Name + ".md"
-	if !strings.HasSuffix(req.Name, ".md") && req.Path != "" && strings.HasSuffix(req.Path, ".md") {
-		fname = filepath.Base(req.Path)
+	// Sanitize: strip directory components from name to prevent path traversal.
+	fname := filepath.Base(req.Name)
+	if !strings.HasSuffix(fname, ".md") {
+		fname += ".md"
+	}
+	if strings.Contains(fname, "..") {
+		return Response{}, fmt.Errorf("update_skill: invalid name: %s", req.Name)
 	}
 	target := filepath.Join(dir, fname)
-	if err := os.WriteFile(target, []byte(req.Text), 0o644); err != nil {
+	if err := writeFileAtomic(target, req.Text, 0o644); err != nil {
 		return Response{}, fmt.Errorf("update_skill: write: %w", err)
 	}
 	return Response{OK: true}, nil

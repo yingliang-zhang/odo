@@ -74,7 +74,9 @@ export default function SkillsPanel({ projectRoot }: Props) {
       // Extract name from frontmatter for new skills
       const nameMatch = editText.match(/^name:\s*(.+)$/m);
       const name = nameMatch?.[1]?.trim() ?? "untitled";
-      await updateSkill(name, editText, selected?.path, projectRoot ?? undefined);
+      // Pass scope: use selected skill's scope if editing, default to project for new
+      const scope = selected?.scope ?? "project";
+      await updateSkill(name, editText, scope, selected?.path, projectRoot ?? undefined);
       setEditing(false);
       setContent(editText);
       if (selected) {

@@ -70,7 +70,8 @@ type Request struct {
 	Adapter        string         `json:"adapter,omitempty"`
 	N              int            `json:"n,omitempty"`
 	Settings       *Settings      `json:"settings,omitempty"`
-	Path           string         `json:"path,omitempty"` // read_wiki: wiki note path
+	Path           string         `json:"path,omitempty"` // read_wiki: wiki note path; read_skill/update_skill: skill filename
+	Scope          string         `json:"scope,omitempty"` // update_skill: "global" | "project" (M8)
 	Epoch          int            `json:"epoch,omitempty"`
 	Accepted       []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
 }
