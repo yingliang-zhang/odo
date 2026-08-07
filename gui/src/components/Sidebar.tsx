@@ -244,25 +244,25 @@ export default function Sidebar({
           </form>
         ) : (
           <>
+          <button
+            type="button"
+            className={clsx("ws-item", active && "active")}
+            onClick={() => {
+              if (!isActiveProject) {
+                if (onOpenForeignWorkstream) onOpenForeignWorkstream(projectRoot, w.id);
+                else { onSwitchProject(projectRoot); onSwitchWorkstream(w.id); }
+              } else {
+                onSwitchWorkstream(w.id);
+              }
+            }}
+          >
             <span className={clsx("ws-dot", dotClass[ds])} aria-hidden="true" />
             <span className="sr-only">{dotLabel[ds]}</span>
-            <button
-              type="button"
-              className={clsx("ws-item", active && "active")}
-              onClick={() => {
-                if (!isActiveProject) {
-                  if (onOpenForeignWorkstream) onOpenForeignWorkstream(projectRoot, w.id);
-                  else { onSwitchProject(projectRoot); onSwitchWorkstream(w.id); }
-                } else {
-                  onSwitchWorkstream(w.id);
-                }
-              }}
-            >
-              <TailPin label={w.name} title={w.name} />
-              <span className="ws-meta">
-                {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
-              </span>
-            </button>
+            <TailPin label={w.name} title={w.name} />
+            <span className="ws-meta">
+              {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
+            </span>
+          </button>
             {isActiveProject && (
               <span className="ws-actions">
                 {workstreamActions(w).map((action) => (

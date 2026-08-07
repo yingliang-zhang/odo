@@ -788,7 +788,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .ws-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
   width: 100%;
   background: none;
@@ -946,6 +946,10 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   display: flex;
   flex-direction: column;
 }
+/* Indent workstream list under the parent project row */
+.proj-group > .ws-list {
+  padding-left: 28px;
+}
 .proj-row {
   display: flex;
   align-items: center;
@@ -985,7 +989,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
+  padding: 6px 8px 6px 28px;
   background: none;
   border: none;
   color: var(--text-dim);
@@ -1010,7 +1014,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   font: inherit;
   font-size: var(--text-caption);
   cursor: pointer;
-  padding: 6px 8px 6px 28px;
+  padding: 6px 8px 6px 24px;
   text-align: left;
   width: 100%;
   border-radius: var(--radius-md);
@@ -1023,7 +1027,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   cursor: pointer;
 }
 .ws-empty-hint {
-  padding: 6px 8px 6px 28px;
+  padding: 6px 8px;
   color: var(--text-dim);
   font-size: var(--text-caption);
   font-style: italic;
@@ -2242,6 +2246,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .ws-running-dot {
