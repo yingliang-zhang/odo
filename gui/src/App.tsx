@@ -624,7 +624,11 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         // Modal/overlay takes priority — don't cancel the agent when closing a dialog
-        if (document.querySelector(".settings-overlay, .palette-overlay") != null) return;
+        if (document.querySelector(".settings-overlay") != null) return;
+        if (document.querySelector(".palette-overlay") != null) {
+          setPaletteOpen(false);
+          return;
+        }
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;
