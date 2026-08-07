@@ -3,8 +3,9 @@
 // Phase 2: Changes tab gets DiffViewer.
 // Phase 3: Wiki/Memory/Ledger tabs get their content.
 
-import { type ReactNode } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, X } from "lucide-react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 
 export type PanelTab = "changes" | "wiki" | "memory" | "ledger" | "skills";
 
@@ -43,6 +44,24 @@ export default function ContextPanel({
 }: Props) {
   if (!open) return null;
 
+  const MIN_WIDTH = 280;
+  const MAX_WIDTH = 600;
+  const [panelWidth, setPanelWidth] = useState(380);
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+
+  const onResizePointerDown = (e: ReactPointerEvent) => {
+    dragRef.current = { startX: e.clientX, startW: panelWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onResizePointerMove = (e: ReactPointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, d.startW + (e.clientX - d.startX))));
+  };
+  const onResizePointerUp = () => {
+    dragRef.current = null;
+  };
+
   const badges: Record<PanelTab, number | null | undefined> = {
     changes: changesBadge,
     wiki: wikiBadge,
@@ -52,8 +71,18 @@ export default function ContextPanel({
   };
 
   return (
-    <aside className="context-panel" aria-label="Context panel">
-      <div className="panel-resize" aria-hidden="true" />
+    <aside
+      className="context-panel"
+      aria-label="Context panel"
+      style={{ "--panel-width": `${panelWidth}px` } as React.CSSProperties}
+    >
+      <div
+        className="panel-resize"
+        aria-hidden="true"
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizePointerUp}
+      />
       <div className="panel-head">
         <div className="panel-tabs" role="tablist">
           {TABS.map((tab) => {

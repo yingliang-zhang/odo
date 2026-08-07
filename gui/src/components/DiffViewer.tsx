@@ -11,6 +11,9 @@ interface Props {
   projectRoot?: string | null;
   onAccept: (diffId: number) => Promise<void>;
   onReject: (diffId: number) => Promise<void>;
+  // P1-3: fire-and-forget comment delivery — App routes through send_message
+  // (steer when the agent is running). Rejects on IPC failure.
+  onSendComments?: (text: string) => Promise<void>;
 }
 
 // Rendering ceiling: diffs are normally well under 500 lines; past this we
@@ -207,13 +210,17 @@ function renderCode(prefix: string, code: string, lang: Language | null): ReactN
 
 // Presents one diff from the daemon with Accept/Reject review actions.
 // Only a `pending` diff is actionable; afterwards this becomes a record card.
-export default function DiffViewer({ diff, runLabel, onAccept, onReject, projectRoot }: Props) {
+export default function DiffViewer({ diff, runLabel, onAccept, onReject, projectRoot, onSendComments }: Props) {
   const [acting, setActing] = useState(false);
   const [reviews, setReviews] = useState<ReviewResult[] | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   // Belt D: inline (unified) vs split (old | new) rendering.
   const [split, setSplit] = useState(false);
+  // P1-3: inline diff comments — Map<lineIndex, comment text>
+  const [comments, setComments] = useState<Map<number, string>>(new Map());
+  const [openLine, setOpenLine] = useState<number | null>(null);
+  const [sendingComments, setSendingComments] = useState(false);
   const oldColRef = useRef<HTMLDivElement>(null);
   const newColRef = useRef<HTMLDivElement>(null);
   // D0: whichever body is mounted (inline <pre> or split grid) — chip clicks
@@ -234,6 +241,24 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
   const pending = diff.status === "pending";
   // Any rejecting reviewer flags the whole card so it cannot be missed.
   const hasReject = reviews?.some((r) => r.verdict === "reject") ?? false;
+
+  // P1-3: compose and send inline diff comments through the existing send path.
+  const sendComments = async () => {
+    if (comments.size === 0 || sendingComments) return;
+    const body = [...comments.entries()]
+      .filter(([, t]) => t.trim() !== "")
+      .map(([i, t]) => `- L${i}: ${t.trim()}`)
+      .join("\n");
+    if (body === "" || !onSendComments) return;
+    setSendingComments(true);
+    try {
+      await onSendComments(`Diff #${diff.id} feedback:\n${body}`);
+      setComments(new Map());
+      setOpenLine(null);
+    } finally {
+      setSendingComments(false);
+    }
+  };
 
   const runReview = async () => {
     if (reviewing) return;
@@ -294,6 +319,16 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
     rendered.push(
       <div key={i} className={cls} data-line={i}>
         {isCode ? renderCode(line.slice(0, 1), line.slice(1), lang) : line}
+        {pending && isCode && (
+          <button
+            type="button"
+            className={`diff-comment-btn${comments.has(i) ? " has-comment" : ""}`}
+            aria-label={`Comment on line ${i}`}
+            onClick={() => setOpenLine((o) => (o === i ? null : i))}
+          >
+            💬
+          </button>
+        )}
       </div>,
     );
   });
@@ -364,6 +399,16 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
         )}
         {pending ? (
           <span className="diff-actions">
+            {comments.size > 0 && (
+              <button
+                type="button"
+                className="btn-comments"
+                disabled={sendingComments}
+                onClick={() => void sendComments()}
+              >
+                {sendingComments ? "Sending…" : `Send comments (${comments.size})`}
+              </button>
+            )}
             <button
               className="btn-review"
               disabled={acting || reviewing}
@@ -466,6 +511,29 @@ export default function DiffViewer({ diff, runLabel, onAccept, onReject, project
             </div>
           )}
         </pre>
+      )}
+      {openLine != null && pending && (
+        <div className="diff-comment-box">
+          <textarea
+            value={comments.get(openLine) ?? ""}
+            aria-label="Line comment"
+            placeholder="Note for the agent…"
+            onChange={(e) =>
+              setComments((prev) => {
+                const next = new Map(prev);
+                next.set(openLine, e.target.value);
+                return next;
+              })
+            }
+          />
+          <button
+            type="button"
+            className="diff-comment-close"
+            onClick={() => setOpenLine(null)}
+          >
+            Done
+          </button>
+        </div>
       )}
     </section>
   );

@@ -1344,11 +1344,12 @@ export default function App() {
                 runLabel={d.run_index != null ? `Run ${d.run_index + 1}` : undefined}
                 onAccept={handleAccept}
                 onReject={handleReject}
+                onSendComments={(text) => handleSend(text, [], agentRunning)}
                 projectRoot={project?.root_path ?? null}
               />
             ))
           : diff
-            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} projectRoot={project?.root_path ?? null} />
+            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={(text) => handleSend(text, [], agentRunning)} projectRoot={project?.root_path ?? null} />
             : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
         )}
         {panelTab === "wiki" && (conversation?.id != null ? (

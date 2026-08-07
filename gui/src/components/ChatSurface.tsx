@@ -815,6 +815,7 @@ export default function ChatSurface({
         <form className="chat-input" onSubmit={handleSubmit}>
           <textarea
             ref={textareaRef}
+            aria-label="Message input"
             rows={1}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

@@ -269,6 +269,18 @@ export interface Settings {
   max_concurrent_runs: string;
 }
 
+// P1-1: Known sudo-provider models (Hermes custom_providers). Hardcoded for
+// MVP — no IPC model-discovery. Free-form values still round-trip via the
+// datalist combobox; these only seed the picker suggestions.
+export const SUDO_PROVIDER = "sudo";
+export const SUDO_MODELS = [
+  "t9s/glm-5.2",
+  "t9s/kimi-k3",
+  "t9s/gpt-5.6-sol",
+  "t9s/deepseek-v4-flash",
+  "t9s/kimi-k2.7-code",
+] as const;
+
 export interface GetSettingsResponse {
   ok: boolean;
   error?: string;

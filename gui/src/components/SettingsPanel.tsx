@@ -1,10 +1,75 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage, getSettings, unwrap, updateSettings } from "../api";
 import { useFocusTrap } from "../focusTrap";
-import type { Settings } from "../types";
+import { SUDO_MODELS, SUDO_PROVIDER, type Settings } from "../types";
 import LoadingInline from "./LoadingInline";
 
 const SAVED_TOAST_MS = 3000;
+
+// P1-1: Chip/tag input for comma-separated model@provider review models.
+// Enter/comma commits a chip; each chip auto-appends @sudo if no provider is
+// given. Chips render as removable tags; the underlying string stays in wire
+// format (comma-joined) so save needs no conversion.
+function ReviewModelsInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const chips = value
+    .split(",")
+    .map((c) => c.trim())
+    .filter((c) => c !== "");
+  const [draft, setDraft] = useState("");
+
+  const commit = (next: string[]) => onChange(next.join(","));
+  const addChip = () => {
+    const raw = draft.trim();
+    if (raw === "") return;
+    const chip = raw.includes("@") ? raw : `${raw}@${SUDO_PROVIDER}`;
+    if (!chips.includes(chip)) commit([...chips, chip]);
+    setDraft("");
+  };
+
+  return (
+    <div className="model-chips">
+      {chips.map((c, i) => (
+        <span key={`${c}-${i}`} className="model-chip">
+          {c}
+          <button
+            type="button"
+            className="model-chip-remove"
+            aria-label={`Remove ${c}`}
+            onClick={() => commit(chips.filter((x) => x !== c))}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        list="sudo-models"
+        className="model-chip-input"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === ",") {
+            e.preventDefault();
+            addChip();
+          }
+        }}
+        onBlur={addChip}
+        placeholder="Add model…"
+      />
+      <datalist id="sudo-models">
+        {SUDO_MODELS.map((m) => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
 
 // Belt D: the theme persists in localStorage and is applied to <html> —
 // App reads the same key on mount, so the dialog never has to sync back.
@@ -139,6 +204,7 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
               <span>Coding model</span>
               <input
                 type="text"
+                list="sudo-models"
                 value={settings.coding_model}
                 onChange={(e) => set("coding_model", e.target.value)}
               />
@@ -147,6 +213,7 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
               <span>Orchestrator model</span>
               <input
                 type="text"
+                list="sudo-models"
                 value={settings.orchestrator_model}
                 onChange={(e) => set("orchestrator_model", e.target.value)}
               />
@@ -172,17 +239,15 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
             </label>
             <label className="settings-field">
               <span>Review models</span>
-              <input
-                type="text"
+              <ReviewModelsInput
                 value={settings.review_models}
-                onChange={(e) => set("review_models", e.target.value)}
-                placeholder="comma-separated model@provider, e.g. glm-5.2@sudo, t9s/kimi-k3@sudo"
+                onChange={(v) => set("review_models", v)}
               />
             </label>
 
             {/* M10: Knowledge capture (auto-distill) */}
             <div className="settings-section-title">Knowledge capture</div>
-            <label className="settings-row">
+            <label className="settings-field">
               <span>Auto-distill</span>
               <select
                 value={settings.auto_distill}
@@ -192,17 +257,18 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
                 <option value="on_idle">On idle (after N seconds)</option>
               </select>
             </label>
-            <label className="settings-row">
+            <label className="settings-field">
               <span>Idle seconds</span>
               <input
                 type="number"
                 min="5"
                 max="300"
+                disabled={settings.auto_distill !== "on_idle"}
                 value={settings.auto_distill_idle_seconds}
                 onChange={(e) => set("auto_distill_idle_seconds", e.target.value)}
               />
             </label>
-            <label className="settings-row">
+            <label className="settings-field">
               <span>Auto-curate after distill</span>
               <select
                 value={settings.auto_curate_after_distill}
@@ -212,7 +278,7 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
                 <option value="true">Yes (chain after distill)</option>
               </select>
             </label>
-            <label className="settings-row">
+            <label className="settings-field">
               <span>Max concurrent runs</span>
               <input
                 type="number"

@@ -1230,8 +1230,12 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 .chat-input input:focus,
 .chat-input textarea:focus {
-  outline: none;
   border-color: var(--accent-user);
+}
+.chat-input textarea:focus-visible,
+.chat-input input:focus-visible {
+  outline: 2px solid var(--accent-user);
+  outline-offset: -1px;
 }
 
 .chat-input input:disabled,
@@ -1552,8 +1556,10 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 .diff-line {
   padding: 0 16px;
-  white-space: pre-wrap;
-  word-break: break-all;
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+  position: relative;
 }
 
 .diff-add {
@@ -1662,6 +1668,73 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text-dim);
   font-style: italic;
   border-top: 1px dashed var(--border);
+}
+
+/* P1-3: inline diff comment affordance */
+.diff-comment-btn {
+  position: absolute;
+  right: 6px;
+  top: 2px;
+  background: none;
+  border: none;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.15s ease;
+  padding: 0;
+  line-height: 1;
+}
+.diff-line:hover .diff-comment-btn,
+.diff-comment-btn.has-comment {
+  opacity: 1;
+}
+.diff-comment-box {
+  border-top: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.diff-comment-box textarea {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--text-caption);
+  padding: 6px 8px;
+  resize: vertical;
+}
+.diff-comment-close {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: var(--text-caption);
+  white-space: nowrap;
+}
+.diff-comment-close:hover {
+  color: var(--text);
+  border-color: var(--accent-user);
+}
+.btn-comments {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+.btn-comments:hover {
+  border-color: var(--accent-user);
+}
+.btn-comments:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ---------- D0: diff file navigation chips ---------- */
@@ -1867,6 +1940,74 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-color: var(--accent-user);
 }
 
+/* P0-2: section title for knowledge-capture group */
+.settings-section-title {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* P1-4: gated fields read as unavailable */
+.settings-field input:disabled,
+.settings-field select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* P1-1: chip input for review models */
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  min-height: 36px;
+}
+.model-chips:focus-within {
+  border-color: var(--accent-user);
+}
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-micro);
+  padding: 2px 4px 2px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.model-chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.model-chip-remove:hover {
+  color: var(--err);
+}
+.model-chip-input {
+  flex: 1;
+  min-width: 80px;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: var(--text-caption);
+  padding: 2px 4px;
+}
+
 .settings-actions {
   display: flex;
   gap: 8px;
@@ -1981,21 +2122,21 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 }
 
 .verdict-accept {
-  background: rgba(63, 163, 95, 0.18);
+  background: rgba(63, 163, 95, 0.15);
   color: var(--ok);
-  border: 1px solid var(--ok);
+  border: none;
 }
 
 .verdict-reject {
-  background: rgba(195, 74, 74, 0.15);
+  background: rgba(195, 74, 74, 0.12);
   color: var(--err);
-  border: 1px solid var(--err);
+  border: none;
 }
 
 .verdict-needs_fixes {
-  background: rgba(204, 167, 66, 0.15);
+  background: rgba(204, 167, 66, 0.12);
   color: var(--warn);
-  border: 1px solid var(--warn);
+  border: none;
 }
 
 .review-comments {
@@ -3009,7 +3150,8 @@ mark {
   top: 0;
   bottom: 0;
   z-index: 1;
-  pointer-events: none; /* P6 will wire drag handlers */
+  pointer-events: auto;
+  touch-action: none;
 }
 
 .panel-resize:hover {
@@ -3232,8 +3374,8 @@ mark {
 }
 
 .skills-add-btn:hover {
-  color: var(--accent);
-  background: var(--raised);
+  color: var(--accent-user);
+  background: var(--bg-raised);
 }
 
 .skills-empty {
@@ -3258,12 +3400,12 @@ mark {
 }
 
 .skill-row:hover {
-  background: var(--raised);
+  background: var(--bg-raised);
 }
 
 .skill-row.active {
-  background: var(--raised);
-  border-left: 2px solid var(--accent);
+  background: var(--bg-raised);
+  border-left: 2px solid var(--accent-user);
 }
 
 .skill-scope-dot {
@@ -3275,7 +3417,7 @@ mark {
 }
 
 .skill-scope-dot.scope-global {
-  background: var(--accent);
+  background: var(--accent-user);
 }
 
 .skill-scope-dot.scope-project {
@@ -3312,7 +3454,7 @@ mark {
 
 .skill-kw {
   font-size: var(--text-micro);
-  background: var(--raised);
+  background: var(--bg-raised);
   color: var(--text-dim);
   padding: 1px 5px;
   border-radius: var(--radius-sm);
@@ -3355,8 +3497,8 @@ mark {
 }
 
 .skill-edit-btn:hover {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-user);
+  border-color: var(--accent-user);
 }
 
 .skill-meta {
@@ -3383,14 +3525,14 @@ mark {
 
 .skill-scope-tag.global {
   background: rgba(59, 130, 246, 0.15);
-  color: var(--accent);
+  color: var(--accent-user);
 }
 
 .skill-origin-tag {
   font-size: var(--text-micro);
   color: var(--text-dim);
   padding: 1px 6px;
-  background: var(--raised);
+  background: var(--bg-raised);
   border-radius: var(--radius-sm);
 }
 
@@ -3408,7 +3550,7 @@ mark {
   overflow-y: auto;
   flex: 1;
   white-space: pre-wrap;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
 }
 
 .skill-editor {
@@ -3435,7 +3577,7 @@ mark {
 }
 
 .skill-save-btn {
-  background: var(--accent);
+  background: var(--accent-user);
   color: white;
   border: none;
   border-radius: var(--radius-sm);
@@ -3474,7 +3616,7 @@ mark {
   border: none;
   border-top: 1px solid var(--stroke-tertiary);
   padding: 10px 14px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: var(--text-caption);
   line-height: 1.6;
   resize: none;
@@ -3504,9 +3646,9 @@ mark {
 }
 
 .skill-scope-opt.active {
-  border-color: var(--accent);
+  border-color: var(--accent-user);
   color: var(--text);
-  background: var(--raised);
+  background: var(--bg-raised);
 }
 
 .skill-scope-path {

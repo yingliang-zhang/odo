@@ -278,9 +278,11 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
 
   return (
     <div className="mem-panel">
-      <div className="mem-tabs">
+      <div className="mem-tabs" role="tablist" aria-label="Memory sections">
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === "proposals"}
           className={`mem-tab${tab === "proposals" ? " active" : ""}`}
           onClick={() => setTab("proposals")}
         >
@@ -288,6 +290,8 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === "files"}
           className={`mem-tab${tab === "files" ? " active" : ""}`}
           onClick={() => setTab("files")}
         >
