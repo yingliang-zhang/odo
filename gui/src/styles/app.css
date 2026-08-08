@@ -2114,12 +2114,6 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   font-size: 12px;
 }
 
-.settings-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
 /* PR2: Settings inspector — 160px left category sidebar + right detail */
 .settings-inspector {
   display: grid;
@@ -2190,18 +2184,6 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .settings-field select:focus {
   outline: none;
   border-color: var(--accent-user);
-}
-
-/* P0-2: section title for knowledge-capture group */
-.settings-section-title {
-  margin-top: 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 /* P1-4: gated fields read as unavailable */
