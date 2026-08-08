@@ -18,7 +18,7 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-M0–M11 complete. 147 commits, ~27K lines (15.6K Go + 11.6K TS/CSS/Rust).
+M0–M11 complete. 162 commits, ~29K lines (15.6K Go + 13.4K TS/CSS/Rust).
 
 | Milestone | What it delivers | Tests |
 |---|---|---|
@@ -37,13 +37,25 @@ M0–M11 complete. 147 commits, ~27K lines (15.6K Go + 11.6K TS/CSS/Rust).
 | Sidebar Redesign | 48px icon rail, 4 sections, toast viewport, collapse (⌘B) | computer-use E2E |
 | GUI Belt A–D | Abort, scroll, textarea, shortcuts, markdown, search, palette, split diff, theme, empty state, a11y | 58 E2E |
 | Hardening | 8 tri-model review items (path guard, retraction dedup, CSS var, palette trap) | 3 Go |
-| GUI Audit | P0+P1 fixes: CSS tokens, model picker (datalist+chips), diff comments, focus ring, panel resize, tablist, verdict badges | 44 E2E (tri-model MoA reviewed) |
+| GUI Audit | P0+P1 fixes: CSS tokens, model picker (datalist+chips), diff comments, focus ring, panel resize, tablist, verdict badges | 43 E2E (tri-model MoA reviewed) |
+| PR1 CSS Polish | systemBlue accent, SF Pro font stack, flat agent bubble + hairline border, asymmetric user bubble tail, macOS focus ring, motion tokens, reduced-motion guard, frosted vibrancy | 43 E2E |
+| PR2 Settings Inspector | Left 160px category sidebar (General/Models/Knowledge) + right detail panel, all fields preserved | 43 E2E |
+| PR3 TopBar Declutter | Distill (labeled) + ⋯ overflow menu (Curate/Pin/Wiki/Ledger) + Settings (gear icon) | 43 E2E |
+| Diff Line Numbers | Hunk header parsing for old/new line numbers, split-view comment buttons, file:line comment refs | 43 E2E |
+| P2 A11y | aria-busy spinners, inline delete confirm (replaces native window.confirm) | 43 E2E |
+| Clipboard Paste Fix | save_attachment daemon command for clipboard image paste (webview → base64 → daemon → real path) | 43 E2E |
 
 ### Planned
 
-- **Cross-examiner** — one-shot mid-discussion second opinion at decision points (config in `prefs.md`, handler not yet wired)
-- **P2 polish** — WCAG AA contrast, aria-busy spinners, in-app confirm dialogs, command palette combobox wiring, fuzzy search
-- **Experiment ledger** — `docs/experiment-ledger.md` for cross-session experiment tracking
+- **Cross-examiner** — one-shot mid-discussion second opinion at decision points (DEFER until a concrete decision-point pain is demonstrated; `/panel` already covers manual second opinions)
+- **Per-run diff lock** — move `ExtractDiff` out of `s.mu` to avoid blocking concurrent conversations during git subprocess calls (DEFER until accept latency is observed blocking another conversation)
+- **Split-view comments in split mode** — 💬 comment button exists in both inline and split views; if split-view commenting becomes a daily need, add comment affordance to split view (currently done)
+
+### WONTFIX (removed from roadmap)
+
+- ~~Experiment ledger~~ — redundant for a single-user app; git history + memory/log.md + ledger.md already capture experiment outcomes
+- ~~P2 polish (contrast audit, palette fuzzy search, combobox wiring)~~ — contrast passes WCAG AA at normal sizes; palette uses substring filter (sufficient); combobox ARIA already present in CommandPalette
+- ~~Vision auto-screenshot finishing layer~~ — premature; core `/vision` route ships with K3 image blocks; the finishing layer needs a demonstrated pain point
 
 ### Features
 

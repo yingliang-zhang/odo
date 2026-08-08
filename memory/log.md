@@ -594,3 +594,81 @@ idle and renders the preview as a dimmed bubble.
   `{"type":"session"…}`) ✓.
 
 Uncommitted at HEAD c7bd684; GUI webview E2E (cua-driver) still outstanding.
+
+## M8–M11 + GUI Polish (2026-08-03 to 2026-08-08)
+
+### M8 Skills — CLOSED
+- Skills panel (CRUD), path traversal security, scope selector, BOM/EOF parser
+- 12 Go tests + 11 E2E, all pass
+- Tri-model review: 3/3 ACCEPT
+
+### M9 Skill Distillation — CLOSED
+- Skill distillation + three-tier gating (auto-discard / human-gate / auto-accept) + MoA review
+- 20 Go tests + 6 E2E, all pass
+- Tri-model review: 3/3 ACCEPT
+
+### M10 Auto-Distill — CLOSED
+- Settings UI, idle gate, auto-curate chain, `auto_distill: on_idle`
+- 44 E2E (full suite), all pass
+- Tri-model review: 3/3 ACCEPT
+
+### M11 Multi-Project — CLOSED
+- Sidebar project list, per-project daemon, folder picker
+- Tri-model review: 3/3 ACCEPT
+
+### Sidebar Redesign — CLOSED
+- 48px icon rail, 4 sections, toast viewport, collapse (⌘B)
+- computer-use E2E verified
+
+### GUI Belt A-D — CLOSED
+- Abort, scroll, textarea, shortcuts, markdown, search, palette, split diff, theme, empty state, a11y
+- 58 E2E, all pass
+- Tri-model review: 3/3 ACCEPT per belt
+
+### Hardening — CLOSED
+- 8 tri-model review items (path guard, retraction dedup, CSS var, palette trap)
+- 3 Go tests, all pass
+
+### GUI Audit — CLOSED
+- P0+P1 fixes: CSS tokens, model picker (datalist+chips), diff comments, focus ring, panel resize, tablist, verdict badges
+- 43 E2E (tri-model MoA reviewed)
+
+### Slash Command Autocomplete — CLOSED
+- `/` opens autocomplete with /panel /vision command list
+- Sidebar cleanup (removed redundant project name + selected branch box → soft bg)
+
+### PR1 CSS Polish — CLOSED (commit 9b36183 + c991ba0)
+- systemBlue accent #0A84FF, SF Pro font stack + antialiased
+- Flat agent bubble + hairline border, asymmetric user bubble tail
+- macOS focus ring (color-mix theme-adaptive), motion tokens, reduced-motion guard
+- Tabular nums, frosted vibrancy (TopBar/StatusBar)
+- Tri-model review: 2/3 ACCEPT → cleanup (theme-adaptive focus ring, dead motion tokens)
+
+### PR2 Settings Inspector — CLOSED (commit 773df94 + 3e7228a)
+- Left 160px category sidebar (General / Models / Knowledge) + right detail panel
+- All 9 fields preserved, E2E selectors retained
+- Tri-model review: 3/3 NEEDS_FIXES → dead CSS cleanup (.settings-form, .settings-section-title)
+
+### PR3 TopBar Declutter — CLOSED (commit 48aebf1 + eeff2d2 + d75d564)
+- Distill (labeled) + ⋯ overflow menu (Curate/Pin/Wiki/Ledger) + Settings (gear icon)
+- Overflow: frosted vibrancy dropdown, outside-click + Escape close, aria-haspopup/expanded
+- Pin popover anchoring fix (moved inside overflow container)
+- Tri-model review: 3/3 ACCEPT → dead CSS + role=separator cleanup
+
+### Diff Line Numbers + Split Comments — CLOSED (commit d3a39ff + a293fc0)
+- #10: Parse @@ hunk headers, track old/new line counters, line-number gutters in inline + split
+- A2: Comment refs fixed from L<arrayIndex> to file:line (real line numbers)
+- #11: Split-view 💬 comment buttons (both old/new columns)
+- Tri-model review: 2/3 ACCEPT + 1 REJECT → 3 fixes (inline syntax highlighting restored, split context lineNum fixed, dead CSS removed)
+
+### P2 A11y — CLOSED (commit bf1d6b5)
+- aria-busy on preview bubbles (tool + agent)
+- Inline delete confirm replacing native window.confirm (Sidebar.tsx)
+- E2E updated for two-step delete confirm
+
+### Clipboard Paste Fix (A1) — CLOSED (commit 6ecbac0)
+- save_attachment daemon command: base64 → .odo/attachments/<ts>-<name> → real path
+- ChatSurface paste handler: FileReader.readAsDataURL → saveAttachment → real path attachment
+- Fixes: ⌃⌘⇧4 screenshot → paste → /vision (was ENOENT, now works)
+
+HEAD: 6ecbac0
