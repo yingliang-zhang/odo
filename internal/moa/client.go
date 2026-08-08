@@ -138,7 +138,7 @@ func (c *Client) Query(ctx context.Context, model, system, prompt string) (strin
 		return "", fmt.Errorf("moa: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("moa: API returned %d: %s", resp.StatusCode, truncate(string(raw), 200))
+		return "", fmt.Errorf("moa: API returned %d (check server logs for details)", resp.StatusCode)
 	}
 	var msg messageResponse
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -150,20 +150,11 @@ func (c *Client) Query(ctx context.Context, model, system, prompt string) (strin
 			texts = append(texts, block.Text)
 		}
 	}
-	return strings.Join(texts, "\n\n"), nil
-}
-
-// QueryModel is a convenience wrapper that resolves model@provider from
-// prefs-style strings (e.g. "t9s/glm-5.2" + "sudo") and calls Query.
-// The provider is currently unused (single gateway) but kept for future
-// multi-provider routing.
-func (c *Client) QueryModel(ctx context.Context, model, _provider, system, prompt string) (string, error) {
-	return c.Query(ctx, model, system, prompt)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+	if msg.StopReason == "max_tokens" {
+		return "", fmt.Errorf("moa: response truncated (stop_reason=max_tokens, %d output tokens used)", msg.Usage.OutputTokens)
 	}
-	return s[:n] + "..."
+	if len(texts) == 0 {
+		return "", fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
+	}
+	return strings.Join(texts, "\n\n"), nil
 }

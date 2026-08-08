@@ -27,7 +27,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// `distill` runs a full summary-agent turn (bounded by the daemon's
 /// 10-minute `distillTimeout`) followed by the M4 learner one-shot (bounded
 /// by the 5-minute `learnerTimeout`) and the M9 tri-model skill gate
-/// (bounded by the 5-minute `moaReviewTimeout`) — all synchronously before
+/// (bounded by the 5-minute skill-gate HTTP client timeout) — all synchronously before
 /// the daemon answers, and the daemon serves one connection at a time, so
 /// the read timeout covers all three plus margin (10m + 5m + 5m + margin).
 const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(1900);
@@ -292,7 +292,15 @@ async fn send_message(
             req["adapter"] = json!(adapter);
         }
     }
-    run_command(root, req, READ_TIMEOUT).await
+    // /panel and /vision fan out to N models via HTTP (up to 300s each);
+    // use the review timeout (330s) to avoid the 120s bridge timeout
+    // triggering a duplicate dispatch.
+    let timeout = if text.starts_with("/panel") || text.starts_with("/vision") {
+        REVIEW_READ_TIMEOUT
+    } else {
+        READ_TIMEOUT
+    };
+    run_command(root, req, timeout).await
 }
 
 // Belt A: abort the conversation's active run (adapter SIGKILLs the

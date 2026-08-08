@@ -316,7 +316,7 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 	}, nil
 }
 
-// generateAgentsMD writes an AGENTS.md file in the project root so OMP reads
+// generateAgentsMD writes an AGENTS.md file in .odo/ so OMP reads
 // Odo's project rules as its system prompt. The content is derived from
 // .odo/memory.md (project behavior rules) and .odo/pins.md (user-authored
 // verbatim statements). If neither file exists, a minimal default is written.
@@ -342,7 +342,10 @@ func (s *Server) generateAgentsMD() {
 		b.Write(data)
 		b.WriteString("\n\n")
 	}
-	_ = os.WriteFile(filepath.Join(s.projectRoot, "AGENTS.md"), []byte(b.String()), 0o644)
+	agentsPath := filepath.Join(s.projectRoot, ".odo", "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte(b.String()), 0o644); err != nil {
+		log.Printf("ipc: generate AGENTS.md: %v", err)
+	}
 }
 
 // handleCreateWorkstream creates (or returns) the named workstream for the
@@ -469,6 +472,9 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 			}
 		}
 		s.mu.Unlock()
+		if _, ok := s.distilling[c.ID]; ok {
+			return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
+		}
 		return s.handlePanelQuery(ctx, &c, strings.TrimSpace(rest))
 	}
 	// /vision slash command: route to K3 (vision-capable) via direct API.
@@ -486,6 +492,9 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 			}
 		}
 		s.mu.Unlock()
+		if _, ok := s.distilling[c.ID]; ok {
+			return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
+		}
 		return s.handleVisionQuery(ctx, &c, strings.TrimSpace(rest))
 	}
 	// Held for the entire handler (M11 P0): the byConv check and
@@ -1069,11 +1078,6 @@ func (s *Server) retireRun(ctx context.Context, conversationID int64) {
 		log.Printf("ipc: retire run: unbind worktree: %v", err)
 	}
 }
-
-// moaReviewTimeout bounds each parallel review run. The adapter wrapper
-// applies its own timeout (default 600s); a skew between the two only
-// changes which error message lands in the review comments.
-const moaReviewTimeout = 5 * time.Minute
 
 // reviewModel is one parsed entry of the prefs.md `review:` line.
 type reviewModel struct {

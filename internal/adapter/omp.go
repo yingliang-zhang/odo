@@ -49,8 +49,6 @@ type OMP struct {
 	stateDir         string // <project>/.odo; prompt/session/output files live here
 	timeout          string
 	prefsKey         string // prefs.md key to read model from ("coding" or "orchestrator")
-	modelOverride    string // non-empty: bypass prefs.md for the model
-	providerOverride string // non-empty: bypass prefs.md for the provider
 
 	mu           sync.Mutex // guards runs + configLogged; run results sync via done channel
 	runs         map[string]*ompRun
@@ -140,30 +138,12 @@ func NewOMPForKey(stateDir, key string) *OMP {
 	return o
 }
 
-// NewOMPExplicit creates an OMP adapter with an explicit model/provider pair,
-// bypassing prefs.md. The MoA review fan-out uses it so each reviewer runs
-// its own configured model.
-func NewOMPExplicit(stateDir, model, provider string) *OMP {
-	o := NewOMP(stateDir)
-	o.modelOverride = model
-	o.providerOverride = provider
-	return o
-}
 
 // resolveModelConfig resolves the wrapper's --hermes-model / --hermes-provider
-// args. Explicit overrides (NewOMPExplicit) win; otherwise ~/.odo/prefs.md is
-// re-read on every call so prefs edits apply to the next run without a daemon
-// restart. Falls back to the M0 defaults. The resolved pair is logged to
-// stderr once (first use) for debugging.
+// args. The prefs.md key (e.g. "coding" or "orchestrator") determines which
+// model line is read. Falls back to the M0 defaults.
 func (a *OMP) resolveModelConfig() (model, providerArg string) {
-	model, provider := a.modelOverride, a.providerOverride
-	pModel, pProvider := LoadPrefsByKey(a.prefsKey)
-	if model == "" {
-		model = pModel
-	}
-	if provider == "" {
-		provider = pProvider
-	}
+	model, provider := LoadPrefsByKey(a.prefsKey)
 	if model == "" {
 		model = defaultModel
 	}
