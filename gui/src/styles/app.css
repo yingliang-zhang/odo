@@ -1045,6 +1045,19 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .ws-action-delete:hover {
   color: var(--err);
 }
+
+/* P2: inline delete confirm — replaces native window.confirm */
+.ws-delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ws-delete-confirm-text {
+  font-size: var(--text-micro);
+  color: var(--err);
+  white-space: nowrap;
+}
 .ws-rename-form {
   flex: 1;
 }

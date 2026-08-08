@@ -90,10 +90,11 @@ test("delete workstream via hover action", async ({ page }) => {
   // Hover and click delete
   const wsRow = sidebar.locator(".ws-row", { hasText: "to-delete" });
   await wsRow.hover();
-
-  // Set up dialog handler before clicking delete
-  page.once("dialog", (d) => d.accept());
   await wsRow.getByRole("button", { name: /Delete/ }).click();
+
+  // P2: inline delete confirm — click confirm to actually delete
+  await expect(wsRow.locator(".ws-delete-confirm-text")).toBeVisible();
+  await wsRow.getByRole("button", { name: /Confirm delete/ }).click();
 
   // Workstream removed
   await expect(sidebar.locator(".ws-item", { hasText: "to-delete" })).toBeHidden();

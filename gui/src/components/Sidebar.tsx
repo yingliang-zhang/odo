@@ -108,6 +108,8 @@ export default function Sidebar({
   const [createError, setCreateError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [renamingId, setRenamingId] = useState<number | null>(null);
+  // P2: inline delete confirm — replaces native window.confirm
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   // Phase 3.5: which projects are collapsed in the tree.
   // Active project is force-expanded; non-active projects follow saved state
@@ -202,9 +204,7 @@ export default function Sidebar({
       icon: <Trash2 size={12} />,
       onClick: (e: React.MouseEvent) => {
         e.stopPropagation();
-        if (confirm(`Delete workstream "${w.name}"? Pending diffs must be resolved first.`)) {
-          void onDeleteWorkstream(w.id);
-        }
+        setDeletingId(w.id);
       },
     },
   ];
@@ -261,20 +261,51 @@ export default function Sidebar({
             </span>
           </button>
             {isActiveProject && (
-              <span className="ws-actions">
-                {workstreamActions(w).map((action) => (
+              deletingId === w.id ? (
+                <span className="ws-delete-confirm">
+                  <span className="ws-delete-confirm-text">Delete?</span>
                   <button
-                    key={action.label}
+                    type="button"
+                    className="ws-action-btn ws-action-delete"
+                    title="Confirm delete"
+                    aria-label={`Confirm delete ${w.name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeletingId(null);
+                      void onDeleteWorkstream(w.id);
+                    }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                  <button
                     type="button"
                     className="ws-action-btn"
-                    title={action.label}
-                    aria-label={`${action.label} ${w.name}`}
-                    onClick={action.onClick}
+                    title="Cancel"
+                    aria-label="Cancel delete"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeletingId(null);
+                    }}
                   >
-                    {action.icon}
+                    ✕
                   </button>
-                ))}
-              </span>
+                </span>
+              ) : (
+                <span className="ws-actions">
+                  {workstreamActions(w).map((action) => (
+                    <button
+                      key={action.label}
+                      type="button"
+                      className="ws-action-btn"
+                      title={action.label}
+                      aria-label={`${action.label} ${w.name}`}
+                      onClick={action.onClick}
+                    >
+                      {action.icon}
+                    </button>
+                  ))}
+                </span>
+              )
             )}
           </>
         )}

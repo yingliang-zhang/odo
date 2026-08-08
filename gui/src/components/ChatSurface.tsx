@@ -128,7 +128,7 @@ function PreviewBubble({ preview }: { preview: PreviewEvent }) {
     const tool = typeof p.tool === "string" && p.tool !== "" ? p.tool : "tool";
     const intent = typeof p.intent === "string" && p.intent !== "" ? ` — ${p.intent}` : "";
     return (
-      <div className="bubble bubble-tool bubble-preview" aria-live="polite">
+      <div className="bubble bubble-tool bubble-preview" aria-live="polite" aria-busy="true">
         <span className="preview-spinner" aria-hidden="true">
           <LoaderCircle size={12} className="spin" />
         </span>{" "}
@@ -140,7 +140,7 @@ function PreviewBubble({ preview }: { preview: PreviewEvent }) {
   const text = typeof p.text === "string" ? p.text : "";
   if (text === "") return null;
   return (
-    <div className="bubble bubble-agent bubble-preview" aria-live="polite">
+    <div className="bubble bubble-agent bubble-preview" aria-live="polite" aria-busy="true">
       {text}
       <span className="preview-caret" aria-hidden="true" />
     </div>
