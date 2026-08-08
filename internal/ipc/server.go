@@ -880,6 +880,14 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 		return
 	}
 
+	// M11 P0: don't start a continuation during distill — same guard as
+	// handleSendMessage (3 places). The distill's unlocked window would let
+	// a continuation run journal events into the epoch the distill is rolling.
+	if _, ok := s.distilling[conversationID]; ok {
+		log.Printf("a2-continuation: skipping — distill in progress for conversation %d", conversationID)
+		return
+	}
+
 	c, err := s.store.GetConversation(ctx, conversationID)
 	if err != nil {
 		log.Printf("a2-continuation: get conversation: %v", err)
@@ -989,6 +997,15 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	}
 	meta.errored = evs[len(evs)-1].Type == store.EventAgentError
 
+	// A2-lite: defer the continuation trigger to a single tail after all
+	// finished paths. We collect the queue here and fire after diff
+	// extraction (or skip on error). This covers the no-diff success path
+	// (diffPath == "") that previously dropped queued steers.
+	queuedSteers := meta.queuedSteers
+	if len(queuedSteers) > 0 {
+		meta.queuedSteers = nil // consume the queue regardless of outcome
+	}
+
 	// The diff is extracted whether the run succeeded or failed: partial
 	// changes are reviewable, and the human decides. (ADR-0001.)
 	baseSHA := ""
@@ -1004,6 +1021,10 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	}
 	if diffPath == "" {
 		meta.finished = true // agent changed nothing; run is complete
+		// A2-lite: even with no diff, fire continuation if steers were queued.
+		if len(queuedSteers) > 0 && !meta.errored {
+			go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+		}
 		return nil
 	}
 	if _, err := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA); err != nil {
@@ -1020,10 +1041,8 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// a continuation run with the queued texts as the prompt. This replaces
 	// the dead steering.txt path — the agent sees the follow-up in a fresh
 	// run with full memory-layer injection, not a silent file it never reads.
-	if len(meta.queuedSteers) > 0 && !meta.errored {
-		queued := meta.queuedSteers
-		meta.queuedSteers = nil // consume the queue
-		go s.startContinuationRun(meta.conversationID, meta.workstreamID, queued)
+	if len(queuedSteers) > 0 && !meta.errored {
+		go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
 	}
 	return nil
 }

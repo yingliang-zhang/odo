@@ -111,12 +111,6 @@ type ReviewResult struct {
 	Comments string `json:"comments"`
 }
 
-// A4-lite: deterministic consensus verdict computed by consensusVerdict().
-// Journaled in the review_action event alongside individual reviews.
-type ConsensusResult struct {
-	Verdict string `json:"verdict"` // "accept" | "reject" | "needs_fixes"
-}
-
 // DiffInfo carries a diff record plus its file content to the client.
 type DiffInfo struct {
 	ID      int64  `json:"id"`

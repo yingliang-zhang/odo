@@ -1009,6 +1009,53 @@ func TestReviewDiff(t *testing.T) {
 	if len(payload.Reviews) != 2 {
 		t.Errorf("journaled reviews = %d, want 2", len(payload.Reviews))
 	}
+
+	// A4-lite: the review_action event carries a consensus_verdict.
+	var fullPayload struct {
+		ConsensusVerdict string `json:"consensus_verdict"`
+	}
+	if err := json.Unmarshal(last.Payload, &fullPayload); err != nil {
+		t.Fatalf("consensus payload: %v", err)
+	}
+	// rm1=accept + rm2=reject → any reject → "reject"
+	if fullPayload.ConsensusVerdict != "reject" {
+		t.Errorf("consensus_verdict = %q, want %q", fullPayload.ConsensusVerdict, "reject")
+	}
+	// The response also carries the consensus field.
+	if rev.Consensus != "reject" {
+		t.Errorf("Response.Consensus = %q, want %q", rev.Consensus, "reject")
+	}
+}
+
+// TestConsensusVerdict tests the deterministic 2/3 tally logic.
+func TestConsensusVerdict(t *testing.T) {
+	tests := []struct {
+		name    string
+		reviews []ReviewResult
+		want    string
+	}{
+		{"empty", nil, "needs_fixes"},
+		{"single accept", []ReviewResult{{Verdict: "accept"}}, "accept"},
+		{"single reject", []ReviewResult{{Verdict: "reject"}}, "reject"},
+		{"single needs_fixes", []ReviewResult{{Verdict: "needs_fixes"}}, "needs_fixes"},
+		{"2/3 accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "needs_fixes"}}, "accept"},
+		{"3/3 accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "accept"}}, "accept"},
+		{"1/3 reject dominates", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "reject"}}, "reject"},
+		{"2/3 reject", []ReviewResult{{Verdict: "reject"}, {Verdict: "reject"}, {Verdict: "accept"}}, "reject"},
+		{"all needs_fixes", []ReviewResult{{Verdict: "needs_fixes"}, {Verdict: "needs_fixes"}, {Verdict: "needs_fixes"}}, "needs_fixes"},
+		{"N=2 both accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}}, "accept"},
+		{"N=2 split", []ReviewResult{{Verdict: "accept"}, {Verdict: "needs_fixes"}}, "needs_fixes"},
+		{"N=2 one reject", []ReviewResult{{Verdict: "accept"}, {Verdict: "reject"}}, "reject"},
+		{"N=4 three accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "needs_fixes"}}, "accept"},
+		{"N=4 two accept one reject", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "reject"}, {Verdict: "needs_fixes"}}, "reject"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := consensusVerdict(tt.reviews); got != tt.want {
+				t.Errorf("consensusVerdict() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 // TestGetSettings covers get_settings: absent prefs yield the compiled-in
