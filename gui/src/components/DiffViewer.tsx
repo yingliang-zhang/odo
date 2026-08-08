@@ -34,7 +34,7 @@ const NEW_FILE_RE = /^\+\+\+ (?:b\/)?(.+)$/;
 const OLD_FILE_RE = /^--- (?:a\/)?(.+)$/;
 
 function stripQuotes(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) s = s.slice(1, -1);
+  if (s.startsWith('\"') && s.endsWith('\"') && s.length >= 2) s = s.slice(1, -1);
   // Git places the a// b/ prefix OUTSIDE the quotes: `"b/my file.txt"` → strip
   // leaves `b/my file.txt`. Remove the prefix so downstream consumers (language
   // detection, file navigation labels) get a clean relative path.
@@ -125,6 +125,94 @@ function parseFileSegments(lines: string[]): DiffFileSegment[] {
   return segments;
 }
 
+// #10: Parse `@@ -oldStart,oldCount +newStart,newCount @@` hunk headers.
+// Returns the old and new starting line numbers, or null if not a hunk header.
+const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+function parseHunkHeader(line: string): { oldStart: number; newStart: number } | null {
+  const m = HUNK_RE.exec(line);
+  if (!m) return null;
+  return { oldStart: parseInt(m[1], 10), newStart: parseInt(m[2], 10) };
+}
+
+// #10: One row of the inline diff with resolved line numbers.
+interface InlineRow {
+  line: string;
+  cls: string;
+  isCode: boolean;
+  srcIndex: number;
+  // Real file line number (from hunk header), null for non-code lines.
+  oldLine: number | null;
+  newLine: number | null;
+  // Current file path (for comment references), null between files.
+  filePath: string | null;
+}
+
+// #10: Walk lines tracking old/new line counters from hunk headers.
+function parseInlineRows(lines: string[]): InlineRow[] {
+  const rows: InlineRow[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let filePath: string | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fp = diffFilePath(line);
+    if (fp) {
+      filePath = fp;
+    }
+
+    // Hunk header resets the counters.
+    const hunk = parseHunkHeader(line);
+    if (hunk) {
+      oldLine = hunk.oldStart;
+      newLine = hunk.newStart;
+      rows.push({
+        line,
+        cls: "diff-line diff-hunk",
+        isCode: false,
+        srcIndex: i,
+        oldLine: null,
+        newLine: null,
+        filePath,
+      });
+      continue;
+    }
+
+    const cls = lineClass(line);
+    const isAdd = cls.endsWith("diff-add");
+    const isDel = cls.endsWith("diff-del");
+    const isCode = isAdd || isDel;
+
+    let rowOldLine: number | null = null;
+    let rowNewLine: number | null = null;
+    if (isDel) {
+      rowOldLine = oldLine;
+      oldLine++;
+    } else if (isAdd) {
+      rowNewLine = newLine;
+      newLine++;
+    } else if (!line.startsWith("diff --git") && !line.startsWith("---") && !line.startsWith("+++") && !line.startsWith("\\") && line.length > 0) {
+      // Context line — both counters advance.
+      rowOldLine = oldLine;
+      rowNewLine = newLine;
+      oldLine++;
+      newLine++;
+    }
+
+    rows.push({
+      line,
+      cls,
+      isCode,
+      srcIndex: i,
+      oldLine: rowOldLine,
+      newLine: rowNewLine,
+      filePath,
+    });
+  }
+
+  return rows;
+}
+
 // Belt D: one side of one side-by-side row. `sign` retains the +/- marker
 // for the gutter; kind only picks the tint class.
 interface SplitCell {
@@ -134,6 +222,8 @@ interface SplitCell {
   // D0: index into the diff's line array, for chip-scroll targeting
   // (undefined only on the synthetic truncation-note row).
   src?: number;
+  // #10: real file line number for the gutter.
+  lineNum?: number | null;
 }
 
 interface SplitRow {
@@ -151,6 +241,8 @@ function parseSplitRows(lines: string[]): SplitRow[] {
   let lang: Language | null = null;
   let olds: SplitCell[] = [];
   let news: SplitCell[] = [];
+  let oldLine = 0;
+  let newLine = 0;
   const flush = () => {
     const n = Math.max(olds.length, news.length);
     for (let i = 0; i < n; i++) {
@@ -164,22 +256,34 @@ function parseSplitRows(lines: string[]): SplitRow[] {
     const fp = diffFilePath(line);
     if (fp) lang = languageFromPath(fp);
 
-    if (line.startsWith("@@")) {
+    // #10: Parse hunk header to reset line counters.
+    const hunk = parseHunkHeader(line);
+    if (hunk) {
       flush();
+      oldLine = hunk.oldStart;
+      newLine = hunk.newStart;
       continue;
     }
     if (line.startsWith("-") && !line.startsWith("---")) {
-      olds.push({ text: line.slice(1), kind: "old", lang, src: i });
+      olds.push({ text: line.slice(1), kind: "old", lang, src: i, lineNum: oldLine });
+      oldLine++;
       continue;
     }
     if (line.startsWith("+") && !line.startsWith("+++")) {
-      news.push({ text: line.slice(1), kind: "new", lang, src: i });
+      news.push({ text: line.slice(1), kind: "new", lang, src: i, lineNum: newLine });
+      newLine++;
       continue;
     }
     // Context lines carry a leading space; file headers and other metadata
     // are duplicated across both columns so file boundaries stay visible.
     flush();
-    const ctx: SplitCell = { text: line, kind: "ctx", lang, src: i };
+    const isMetadata = line.startsWith("diff --git") || line.startsWith("\\") || line.length === 0 && !line.startsWith(" ");
+    const ctxLineNum = isMetadata ? null : oldLine;
+    const ctx: SplitCell = { text: line, kind: "ctx", lang, src: i, lineNum: ctxLineNum };
+    if (!isMetadata) {
+      oldLine++;
+      newLine++;
+    }
     rows.push({ left: ctx, right: ctx });
   }
   flush();
@@ -240,12 +344,19 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   // Any rejecting reviewer flags the whole card so it cannot be missed.
   const hasReject = reviews?.some((r) => r.verdict === "reject") ?? false;
 
-  // P1-3: compose and send inline diff comments through the existing send path.
+  // #10 + A2: compose and send inline diff comments with real file:line refs.
   const sendComments = async () => {
     if (comments.size === 0 || sendingComments) return;
+    // Build file:line references from the parsed inline rows.
     const body = [...comments.entries()]
       .filter(([, t]) => t.trim() !== "")
-      .map(([i, t]) => `- L${i}: ${t.trim()}`)
+      .map(([i, t]) => {
+        const row = inlineRows[i];
+        const file = row?.filePath ?? "unknown";
+        const lineNum = row?.newLine ?? row?.oldLine;
+        const ref = lineNum != null ? `${file}:${lineNum}` : `L${i}`;
+        return `- ${ref}: ${t.trim()}`;
+      })
       .join("\n");
     if (body === "" || !onSendComments) return;
     setSendingComments(true);
@@ -304,24 +415,33 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   // Memoized on diff.content — parseFileSegments is a full linear pass.
   const fileSegments = useMemo(() => parseFileSegments(allLines), [diff.content]);
 
-  // Walk the lines once, tracking the language of the file currently being
-  // diffed (multi-file diffs switch at each `diff --git` / `+++ b/` header).
-  const rendered: ReactNode[] = [];
-  let lang: Language | null = null;
-  lines.forEach((line, i) => {
-    const fp = diffFilePath(line);
-    if (fp) lang = languageFromPath(fp);
+  // #10: parse inline rows with line number tracking.
+  const inlineRows = useMemo(() => parseInlineRows(lines), [lines]);
 
-    const cls = lineClass(line);
-    const isCode = cls.endsWith("diff-add") || cls.endsWith("diff-del");
+  // Walk the inline rows once, rendering with line-number gutters.
+  const rendered: ReactNode[] = [];
+  inlineRows.forEach((row, i) => {
+    const isCode = row.isCode;
     rendered.push(
-      <div key={i} className={cls} data-line={i}>
-        {isCode ? renderCode(line.slice(0, 1), line.slice(1), lang) : line}
+      <div key={i} className={row.cls} data-line={row.srcIndex}>
+        {row.cls.endsWith("diff-add") ? (
+          <>
+            <span className="diff-linenum diff-linenum-new">{row.newLine ?? ""}</span>
+            {renderCode("+", row.line.slice(1), null)}
+          </>
+        ) : row.cls.endsWith("diff-del") ? (
+          <>
+            <span className="diff-linenum diff-linenum-old">{row.oldLine ?? ""}</span>
+            {renderCode("-", row.line.slice(1), null)}
+          </>
+        ) : (
+          row.line
+        )}
         {pending && isCode && (
           <button
             type="button"
             className={`diff-comment-btn${comments.has(i) ? " has-comment" : ""}`}
-            aria-label={`Comment on line ${i}`}
+            aria-label={`Comment on line ${row.newLine ?? row.oldLine ?? i}`}
             onClick={() => setOpenLine((o) => (o === i ? null : i))}
           >
             💬
@@ -338,6 +458,8 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
     const ctx: SplitCell = { text: truncatedNote, kind: "ctx", lang: null };
     splitRows.push({ left: ctx, right: ctx });
   }
+
+  // #11: Split view comment button — same pattern as inline, using srcIndex.
   const renderSplitCell = (cell: SplitCell | null, key: number): ReactNode => {
     if (cell === null) {
       // Padding row: nbsp so the empty line keeps its height for alignment.
@@ -350,19 +472,44 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
     if (cell.kind === "old") {
       return (
         <div key={key} className="diff-line diff-line-old" data-line={cell.src}>
+          <span className="diff-linenum diff-linenum-old">{cell.lineNum ?? ""}</span>
           {renderCode("-", cell.text, cell.lang)}
+          {pending && cell.src != null && (
+            <button
+              type="button"
+              className={`diff-comment-btn${comments.has(cell.src) ? " has-comment" : ""}`}
+              aria-label={`Comment on line ${cell.lineNum ?? cell.src}`}
+              onClick={() => setOpenLine((o) => (o === cell.src ? null : cell.src!))}
+            >
+              💬
+            </button>
+          )}
         </div>
       );
     }
     if (cell.kind === "new") {
       return (
         <div key={key} className="diff-line diff-line-new" data-line={cell.src}>
+          <span className="diff-linenum diff-linenum-new">{cell.lineNum ?? ""}</span>
           {renderCode("+", cell.text, cell.lang)}
+          {pending && cell.src != null && (
+            <button
+              type="button"
+              className={`diff-comment-btn${comments.has(cell.src) ? " has-comment" : ""}`}
+              aria-label={`Comment on line ${cell.lineNum ?? cell.src}`}
+              onClick={() => setOpenLine((o) => (o === cell.src ? null : cell.src!))}
+            >
+              💬
+            </button>
+          )}
         </div>
       );
     }
     return (
       <div key={key} className="diff-line diff-line-context" data-line={cell.src}>
+        {cell.lineNum != null && (
+          <span className="diff-linenum diff-linenum-ctx">{cell.lineNum}</span>
+        )}
         {cell.text}
       </div>
     );

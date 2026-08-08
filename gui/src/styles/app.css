@@ -1854,6 +1854,31 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   user-select: none;
 }
 
+/* #10: Line number gutter — real file line numbers from hunk headers */
+.diff-linenum {
+  display: inline-block;
+  width: 3em;
+  min-width: 3em;
+  text-align: right;
+  padding-right: 8px;
+  user-select: none;
+  color: var(--text-dim);
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-linenum-old {
+  /* old file line numbers in del rows */
+}
+
+.diff-linenum-new {
+  /* new file line numbers in add rows */
+}
+
+.diff-linenum-ctx {
+  /* context line numbers — same dim style */
+}
+
 /* ---------- Belt D: diff view toggle + split view ---------- */
 
 /* Segmented control — also used by the settings theme toggle. */
