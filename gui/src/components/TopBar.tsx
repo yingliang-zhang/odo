@@ -285,39 +285,39 @@ export default function TopBar({
               </button>
             </div>
           )}
-        </div>
 
-        {/* PR3: Pin popover — anchored under the overflow area */}
-        {pinOpen && (
-          <div className="topbar-pin">
-            <form className="topbar-pin-popover" onSubmit={handlePinSubmit}>
-              <input
-                type="text"
-                className="pin-input"
-                value={pinText}
-                onChange={(e) => setPinText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setPinOpen(false);
-                    setPinError(null);
-                  }
-                }}
-                placeholder="remember: …"
-                disabled={pinBusy}
-                autoFocus
-              />
-              <button
-                type="submit"
-                className="pin-btn"
-                disabled={pinBusy || pinText.trim() === ""}
-                title="Store a verbatim pin in .odo/pins.md"
-              >
-                Pin
-              </button>
-              {pinError && <div className="topbar-pin-error">{pinError}</div>}
-            </form>
-          </div>
-        )}
+          {/* PR3: Pin popover — anchored under the overflow button */}
+          {pinOpen && (
+            <div className="topbar-pin">
+              <form className="topbar-pin-popover" onSubmit={handlePinSubmit}>
+                <input
+                  type="text"
+                  className="pin-input"
+                  value={pinText}
+                  onChange={(e) => setPinText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setPinOpen(false);
+                      setPinError(null);
+                    }
+                  }}
+                  placeholder="remember: …"
+                  disabled={pinBusy}
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  className="pin-btn"
+                  disabled={pinBusy || pinText.trim() === ""}
+                  title="Store a verbatim pin in .odo/pins.md"
+                >
+                  Pin
+                </button>
+                {pinError && <div className="topbar-pin-error">{pinError}</div>}
+              </form>
+            </div>
+          )}
+        </div>
 
         {/* PR3: Settings — gear icon only (no label) */}
         <IconButton
