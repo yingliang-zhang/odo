@@ -555,6 +555,23 @@ async fn delete_skill(
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// A1: save_attachment — writes base64-encoded clipboard image to .odo/attachments/
+#[tauri::command]
+async fn save_attachment(
+    name: String,
+    data: String,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({
+        "cmd": "save_attachment",
+        "name": name,
+        "data": data,
+        "project_root": root,
+    });
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M5 curation: list wiki/topics/*.md pages (title parsed from the first `# `
 // line) through the daemon's list_topics command.
 #[tauri::command]
@@ -895,6 +912,7 @@ pub fn run() {
             read_skill,
             update_skill,
             delete_skill,
+            save_attachment,
             list_topics,
             ledger,
             contradictions,

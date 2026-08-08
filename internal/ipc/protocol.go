@@ -53,6 +53,7 @@ const (
 	CmdReadSkill   = "read_skill"
 	CmdUpdateSkill = "update_skill"
 	CmdDeleteSkill = "delete_skill"
+	CmdSaveAttachment = "save_attachment"
 )
 
 // Request is one command line on the socket.
@@ -72,6 +73,8 @@ type Request struct {
 	Path           string         `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename
 	Scope          string         `json:"scope,omitempty"` // update_skill: "global" | "project" (M8)
 	Epoch          int            `json:"epoch,omitempty"`
+	// A1: save_attachment writes a base64-encoded file to .odo/attachments/.
+	Data string `json:"data,omitempty"` // save_attachment: base64-encoded file content
 	Accepted       []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
 }
 
@@ -172,4 +175,6 @@ type Response struct {
 	// read_skill returns the full markdown body of one skill.
 	Skills       []SkillInfo `json:"skills,omitempty"`
 	SkillContent string      `json:"skill_content,omitempty"`
+	// A1: save_attachment returns the absolute path of the written file.
+	Path string `json:"path,omitempty"`
 }

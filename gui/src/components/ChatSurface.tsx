@@ -14,6 +14,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
 import type { OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
+import { saveAttachment } from "../api";
 import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown } from "lucide-react";
 import ToolTicker from "./ToolTicker";
 
@@ -317,13 +318,35 @@ export default function ChatSurface({
     addAttachments(Array.from(e.dataTransfer.files).map((f) => f.name));
   };
 
-  // Clipboard paste: file objects expose only a name in the webview, so the
-  // chip carries that name; the daemon resolves paths against the project.
-  const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+  // A1: Clipboard paste — webview File objects expose only filenames, not
+  // real paths. Read as data URL → send base64 to daemon → get real path back.
+  const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(e.clipboardData?.files ?? []);
     if (files.length === 0) return; // plain text paste: let it through
     e.preventDefault();
-    addAttachments(files.map((f) => f.name));
+    const paths: string[] = [];
+    for (const file of files) {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      // Strip "data:image/png;base64," prefix → raw base64.
+      const base64 = dataUrl.split(",")[1] ?? "";
+      try {
+        const resp = await saveAttachment(file.name, base64);
+        if (resp.ok && resp.path) {
+          paths.push(resp.path);
+        }
+      } catch {
+        // Save failed — skip this file (user sees no chip, no error toast
+        // since the paste handler is async and silent by design).
+      }
+    }
+    if (paths.length > 0) {
+      addAttachments(paths);
+    }
   };
 
   const removeAttachment = (path: string) => {

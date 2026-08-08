@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -235,6 +236,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleContradictions(ctx, req)
 	case CmdSearchEvents:
 		resp, err = s.handleSearchEvents(ctx, req)
+	case CmdSaveAttachment:
+		resp, err = s.handleSaveAttachment(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -2322,4 +2325,35 @@ func (s *Server) handleDeleteSkill(ctx context.Context, req Request) (Response, 
 		return Response{}, fmt.Errorf("delete_skill: %w", err)
 	}
 	return Response{OK: true}, nil
+}
+
+// A1: handleSaveAttachment writes a base64-encoded file (from clipboard paste)
+// to .odo/attachments/<timestamp>-<name> and returns the absolute path so the
+// frontend can use it as an attachment for /vision queries.
+func (s *Server) handleSaveAttachment(ctx context.Context, req Request) (Response, error) {
+	if req.Name == "" {
+		return Response{}, fmt.Errorf("save_attachment: name is required")
+	}
+	if req.Data == "" {
+		return Response{}, fmt.Errorf("save_attachment: data is required")
+	}
+	// Sanitize filename — prevent path traversal.
+	base := filepath.Base(req.Name)
+	// Ensure .odo/attachments/ exists.
+	attachDir := filepath.Join(s.projectRoot, ".odo", "attachments")
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		return Response{}, fmt.Errorf("save_attachment: mkdir: %w", err)
+	}
+	// Prepend timestamp to avoid collisions.
+	ts := time.Now().UnixMilli()
+	dest := filepath.Join(attachDir, fmt.Sprintf("%d-%s", ts, base))
+	// Decode base64.
+	data, err := base64.StdEncoding.DecodeString(req.Data)
+	if err != nil {
+		return Response{}, fmt.Errorf("save_attachment: base64 decode: %w", err)
+	}
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return Response{}, fmt.Errorf("save_attachment: write: %w", err)
+	}
+	return Response{OK: true, Path: dest}, nil
 }

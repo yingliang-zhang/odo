@@ -115,6 +115,26 @@ export function sendMessage(
   return invoke<SendMessageResponse>("send_message", req);
 }
 
+// A1: save_attachment — writes base64-encoded clipboard image to .odo/attachments/
+// and returns the absolute path for use as an attachment in /vision queries.
+export interface SaveAttachmentResponse {
+  ok: boolean;
+  error?: string;
+  path?: string;
+}
+
+export function saveAttachment(
+  name: string,
+  data: string,
+  projectRoot?: string,
+): Promise<SaveAttachmentResponse> {
+  return invoke<SaveAttachmentResponse>("save_attachment", {
+    name,
+    data,
+    projectRoot: projectRoot ?? null,
+  });
+}
+
 // Belt A: abort the conversation's active run (adapter SIGKILL). The
 // daemon journals agent_error{cancelled by user}; ok:false means the run
 // ended before the cancel landed — a benign race, so callers may ignore it.
