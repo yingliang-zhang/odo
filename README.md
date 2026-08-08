@@ -18,7 +18,7 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-M0–M11 complete. 162 commits, ~29K lines (15.6K Go + 13.4K TS/CSS/Rust).
+M0–M11 complete. 170 commits, ~29K lines (15.0K Go + 13.7K TS/CSS/Rust).
 
 | Milestone | What it delivers | Tests |
 |---|---|---|

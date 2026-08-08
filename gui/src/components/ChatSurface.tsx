@@ -326,22 +326,21 @@ export default function ChatSurface({
     e.preventDefault();
     const paths: string[] = [];
     for (const file of files) {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(file);
-      });
-      // Strip "data:image/png;base64," prefix → raw base64.
-      const base64 = dataUrl.split(",")[1] ?? "";
       try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        });
+        // Strip "data:image/png;base64," prefix → raw base64.
+        const base64 = dataUrl.split(",")[1] ?? "";
         const resp = await saveAttachment(file.name, base64);
         if (resp.ok && resp.path) {
           paths.push(resp.path);
         }
       } catch {
-        // Save failed — skip this file (user sees no chip, no error toast
-        // since the paste handler is async and silent by design).
+        // FileReader or save failed — skip this file silently.
       }
     }
     if (paths.length > 0) {

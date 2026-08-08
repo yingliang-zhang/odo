@@ -62,9 +62,9 @@ type Server struct {
 	// store/filesystem work don't take it; distill and curate explicitly
 	// drop it around their multi-minute agent runs. wg tracks handleConn
 	// goroutines for graceful shutdown (Wait).
-	mu         sync.Mutex
-	runs       map[string]*runMeta // adapter runID -> meta
-	byConv     map[int64]string    // conversationID -> adapter runID (active run)
+	mu     sync.Mutex
+	runs   map[string]*runMeta // adapter runID -> meta
+	byConv map[int64]string    // conversationID -> adapter runID (active run)
 
 	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
 	curating   bool               // a curate pass is in flight (M11 P0)

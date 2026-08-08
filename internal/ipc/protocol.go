@@ -49,33 +49,33 @@ const (
 	// M8 (Skills): skills are plain markdown files in ~/.odo/skills/ and
 	// .odo/skills/. list_skills returns metadata; read_skill returns the
 	// full body; update_skill writes (creates or overwrites) a skill file.
-	CmdListSkills  = "list_skills"
-	CmdReadSkill   = "read_skill"
-	CmdUpdateSkill = "update_skill"
-	CmdDeleteSkill = "delete_skill"
+	CmdListSkills     = "list_skills"
+	CmdReadSkill      = "read_skill"
+	CmdUpdateSkill    = "update_skill"
+	CmdDeleteSkill    = "delete_skill"
 	CmdSaveAttachment = "save_attachment"
 )
 
 // Request is one command line on the socket.
 type Request struct {
-	Cmd            string         `json:"cmd"`
-	ProjectRoot    string         `json:"project_root,omitempty"`
-	ConversationID int64          `json:"conversation_id,omitempty"`
-	WorkstreamID   int64          `json:"workstream_id,omitempty"`
-	Name           string         `json:"name,omitempty"`
-	Text           string         `json:"text,omitempty"`
-	Attachments    []string       `json:"attachments,omitempty"`
-	AfterSeq       int            `json:"after_seq,omitempty"`
-	DiffID         int64          `json:"diff_id,omitempty"`
-	Steer          bool           `json:"steer,omitempty"`
-	Adapter        string         `json:"adapter,omitempty"`
-	Settings       *Settings      `json:"settings,omitempty"`
-	Path           string         `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename
-	Scope          string         `json:"scope,omitempty"` // update_skill: "global" | "project" (M8)
-	Epoch          int            `json:"epoch,omitempty"`
+	Cmd            string    `json:"cmd"`
+	ProjectRoot    string    `json:"project_root,omitempty"`
+	ConversationID int64     `json:"conversation_id,omitempty"`
+	WorkstreamID   int64     `json:"workstream_id,omitempty"`
+	Name           string    `json:"name,omitempty"`
+	Text           string    `json:"text,omitempty"`
+	Attachments    []string  `json:"attachments,omitempty"`
+	AfterSeq       int       `json:"after_seq,omitempty"`
+	DiffID         int64     `json:"diff_id,omitempty"`
+	Steer          bool      `json:"steer,omitempty"`
+	Adapter        string    `json:"adapter,omitempty"`
+	Settings       *Settings `json:"settings,omitempty"`
+	Path           string    `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename
+	Scope          string    `json:"scope,omitempty"` // update_skill: "global" | "project" (M8)
+	Epoch          int       `json:"epoch,omitempty"`
 	// A1: save_attachment writes a base64-encoded file to .odo/attachments/.
-	Data string `json:"data,omitempty"` // save_attachment: base64-encoded file content
-	Accepted       []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
+	Data     string         `json:"data,omitempty"`     // save_attachment: base64-encoded file content
+	Accepted []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
 }
 
 // MemoryAccept references one proposal out of a pending memory_propose batch:
