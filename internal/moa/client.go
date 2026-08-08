@@ -10,11 +10,13 @@ package moa
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -113,6 +115,102 @@ func (c *Client) Query(ctx context.Context, model, system, prompt string) (strin
 		Messages: []messageEntry{
 			{Role: "user", Content: prompt},
 		},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("moa: marshal request: %w", err)
+	}
+	url := c.BaseURL + "/v1/messages"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("moa: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.APIKey)
+	req.Header.Set("anthropic-version", apiVersion)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("moa: http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("moa: read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("moa: API returned %d (check server logs for details)", resp.StatusCode)
+	}
+	var msg messageResponse
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return "", fmt.Errorf("moa: parse response: %w", err)
+	}
+	var texts []string
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			texts = append(texts, block.Text)
+		}
+	}
+	if msg.StopReason == "max_tokens" {
+		return "", fmt.Errorf("moa: response truncated (stop_reason=max_tokens, %d output tokens used)", msg.Usage.OutputTokens)
+	}
+	if len(texts) == 0 {
+		return "", fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
+	}
+	return strings.Join(texts, "\n\n"), nil
+}
+
+// QueryWithImages sends a request with both text and image content blocks.
+// imagePaths are file paths to images that will be base64-encoded and sent
+// as Anthropic image content blocks before the text prompt.
+func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt string, imagePaths []string) (string, error) {
+	if c.APIKey == "" {
+		return "", fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
+	}
+	if model == "" {
+		model = defaultModel
+	}
+	// Build content blocks: images first, then text.
+	var contentBlocks []map[string]interface{}
+	for _, imgPath := range imagePaths {
+		data, err := os.ReadFile(imgPath)
+		if err != nil {
+			return "", fmt.Errorf("moa: read image %s: %w", imgPath, err)
+		}
+		mediaType := "image/png"
+		ext := strings.ToLower(filepath.Ext(imgPath))
+		switch ext {
+		case ".jpg", ".jpeg":
+			mediaType = "image/jpeg"
+		case ".webp":
+			mediaType = "image/webp"
+		case ".gif":
+			mediaType = "image/gif"
+		}
+		contentBlocks = append(contentBlocks, map[string]interface{}{
+			"type": "image",
+			"source": map[string]interface{}{
+				"type":       "base64",
+				"media_type": mediaType,
+				"data":       base64.StdEncoding.EncodeToString(data),
+			},
+		})
+	}
+	contentBlocks = append(contentBlocks, map[string]interface{}{
+		"type": "text",
+		"text": prompt,
+	})
+	// Build request with array content instead of string.
+	reqBody := map[string]interface{}{
+		"model":      model,
+		"max_tokens": defaultMaxTok,
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": contentBlocks},
+		},
+	}
+	if system != "" {
+		reqBody["system"] = system
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {

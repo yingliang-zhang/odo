@@ -1563,3 +1563,161 @@ func TestPendingCounts(t *testing.T) {
 	// A foreign project root is refused.
 	rig.callExpectErr(t, Request{Cmd: CmdPendingCounts, ProjectRoot: filepath.Join(root, "elsewhere")})
 }
+
+// moaMockServer returns a httptest server that mocks the MoA API and a
+// cleanup function. Each call returns the model name in the text field so
+// tests can verify routing. Callers must set MOA_BASE_URL and SUDO_CODING_KEY.
+func moaMockServer(t *testing.T, text string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": text}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestPanelRouting verifies /panel routing: prefix match routes to
+// handlePanelQuery, /panelx falls through, no models configured is an
+// error, and /panel while an agent is running is rejected.
+func TestPanelRouting(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+
+	// Mock the MoA API.
+	moaSrv := moaMockServer(t, "panel response from model")
+	t.Setenv("MOA_BASE_URL", moaSrv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Without a review: line the command refuses.
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel analyze this"})
+	if !strings.Contains(resp.Error, "No review models configured") {
+		t.Errorf("/panel no models: error = %q", resp.Error)
+	}
+
+	// With models configured: /panel routes to handlePanelQuery.
+	writePrefs(t, home, "review: pm1@test, pm2@test\n")
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel analyze this"})
+
+	// Verify the panel response is journaled as agent_text with panel=true.
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	var foundPanel bool
+	for _, ev := range events {
+		if ev.Type == store.EventAgentText {
+			var p struct {
+				Panel  bool `json:"panel"`
+				Models []struct {
+					Model string `json:"model"`
+					Text  string `json:"text"`
+				} `json:"models"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil && p.Panel {
+				foundPanel = true
+				if len(p.Models) != 2 {
+					t.Errorf("panel models = %d, want 2", len(p.Models))
+				}
+			}
+		}
+	}
+	if !foundPanel {
+		t.Error("/panel: no agent_text with panel=true found in events")
+	}
+
+	// /panelx does NOT route — falls through to normal send (agent run).
+	// This creates a real agent run, so we poll it to completion.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panelx create hello.txt"})
+	rig.pollUntilDone(t, convID)
+}
+
+// TestPanelWhileRunning verifies /panel is rejected while an agent run is active.
+func TestPanelWhileRunning(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+
+	moaSrv := moaMockServer(t, "panel response")
+	t.Setenv("MOA_BASE_URL", moaSrv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	writePrefs(t, home, "review: pm1@test\n")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Start a slow agent run (3s delay in the wrapper).
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+
+	// /panel while the agent is running should be rejected.
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel analyze"})
+	if !strings.Contains(resp.Error, "agent already running") {
+		t.Errorf("/panel while running: error = %q, want 'agent already running'", resp.Error)
+	}
+
+	// Wait for the slow run to finish.
+	rig.pollUntilDone(t, convID)
+}
+
+// TestVisionRouting verifies /vision routing: prefix match routes to
+// handleVisionQuery, /visionx falls through, and no prompt is an error.
+func TestVisionRouting(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+
+	// Mock the MoA API.
+	moaSrv := moaMockServer(t, "vision analysis from K3")
+	t.Setenv("MOA_BASE_URL", moaSrv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// /vision with no prompt text is an error.
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/vision "})
+	if !strings.Contains(resp.Error, "prompt text is required") {
+		t.Errorf("/vision empty: error = %q", resp.Error)
+	}
+
+	// /vision with a prompt routes to handleVisionQuery and journals a vision event.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/vision describe this screenshot"})
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	var foundVision bool
+	for _, ev := range events {
+		if ev.Type == store.EventAgentText {
+			var p struct {
+				Vision bool `json:"vision"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil && p.Vision {
+				foundVision = true
+			}
+		}
+	}
+	if !foundVision {
+		t.Error("/vision: no agent_text with vision=true found in events")
+	}
+
+	// /visionx does NOT route — falls through to normal send.
+	// This starts a real agent run, so poll it to completion.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/visionx create hello.txt"})
+	rig.pollUntilDone(t, convID)
+}

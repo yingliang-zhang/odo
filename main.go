@@ -82,6 +82,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", socket, err)
 	}
+	// F-chmod: restrict socket to owner-only (0600). The Tauri client
+	// runs as the same user; this closes the cross-user read/write vector.
+	os.Chmod(socket, 0o600)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

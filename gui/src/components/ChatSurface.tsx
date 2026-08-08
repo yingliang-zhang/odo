@@ -32,6 +32,8 @@ interface Props {
   // journaled). Rendered as the dimmed preview bubble; replaced wholesale
   // per poll, null when the stream is between blocks or done.
   preview?: PreviewEvent | null;
+  // J: spinner shown while /panel or /vision blocks on the daemon side.
+  panelThinking?: boolean;
   sendDisabled: boolean;
   onSend: (text: string, attachments: string[], steer: boolean) => Promise<void>;
   // Belt A: abort the running agent (Stop button / Esc).
@@ -195,6 +197,7 @@ export default function ChatSurface({
   events,
   agentRunning,
   preview,
+  panelThinking,
   sendDisabled,
   onSend,
   onCancel,
@@ -619,6 +622,12 @@ export default function ChatSurface({
               <span>⌘F Search</span>
               <span>⌘, Settings</span>
             </div>
+          </div>
+        )}
+        {panelThinking && (
+          <div className="panel-thinking">
+            <LoaderCircle size={14} className="spin" />
+            <span>Panel consulting models…</span>
           </div>
         )}
           {runGroups.map((group) => (

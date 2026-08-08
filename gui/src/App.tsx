@@ -113,6 +113,8 @@ export default function App() {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [events, setEvents] = useState<OdoEvent[]>([]);
   const [agentRunning, setAgentRunning] = useState(false);
+  // J: spinner for /panel and /vision while the daemon consults models.
+  const [panelThinking, setPanelThinking] = useState(false);
   // M7: transient streaming preview (never journaled), rebuilt every poll.
   const [preview, setPreview] = useState<PreviewEvent | null>(null);
   const [diff, setDiff] = useState<Diff | null>(null);
@@ -513,6 +515,9 @@ export default function App() {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
       cancelAutoDistill(); // M10: user sent a message — cancel pending auto-distill
+      // J: show a spinner for /panel and /vision while the daemon blocks.
+      const isPanel = text.trim().startsWith("/panel") || text.trim().startsWith("/vision");
+      if (isPanel) setPanelThinking(true);
       try {
         const resp = unwrap(
           await sendMessage(cid, text, attachments, {
@@ -528,6 +533,8 @@ export default function App() {
       } catch (e) {
         setError(`send failed: ${errorMessage(e)}`);
         throw e; // let the composer keep the draft
+      } finally {
+        if (isPanel) setPanelThinking(false);
       }
     },
     [recordEvents],
@@ -1255,6 +1262,7 @@ export default function App() {
           events={events}
           agentRunning={agentRunning}
           preview={preview}
+          panelThinking={panelThinking}
           sendDisabled={!booted}
           onSend={handleSend}
           onCancel={handleCancel}

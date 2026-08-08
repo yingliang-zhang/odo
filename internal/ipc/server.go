@@ -495,7 +495,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		if _, ok := s.distilling[c.ID]; ok {
 			return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
 		}
-		return s.handleVisionQuery(ctx, &c, strings.TrimSpace(rest))
+		return s.handleVisionQuery(ctx, &c, strings.TrimSpace(rest), req.Attachments)
 	}
 	// Held for the entire handler (M11 P0): the byConv check and
 	// the run-table insert must be one critical section, and adapter.Start is
@@ -928,7 +928,12 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		return nil
 	}
 	if _, err := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA); err != nil {
-		return err
+		log.Printf("ipc: drainRun: InsertDiff failed: %v", err)
+		s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError, mustJSON(map[string]interface{}{
+			"error": "diff save failed: " + err.Error(),
+		}))
+		meta.finished = true
+		return nil
 	}
 	meta.finished = true // mark finished only after the diff row exists
 	return nil
@@ -1085,10 +1090,10 @@ type reviewModel struct {
 	provider string
 }
 
-// handleReviewDiff implements review_diff: the diff is fanned out to every
-// model on the prefs.md `review:` line, each as a one-shot OMP run in a temp
-// directory (the distill pattern). Reviews run in parallel; the call blocks
-// until all finish — like distill, it blocks the single-connection daemon.
+// handleReviewDiff implements review_diff: the diff is sent to every
+// model on the prefs.md `review:` line via direct HTTP API (moa.Query),
+// in parallel. The call blocks until all finish — like distill, it
+// blocks the single-connection daemon.
 // Results are journaled as a review_action event with action "moa_review".
 func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, error) {
 	if req.DiffID == 0 {
@@ -1128,12 +1133,12 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 	return Response{Reviews: reviews}, nil
 }
 
-// reviewWithModel runs a review prompt through one explicit-model OMP
-// adapter and parses the verdict. The prompt is pre-built by the caller
-// (handleReviewDiff wraps with reviewPrompt; gateSkillProposals wraps
-// with skillReviewPrompt). A failed run degrades to needs_fixes with
-// the error as comments: a review that never happened must not read as an
-// accept.
+// reviewWithModel runs a review prompt through one model via the direct
+// HTTP API client (moa.Query) and parses the verdict. The prompt is
+// pre-built by the caller (handleReviewDiff wraps with reviewPrompt;
+// gateSkillProposals wraps with skillReviewPrompt). A failed run
+// degrades to needs_fixes with the error as comments: a review that
+// never happened must not read as an accept.
 func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt string) ReviewResult {
 	label := m.model + "@" + m.provider
 	client := moa.NewClientFromEnv("", "")
@@ -1259,9 +1264,9 @@ func formatPanelResults(results []PanelResult) string {
 // handleVisionQuery routes a /vision prompt to K3 (the only vision-capable
 // model on the gateway) via direct API. Unlike /panel which fans out to N
 // models, /vision uses a single model because GLM/DS lack vision capability.
-// The prompt should contain file paths to images; the model reads them via
-// the OMP tool loop or the gateway's image passthrough.
-func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, text string) (Response, error) {
+// The prompt text is sent to K3 via direct HTTP API. Image content blocks
+// are not yet supported — the model receives text only.
+func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, text string, attachments []string) (Response, error) {
 	if text == "" {
 		return Response{}, fmt.Errorf("/vision: prompt text is required after /vision")
 	}
@@ -1276,7 +1281,13 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 
 	client := moa.NewClientFromEnv("", "")
 	system := "You are a vision-capable coding assistant. Analyze the image or screenshot described in the prompt. Identify visual issues, layout problems, or design suggestions."
-	resp, err := client.Query(ctx, visionModel, system, text)
+	var resp string
+	var err error
+	if len(attachments) > 0 {
+		resp, err = client.QueryWithImages(ctx, visionModel, system, text, attachments)
+	} else {
+		resp, err = client.Query(ctx, visionModel, system, text)
+	}
 
 	var resultText string
 	if err != nil {
@@ -2047,7 +2058,7 @@ func (s *Server) runDistillAgent(ctx context.Context, events []store.Event) (str
 
 // runOneShot runs prompt through ad in a throwaway directory, blocking until
 // the run's terminal event or timeout, and returns the concatenated
-// agent_text output. Distill and the MoA review both use it.
+// agent_text output. Distill uses it (review migrated to moa.Query in D5).
 func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout time.Duration) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "odo-oneshot-")
 	if err != nil {
@@ -2216,12 +2227,18 @@ func (s *Server) handleReadSkill(ctx context.Context, req Request) (Response, er
 	if req.Path == "" {
 		return Response{}, fmt.Errorf("read_skill: path is required")
 	}
+	// Before building candidates, clean the path and reject traversal.
+	// The GUI sends bare filenames, never absolute paths.
+	name := filepath.Clean(req.Path)
+	if strings.Contains(name, "..") || filepath.IsAbs(name) {
+		return Response{}, fmt.Errorf("read_skill: invalid path: %s", req.Path)
+	}
 	// Resolve the path: try project skills dir first, then global.
 	home, _ := os.UserHomeDir()
+	base := filepath.Base(name)
 	candidates := []string{
-		filepath.Join(s.projectRoot, ".odo", "skills", req.Path),
-		filepath.Join(home, ".odo", "skills", req.Path),
-		req.Path, // allow absolute paths too
+		filepath.Join(s.projectRoot, ".odo", "skills", base),
+		filepath.Join(home, ".odo", "skills", base),
 	}
 	for _, c := range candidates {
 		b, err := os.ReadFile(c)

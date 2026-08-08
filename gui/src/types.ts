@@ -115,6 +115,11 @@ export interface EventPayload {
   partial?: boolean;
   intent?: string;
   call_id?: string;
+  // /panel and /vision payloads: mark the event as panel/vision output and
+  // carry per-model results for /panel.
+  panel?: boolean;
+  vision?: boolean;
+  models?: { model: string; text: string; error?: string }[];
 }
 
 // M7 live streaming: the transient in-flight block preview returned by
