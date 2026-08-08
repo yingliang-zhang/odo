@@ -145,6 +145,8 @@ interface InlineRow {
   newLine: number | null;
   // Current file path (for comment references), null between files.
   filePath: string | null;
+  // Language for syntax highlighting (tracked per file header).
+  lang: Language | null;
 }
 
 // #10: Walk lines tracking old/new line counters from hunk headers.
@@ -153,12 +155,14 @@ function parseInlineRows(lines: string[]): InlineRow[] {
   let oldLine = 0;
   let newLine = 0;
   let filePath: string | null = null;
+  let lang: Language | null = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const fp = diffFilePath(line);
     if (fp) {
       filePath = fp;
+      lang = languageFromPath(fp);
     }
 
     // Hunk header resets the counters.
@@ -174,6 +178,7 @@ function parseInlineRows(lines: string[]): InlineRow[] {
         oldLine: null,
         newLine: null,
         filePath,
+        lang,
       });
       continue;
     }
@@ -207,6 +212,7 @@ function parseInlineRows(lines: string[]): InlineRow[] {
       oldLine: rowOldLine,
       newLine: rowNewLine,
       filePath,
+      lang,
     });
   }
 
@@ -277,14 +283,17 @@ function parseSplitRows(lines: string[]): SplitRow[] {
     // Context lines carry a leading space; file headers and other metadata
     // are duplicated across both columns so file boundaries stay visible.
     flush();
-    const isMetadata = line.startsWith("diff --git") || line.startsWith("\\") || line.length === 0 && !line.startsWith(" ");
-    const ctxLineNum = isMetadata ? null : oldLine;
-    const ctx: SplitCell = { text: line, kind: "ctx", lang, src: i, lineNum: ctxLineNum };
+    const isMetadata = line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++") || line.startsWith("\\") || line.startsWith("index ") || (line.length === 0 && !line.startsWith(" "));
+    const oldCtxLineNum = isMetadata ? null : oldLine;
+    const newCtxLineNum = isMetadata ? null : newLine;
+    // #10: separate cells per column so left shows oldLine, right shows newLine.
+    const ctxL: SplitCell = { text: line, kind: "ctx", lang, src: i, lineNum: oldCtxLineNum };
+    const ctxR: SplitCell = { text: line, kind: "ctx", lang, src: i, lineNum: newCtxLineNum };
     if (!isMetadata) {
       oldLine++;
       newLine++;
     }
-    rows.push({ left: ctx, right: ctx });
+    rows.push({ left: ctxL, right: ctxR });
   }
   flush();
   return rows;
@@ -427,12 +436,12 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         {row.cls.endsWith("diff-add") ? (
           <>
             <span className="diff-linenum diff-linenum-new">{row.newLine ?? ""}</span>
-            {renderCode("+", row.line.slice(1), null)}
+            {renderCode("+", row.line.slice(1), row.lang)}
           </>
         ) : row.cls.endsWith("diff-del") ? (
           <>
             <span className="diff-linenum diff-linenum-old">{row.oldLine ?? ""}</span>
-            {renderCode("-", row.line.slice(1), null)}
+            {renderCode("-", row.line.slice(1), row.lang)}
           </>
         ) : (
           row.line
