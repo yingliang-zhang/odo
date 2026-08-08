@@ -1201,21 +1201,22 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   z-index: 10;
   box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
 }
-.slash-item {
+.slash-menu .slash-item {
   display: flex;
   align-items: baseline;
   gap: 8px;
   width: 100%;
   padding: 6px 12px;
-  background: none;
+  background: transparent !important;
   border: none;
+  border-radius: 0;
   color: var(--text);
   text-align: left;
   cursor: pointer;
   font-size: 13px;
 }
-.slash-item:hover {
-  background: var(--bg-input);
+.slash-menu .slash-item:hover {
+  background: var(--bg-input) !important;
 }
 .slash-cmd {
   font-weight: 600;
