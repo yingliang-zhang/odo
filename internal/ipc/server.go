@@ -44,6 +44,10 @@ type runMeta struct {
 	// partial:true), rebuilt by each drainRun while the run is live. Never
 	// journaled; handlePollEvents passes it through verbatim.
 	previewEvent *adapter.AgentEvent
+	// A2-lite: queued steering messages collected during the run. On run
+	// completion, drainRun triggers a continuation run with these as the
+	// prompt (verbatim, never LLM-summarized — Hermes verify-handoff rule).
+	queuedSteers []string
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -741,13 +745,16 @@ func buildPrompt(text string, attachments []string, userMem, projectMem, pins, i
 }
 
 // handleSteering journals a steering message for a conversation without
-// starting a new run. An active run receives the text via the owning
-// adapter's Send; adapters without steering support get a journaled
-// agent_error so the user sees why the message stops at the chat. With no
-// active run the message is simply journaled. Caller holds s.mu (called from
-// handleSendMessage).
+// starting a new run. If a run is active, the text is queued in the run's
+// meta; when the run completes, drainRun auto-starts a continuation run
+// with the queued texts as the prompt (A2-lite: queue-continuation).
+// Previously this called adapter.Send which wrote to steering.txt — a dead
+// path the wrapper never reads. The UI showed "delivered" but the agent
+// never saw the message. Now the message is honestly queued and delivered
+// via a fresh run on completion.
+// Caller holds s.mu (called from handleSendMessage).
 func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req Request) (Response, error) {
-	msgPayload := map[string]interface{}{"text": req.Text}
+	msgPayload := map[string]interface{}{"text": req.Text, "steer": true}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
 	}
@@ -758,19 +765,13 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 	runID, ok := s.byConv[c.ID]
 	meta := s.runs[runID]
 	if ok && meta != nil && !meta.finished {
-		if err := s.adapterFor(meta.adapter).Send(ctx, runID, req.Text); err != nil {
-			log.Printf("steering: send to run %s: %v", runID, err)
-			msg := err.Error()
-			if strings.Contains(msg, "not supported") {
-				msg = "Steering not supported by current adapter."
-			}
-			_, _ = s.store.AppendEvent(ctx, c.ID, store.EventAgentError, mustJSON(map[string]interface{}{
-				"error": msg,
-			}))
-		}
+		// A2-lite: queue the steering text for the continuation run.
+		// The agent will see it as the prompt of the next run, not mid-run.
+		meta.queuedSteers = append(meta.queuedSteers, req.Text)
 		return Response{Event: &ev}, nil
 	}
-	// No active run: the steering message is journaled only.
+	// No active run: the steering message is journaled only (user can
+	// send a normal message to start a new run).
 	return Response{Event: &ev}, nil
 }
 
@@ -850,6 +851,79 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 		Diff:         s.latestDiffInfo(ctx, c.ID),
 		Diffs:        s.pendingDiffInfos(ctx, c.ID),
 	}, nil
+}
+
+// startContinuationRun (A2-lite) starts a fresh run for a conversation
+// after the previous run completed with queued steering messages. The
+// queued texts are joined as the prompt (verbatim, never LLM-summarized).
+// Memory layers are re-read fresh (ADR-0003: each run gets current state).
+// Runs in a goroutine because drainRun holds s.mu; this function takes
+// its own lock.
+func (s *Server) startContinuationRun(conversationID, workstreamID int64, queuedTexts []string) {
+	ctx := context.Background()
+	prompt := strings.Join(queuedTexts, "\n\n")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Re-check: don't start if a run is already active for this conversation
+	// (user may have sent a normal message in the window between drain and
+	// this goroutine).
+	if runID, ok := s.byConv[conversationID]; ok {
+		if meta := s.runs[runID]; meta != nil && !meta.finished {
+			return // a new run already started; drop the continuation
+		}
+	}
+	// Respect the concurrency cap.
+	if cap := resolveMaxConcurrent(); s.activeRunCount() >= cap {
+		log.Printf("a2-continuation: skipping — concurrency cap %d reached", cap)
+		return
+	}
+
+	c, err := s.store.GetConversation(ctx, conversationID)
+	if err != nil {
+		log.Printf("a2-continuation: get conversation: %v", err)
+		return
+	}
+	w, err := s.store.GetWorkstream(ctx, workstreamID)
+	if err != nil {
+		log.Printf("a2-continuation: get workstream: %v", err)
+		return
+	}
+
+	ml := s.memoryLayers(ctx, w.Name, conversationID, prompt)
+	fullPrompt := buildPrompt(prompt, nil, ml.user, ml.project, ml.pins, ml.index, ml.wiki, ml.skills)
+
+	runDirID := worktree.NewRunID()
+	wtPath, err := s.mgr.Create(runDirID, workstreamGitBranch(w))
+	if err != nil {
+		log.Printf("a2-continuation: create worktree: %v", err)
+		return
+	}
+	if err := s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, &wtPath); err != nil {
+		_ = s.mgr.Remove(wtPath)
+		log.Printf("a2-continuation: bind worktree: %v", err)
+		return
+	}
+
+	ad := s.adapters[""] // default adapter
+	runID, err := ad.Start(ctx, wtPath, fullPrompt)
+	if err != nil {
+		_ = s.mgr.Remove(wtPath)
+		_ = s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, nil)
+		log.Printf("a2-continuation: start agent: %v", err)
+		return
+	}
+
+	s.runs[runID] = &runMeta{
+		runID:          runID,
+		runDirID:       runDirID,
+		adapter:        "",
+		conversationID: conversationID,
+		workstreamID:   workstreamID,
+		worktreePath:   wtPath,
+	}
+	s.byConv[conversationID] = runID
 }
 
 // activeRunCount returns the number of non-finished runs across all
@@ -941,6 +1015,16 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		return nil
 	}
 	meta.finished = true // mark finished only after the diff row exists
+
+	// A2-lite: if steering messages were queued during this run, auto-start
+	// a continuation run with the queued texts as the prompt. This replaces
+	// the dead steering.txt path — the agent sees the follow-up in a fresh
+	// run with full memory-layer injection, not a silent file it never reads.
+	if len(meta.queuedSteers) > 0 && !meta.errored {
+		queued := meta.queuedSteers
+		meta.queuedSteers = nil // consume the queue
+		go s.startContinuationRun(meta.conversationID, meta.workstreamID, queued)
+	}
 	return nil
 }
 
@@ -1128,14 +1212,44 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 	}
 	wg.Wait()
 
+	cv := consensusVerdict(reviews)
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
-		"action":  "moa_review",
-		"diff_id": d.ID,
-		"reviews": reviews,
+		"action":            "moa_review",
+		"diff_id":           d.ID,
+		"reviews":           reviews,
+		"consensus_verdict": cv,
 	})); err != nil {
 		return Response{}, err
 	}
-	return Response{Reviews: reviews}, nil
+	return Response{Reviews: reviews, Consensus: cv}, nil
+}
+
+// consensusVerdict computes a deterministic 2/3 tally over review results.
+// Returns "accept" if ≥2/3 of verdicts are "accept", "reject" if any
+// verdict is "reject", otherwise "needs_fixes". This mirrors Hermes's
+// consolidator gate rule without a 4th model call.
+func consensusVerdict(reviews []ReviewResult) string {
+	if len(reviews) == 0 {
+		return "needs_fixes"
+	}
+	accepts := 0
+	rejects := 0
+	for _, r := range reviews {
+		switch r.Verdict {
+		case "accept":
+			accepts++
+		case "reject":
+			rejects++
+		}
+	}
+	threshold := (len(reviews)*2 + 2) / 3 // ceil(2N/3)
+	if rejects > 0 {
+		return "reject"
+	}
+	if accepts >= threshold {
+		return "accept"
+	}
+	return "needs_fixes"
 }
 
 // reviewWithModel runs a review prompt through one model via the direct

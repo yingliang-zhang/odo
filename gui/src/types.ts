@@ -246,6 +246,7 @@ export interface ReviewDiffResponse {
   ok: boolean;
   error?: string;
   reviews?: ReviewResult[];
+  consensus?: string; // A4-lite: deterministic 2/3 verdict ("accept" | "reject" | "needs_fixes")
 }
 
 // Daemon-managed project settings (daemon `get_settings` / `update_settings`).

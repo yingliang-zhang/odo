@@ -111,6 +111,12 @@ type ReviewResult struct {
 	Comments string `json:"comments"`
 }
 
+// A4-lite: deterministic consensus verdict computed by consensusVerdict().
+// Journaled in the review_action event alongside individual reviews.
+type ConsensusResult struct {
+	Verdict string `json:"verdict"` // "accept" | "reject" | "needs_fixes"
+}
+
 // DiffInfo carries a diff record plus its file content to the client.
 type DiffInfo struct {
 	ID      int64  `json:"id"`
@@ -151,6 +157,7 @@ type Response struct {
 	WikiPath    string              `json:"wiki_path,omitempty"`
 	Epoch       int                 `json:"epoch,omitempty"`
 	Reviews     []ReviewResult      `json:"reviews,omitempty"`
+	Consensus   string              `json:"consensus,omitempty"` // A4-lite: deterministic 2/3 tally
 	Settings    *Settings           `json:"settings,omitempty"`
 	WikiNotes   []WikiNoteInfo      `json:"wiki_notes,omitempty"`
 	WikiContent string              `json:"wiki_content,omitempty"`

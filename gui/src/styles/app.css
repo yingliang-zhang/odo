@@ -2419,6 +2419,20 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   padding: 4px 0;
 }
 
+/* A4-lite: consensus badge — deterministic 2/3 tally */
+.review-consensus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-consensus-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .review-empty {
   padding: 10px 16px;
   color: var(--text-dim);

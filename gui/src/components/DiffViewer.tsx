@@ -324,6 +324,7 @@ function renderCode(prefix: string, code: string, lang: Language | null): ReactN
 export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments }: Props) {
   const [acting, setActing] = useState(false);
   const [reviews, setReviews] = useState<ReviewResult[] | null>(null);
+  const [consensus, setConsensus] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   // Belt D: inline (unified) vs split (old | new) rendering.
@@ -385,6 +386,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
     try {
       const resp = unwrap(await reviewDiff(diff.id, projectRoot ?? undefined));
       setReviews(resp.reviews ?? []);
+      setConsensus(resp.consensus ?? null);
     } catch (e) {
       setReviewError(errorMessage(e));
     } finally {
@@ -588,6 +590,16 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         <div className="review-results">
           {reviews.length === 0 && (
             <div className="review-empty">No reviewers returned a verdict.</div>
+          )}
+          {reviews.length > 0 && consensus && (
+            <div className="review-consensus">
+              <span className={`verdict-badge verdict-${consensus}`}>
+                {consensus.replace("_", " ")}
+              </span>
+              <span className="review-consensus-label">
+                {reviews.length} reviewer{reviews.length > 1 ? "s" : ""} · 2/3 gate
+              </span>
+            </div>
           )}
           {reviews.map((r, i) => (
             <div className="review-item" key={`${r.model}-${i}`}>

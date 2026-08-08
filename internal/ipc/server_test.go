@@ -521,11 +521,10 @@ func TestBootstrapByWorkstream(t *testing.T) {
 }
 
 // TestSteering covers steer=true messages: they journal a user_message
-// without starting a run, reach a running OMP agent via the steering file,
-// surface a friendly agent_error on adapters without steering, and are
-// journaled silently when no agent is active.
+// without starting a run, queue the text for the continuation run (A2-lite),
+// and are journaled silently when no agent is active.
 func TestSteering(t *testing.T) {
-	t.Run("supported writes the steering file", func(t *testing.T) {
+	t.Run("active run queues the steer text", func(t *testing.T) {
 		root := initRepo(t)
 		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 		rig := startRig(t, root)
@@ -541,24 +540,41 @@ func TestSteering(t *testing.T) {
 			t.Fatalf("steer event = %+v, want user_message seq 2", steered.Event)
 		}
 
-		// The OMP adapter handed the text to the run via steering.txt.
-		matches, err := filepath.Glob(filepath.Join(root, ".odo", "sessions", "*", "steering.txt"))
-		if err != nil || len(matches) != 1 {
-			t.Fatalf("steering.txt not found (matches=%v, err=%v)", matches, err)
+		// A2-lite: the steer text is queued in the run's meta (not written
+		// to a dead steering.txt file). The run completes normally, then
+		// a continuation run starts with the queued text as the prompt.
+		rig.pollUntilDone(t, convID)
+
+		// The first run's events should be intact.
+		types := rig.allEventTypes(t, convID)
+		hasDone := false
+		for _, ty := range types {
+			if ty == "agent_done" {
+				hasDone = true
+			}
 		}
-		content, err := os.ReadFile(matches[0])
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(content) != "Also add a second line.\n" {
-			t.Errorf("steering.txt = %q", content)
+		if !hasDone {
+			t.Errorf("expected agent_done in events: %v", types)
 		}
 
-		// No error event was journaled; the run completes normally.
-		rig.pollUntilDone(t, convID)
-		if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
-			"[user_message user_message agent_text agent_done]"; got != want {
-			t.Errorf("events = %s, want %s", got, want)
+		// The steer message was journaled as a user_message with steer:true.
+		// Poll events to get the full list including the steer payload.
+		resp := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
+		var steerFound bool
+		for _, ev := range resp.Events {
+			if ev.Type == store.EventUserMessage && ev.Seq == 2 {
+				var payload map[string]interface{}
+				if err := json.Unmarshal([]byte(ev.Payload), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload["steer"] != true {
+					t.Errorf("steer event payload = %v, want steer:true", payload)
+				}
+				steerFound = true
+			}
+		}
+		if !steerFound {
+			t.Error("steer user_message event (seq 2) not found in poll")
 		}
 	})
 
