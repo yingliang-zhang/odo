@@ -251,7 +251,7 @@ export default function TopBar({
                 <MapPin size={14} />
                 <span>Pin</span>
               </button>
-              <div className="topbar-overflow-sep" />
+              <div className="topbar-overflow-sep" role="separator" />
               <button
                 type="button"
                 className="topbar-overflow-item"

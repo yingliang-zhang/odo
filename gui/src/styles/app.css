@@ -329,13 +329,9 @@ body {
   text-align: center;
 }
 
-/* PR3: icon-only action (Settings gear) — no label span, tighter padding */
+/* PR3: icon-only action (Settings gear, ⋯ overflow) — tighter padding */
 .topbar-action-icon-only {
   padding: 3px 6px;
-}
-
-.topbar-action-icon-only .topbar-action-label {
-  display: none;
 }
 
 /* PR3: overflow menu (⋯) — dropdown for Curate/Pin/Wiki/Ledger */
