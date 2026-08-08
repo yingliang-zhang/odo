@@ -471,6 +471,23 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		s.mu.Unlock()
 		return s.handlePanelQuery(ctx, &c, strings.TrimSpace(rest))
 	}
+	// /vision slash command: route to K3 (vision-capable) via direct API.
+	// Same routing as /panel but single model (K3 only) for image analysis.
+	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/vision"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
+		c, err := s.checkConversation(ctx, req.ConversationID)
+		if err != nil {
+			return Response{}, err
+		}
+		s.mu.Lock()
+		if runID, ok := s.byConv[c.ID]; ok {
+			if meta := s.runs[runID]; meta != nil && !meta.finished {
+				s.mu.Unlock()
+				return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
+			}
+		}
+		s.mu.Unlock()
+		return s.handleVisionQuery(ctx, &c, strings.TrimSpace(rest))
+	}
 	// Held for the entire handler (M11 P0): the byConv check and
 	// the run-table insert must be one critical section, and adapter.Start is
 	// non-blocking so the hold stays short (~200ms).
@@ -1235,6 +1252,50 @@ func formatPanelResults(results []PanelResult) string {
 
 // parseVerdict extracts the verdict (the first line that IS or STARTS WITH
 // ACCEPT, REJECT, or NEEDS_FIXES) and the comments (everything after that line).
+// handleVisionQuery routes a /vision prompt to K3 (the only vision-capable
+// model on the gateway) via direct API. Unlike /panel which fans out to N
+// models, /vision uses a single model because GLM/DS lack vision capability.
+// The prompt should contain file paths to images; the model reads them via
+// the OMP tool loop or the gateway's image passthrough.
+func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, text string) (Response, error) {
+	if text == "" {
+		return Response{}, fmt.Errorf("/vision: prompt text is required after /vision")
+	}
+	// K3 is the only vision-capable model (confirmed in ~/.omp/agent/models.yml).
+	const visionModel = "t9s/kimi-k3"
+
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(map[string]interface{}{
+		"text": "/vision " + text,
+	})); err != nil {
+		return Response{}, err
+	}
+
+	client := moa.NewClientFromEnv("", "")
+	system := "You are a vision-capable coding assistant. Analyze the image or screenshot described in the prompt. Identify visual issues, layout problems, or design suggestions."
+	resp, err := client.Query(ctx, visionModel, system, text)
+
+	var resultText string
+	if err != nil {
+		resultText = "(vision error: " + err.Error() + ")"
+	} else {
+		resultText = "## " + visionModel + "\n\n" + resp
+	}
+
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentText, mustJSON(map[string]interface{}{
+		"text":   resultText,
+		"vision": true,
+	})); err != nil {
+		return Response{}, err
+	}
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentDone, mustJSON(map[string]interface{}{
+		"vision": true,
+	})); err != nil {
+		return Response{}, err
+	}
+
+	return Response{OK: true}, nil
+}
+
 // A line like "I cannot accept this" must NOT match — only a verdict token
 // on its own or as the first word of the line counts. Unparseable output
 // degrades to needs_fixes — a review must never silently read as an accept.
