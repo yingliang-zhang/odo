@@ -73,10 +73,13 @@
      enter/slide, and a gentler standard curve for width/color tweens. */
   --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
-  /* Motion duration tokens + spring easing for bounce/overshoot. */
+  /* Motion duration tokens — consumed by transitions throughout (sidebar,
+     bubble-in, toast-in, sheet-in, panel-in, focus ring, hover states). */
   --dur-fast: 120ms;
   --dur: 180ms;
   --dur-slow: 280ms;
+  /* Spring easing for bounce/overshoot — use on transform/opacity only,
+     never on width/height (y1=1.56 overshoot causes layout jitter). */
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -462,7 +465,7 @@ body {
   color: #e8b030;
   padding: 6px 12px;
   font-size: 13px;
-  animation: toast-in 0.2s ease-out;
+  animation: toast-in var(--dur) ease-out;
 }
 
 /* Transient confirmations (distill/curate/pin, learner updates,
@@ -493,7 +496,7 @@ body {
   text-align: left;
   cursor: pointer;
   word-break: break-word;
-  animation: toast-in 0.2s var(--ease-out);
+  animation: toast-in var(--dur) var(--ease-out);
 }
 
 .toast-item:hover {
@@ -603,7 +606,7 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  transition: width 0.22s var(--ease-out), padding 0.22s var(--ease-out);
+  transition: width var(--dur-slow) var(--ease-out), padding 0.22s var(--ease-out);
   will-change: width;
 }
 
@@ -726,7 +729,7 @@ body {
 .project-caret {
   font-size: 10px;
   color: var(--text-dim);
-  transition: transform 0.12s ease;
+  transition: transform var(--dur-fast) var(--ease-out);
 }
 
 .project-toggle.open .project-caret {
@@ -825,7 +828,7 @@ body {
   margin-left: auto;
   font-size: 9px;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 
 .sidebar-section-header:hover .caret,
@@ -1114,7 +1117,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text-dim);
   font-size: 11px;
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease-out);
 }
 .proj-add-btn:hover {
   background: var(--bg-input);
@@ -1290,12 +1293,12 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border: 1px solid var(--stroke-secondary);
   border-radius: var(--radius-lg);
   padding: 6px 6px 6px 14px;
-  transition: border-color 0.18s var(--ease-standard), box-shadow 0.18s var(--ease-standard);
+  transition: border-color 0.18s var(--ease-standard), box-shadow var(--dur) var(--ease-standard);
 }
 
 .chat-input:focus-within {
   border-color: var(--accent-user);
-  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-user) 25%, transparent);
 }
 
 .composer-hint {
@@ -1393,7 +1396,6 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text);
   padding: 8px 0;
   font: inherit;
-  transition: box-shadow 0.12s ease;
 }
 
 .chat-input textarea {
@@ -1489,7 +1491,6 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 /* Agent output sits on a flat elevated surface — no fill, just a hairline
    so long-form content (tables, code, diffs) gets the full column. */
 .bubble-agent {
-  align-self: flex-start;
   width: 92%;
   max-width: 720px;
   margin: 0 auto;
@@ -2090,7 +2091,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-radius: 14px;
   padding: 24px 28px;
   box-shadow: var(--shadow-panel);
-  animation: sheet-in 0.2s var(--ease-out);
+  animation: sheet-in var(--dur) var(--ease-out);
 }
 
 .settings-title {
@@ -3124,7 +3125,7 @@ mark {
   border-radius: 14px;
   padding: 12px;
   box-shadow: var(--shadow-panel);
-  animation: sheet-in 0.2s var(--ease-out);
+  animation: sheet-in var(--dur) var(--ease-out);
 }
 
 .palette-input {
@@ -3605,7 +3606,7 @@ mark {
 }
 
 .skill-scope-tag.global {
-  background: rgba(59, 130, 246, 0.15);
+  background: color-mix(in srgb, var(--accent-user) 15%, transparent);
   color: var(--accent-user);
 }
 
