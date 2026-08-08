@@ -1,4 +1,5 @@
 import {
+  ChangeEvent,
   ClipboardEvent,
   DragEvent,
   FormEvent,
@@ -193,6 +194,12 @@ const EXAMPLE_PROMPTS = [
   "Distill a summary of recent decisions",
 ];
 
+// Slash command autocomplete: / prefix shows available commands.
+const SLASH_COMMANDS = [
+  { cmd: "/panel",  desc: "MoA thinking — fan out to N review models",          args: " <text>" },
+  { cmd: "/vision", desc: "Vision analysis — send to K3 with image content blocks", args: " <text>" },
+];
+
 export default function ChatSurface({
   events,
   agentRunning,
@@ -212,6 +219,9 @@ export default function ChatSurface({
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  // Slash command autocomplete menu state.
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  const [slashFilter, setSlashFilter] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -374,7 +384,24 @@ export default function ChatSurface({
   // default), Esc stops a run or clears the draft. Escape is swallowed here
   // so App's global handler (blur/cancel for focus elsewhere) doesn't
   // double-fire.
+  const handleDraftChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setDraft(val);
+    // Slash command autocomplete: show menu when typing /word (no space yet)
+    if (val.startsWith("/") && !val.includes(" ") && val.indexOf("/") === 0) {
+      setSlashFilter(val.slice(1));
+      setSlashMenuOpen(true);
+    } else {
+      setSlashMenuOpen(false);
+    }
+  };
+
   const handleComposerKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashMenuOpen && e.key === "Escape") {
+      e.preventDefault();
+      setSlashMenuOpen(false);
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       void submitDraft();
@@ -696,12 +723,44 @@ export default function ChatSurface({
           </div>
         )}
         <form className="chat-input" onSubmit={handleSubmit}>
+          {slashMenuOpen && (
+            <div className="slash-menu">
+              {SLASH_COMMANDS
+                .filter((c) => slashFilter === "" || c.cmd.startsWith("/" + slashFilter))
+                .map((c) => (
+                  <button
+                    key={c.cmd}
+                    type="button"
+                    className="slash-item"
+                    onMouseDown={(e) => {
+                      e.preventDefault(); // don't blur the textarea
+                      const newText = c.cmd + c.args;
+                      setDraft(newText);
+                      setSlashMenuOpen(false);
+                      // Focus textarea and put cursor after the command
+                      requestAnimationFrame(() => {
+                        textareaRef.current?.focus();
+                        const pos = c.cmd.length;
+                        textareaRef.current?.setSelectionRange(pos, pos);
+                      });
+                    }}
+                  >
+                    <span className="slash-cmd">{c.cmd}</span>
+                    <span className="slash-desc">{c.desc}</span>
+                  </button>
+                ))}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             aria-label="Message input"
             rows={1}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={handleDraftChange}
+            onBlur={() => {
+              // Delay close so click registration on menu items fires first.
+              setTimeout(() => setSlashMenuOpen(false), 150);
+            }}
             onKeyDown={handleComposerKeyDown}
             onPaste={handlePaste}
             placeholder={

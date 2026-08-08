@@ -6,10 +6,7 @@ import { test, expect } from "@playwright/test";
 test("app boots with sidebar tree and workstreams", async ({ page }) => {
   await page.goto("/");
 
-  // Sidebar app title shows active project name
-  await expect(page.locator(".sidebar-app")).toHaveText("odo");
-
-  // Projects section heading
+  // Sidebar Projects section heading is visible
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
 
   // Active project (odo) is expanded — its workstreams visible in the tree

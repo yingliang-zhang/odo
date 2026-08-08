@@ -165,9 +165,6 @@ export default function Sidebar({
     }
   }, [projects, collapsedProjects, activeProjectRoot, fetchAttempted, onFetchWorkstreams]);
 
-  const activeEntry = projects.find((p) => p.root === activeProjectRoot);
-  const activeLabel = activeEntry?.name ?? projects[0]?.name ?? "Odo";
-
   const resetCreate = () => {
     setCreating(false);
     setNewName("");
@@ -379,7 +376,6 @@ export default function Sidebar({
 
       <div className="sidebar-sections">
         <div className="sidebar-head">
-          <h1 className="sidebar-app">{activeLabel}</h1>
           <button
             type="button"
             className="collapse-btn"

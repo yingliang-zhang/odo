@@ -5,7 +5,7 @@ import { test, expect } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator(".sidebar-app")).toBeVisible();
+  await expect(page.locator(".sidebar .proj-tree")).toBeVisible();
 });
 
 test("pending diff is visible in context panel", async ({ page }) => {

@@ -816,8 +816,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 }
 
 .ws-item.active {
-  background: var(--bg-input);
-  border-color: var(--accent-user);
+  background: color-mix(in srgb, var(--accent-user) 12%, transparent);
 }
 
 .ws-name {
@@ -1174,6 +1173,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 }
 
 .chat-input {
+  position: relative;
   display: flex;
   gap: 8px;
   padding: 12px 16px;
@@ -1184,6 +1184,51 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   font-size: 11px;
   color: var(--text-dim);
   text-align: right;
+}
+
+/* Slash command autocomplete menu */
+.slash-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--stroke-tertiary);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 10;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
+}
+.slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+.slash-item:hover {
+  background: var(--bg-input);
+}
+.slash-cmd {
+  font-weight: 600;
+  color: var(--accent-user);
+  white-space: nowrap;
+  min-width: 70px;
+}
+.slash-desc {
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attachment-chips {
