@@ -329,6 +329,83 @@ body {
   text-align: center;
 }
 
+/* PR3: icon-only action (Settings gear) — no label span, tighter padding */
+.topbar-action-icon-only {
+  padding: 3px 6px;
+}
+
+.topbar-action-icon-only .topbar-action-label {
+  display: none;
+}
+
+/* PR3: overflow menu (⋯) — dropdown for Curate/Pin/Wiki/Ledger */
+.topbar-overflow {
+  position: relative;
+}
+
+.topbar-overflow-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 160px;
+  padding: 6px;
+  background: var(--panel-float);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  animation: overlay-fade 0.12s var(--ease-standard);
+}
+
+.topbar-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s var(--ease-standard);
+}
+
+.topbar-overflow-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-user) 10%, transparent);
+}
+
+.topbar-overflow-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.topbar-overflow-sep {
+  height: 1px;
+  margin: 3px 0;
+  background: var(--stroke-tertiary);
+}
+
+.topbar-overflow-badge {
+  margin-left: auto;
+  min-width: 16px;
+  padding: 0 5px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: center;
+}
+
 /* M9 P4: pin popover — inline text entry anchored under the Pin button */
 .topbar-pin {
   position: relative;

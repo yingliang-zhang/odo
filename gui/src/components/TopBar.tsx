@@ -1,12 +1,16 @@
-import { FormEvent, useState, type ReactNode } from "react";
+import { FormEvent, useState, type ReactNode, useEffect, useRef } from "react";
 import { errorMessage } from "../api";
-import { Sparkles, FileText, Wand2, MapPin, BookOpen, Settings, PanelLeft, ChevronLeft } from "lucide-react";
+import { Sparkles, FileText, Wand2, MapPin, BookOpen, Settings, PanelLeft, ChevronLeft, MoreHorizontal } from "lucide-react";
 
 // M9 Phase 1: TopBar — 32px bar above the main content area.
 // M9 Phase 4: owns the action row that used to live in the sidebar
-// (Distill/Wiki/Curate/Pin/Ledger/Settings). Success/failure feedback is
+// (Distill/Curate/Pin/Settings). Success/failure feedback is
 // produced by App's handlers (toasts + error banner); this component keeps
 // only its own interaction state (curate busy, pin popover).
+//
+// PR3: TopBar decluttered to 3 visible controls + overflow menu.
+// Visible: Distill (labeled), ⋯ overflow, Settings (gear icon only).
+// Overflow: Curate, Pin, Wiki (opens panel), Ledger (opens panel).
 
 interface Props {
   workstreamName: string | null;
@@ -65,6 +69,34 @@ function ActionButton({
   );
 }
 
+// Icon-only button (for Settings gear — no visible label).
+function IconButton({
+  icon,
+  disabled,
+  title,
+  onClick,
+}: {
+  icon: ReactNode;
+  disabled?: boolean;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="topbar-action topbar-action-icon-only"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span className="topbar-action-icon" aria-hidden="true">
+        {icon}
+      </span>
+    </button>
+  );
+}
+
 export default function TopBar({
   workstreamName,
   sidebarCollapsed,
@@ -85,6 +117,8 @@ export default function TopBar({
   const [pinText, setPinText] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLDivElement>(null);
 
   const handleCurate = async () => {
     if (curateBusy) return;
@@ -123,6 +157,25 @@ export default function TopBar({
     }
   };
 
+  // PR3: Close overflow menu on outside click or Escape.
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (overflowRef.current && !overflowRef.current.contains(e.target as Node)) {
+        setOverflowOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOverflowOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [overflowOpen]);
+
   return (
     <header className="app-topbar">
       <button
@@ -143,6 +196,7 @@ export default function TopBar({
       )}
 
       <div className="topbar-actions">
+        {/* PR3: Distill — primary visible action (labeled) */}
         <ActionButton
           icon={<Sparkles size={14} />}
           label={distillBusy ? "Distilling…" : "Distill"}
@@ -151,30 +205,91 @@ export default function TopBar({
           title="Distill this conversation into a wiki note and start a new epoch"
           onClick={onDistill}
         />
-        <ActionButton
-          icon={<FileText size={14} />}
-          label="Wiki"
-          badge={wikiNoteCount}
-          disabled={actionsDisabled}
-          title="Browse this workstream's distilled wiki notes"
-          onClick={onOpenWiki}
-        />
-        <ActionButton
-          icon={<Wand2 size={14} />}
-          label={curateBusy ? "Curating…" : "Curate"}
-          disabled={curateBusy || actionsDisabled}
-          title="Rewrite wiki topic pages + index from all epoch notes"
-          onClick={() => void handleCurate()}
-        />
-        <div className="topbar-pin">
-          <ActionButton
-            icon={<MapPin size={14} />}
-            label="Pin"
-            disabled={actionsDisabled}
-            title="Store a verbatim pin in .odo/pins.md (always injected, human-owned)"
-            onClick={togglePin}
-          />
-          {pinOpen && (
+
+        {/* PR3: Overflow menu — Curate, Pin, Wiki, Ledger */}
+        <div className="topbar-overflow" ref={overflowRef}>
+          <button
+            type="button"
+            className="topbar-action topbar-action-icon-only"
+            title="More actions"
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={overflowOpen}
+            onClick={() => setOverflowOpen((v) => !v)}
+          >
+            <span className="topbar-action-icon" aria-hidden="true">
+              <MoreHorizontal size={14} />
+            </span>
+          </button>
+          {overflowOpen && (
+            <div className="topbar-overflow-menu" role="menu">
+              <button
+                type="button"
+                className="topbar-overflow-item"
+                role="menuitem"
+                disabled={curateBusy || actionsDisabled}
+                title="Rewrite wiki topic pages + index from all epoch notes"
+                onClick={() => {
+                  setOverflowOpen(false);
+                  void handleCurate();
+                }}
+              >
+                <Wand2 size={14} />
+                <span>{curateBusy ? "Curating…" : "Curate"}</span>
+              </button>
+              <button
+                type="button"
+                className="topbar-overflow-item"
+                role="menuitem"
+                disabled={actionsDisabled}
+                title="Store a verbatim pin in .odo/pins.md"
+                onClick={() => {
+                  setOverflowOpen(false);
+                  togglePin();
+                }}
+              >
+                <MapPin size={14} />
+                <span>Pin</span>
+              </button>
+              <div className="topbar-overflow-sep" />
+              <button
+                type="button"
+                className="topbar-overflow-item"
+                role="menuitem"
+                disabled={actionsDisabled}
+                title="Browse this workstream's distilled wiki notes"
+                onClick={() => {
+                  setOverflowOpen(false);
+                  onOpenWiki();
+                }}
+              >
+                <FileText size={14} />
+                <span>Wiki</span>
+                {wikiNoteCount != null && (
+                  <span className="topbar-overflow-badge">{wikiNoteCount}</span>
+                )}
+              </button>
+              <button
+                type="button"
+                className="topbar-overflow-item"
+                role="menuitem"
+                disabled={actionsDisabled}
+                title="Open .odo/ledger.md — daemon-written verified metrics"
+                onClick={() => {
+                  setOverflowOpen(false);
+                  onOpenLedger();
+                }}
+              >
+                <BookOpen size={14} />
+                <span>Ledger</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* PR3: Pin popover — anchored under the overflow area */}
+        {pinOpen && (
+          <div className="topbar-pin">
             <form className="topbar-pin-popover" onSubmit={handlePinSubmit}>
               <input
                 type="text"
@@ -201,18 +316,12 @@ export default function TopBar({
               </button>
               {pinError && <div className="topbar-pin-error">{pinError}</div>}
             </form>
-          )}
-        </div>
-        <ActionButton
-          icon={<BookOpen size={14} />}
-          label="Ledger"
-          disabled={actionsDisabled}
-          title="Open .odo/ledger.md — daemon-written verified metrics (durations, proposals, accept/reject)"
-          onClick={onOpenLedger}
-        />
-        <ActionButton
+          </div>
+        )}
+
+        {/* PR3: Settings — gear icon only (no label) */}
+        <IconButton
           icon={<Settings size={14} />}
-          label="Settings"
           title="Settings (⌘,)"
           onClick={onOpenSettings}
         />
