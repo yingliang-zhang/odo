@@ -19,8 +19,8 @@ test("app boots with sidebar tree and workstreams", async ({ page }) => {
   // Second project exists
   await expect(sidebar.getByText("supersplat-hdr")).toBeVisible();
 
-  // Add project button exists
-  await expect(page.getByText("Add project")).toBeVisible();
+  // New project button exists in section header
+  await expect(page.getByText("New", { exact: true })).toBeVisible();
 
   // Status bar at bottom shows workstream info
   await expect(page.locator(".app-statusbar")).toContainText("main");

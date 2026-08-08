@@ -390,18 +390,17 @@ export default function Sidebar({
         <div className="sidebar-section sidebar-section-grow">
           <div className="sidebar-section-head">
             <h2>Projects</h2>
+            <button
+              type="button"
+              className="proj-add-btn"
+              onClick={onAddProject}
+              title="New project"
+            >
+              <FolderPlus size={12} /> New
+            </button>
           </div>
           <ul className="proj-tree">
             {projects.map(renderProject)}
-            <li className="proj-group proj-add-group">
-              <button
-                type="button"
-                className="proj-add"
-                onClick={onAddProject}
-              >
-                <FolderPlus size={12} /> Add project
-              </button>
-            </li>
           </ul>
         </div>
       </div>
