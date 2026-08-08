@@ -74,6 +74,15 @@ function ReviewModelsInput({
 // App reads the same key on mount, so the dialog never has to sync back.
 type Theme = "dark" | "light";
 
+// PR2: Settings inspector categories — left sidebar + right detail panel.
+type Category = "general" | "models" | "knowledge";
+
+const CATEGORIES: { id: Category; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "models", label: "Models" },
+  { id: "knowledge", label: "Knowledge" },
+];
+
 interface Props {
   onClose: () => void;
   // M9 P4: fired after a successful save so App can react.
@@ -86,12 +95,17 @@ interface Props {
 // curated subset (coding/orchestrator model, OMP timeout,
 // review models), and saves the full object back so untouched keys
 // (providers) survive the round trip.
+//
+// PR2: Restructured from a single-column form into an inspector layout —
+// 160px left category sidebar + right detail panel. All existing fields
+// preserved, only regrouped under General / Models / Knowledge.
 export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedToast, setSavedToast] = useState(false);
+  const [activeCategory, setActiveCategory] = useState<Category>("general");
   const [theme, setTheme] = useState<Theme>(() =>
     localStorage.getItem("odo-theme") === "light" ? "light" : "dark",
   );
@@ -172,122 +186,173 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
       >
         <h2 className="settings-title">Settings</h2>
 
-        <div className="settings-field">
-          <span id="theme-label">Theme</span>
-          <div className="theme-toggle" role="group" aria-labelledby="theme-label">
-            <button
-              type="button"
-              className={theme === "dark" ? "active" : ""}
-              aria-pressed={theme === "dark"}
-              onClick={() => switchTheme("dark")}
-            >
-              Dark
-            </button>
-            <button
-              type="button"
-              className={theme === "light" ? "active" : ""}
-              aria-pressed={theme === "light"}
-              onClick={() => switchTheme("light")}
-            >
-              Light
-            </button>
-          </div>
-        </div>
-
         {loading && <LoadingInline />}
         {error && <div className="settings-error">{error}</div>}
 
         {settings && (
-          <form className="settings-form" onSubmit={handleSave}>
+          <form className="settings-inspector" onSubmit={handleSave}>
             <datalist id="sudo-models">
               {SUDO_MODELS.map((m) => (
                 <option key={m} value={m} />
               ))}
             </datalist>
-            <label className="settings-field">
-              <span>Coding model</span>
-              <input
-                type="text"
-                list="sudo-models"
-                value={settings.coding_model}
-                onChange={(e) => set("coding_model", e.target.value)}
-              />
-            </label>
-            <label className="settings-field">
-              <span>Orchestrator model</span>
-              <input
-                type="text"
-                list="sudo-models"
-                value={settings.orchestrator_model}
-                onChange={(e) => set("orchestrator_model", e.target.value)}
-              />
-            </label>
-            <label className="settings-field">
-              <span>OMP timeout (seconds)</span>
-              <input
-                type="text"
-                value={settings.omp_timeout}
-                onChange={(e) => set("omp_timeout", e.target.value)}
-                placeholder="e.g. 900"
-              />
-            </label>
-            <label className="settings-field">
-              <span>Review Models</span>
-              <ReviewModelsInput
-                value={settings.review_models}
-                onChange={(v) => set("review_models", v)}
-              />
-            </label>
 
-            {/* M10: Knowledge capture (auto-distill) */}
-            <div className="settings-section-title">Knowledge capture</div>
-            <label className="settings-field">
-              <span>Auto-distill</span>
-              <select
-                value={settings.auto_distill}
-                onChange={(e) => set("auto_distill", e.target.value)}
-              >
-                <option value="never">Never (manual)</option>
-                <option value="on_idle">On idle (after N seconds)</option>
-              </select>
-            </label>
-            <label className="settings-field">
-              <span>Idle seconds</span>
-              <input
-                type="number"
-                min="5"
-                max="300"
-                disabled={settings.auto_distill !== "on_idle"}
-                value={settings.auto_distill_idle_seconds}
-                onChange={(e) => set("auto_distill_idle_seconds", e.target.value)}
-              />
-            </label>
-            <label className="settings-field">
-              <span>Auto-curate after distill</span>
-              <select
-                value={settings.auto_curate_after_distill}
-                onChange={(e) => set("auto_curate_after_distill", e.target.value)}
-              >
-                <option value="false">No (manual)</option>
-                <option value="true">Yes (chain after distill)</option>
-              </select>
-            </label>
-            <label className="settings-field">
-              <span>Max concurrent runs</span>
-              <input
-                type="number"
-                min="1"
-                max="16"
-                value={settings.max_concurrent_runs}
-                onChange={(e) => set("max_concurrent_runs", e.target.value)}
-              />
-            </label>
+            {/* PR2: Left category sidebar */}
+            <nav className="settings-sidebar" aria-label="Settings categories">
+              {CATEGORIES.map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  className={
+                    activeCategory === cat.id
+                      ? "settings-nav-item active"
+                      : "settings-nav-item"
+                  }
+                  aria-pressed={activeCategory === cat.id}
+                  onClick={() => setActiveCategory(cat.id)}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </nav>
+
+            {/* PR2: Right detail panel */}
+            <div className="settings-detail">
+              {activeCategory === "general" && (
+                <>
+                  <div className="settings-field">
+                    <span id="theme-label">Theme</span>
+                    <div
+                      className="theme-toggle"
+                      role="group"
+                      aria-labelledby="theme-label"
+                    >
+                      <button
+                        type="button"
+                        className={theme === "dark" ? "active" : ""}
+                        aria-pressed={theme === "dark"}
+                        onClick={() => switchTheme("dark")}
+                      >
+                        Dark
+                      </button>
+                      <button
+                        type="button"
+                        className={theme === "light" ? "active" : ""}
+                        aria-pressed={theme === "light"}
+                        onClick={() => switchTheme("light")}
+                      >
+                        Light
+                      </button>
+                    </div>
+                  </div>
+                  <label className="settings-field">
+                    <span>OMP timeout (seconds)</span>
+                    <input
+                      type="text"
+                      value={settings.omp_timeout}
+                      onChange={(e) => set("omp_timeout", e.target.value)}
+                      placeholder="e.g. 900"
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>Max concurrent runs</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="16"
+                      value={settings.max_concurrent_runs}
+                      onChange={(e) =>
+                        set("max_concurrent_runs", e.target.value)
+                      }
+                    />
+                  </label>
+                </>
+              )}
+
+              {activeCategory === "models" && (
+                <>
+                  <label className="settings-field">
+                    <span>Coding model</span>
+                    <input
+                      type="text"
+                      list="sudo-models"
+                      value={settings.coding_model}
+                      onChange={(e) => set("coding_model", e.target.value)}
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>Orchestrator model</span>
+                    <input
+                      type="text"
+                      list="sudo-models"
+                      value={settings.orchestrator_model}
+                      onChange={(e) =>
+                        set("orchestrator_model", e.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>Review Models</span>
+                    <ReviewModelsInput
+                      value={settings.review_models}
+                      onChange={(v) => set("review_models", v)}
+                    />
+                  </label>
+                </>
+              )}
+
+              {activeCategory === "knowledge" && (
+                <>
+                  <label className="settings-field">
+                    <span>Auto-distill</span>
+                    <select
+                      value={settings.auto_distill}
+                      onChange={(e) => set("auto_distill", e.target.value)}
+                    >
+                      <option value="never">Never (manual)</option>
+                      <option value="on_idle">
+                        On idle (after N seconds)
+                      </option>
+                    </select>
+                  </label>
+                  <label className="settings-field">
+                    <span>Idle seconds</span>
+                    <input
+                      type="number"
+                      min="5"
+                      max="300"
+                      disabled={settings.auto_distill !== "on_idle"}
+                      value={settings.auto_distill_idle_seconds}
+                      onChange={(e) =>
+                        set("auto_distill_idle_seconds", e.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>Auto-curate after distill</span>
+                    <select
+                      value={settings.auto_curate_after_distill}
+                      onChange={(e) =>
+                        set("auto_curate_after_distill", e.target.value)
+                      }
+                    >
+                      <option value="false">No (manual)</option>
+                      <option value="true">Yes (chain after distill)</option>
+                    </select>
+                  </label>
+                </>
+              )}
+            </div>
 
             <div className="settings-actions">
               <button type="submit" className="settings-save" disabled={saving}>
                 {saving ? "Saving…" : "Save"}
               </button>
-              <button type="button" className="settings-close" onClick={onClose}>
+              <button
+                type="button"
+                className="settings-close"
+                onClick={onClose}
+              >
                 Close
               </button>
             </div>

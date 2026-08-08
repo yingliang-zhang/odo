@@ -2082,7 +2082,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 .settings-panel {
   position: relative;
-  width: 440px;
+  width: 560px;
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 64px);
   overflow: auto;
@@ -2115,6 +2115,54 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 }
 
 .settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* PR2: Settings inspector — 160px left category sidebar + right detail */
+.settings-inspector {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 0;
+  min-height: 280px;
+}
+
+.settings-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 16px;
+  border-right: 1px solid var(--stroke-tertiary);
+}
+
+.settings-nav-item {
+  display: block;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-standard), color 0.15s var(--ease-standard);
+}
+
+.settings-nav-item:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-input) 50%, transparent);
+}
+
+.settings-nav-item.active {
+  color: var(--accent-user);
+  background: color-mix(in srgb, var(--accent-user) 12%, transparent);
+  font-weight: 500;
+}
+
+.settings-detail {
+  padding-left: 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2216,6 +2264,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   display: flex;
   gap: 8px;
   margin-top: 6px;
+  grid-column: 1 / -1;
 }
 
 .settings-save {
