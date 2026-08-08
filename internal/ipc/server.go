@@ -471,10 +471,11 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 				return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 			}
 		}
-		s.mu.Unlock()
 		if _, ok := s.distilling[c.ID]; ok {
+			s.mu.Unlock()
 			return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
 		}
+		s.mu.Unlock()
 		return s.handlePanelQuery(ctx, &c, strings.TrimSpace(rest))
 	}
 	// /vision slash command: route to K3 (vision-capable) via direct API.
@@ -491,10 +492,11 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 				return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 			}
 		}
-		s.mu.Unlock()
 		if _, ok := s.distilling[c.ID]; ok {
+			s.mu.Unlock()
 			return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
 		}
+		s.mu.Unlock()
 		return s.handleVisionQuery(ctx, &c, strings.TrimSpace(rest), req.Attachments)
 	}
 	// Held for the entire handler (M11 P0): the byConv check and
@@ -1265,7 +1267,7 @@ func formatPanelResults(results []PanelResult) string {
 // model on the gateway) via direct API. Unlike /panel which fans out to N
 // models, /vision uses a single model because GLM/DS lack vision capability.
 // The prompt text is sent to K3 via direct HTTP API. Image content blocks
-// are not yet supported — the model receives text only.
+// are sent as Anthropic image content blocks when attachments are provided.
 func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, text string, attachments []string) (Response, error) {
 	if text == "" {
 		return Response{}, fmt.Errorf("/vision: prompt text is required after /vision")

@@ -274,10 +274,7 @@ async fn send_message(
     project_root: Option<String>,
 ) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    // The daemon ignores `attachments` today (its Request struct has no such
-    // field, and Go JSON decoding drops unknown keys); the frontend already
-    // prefixes the paths into `text`. Forwarded now so the daemon-side
-    // change needs no further GUI work.
+    // The daemon honors `attachments` for /vision (image content blocks).
     let mut req = json!({"cmd": "send_message", "conversation_id": conversation_id, "text": text});
     if let Some(paths) = attachments {
         req["attachments"] = json!(paths);
