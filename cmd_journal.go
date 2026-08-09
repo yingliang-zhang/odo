@@ -20,27 +20,34 @@ import (
 // shell — no daemon, no socket; the journal is opened READ-ONLY (query_only)
 // so a live daemon's ownership is never disturbed.
 //
-// Subcommands (all default to the "main" workstream's active conversation;
-// --workstream <name> selects another):
+// Subcommands (the windowed reads default to the "main" workstream's
+// active conversation — --workstream <name> selects another; search
+// always spans every active workstream in the project):
 //
 //	odo journal folded   — the window the latest distill folded out of view
 //	odo journal range A [B] — events with seq in [A, B] (B optional: to end)
 //	odo journal tail N   — the conversation's last N events
+//	odo journal search <terms> — keyword hits across active workstreams
 //
 // Output is one JSON object per line (stdout), same shape poll_events
 // serves; a human summary of the resolved window goes to stderr. The
 // correct agent response to "the summary lost a detail" is
-// `odo journal folded` (or `range`), never guessing from the note.
+// `odo journal search <terms>` to locate the seq window, then
+// `odo journal folded` (or `range`) to pull it — never guessing from
+// the note.
 
 // journalUsage is printed on invocation errors (exit 2).
 const journalUsage = `usage: odo journal <subcommand> [--workstream <name>]
-  folded        events folded by the latest distill (window from its marker)
-  range A [B]   events with seq in [A, B]; B omitted reads to the end
-  tail N        the conversation's last N events`
+  folded          events folded by the latest distill (window from its marker)
+  range A [B]     events with seq in [A, B]; B omitted reads to the end
+  tail N          the conversation's last N events
+  search <terms>  keyword search across ALL active workstreams, newest first
+                  [--limit N] (default 20; % and _ are LIKE wildcards)`
 
 // runJournalCLI dispatches `odo journal <sub>`.
 func runJournalCLI(args []string) int {
 	workstream := "main"
+	limit := 20 // search only; capped again by the store's default when <= 0
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		switch {
@@ -49,6 +56,25 @@ func runJournalCLI(args []string) int {
 			i++
 		case strings.HasPrefix(args[i], "--workstream="):
 			workstream = strings.TrimPrefix(args[i], "--workstream=")
+		case args[i] == "--limit":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "odo journal: --limit needs a value\n")
+				return 2
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n < 1 {
+				fmt.Fprintf(os.Stderr, "odo journal: --limit must be a positive integer, got %q\n", args[i+1])
+				return 2
+			}
+			limit = n
+			i++
+		case strings.HasPrefix(args[i], "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(args[i], "--limit="))
+			if err != nil || n < 1 {
+				fmt.Fprintf(os.Stderr, "odo journal: --limit must be a positive integer, got %q\n", args[i])
+				return 2
+			}
+			limit = n
 		default:
 			positional = append(positional, args[i])
 		}
@@ -59,6 +85,26 @@ func runJournalCLI(args []string) int {
 	}
 
 	ctx := context.Background()
+	sub := positional[0]
+	rest := positional[1:]
+
+	// search is conversation-independent (project-wide, cross-workstream):
+	// resolve the store+project only, so it also works on workstreams with
+	// no active conversation.
+	if sub == "search" {
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, journalUsage)
+			return 2
+		}
+		jc, closeStore, err := journalStore(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "odo journal: %v\n", err)
+			return 1
+		}
+		defer closeStore()
+		return journalSearch(ctx, jc, strings.Join(rest, " "), limit)
+	}
+
 	conv, closeStore, err := journalConversation(ctx, workstream)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "odo journal: %v\n", err)
@@ -66,8 +112,6 @@ func runJournalCLI(args []string) int {
 	}
 	defer closeStore()
 
-	sub := positional[0]
-	rest := positional[1:]
 	switch sub {
 	case "folded":
 		if len(rest) != 0 {
@@ -112,28 +156,45 @@ func runJournalCLI(args []string) int {
 	}
 }
 
-// journalConversation resolves the project root from the cwd, opens the
-// journal read-only, and returns the workstream's active conversation.
-// closeStore releases the handle (non-nil only when err is nil).
-func journalConversation(ctx context.Context, workstreamName string) (journalConv, func() error, error) {
+// journalStore resolves the project root from the cwd, opens the journal
+// read-only, and returns the project. closeStore releases the handle
+// (non-nil only when err is nil).
+func journalStore(ctx context.Context) (journalProj, func() error, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return journalConv{}, nil, fmt.Errorf("resolve cwd: %w", err)
+		return journalProj{}, nil, fmt.Errorf("resolve cwd: %w", err)
 	}
 	root, err := journalRoot(cwd)
 	if err != nil {
-		return journalConv{}, nil, err
+		return journalProj{}, nil, err
 	}
 	st, err := store.OpenReadOnly(filepath.Join(root, ".odo", "journal.sqlite"))
 	if err != nil {
-		return journalConv{}, nil, err
+		return journalProj{}, nil, err
 	}
 	p, err := st.GetProjectByRoot(ctx, root)
 	if err != nil {
 		st.Close()
-		return journalConv{}, nil, fmt.Errorf("project %s not in journal: %w", root, err)
+		return journalProj{}, nil, fmt.Errorf("project %s not in journal: %w", root, err)
 	}
-	w, err := st.GetWorkstreamByName(ctx, p.ID, workstreamName)
+	return journalProj{store: st, project: p}, st.Close, nil
+}
+
+// journalProj bundles a read-only store with the resolved project.
+type journalProj struct {
+	store   *store.Store
+	project store.Project
+}
+
+// journalConversation resolves the workstream's active conversation on top
+// of journalStore.
+func journalConversation(ctx context.Context, workstreamName string) (journalConv, func() error, error) {
+	jp, closeStore, err := journalStore(ctx)
+	if err != nil {
+		return journalConv{}, nil, err
+	}
+	st := jp.store
+	w, err := st.GetWorkstreamByName(ctx, jp.project.ID, workstreamName)
 	if err != nil {
 		st.Close()
 		return journalConv{}, nil, err
@@ -143,7 +204,7 @@ func journalConversation(ctx context.Context, workstreamName string) (journalCon
 		st.Close()
 		return journalConv{}, nil, fmt.Errorf("no active conversation for workstream %q", workstreamName)
 	}
-	return journalConv{store: st, conversation: c}, st.Close, nil
+	return journalConv{store: st, conversation: c}, closeStore, nil
 }
 
 // journalConv bundles the resolved conversation with its read-only store.
@@ -252,6 +313,31 @@ func journalTail(ctx context.Context, conv journalConv, n int) int {
 		first, last = events[0].Seq, events[len(events)-1].Seq
 	}
 	writeEvents(events, first, last)
+	return 0
+}
+
+// journalSearch prints keyword hits across every active workstream in the
+// project, newest first — the remedy when the summary lost a detail and
+// the seq window is unknown (search locates it, range pulls it).
+func journalSearch(ctx context.Context, jp journalProj, query string, limit int) int {
+	results, err := jp.store.SearchEvents(ctx, jp.project.ID, query, limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo journal search: %v\n", err)
+		return 1
+	}
+	streams := map[string]bool{}
+	for _, r := range results {
+		streams[r.WorkstreamName] = true
+	}
+	fmt.Fprintf(os.Stderr, "%d match(es) for %q across %d active workstream(s), newest first — pull context with `odo journal range A B --workstream <name>`\n",
+		len(results), query, len(streams))
+	enc := json.NewEncoder(os.Stdout)
+	for _, r := range results {
+		if err := enc.Encode(r); err != nil {
+			fmt.Fprintf(os.Stderr, "odo journal: write stdout: %v\n", err)
+			return 1
+		}
+	}
 	return 0
 }
 

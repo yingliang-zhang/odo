@@ -213,7 +213,7 @@ func buildResumeCard(projectRoot, wsName string, events []store.Event) (block, n
 	fmt.Fprintf(&b, "## Resume context (cold start: open loops from %s, folded through seq %d)\n\n",
 		filepath.Base(newest), boundary)
 	b.WriteString(loops)
-	fmt.Fprintf(&b, "\n\n> Distilled summary of folded events — details may be lossy, and anything after seq %d is not covered. The journal is authoritative: verify with `odo journal tail N` or `odo journal range A B` before relying on specifics.", boundary)
+	fmt.Fprintf(&b, "\n\n> Distilled summary of folded events — details may be lossy, and anything after seq %d is not covered. The journal is authoritative: verify with `odo journal search <terms>` (no seq known), `odo journal tail N`, or `odo journal range A B` before relying on specifics.", boundary)
 	return b.String(), newest
 }
 

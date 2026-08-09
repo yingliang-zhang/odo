@@ -166,6 +166,142 @@ func TestJournalCLIRangeAndTail(t *testing.T) {
 	}
 }
 
+// seedJournalTwoStreams builds a journal with "main" and "exp" workstreams
+// so search's cross-workstream span is exercised. Returns after CLOSING the
+// store (read-only CLI path).
+func seedJournalTwoStreams(t *testing.T, root string) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(root, ".odo", "journal.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, err := st.CreateOrGetProject(ctx, root, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendTo := func(ws string, payloads ...string) {
+		w, err := st.CreateOrGetWorkstream(ctx, p.ID, ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := st.CreateConversation(ctx, w.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pl := range payloads {
+			if _, err := st.AppendEvent(ctx, c.ID, "user_message", pl); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	appendTo("main", `{"text":"tokenizer config v2"}`, `{"text":"unrelated"}`)
+	appendTo("exp", `{"text":"tokenizer ablations"}`)
+}
+
+// stdoutSearchHits parses search JSONL into (workstream, payload) pairs.
+func stdoutSearchHits(t *testing.T, stdout string) []store.SearchResult {
+	t.Helper()
+	var hits []store.SearchResult
+	for line := range strings.Lines(strings.TrimRight(stdout, "\n")) {
+		if line == "" {
+			continue
+		}
+		var r store.SearchResult
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("bad JSONL line %q: %v", line, err)
+		}
+		hits = append(hits, r)
+	}
+	return hits
+}
+
+func TestJournalCLISearch(t *testing.T) {
+	root := t.TempDir()
+	seedJournalTwoStreams(t, root)
+	t.Chdir(root)
+
+	stdout, stderr, code := captureCLI(t, func() int {
+		return runJournalCLI([]string{"search", "tokenizer"})
+	})
+	if code != 0 {
+		t.Fatalf("search: exit %d, stderr %q", code, stderr)
+	}
+	hits := stdoutSearchHits(t, stdout)
+	if len(hits) != 2 {
+		t.Fatalf("search hits = %d, want 2 (one per workstream): %q", len(hits), stdout)
+	}
+	streams := map[string]bool{}
+	for _, h := range hits {
+		streams[h.WorkstreamName] = true
+		if h.ConversationID == 0 || h.Event.Seq == 0 {
+			t.Errorf("hit missing conversation/seq context: %+v", h)
+		}
+	}
+	if !streams["main"] || !streams["exp"] {
+		t.Errorf("streams = %v, want both main and exp (cross-workstream span)", streams)
+	}
+	if !strings.Contains(string(hits[0].Event.Payload), "tokenizer") {
+		t.Errorf("payload not verbatim: %s", hits[0].Event.Payload)
+	}
+	if !strings.Contains(stderr, "2 match(es)") {
+		t.Errorf("stderr %q, want the match count", stderr)
+	}
+}
+
+func TestJournalCLISearchLimitJoinAndNoMatch(t *testing.T) {
+	root := t.TempDir()
+	seedJournalTwoStreams(t, root)
+	t.Chdir(root)
+
+	stdout, _, code := captureCLI(t, func() int {
+		return runJournalCLI([]string{"search", "tokenizer", "--limit", "1"})
+	})
+	if code != 0 || len(stdoutSearchHits(t, stdout)) != 1 {
+		t.Errorf("search --limit 1: exit %d, stdout %q; want 1 hit", code, stdout)
+	}
+
+	// Multiple positional terms join into one phrase query.
+	stdout, _, code = captureCLI(t, func() int {
+		return runJournalCLI([]string{"search", "tokenizer", "config"})
+	})
+	if code != 0 {
+		t.Fatalf("joined search: exit %d", code)
+	}
+	hits := stdoutSearchHits(t, stdout)
+	if len(hits) != 1 || !strings.Contains(string(hits[0].Event.Payload), "tokenizer config v2") {
+		t.Errorf("joined terms hits = %v, want only the \"tokenizer config v2\" event", hits)
+	}
+
+	// No match is a normal outcome: exit 0, empty stdout, count on stderr.
+	stdout, stderr, code := captureCLI(t, func() int {
+		return runJournalCLI([]string{"search", "zzz-nothing"})
+	})
+	if code != 0 || stdout != "" || !strings.Contains(stderr, "0 match(es)") {
+		t.Errorf("no match: exit %d stdout %q stderr %q; want 0 / empty / '0 match(es)'", code, stdout, stderr)
+	}
+}
+
+func TestJournalCLISearchFromRunWorktree(t *testing.T) {
+	root := t.TempDir()
+	seedJournalTwoStreams(t, root)
+	wt := filepath.Join(root, ".odo", "worktrees", "abc123-1-abcdef")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+
+	// Project-wide search resolves the root from an agent worktree cwd —
+	// and needs no active conversation on the default workstream.
+	stdout, _, code := captureCLI(t, func() int {
+		return runJournalCLI([]string{"search", "tokenizer", "--limit=5"})
+	})
+	if code != 0 || len(stdoutSearchHits(t, stdout)) != 2 {
+		t.Errorf("search from worktree: exit %d stdout %q; want 2 hits", code, stdout)
+	}
+}
+
 func TestJournalCLIRejectsBadArgs(t *testing.T) {
 	root := t.TempDir()
 	seedJournal(t, root, []string{"user_message"})
@@ -178,6 +314,10 @@ func TestJournalCLIRejectsBadArgs(t *testing.T) {
 		{"range", "5", "2"},
 		{"tail", "0"},
 		{"folded", "extra"},
+		{"search"},
+		{"search", "q", "--limit", "0"},
+		{"search", "q", "--limit=x"},
+		{"search", "q", "--limit"},
 	} {
 		if _, _, code := captureCLI(t, func() int { return runJournalCLI(args) }); code != 2 {
 			t.Errorf("args %v: exit %d, want 2 (usage)", args, code)

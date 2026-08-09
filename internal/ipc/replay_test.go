@@ -230,7 +230,7 @@ func TestPromptAdvertisesJournalPull(t *testing.T) {
 	root := initRepo(t)
 	writeEpochNote(t, root, "main-epoch-1", "x\n")
 	block := memoryMapBlock(root)
-	for _, want := range []string{"odo journal folded", "odo journal range A B", "odo journal tail N", "NOT injected"} {
+	for _, want := range []string{"odo journal folded", "odo journal range A B", "odo journal tail N", "odo journal search <terms>", "NOT injected"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("memoryMapBlock missing %q", want)
 		}
@@ -257,7 +257,8 @@ func TestPromptAdvertisesJournalPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read AGENTS.md: %v", err)
 	}
-	if !strings.Contains(string(agents), "odo journal folded|range|tail") {
-		t.Error("AGENTS.md project rules do not name the journal pull path")
+	if !strings.Contains(string(agents), "odo journal folded|range|tail") ||
+		!strings.Contains(string(agents), "odo journal search <terms>") {
+		t.Error("AGENTS.md project rules do not name the journal pull paths")
 	}
 }

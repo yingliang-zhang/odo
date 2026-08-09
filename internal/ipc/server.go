@@ -338,8 +338,9 @@ func (s *Server) generateAgentsMD() {
 	b.WriteString("notes in the prompt prefix. Treat them as authoritative. If OMP's\n")
 	b.WriteString("hindsight memory conflicts with the prompt, follow the prompt. Older turns\n")
 	b.WriteString("folded by distills are not injected verbatim — when a summary or the replay\n")
-	b.WriteString("lacks a detail, run `odo journal folded|range|tail` (read-only) before\n")
-	b.WriteString("concluding it is lost.\n\n")
+	b.WriteString("lacks a detail, run `odo journal folded|range|tail` (read-only), or\n")
+	b.WriteString("`odo journal search <terms>` (keyword over every active workstream) to\n")
+	b.WriteString("locate the window first, before concluding it is lost.\n\n")
 	// Append project memory if it exists.
 	if data, err := os.ReadFile(filepath.Join(s.projectRoot, ".odo", "memory.md")); err == nil {
 		b.WriteString("## Memory\n\n")
@@ -838,7 +839,7 @@ func memoryMapBlock(projectRoot string) string {
 		fmt.Fprintf(&b, "- Per-epoch metrics ledger: `%s`\n", ledger)
 	}
 	b.WriteString("From the main checkout you can also run `odo wiki read <name>` (e.g. `odo wiki read index`, `odo wiki read ledger`).\n\n")
-	b.WriteString("Folded-out journal turns are NOT injected above, and every summary layer is lossy: when a summary or the replay lacks a detail, query the journal first (read-only; works from this worktree) — `odo journal folded`, `odo journal range A B`, `odo journal tail N` — instead of concluding it is lost.")
+	b.WriteString("Folded-out journal turns are NOT injected above, and every summary layer is lossy: when a summary or the replay lacks a detail, query the journal first (read-only; works from this worktree) — `odo journal search <terms>` (keyword over every active workstream, to locate the seq window), then `odo journal folded`, `odo journal range A B`, or `odo journal tail N` — instead of concluding it is lost.")
 	return b.String()
 }
 
