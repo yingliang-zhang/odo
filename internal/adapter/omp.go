@@ -113,6 +113,36 @@ func defaultWrapperPath() string {
 	return filepath.Join(home, ".hermes", "profiles", "orchestrator", "scripts", "omp_with_timeout.sh")
 }
 
+// enrichedEnv returns os.Environ() with a PATH that includes common
+// tool locations missing when the daemon is launched from a .app bundle
+// (macOS GUI apps get a minimal PATH like /usr/bin:/bin:/usr/sbin:/sbin).
+// Adds homebrew, ~/.local/bin, ~/.cargo/bin, ~/.omp/bin, and conda paths
+// so the wrapper can find omp, go, node, git, etc.
+func enrichedEnv() []string {
+	env := os.Environ()
+	home, _ := os.UserHomeDir()
+	extraPaths := []string{
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".cargo", "bin"),
+		filepath.Join(home, ".omp", "bin"),
+		filepath.Join(home, ".hermes", "node", "bin"),
+	}
+	found := false
+	for i, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			env[i] = e + string(filepath.ListSeparator) + strings.Join(extraPaths, string(filepath.ListSeparator))
+			found = true
+			break
+		}
+	}
+	if !found {
+		env = append(env, "PATH="+strings.Join(extraPaths, string(filepath.ListSeparator)))
+	}
+	return env
+}
+
 // NewOMP returns an OMP adapter. State (prompts, session dirs, output files)
 // goes under stateDir. The wrapper path defaults to the Hermes profile script
 // and can be overridden with ODO_OMP_WRAPPER (used by tests/smoke scripts).
@@ -205,6 +235,7 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 	}
 	cmd := exec.Command(a.wrapperPath, args...)
 	cmd.Dir = workdir
+	cmd.Env = enrichedEnv()
 	cmd.Stdout = nil // transcript goes to outputFile via the wrapper
 	stderr := &tailBuffer{}
 	cmd.Stderr = stderr

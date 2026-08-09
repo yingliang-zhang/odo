@@ -425,6 +425,13 @@ export default function ChatSurface({
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      // IME composition: if the user is composing CJK text, Enter confirms
+      // the candidate — don't send the message. isComposing is true during
+      // composition and becomes false on the compositionend event. The
+      // keyCode 229 check is a legacy fallback for older webviews.
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+        return;
+      }
       e.preventDefault();
       void submitDraft();
       return;
