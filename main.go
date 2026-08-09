@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
@@ -22,6 +23,13 @@ import (
 func main() {
 	log.SetPrefix("odo: ")
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
+
+	// .app-launch env enrichment: macOS GUI apps don't source ~/.zshrc, so
+	// SUDO_CODING_KEY (used by moa.NewClientFromEnv for review_diff/panel/
+	// vision/skill-gate) and PATH (for git, omp, etc.) are missing.
+	// Inject them here so the daemon process itself has them, not just the
+	// OMP child subprocess (enrichedEnv in omp.go handles the child).
+	enrichDaemonEnv()
 
 	var projectFlag, socketFlag string
 	flag.StringVar(&projectFlag, "project", "", "project root (default: current working directory)")
@@ -120,4 +128,41 @@ func main() {
 		log.Printf("close journal: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// enrichDaemonEnv injects environment variables that are missing when
+// the daemon is launched from a .app bundle (macOS GUI apps don't source
+// ~/.zshrc). This covers the daemon's OWN environment — the OMP child
+// subprocess gets its own enrichment via enrichedEnv() in omp.go.
+// Without this, moa.NewClientFromEnv (review_diff/panel/vision/skill-gate)
+// can't find SUDO_CODING_KEY and returns "API key is empty".
+func enrichDaemonEnv() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	// Inject SUDO_CODING_KEY if missing.
+	if os.Getenv("SUDO_CODING_KEY") == "" {
+		if key := adapter.ExtractExportFromZshrc(home, "SUDO_CODING_KEY"); key != "" {
+			os.Setenv("SUDO_CODING_KEY", key)
+		}
+	}
+	// Enrich PATH if it looks minimal (missing /opt/homebrew/bin).
+	if !strings.Contains(os.Getenv("PATH"), "/opt/homebrew/bin") {
+		extra := []string{
+			"/opt/homebrew/bin",
+			"/usr/local/bin",
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, ".cargo", "bin"),
+			filepath.Join(home, ".omp", "bin"),
+			filepath.Join(home, ".hermes", "node", "bin"),
+			filepath.Join(home, "go", "bin"),
+		}
+		current := os.Getenv("PATH")
+		if current == "" {
+			os.Setenv("PATH", strings.Join(extra, string(filepath.ListSeparator)))
+		} else {
+			os.Setenv("PATH", current+string(filepath.ListSeparator)+strings.Join(extra, string(filepath.ListSeparator)))
+		}
+	}
 }

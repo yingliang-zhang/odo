@@ -167,7 +167,7 @@ func enrichedEnv() []string {
 		}
 	}
 	if !hasKey {
-		if key := extractExportFromZshrc(home, "SUDO_CODING_KEY"); key != "" {
+		if key := ExtractExportFromZshrc(home, "SUDO_CODING_KEY"); key != "" {
 			env = append(env, "SUDO_CODING_KEY="+key)
 		}
 	}
@@ -175,11 +175,11 @@ func enrichedEnv() []string {
 	return env
 }
 
-// extractExportFromZshrc reads ~/.zshrc and extracts the value of an
+// ExtractExportFromZshrc reads ~/.zshrc and extracts the value of an
 // `export VAR="value"` line. Returns "" if not found or unreadable.
 // This is a lightweight parser — it doesn't source the file, just
-// regex-matches the export line.
-func extractExportFromZshrc(home, varName string) string {
+// matches the export line. Exported so main.go can use it for daemon env.
+func ExtractExportFromZshrc(home, varName string) string {
 	data, err := os.ReadFile(filepath.Join(home, ".zshrc"))
 	if err != nil {
 		return ""
