@@ -58,8 +58,10 @@ export type EventType =
 //   agent_done        { summary }
 //   agent_error       { error }
 //   review_action     { action: "accept" | "reject", diff_id }
-//                       — also "distill" { epoch, wiki_path } (M1) and
-//                       "curate" { action, topics, notes_read } (M5).
+//                       — also "distill" { epoch, wiki_path } (M1; plus
+//                       first_seq, last_seq, note_sha — explicit fold
+//                       provenance) and "curate" { action, topics,
+//                       notes_read } (M5).
 //   memory_update     { layer, cause, before_sha?, after_sha?, detail? }
 //                       layer: "memory" | "user" | "learner" (M4) |
 //                       "curator" | "index" | "pins" (M5) |
@@ -103,9 +105,15 @@ export interface EventPayload {
   layer?: string;
   cause?: string;
   detail?: string;
-  // review_action when action == "distill" (M1 memory distiller).
+  // review_action when action == "distill" (M1 memory distiller). The fold
+  // window [first_seq, last_seq] is journaled explicitly (epoch-fold root
+  // fix) alongside the note's sha16; older markers omit them and consumers
+  // derive (previous marker seq+1 … marker seq−1).
   epoch?: number;
   wiki_path?: string;
+  first_seq?: number;
+  last_seq?: number;
+  note_sha?: string;
   // review_action when action == "curate" (M5 curator pass): how many
   // topic pages were rewritten and how many epoch notes were read.
   topics?: number;

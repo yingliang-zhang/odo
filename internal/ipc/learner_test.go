@@ -259,6 +259,122 @@ func TestLearnerProposesJournaled(t *testing.T) {
 	}
 }
 
+// lastDistillMarker returns the conversation's newest distill review_action.
+func lastDistillMarker(t *testing.T, rig *testRig, convID int64) store.Event {
+	t.Helper()
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != store.EventReviewAction {
+			continue
+		}
+		var p map[string]interface{}
+		if json.Unmarshal(events[i].Payload, &p) == nil && p["action"] == "distill" {
+			return events[i]
+		}
+	}
+	t.Fatal("no distill marker journaled")
+	return store.Event{}
+}
+
+// TestFoldWindow pins the window arithmetic: after no marker, after one,
+// and the empty-window shapes (no events at all / nothing new since the
+// last marker both yield lastSeq < firstSeq).
+func TestFoldWindow(t *testing.T) {
+	ev := func(seq int, typ, action string) store.Event {
+		p := "{}"
+		if action != "" {
+			p = fmt.Sprintf(`{"action":%q}`, action)
+		}
+		return store.Event{Seq: seq, Type: typ, Payload: json.RawMessage(p)}
+	}
+	marker := func(seq int) store.Event { return ev(seq, store.EventReviewAction, "distill") }
+	msg := func(seq int) store.Event { return ev(seq, store.EventUserMessage, "") }
+
+	cases := []struct {
+		name                string
+		events              []store.Event
+		wantFirst, wantLast int
+	}{
+		{"empty log", nil, 1, 0},
+		{"no marker", []store.Event{msg(1), msg(2), msg(3)}, 1, 3},
+		{"after marker", []store.Event{msg(1), marker(2), msg(3), msg(4)}, 3, 4},
+		{"only marker", []store.Event{marker(5)}, 6, 5},
+		{"latest marker wins", []store.Event{msg(1), marker(2), msg(3), marker(4), msg(5)}, 5, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			first, last := FoldWindow(tc.events)
+			if first != tc.wantFirst || last != tc.wantLast {
+				t.Errorf("foldWindow = (%d, %d), want (%d, %d)", first, last, tc.wantFirst, tc.wantLast)
+			}
+		})
+	}
+}
+
+// TestDistillFoldSchema covers the epoch-fold provenance fix: the distill
+// marker journals the folded window [first_seq, last_seq] and the note's
+// content hash explicitly, so consumers never reverse-derive the boundary.
+// The second distill's window must start right after the first marker.
+func TestDistillFoldSchema(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+	note1 := "# Epoch 1\n\nFirst folded epoch.\n"
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", note1)
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[],"user":[],"reaffirm":[]}`)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	convID, d1 := runToDistill(t, rig, root)
+	if d1.WikiPath == "" {
+		t.Fatalf("distill #1 failed: %+v", d1)
+	}
+
+	marker1 := lastDistillMarker(t, rig, convID)
+	var p1 map[string]interface{}
+	if err := json.Unmarshal(marker1.Payload, &p1); err != nil {
+		t.Fatalf("marker #1 payload: %v", err)
+	}
+	if p1["first_seq"] != float64(1) {
+		t.Errorf("marker #1 first_seq = %v, want 1", p1["first_seq"])
+	}
+	if p1["last_seq"] != float64(marker1.Seq-1) {
+		t.Errorf("marker #1 last_seq = %v, want marker seq-1 = %d", p1["last_seq"], marker1.Seq-1)
+	}
+	last1, ok1 := p1["last_seq"].(float64)
+	if !ok1 || last1 < 1 {
+		t.Errorf("marker #1 window %v..%v — want the run's events folded", p1["first_seq"], p1["last_seq"])
+	}
+	if p1["note_sha"] != sha16([]byte(readFileStr(t, d1.WikiPath))) {
+		t.Errorf("marker #1 note_sha = %v, want sha16 of the note on disk", p1["note_sha"])
+	}
+
+	// A second run + distill: window #2 starts right after marker #1 and
+	// folds everything journaled since (the run's events here).
+	note2 := "# Epoch 2\n\nSecond folded epoch.\n"
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", note2)
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Update hello.txt"})
+	rig.pollUntilDone(t, convID)
+	d2 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if d2.WikiPath == "" {
+		t.Fatalf("distill #2 failed: %+v", d2)
+	}
+	marker2 := lastDistillMarker(t, rig, convID)
+	var p2 map[string]interface{}
+	if err := json.Unmarshal(marker2.Payload, &p2); err != nil {
+		t.Fatalf("marker #2 payload: %v", err)
+	}
+	if p2["first_seq"] != float64(marker1.Seq+1) {
+		t.Errorf("marker #2 first_seq = %v, want marker#1 seq+1 = %d", p2["first_seq"], marker1.Seq+1)
+	}
+	if p2["last_seq"] != float64(marker2.Seq-1) {
+		t.Errorf("marker #2 last_seq = %v, want marker#2 seq-1 = %d", p2["last_seq"], marker2.Seq-1)
+	}
+	if p2["note_sha"] != sha16([]byte(readFileStr(t, d2.WikiPath))) {
+		t.Errorf("marker #2 note_sha = %v, want sha16 of the note on disk", p2["note_sha"])
+	}
+}
+
 // TestLearnerVetoesWeakEvidence covers the daemon-side evidence gate: a
 // memory proposal whose evidence is not the just-written note name and a
 // user proposal backed by <2 distinct registered projects are dropped and

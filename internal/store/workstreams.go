@@ -34,6 +34,21 @@ func (s *Store) CreateOrGetWorkstream(ctx context.Context, projectID int64, name
 	return w, nil
 }
 
+// GetWorkstreamByName fetches the active workstream named name under the
+// project (error wrapping sql.ErrNoRows when none). Read-only counterpart
+// of CreateOrGetWorkstream for the no-daemon CLIs — it never creates.
+func (s *Store) GetWorkstreamByName(ctx context.Context, projectID int64, name string) (Workstream, error) {
+	w, err := scanWorkstream(s.db.QueryRowContext(ctx,
+		`SELECT id, project_id, name, branch, worktree_path, status, created_at
+		 FROM workstreams
+		 WHERE project_id = ? AND name = ? AND status = ?
+		 ORDER BY id DESC LIMIT 1`, projectID, name, WorkstreamActive))
+	if err != nil {
+		return Workstream{}, fmt.Errorf("store: get workstream %q: %w", name, err)
+	}
+	return w, nil
+}
+
 // GetWorkstream fetches a workstream by ID.
 func (s *Store) GetWorkstream(ctx context.Context, id int64) (Workstream, error) {
 	w, err := scanWorkstream(s.db.QueryRowContext(ctx,

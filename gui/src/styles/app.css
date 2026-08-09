@@ -1242,10 +1242,16 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   padding: 0 8px;
 }
 
-/* ---------- Epoch banner ---------- */
+/* ---------- Fold chip ---------- */
 
-.epoch-banner {
+/* Persistent fold marker at the top of the chat log (epoch-fold root fix):
+   announces how many events the latest distill folded out of view and
+   carries the reversible actions (expand the record / open the note). */
+.fold-chip {
   align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   max-width: 100%;
   background: var(--bg-raised);
   border: 1px solid var(--border);
@@ -1255,8 +1261,23 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   padding: 4px 12px;
 }
 
-.epoch-banner code {
+.fold-chip-text code {
   font-family: var(--mono);
+}
+
+.fold-chip-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
+.fold-chip-btn:hover {
+  border-color: var(--accent-user);
+  color: var(--accent-user);
 }
 
 /* ---------- Chat surface ---------- */

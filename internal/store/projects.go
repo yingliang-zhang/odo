@@ -40,7 +40,9 @@ func (s *Store) GetProject(ctx context.Context, id int64) (Project, error) {
 	return p, nil
 }
 
-func (s *Store) getProjectByRoot(ctx context.Context, rootPath string) (Project, error) {
+// GetProjectByRoot fetches the project registered for rootPath (error
+// wrapping sql.ErrNoRows when none). Exported for the read-only CLIs.
+func (s *Store) GetProjectByRoot(ctx context.Context, rootPath string) (Project, error) {
 	var p Project
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, root_path, name, created_at FROM projects WHERE root_path = ?`, rootPath).
@@ -49,4 +51,8 @@ func (s *Store) getProjectByRoot(ctx context.Context, rootPath string) (Project,
 		return Project{}, err
 	}
 	return p, nil
+}
+
+func (s *Store) getProjectByRoot(ctx context.Context, rootPath string) (Project, error) {
+	return s.GetProjectByRoot(ctx, rootPath)
 }

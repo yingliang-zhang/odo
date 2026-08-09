@@ -170,6 +170,23 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// OpenReadOnly opens the journal at path for pure reads (`odo journal`
+// CLI): no directory creation, no migrations, query_only — so it can never
+// mutate a journal a live daemon owns. Errors when the file is absent.
+func OpenReadOnly(path string) (*Store, error) {
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: open read-only %s: %w", path, err)
+	}
+	return &Store{db: db}, nil
+}
+
 func migrate(db *sql.DB) error {
 	if _, err := db.Exec(schemaV1); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)

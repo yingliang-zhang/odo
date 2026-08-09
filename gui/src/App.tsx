@@ -143,7 +143,9 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // M11 D2: ⌘N opens palette in new-workstream prompt mode directly.
   const [paletteInitialAction, setPaletteInitialAction] = useState<string | undefined>(undefined);
-  const [lastDistillPath, setLastDistillPath] = useState<string | null>(null);
+  // Fold chip's "Open note": selects a specific note in the wiki browser.
+  // The counter makes repeated clicks on the same note re-select it.
+  const [wikiFocus, setWikiFocus] = useState<{ path: string; n: number } | null>(null);
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // E P2: daemon disconnect tracking — consecutive poll failures
@@ -341,7 +343,7 @@ export default function App() {
       // bootstrap (switch workstream, session restore) doesn't auto-open.
       bootstrappedRef.current = false;
       prevDiffsCountRef.current = 0;
-      setLastDistillPath(null);
+      setWikiFocus(null);
       const cid = resp.conversation?.id;
       if (cid != null) {
         void refreshWikiCount(cid);
@@ -811,6 +813,16 @@ export default function App() {
     setMemorySubTab(memSubTab ?? "proposals");
   }, []);
 
+  // Fold chip's "Open note": pivot to the wiki tab and focus the folded
+  // epoch's note there.
+  const handleOpenFoldNote = useCallback(
+    (path: string) => {
+      openPanelTab("wiki");
+      setWikiFocus((prev) => ({ path, n: (prev?.n ?? 0) + 1 }));
+    },
+    [openPanelTab],
+  );
+
   // Toast viewport lifecycle: push shows a confirmation for 10 s; either
   // the timer or a click (which also click-throughs to its panel) removes it.
   const dismissToast = useCallback((id: number) => {
@@ -841,8 +853,8 @@ export default function App() {
         const epoch = resp.epoch;
         setConversation((prev) => (prev ? { ...prev, epoch } : prev));
       }
-      setLastDistillPath(resp.wiki_path ?? null);
-      // The distill just wrote a new note; the TopBar count follows.
+      // The fold chip derives boundary/note/count from the journaled
+      // marker itself — no session-only mirror to keep.
       void refreshWikiCount(cid);
       // M4: the learner ran synchronously inside the same distill call, so
       // the proposal batch (if any) is already journaled — re-read it for
@@ -1267,7 +1279,8 @@ export default function App() {
           onSend={handleSend}
           onCancel={handleCancel}
           epoch={conversation?.epoch ?? 1}
-          distilledTo={lastDistillPath}
+          conversationId={conversation?.id}
+          onOpenNote={handleOpenFoldNote}
           searchOpen={searchOpen}
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
@@ -1307,6 +1320,7 @@ export default function App() {
             key={`${project?.root_path ?? "default"}:${conversation.id}`}
             conversationId={conversation.id}
             projectRoot={project?.root_path ?? null}
+            focus={wikiFocus}
           />
         ) : (
           <div className="panel-empty">No active conversation.</div>

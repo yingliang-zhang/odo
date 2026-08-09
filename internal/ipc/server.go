@@ -1762,23 +1762,27 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	if err != nil {
 		return Response{}, err
 	}
-	// R3: the fold boundary is explicit schema, not UI inference. The epoch
-	// window is (previous fold boundary, last journaled seq at distill time];
-	// note_path/note_sha bind the note that replaces the window. Replay (R1)
-	// and the future fold chip read these fields directly.
-	foldFrom := foldBoundary(events) + 1
-	foldTo := 0
-	if len(events) > 0 {
-		foldTo = events[len(events)-1].Seq
+	// Fold provenance (epoch-fold root fix): the marker records the folded
+	// window [first_seq, last_seq] explicitly instead of letting consumers
+	// reverse-derive it from journal scans, plus the note's content hash so
+	// the fold is falsifiable against the artifact on disk. Re-list events
+	// so the window is exact no matter which sub-passes (contradictions,
+	// learner, gate) journaled since the distill started; a list failure
+	// degrades to the events snapshot from distill start, never to a
+	// failed distill.
+	foldEvents, lerr := s.store.ListEvents(ctx, c.ID, 0)
+	if lerr != nil {
+		foldEvents = events
 	}
+	firstSeq, lastSeq := FoldWindow(foldEvents)
 	distillEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":         "distill",
 		"epoch":          newEpoch,
 		"wiki_path":      wikiPath,
 		"duration_ms":    time.Since(start).Milliseconds(), // M6: ledger metric
 		"contradictions": contradictions,                   // M6: contradiction report count
-		"first_seq":      foldFrom,
-		"last_seq":       foldTo,
+		"first_seq":      firstSeq,
+		"last_seq":       lastSeq,
 		"note_path":      filepath.Join("wiki", noteName+".md"),
 		"note_sha":       sha16([]byte(note)),
 	}))
@@ -1791,6 +1795,33 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	// not newEpoch (the counter after increment).
 	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
 	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: len(batchProposals)}, nil
+}
+
+// FoldWindow computes the journal window [firstSeq, lastSeq] that a new
+// distill marker folds: everything after the previous distill marker
+// through the newest journaled event. events is seq-ascending and does NOT
+// yet include the marker about to be appended. An empty log (or nothing
+// journaled since the last marker) yields lastSeq < firstSeq — consumers
+// treat that as an empty window. Exported: the rehydration CLI derives
+// legacy markers' windows with the same arithmetic (single convention).
+func FoldWindow(events []store.Event) (firstSeq, lastSeq int) {
+	firstSeq = 1
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action string `json:"action"`
+		}
+		if json.Unmarshal(events[i].Payload, &p) == nil && p.Action == "distill" {
+			firstSeq = events[i].Seq + 1
+			break
+		}
+	}
+	if len(events) > 0 {
+		lastSeq = events[len(events)-1].Seq
+	}
+	return firstSeq, lastSeq
 }
 
 // journalDistillLedger appends the distill's section to .odo/ledger.md from

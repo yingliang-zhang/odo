@@ -40,10 +40,16 @@ interface Props {
   onSend: (text: string, attachments: string[], steer: boolean) => Promise<void>;
   // Belt A: abort the running agent (Stop button / Esc).
   onCancel: () => void;
-  // M1 memory distiller: current epoch (banner shown when > 1) and the wiki
-  // path of the most recent distill, when known this session.
+  // M1 memory distiller: the conversation's current epoch, surfaced by the
+  // folded-all empty state ("continue in epoch N").
   epoch: number;
-  distilledTo?: string | null;
+  // Conversation identity for the fold chip's expand memory: expansion is
+  // tracked per (conversation, fold boundary) so a workstream switch or a
+  // new distill never inherits a stale expanded view.
+  conversationId?: number;
+  // "Open note" on the fold chip — opens the wiki panel focused on the
+  // folded epoch's note.
+  onOpenNote: (path: string) => void;
   // Belt B: conversation-local search (⌘F). State is owned by App so the
   // command palette can open it too; matching happens here, over the events
   // already in memory — no IPC.
@@ -86,6 +92,17 @@ function searchableText(e: OdoEvent): string {
 interface RunGroup {
   start: OdoEvent | null;
   events: OdoEvent[];
+}
+
+// The latest distill's fold, derived from the journal events in memory.
+// count comes from the marker's explicit window when present (the daemon
+// journals first_seq/last_seq/note_sha), else from the derived boundary
+// arithmetic — identical because per-conversation seqs are gap-free.
+interface Fold {
+  boundarySeq: number; // the marker's own seq: events ≤ it are folded
+  count: number; // events folded out of view
+  notePath?: string; // folded epoch's wiki note, when the marker names one
+  noteName?: string; // its basename without .md, for display
 }
 
 // One unit of rendered output inside a run: a plain bubble, or a bundle of
@@ -210,7 +227,8 @@ export default function ChatSurface({
   onSend,
   onCancel,
   epoch,
-  distilledTo,
+  conversationId,
+  onOpenNote,
   searchOpen,
   searchQuery,
   onSearchQueryChange,
@@ -446,22 +464,56 @@ export default function ChatSurface({
     }
   };
 
-  // M1 epoch filtering: show only events from the current epoch.
-  // The last distill review_action marks the epoch boundary; events after
-  // it belong to the current epoch. If no distill has happened, show all.
-  const lastDistillSeq = useMemo(() => {
+  // M1 epoch filtering + epoch-fold provenance (root fix): the latest
+  // distill review_action marks the fold boundary. The marker journals the
+  // folded window [first_seq, last_seq] explicitly; legacy markers derive
+  // it from journal order (previous marker seq+1 … marker seq−1). If no
+  // distill has happened there is no fold and everything shows.
+  const fold = useMemo<Fold | null>(() => {
+    let latestIdx = -1;
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (e.type === "review_action" && e.payload?.action === "distill") {
-        return e.seq;
+        latestIdx = i;
+        break;
       }
     }
-    return 0;
+    if (latestIdx < 0) return null;
+    const marker = events[latestIdx];
+    let first = marker.payload?.first_seq;
+    let last = marker.payload?.last_seq;
+    if (first == null || last == null) {
+      first = 1;
+      for (let i = latestIdx - 1; i >= 0; i--) {
+        const e = events[i];
+        if (e.type === "review_action" && e.payload?.action === "distill") {
+          first = e.seq + 1;
+          break;
+        }
+      }
+      last = marker.seq - 1;
+    }
+    const notePath = marker.payload?.wiki_path || undefined;
+    const noteName = notePath ? basename(notePath).replace(/\.md$/, "") : undefined;
+    return {
+      boundarySeq: marker.seq,
+      count: Math.max(0, last - first + 1),
+      notePath,
+      noteName,
+    };
   }, [events]);
+  const lastDistillSeq = fold?.boundarySeq ?? 0;
+
+  // Fold expansion is remembered per (conversation, boundary): a new
+  // distill moves the boundary and re-collapses, and a workstream switch
+  // can never display another conversation's journal unfolded by default.
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const foldKey = fold ? `${conversationId ?? "default"}:${fold.boundarySeq}` : null;
+  const expanded = foldKey !== null && expandedKey === foldKey;
 
   const visibleEvents = useMemo(
-    () => events.filter((e) => e.seq > lastDistillSeq),
-    [events, lastDistillSeq],
+    () => (expanded ? events : events.filter((e) => e.seq > lastDistillSeq)),
+    [events, lastDistillSeq, expanded],
   );
 
   // Belt C (§Fix 1): group the visible events into runs — each
@@ -639,20 +691,58 @@ export default function ChatSurface({
           onScroll={handleListScroll}
           aria-live="polite"
         >
-        {epoch > 1 && (
-          <div className="epoch-banner">
-            Epoch {epoch}
-            {distilledTo ? (
-              <>
-                {" — previous epoch distilled to "}
-                <code>{distilledTo}</code>
-              </>
-            ) : (
-              " — previous epochs distilled to the wiki"
+        {fold && (
+          <div className="fold-chip" role="note">
+            <span className="fold-chip-text" title={fold.notePath}>
+              {fold.count} event{fold.count === 1 ? "" : "s"} folded
+              {fold.noteName ? ` → ${fold.noteName}` : ""}
+            </span>
+            <button
+              type="button"
+              className="fold-chip-btn"
+              aria-expanded={expanded}
+              onClick={() => setExpandedKey(expanded ? null : foldKey)}
+            >
+              {expanded ? "Collapse" : "Expand"}
+            </button>
+            {fold.notePath && (
+              <button
+                type="button"
+                className="fold-chip-btn"
+                onClick={() => onOpenNote(fold.notePath!)}
+              >
+                Open note
+              </button>
             )}
           </div>
         )}
-        {visibleEvents.length === 0 && (
+        {visibleEvents.length === 0 && (fold ? (
+          <div className="empty-state">
+            <h2>Everything here is folded</h2>
+            <p className="dim">
+              All {fold.count} events in this conversation were distilled into
+              {fold.noteName ? <> <code>{fold.noteName}</code></> : " a wiki note"}.
+              Nothing was lost — the journal keeps every event. Send a message
+              to continue in epoch {epoch}, or reopen the folded record.
+            </p>
+            <button
+              type="button"
+              className="example-prompt"
+              onClick={() => setExpandedKey(foldKey)}
+            >
+              Expand the folded record
+            </button>
+            {fold.notePath && (
+              <button
+                type="button"
+                className="example-prompt"
+                onClick={() => onOpenNote(fold.notePath!)}
+              >
+                Open the note
+              </button>
+            )}
+          </div>
+        ) : (
           <div className="empty-state">
             <h2>Welcome to Odo</h2>
             <p className="dim">
@@ -679,7 +769,7 @@ export default function ChatSurface({
               <span>⌘, Settings</span>
             </div>
           </div>
-        )}
+        ))}
         {panelThinking && (
           <div className="panel-thinking">
             <LoaderCircle size={14} className="spin" />

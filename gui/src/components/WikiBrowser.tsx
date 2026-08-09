@@ -36,6 +36,10 @@ interface Props {
   // App remounts the browser on project switch, so no cross-project state
   // (note list, reader cache, selection) can survive.
   projectRoot?: string | null;
+  // Fold chip's "Open note": select + read this note. The counter lets a
+  // repeated request for the same path re-select it even when the browser
+  // stayed mounted (object identity changes per request).
+  focus?: { path: string; n: number } | null;
 }
 
 // Compact relative timestamp for the note list ("45s ago", "3h ago", …).
@@ -60,7 +64,7 @@ function relativeTime(iso: string): string {
 // M9 P3: the browser renders inline inside the right panel's Wiki tab; the
 // list and reader stack vertically and scroll independently while the tabs
 // and search stay pinned. Closing is the panel's job (⌘J).
-export default function WikiBrowser({ conversationId, projectRoot }: Props) {
+export default function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
   const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -133,6 +137,15 @@ export default function WikiBrowser({ conversationId, projectRoot }: Props) {
       cancelled = true;
     };
   }, [tab, topics, topicsError, projectRoot]);
+
+  // External focus requests (the fold chip's "Open note") select the note
+  // directly — the reader below picks the selection up through `selected`.
+  useEffect(() => {
+    if (focus) {
+      setTab("notes");
+      setSelected(focus.path);
+    }
+  }, [focus]);
 
   // Reader: fetch the selected entry once, then serve from the cache.
   useEffect(() => {

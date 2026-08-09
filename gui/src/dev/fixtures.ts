@@ -68,27 +68,33 @@ export const workstreams: Record<string, Workstream[]> = {
 
 export const conversations: Record<number, Conversation> = {
   1: { id: 1, workstream_id: 1, epoch: 2, state: "active", base_commit_sha: "abc123", created_at: "2026-07-20T10:01:00Z" },
-  2: { id: 2, workstream_id: 2, epoch: 1, state: "active", created_at: "2026-08-05T09:00:00Z" },
-  3: { id: 3, workstream_id: 3, epoch: 1, state: "active", created_at: "2026-08-06T15:00:00Z" },
+  // Epochs are post-distill (a marker bumped each of 2 and 3 to 2).
+  2: { id: 2, workstream_id: 2, epoch: 2, state: "active", created_at: "2026-08-05T09:00:00Z" },
+  3: { id: 3, workstream_id: 3, epoch: 2, state: "active", created_at: "2026-08-06T15:00:00Z" },
   10: { id: 10, workstream_id: 10, epoch: 1, state: "active", created_at: "2026-08-01T14:01:00Z" },
 };
 
 // ---------- Events (conversation 1) ----------
 
-let seqCounter = 0;
+// IDs are global; seqs are PER-CONVERSATION and gap-free — same shape the
+// daemon's journal guarantees, and the fold chip's derived-window fallback
+// relies on it.
+let idCounter = 0;
+const seqByConv: Record<number, number> = {};
 export function ev(
   type: OdoEvent["type"],
   payload: Record<string, unknown>,
   convId = 1,
 ): OdoEvent {
-  seqCounter += 1;
+  idCounter += 1;
+  seqByConv[convId] = (seqByConv[convId] ?? 0) + 1;
   return {
-    id: seqCounter,
+    id: idCounter,
     conversation_id: convId,
-    seq: seqCounter,
+    seq: seqByConv[convId],
     type,
     payload: payload as OdoEvent["payload"],
-    created_at: new Date(Date.now() - (20 - seqCounter) * 60000).toISOString(),
+    created_at: new Date(Date.now() - (24 - idCounter) * 60000).toISOString(),
   };
 }
 
@@ -103,6 +109,34 @@ export const events: OdoEvent[] = [
   ev("user_message", { text: "Looks good — now add the CSS for `.md-table`" }),
   ev("agent_text", { text: "Adding table styles to app.css — borders, padding, header background." }),
   ev("agent_done", { summary: "Added .md-table CSS with th/td borders, padding, and header styling" }),
+
+  // ---------- Events (conversation 2) — everything folded ----------
+  // Legacy marker (no first_seq/last_seq): the UI derives the window from
+  // journal order. Covers the folded-all empty state.
+  ev("user_message", { text: "Initial sidebar tree layout" }, 2),
+  ev("agent_done", { summary: "Sidebar tree landed" }, 2),
+  ev("review_action", {
+    action: "distill",
+    epoch: 2,
+    wiki_path: "/Users/yingliangzhang/Projects/odo/wiki/feat-sidebar-tree-epoch-1.md",
+  }, 2),
+
+  // ---------- Events (conversation 3) — partial fold, epoch 2 active ----------
+  // Explicit schema marker (first_seq/last_seq/note_sha): the UI prefers
+  // the journaled window. Post-fold activity stays visible.
+  ev("user_message", { text: "Patch the daemon launch path" }, 3),
+  ev("agent_done", { summary: "Daemon launch path patched" }, 3),
+  ev("review_action", {
+    action: "distill",
+    epoch: 2,
+    wiki_path: "/Users/yingliangzhang/Projects/odo/wiki/fix-daemon-binary-epoch-1.md",
+    first_seq: 1,
+    last_seq: 2,
+    note_sha: "c3d4e5f60718293a",
+  }, 3),
+  ev("user_message", { text: "Now fix the socket perms" }, 3),
+  ev("agent_text", { text: "Adjusting the socket chmod to 0600." }, 3),
+  ev("agent_done", { summary: "Socket permissions fixed" }, 3),
 ];
 
 // ---------- Diffs ----------
