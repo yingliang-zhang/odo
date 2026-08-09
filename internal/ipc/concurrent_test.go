@@ -94,6 +94,17 @@ func (r *testRig) roundTrip(req Request) (Response, error) {
 	return resp, nil
 }
 
+// bootstrapConvWithRun additionally drives one agent run to completion, so
+// the journal holds events a distill can fold — distilling an untouched
+// conversation is rejected as an empty window.
+func bootstrapConvWithRun(t *testing.T, rig *testRig, root string) int64 {
+	t.Helper()
+	convID := bootstrapConv(t, rig, root)
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	rig.pollUntilDone(t, convID)
+	return convID
+}
+
 // bootstrapConv returns the bound conversation ID for a fresh rig.
 func bootstrapConv(t *testing.T, rig *testRig, root string) int64 {
 	t.Helper()
@@ -268,7 +279,7 @@ func TestPollDuringDistill(t *testing.T) {
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 	rig := startRig(t, root)
 	defer rig.stop(t)
-	convID := bootstrapConv(t, rig, root)
+	convID := bootstrapConvWithRun(t, rig, root)
 
 	distill := asyncCall(rig, Request{Cmd: CmdDistill, ConversationID: convID})
 	time.Sleep(time.Second) // distill handler is now inside its ~6s agent run
@@ -297,7 +308,7 @@ func TestDoubleDistillGuard(t *testing.T) {
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 	rig := startRig(t, root)
 	defer rig.stop(t)
-	convID := bootstrapConv(t, rig, root)
+	convID := bootstrapConvWithRun(t, rig, root)
 
 	first := asyncCall(rig, Request{Cmd: CmdDistill, ConversationID: convID})
 	time.Sleep(time.Second) // first distill is past its guard, slot reserved
@@ -326,7 +337,7 @@ func TestCancelDuringDistill(t *testing.T) {
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 	rig := startRig(t, root)
 	defer rig.stop(t)
-	convID := bootstrapConv(t, rig, root)
+	convID := bootstrapConvWithRun(t, rig, root)
 
 	distill := asyncCall(rig, Request{Cmd: CmdDistill, ConversationID: convID})
 	time.Sleep(time.Second) // distill is mid agent run

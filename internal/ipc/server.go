@@ -206,6 +206,12 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleUpdateSettings(ctx, req)
 	case CmdDistill:
 		resp, err = s.handleDistill(ctx, req)
+		if err != nil {
+			// Distill failures otherwise leave no durable trace: the GUI
+			// shows a 10s toast and daemon.log stays silent (the
+			// 2026-08-09 E2BIG failure took a journal dig to diagnose).
+			log.Printf("distill: conversation %d: %v", req.ConversationID, err)
+		}
 	case CmdListWiki:
 		resp, err = s.handleListWiki(ctx, req)
 	case CmdPendingCounts:
@@ -1729,7 +1735,18 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		return Response{}, err
 	}
 
-	note, err := s.runDistillAgent(ctx, events)
+	// The note covers only the current epoch's window — events after the
+	// previous distill marker (the same FoldWindow arithmetic the new
+	// marker records below). Rendering the full history let the prompt
+	// grow past the kernel's ARG_MAX (exec E2BIG before the agent even
+	// started, 2026-08-09) and past the model's context as the journal
+	// grows.
+	window := windowEvents(events)
+	if len(window) == 0 {
+		return Response{}, fmt.Errorf("distill: nothing journaled since the last distill")
+	}
+
+	note, err := s.runDistillAgent(ctx, window)
 	if err != nil {
 		return Response{}, fmt.Errorf("distill: %w", err)
 	}
@@ -1875,6 +1892,15 @@ func FoldWindow(events []store.Event) (firstSeq, lastSeq int) {
 		lastSeq = events[len(events)-1].Seq
 	}
 	return firstSeq, lastSeq
+}
+
+// windowEvents returns the events the next distill note should cover: the
+// window FoldWindow computes, sliced out of the seq-ascending list. The
+// result shares the input's backing array (callers render read-only).
+func windowEvents(events []store.Event) []store.Event {
+	firstSeq, _ := FoldWindow(events)
+	i := sort.Search(len(events), func(i int) bool { return events[i].Seq >= firstSeq })
+	return events[i:]
 }
 
 // journalDistillLedger appends the distill's section to .odo/ledger.md from
@@ -2443,15 +2469,47 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 // distillPrompt renders journaled events into the summary prompt: the M1
 // spec's instruction line, the Open loops mandate (R4 — the next epoch's
 // cold-start resume card is rendered from this section), then each event as
-// raw payload JSON.
+// raw payload JSON. Windows larger than distillPromptBytesCap keep the
+// newest events; the omission is declared in the prompt so the note never
+// silently claims coverage it didn't see.
 func distillPrompt(events []store.Event) string {
 	var b strings.Builder
 	b.WriteString("Summarize the key decisions, code changes, and open questions from this conversation. Format as markdown.\n\n")
 	b.WriteString("The note MUST end with a `## Open loops` section: one bullet per unresolved question, pending task, or decision still awaiting the user. If nothing is open, write `## Open loops` followed by the single line `None.` — never omit the section.\n\n")
+	if tail, omitted := capEvents(events, distillPromptBytesCap); omitted > 0 {
+		fmt.Fprintf(&b, "[odo: %d older event(s), seq %d–%d, omitted — the journaled window outgrew the %d KiB prompt budget. Summarize only the events below; do not claim coverage of the omitted range.]\n\n",
+			omitted, events[0].Seq, events[omitted-1].Seq, distillPromptBytesCap/1024)
+		events = tail
+	}
 	for _, ev := range events {
 		fmt.Fprintf(&b, "### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
 	}
 	return b.String()
+}
+
+// distillPromptBytesCap bounds the rendered event section (~256 KiB ≈
+// 60–85K tokens) so the one-shot prompt stays inside the distill model's
+// context with room for its thinking budget. The epoch window keeps
+// routine distills far below this; the cap is the no-marker / pathological
+// epoch backstop.
+const distillPromptBytesCap = 256 * 1024
+
+// capEvents keeps the newest events whose rendered size fits budget; the
+// per-event render ("### TYPE (seq N)\nPAYLOAD\n\n") is fixed-format, so
+// sizing never materializes the strings. The newest event is kept even
+// when it alone exceeds the budget.
+func capEvents(events []store.Event, budget int) (tail []store.Event, omitted int) {
+	size := 0
+	start := 0
+	for i := len(events) - 1; i >= 0; i-- {
+		n := len(events[i].Type) + len(events[i].Payload) + 64 // header + separators, over-estimated
+		if size > 0 && size+n > budget {
+			start = i + 1
+			break
+		}
+		size += n
+	}
+	return events[start:], start
 }
 
 // latestDiffInfo returns the latest diff for a conversation with its content,

@@ -904,6 +904,11 @@ func TestDistill(t *testing.T) {
 		t.Error("distill prompt missing summary instruction and conversation text")
 	}
 
+	// The second distill folds only events journaled after marker #1 — an
+	// empty window is now rejected — so give it a fresh run to fold.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Update hello.txt"})
+	rig.pollUntilDone(t, convID)
+
 	// A second distill bumps the epoch again; the first note survives.
 	d2 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
 	if d2.Epoch != 3 || d2.WikiPath != filepath.Join(root, "wiki", "main-epoch-2.md") {

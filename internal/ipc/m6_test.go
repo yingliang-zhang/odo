@@ -280,6 +280,10 @@ func m6DistillFlow(t *testing.T, note1, note2 string) (*testRig, int64, []store.
 	if err := os.WriteFile(oneshot, []byte(note2), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Distill #2 folds only events journaled after marker #1 — an empty
+	// window is now rejected — so give it a fresh run to fold.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Update hello.txt"})
+	rig.pollUntilDone(t, convID)
 	resp2 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
 	if resp2.WikiPath == "" {
 		t.Fatalf("distill #2 failed: %+v", resp2)

@@ -375,6 +375,138 @@ func TestDistillFoldSchema(t *testing.T) {
 	}
 }
 
+// TestWindowEvents pins the render-side window: the note covers only events
+// after the latest distill marker; no marker renders the full log (the
+// first-ever distill); a trailing marker yields an empty window, which
+// handleDistill rejects before running the agent.
+func TestWindowEvents(t *testing.T) {
+	marker := func(seq int) store.Event {
+		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"distill"}`)}
+	}
+	msg := func(seq int) store.Event {
+		return store.Event{Seq: seq, Type: store.EventUserMessage, Payload: json.RawMessage(`{"text":"hi"}`)}
+	}
+	cases := []struct {
+		name     string
+		events   []store.Event
+		wantSeqs []int
+	}{
+		{"empty log", nil, nil},
+		{"no marker renders full log", []store.Event{msg(1), msg(2)}, []int{1, 2}},
+		{"after marker renders tail", []store.Event{msg(1), marker(2), msg(3), msg(4)}, []int{3, 4}},
+		{"latest marker wins", []store.Event{msg(1), marker(2), msg(3), marker(4), msg(5)}, []int{5}},
+		{"trailing marker renders nothing", []store.Event{msg(1), marker(2)}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := windowEvents(tc.events)
+			if len(got) != len(tc.wantSeqs) {
+				t.Fatalf("windowEvents len = %d, want %d", len(got), len(tc.wantSeqs))
+			}
+			for i, want := range tc.wantSeqs {
+				if got[i].Seq != want {
+					t.Errorf("windowEvents[%d].Seq = %d, want %d", i, got[i].Seq, want)
+				}
+			}
+		})
+	}
+}
+
+// TestCapEvents pins the budget walk: newest events survive, the boundary
+// event is dropped whole (never half-rendered), and a single oversized
+// event is still kept — dropping it would distill nothing.
+func TestCapEvents(t *testing.T) {
+	ev := func(seq, size int) store.Event {
+		// type "agent_text" (10 bytes) + size payload + 64 render pad = one event's cost
+		return store.Event{Seq: seq, Type: "agent_text", Payload: json.RawMessage(strings.Repeat("x", size))}
+	}
+	events := []store.Event{ev(1, 10), ev(2, 10), ev(3, 10)} // 84 bytes each
+	tail, omitted := capEvents(events, 170)                  // room for exactly 2
+	if omitted != 1 || len(tail) != 2 || tail[0].Seq != 2 {
+		t.Errorf("capEvents(170) = %d omitted, tail seqs %v — want 1 omitted, seqs [2 3]", omitted, seqsOf(tail))
+	}
+	tail, omitted = capEvents(events, 84) // room for exactly 1
+	if omitted != 2 || len(tail) != 1 || tail[0].Seq != 3 {
+		t.Errorf("capEvents(84) = %d omitted, tail seqs %v — want 2 omitted, seq [3]", omitted, seqsOf(tail))
+	}
+	tail, omitted = capEvents([]store.Event{ev(1, 5000)}, 100) // oversized: kept anyway
+	if omitted != 0 || len(tail) != 1 {
+		t.Errorf("oversized single event = %d omitted, %d kept — want 0 omitted, 1 kept", omitted, len(tail))
+	}
+	if _, omitted = capEvents(events, 1<<20); omitted != 0 {
+		t.Errorf("under-budget capEvents omitted %d, want 0", omitted)
+	}
+}
+
+func seqsOf(events []store.Event) []int {
+	out := make([]int, len(events))
+	for i, ev := range events {
+		out[i] = ev.Seq
+	}
+	return out
+}
+
+// TestDistillPromptOmission pins the over-budget render at the real cap:
+// the prompt declares the omitted seq range and renders only the tail.
+func TestDistillPromptOmission(t *testing.T) {
+	ev := func(seq int, fill byte, size int) store.Event {
+		return store.Event{Seq: seq, Type: "agent_text", Payload: json.RawMessage("key-" + strings.Repeat(string(fill), size))}
+	}
+	events := []store.Event{ev(1, 'A', distillPromptBytesCap), ev(2, 'B', 100), ev(3, 'C', 100)}
+	p := distillPrompt(events)
+	if !strings.Contains(p, "1 older event(s), seq 1–1, omitted") {
+		t.Errorf("prompt missing omission declaration:\n%.300s", p)
+	}
+	if strings.Contains(p, strings.Repeat("A", 100)) {
+		t.Errorf("prompt still renders the omitted oldest event")
+	}
+	if !strings.Contains(p, "(seq 3)") {
+		t.Errorf("prompt missing the newest event")
+	}
+	if small := distillPrompt([]store.Event{ev(1, 'A', 10)}); strings.Contains(small, "omitted") {
+		t.Errorf("under-budget prompt carries the omission header")
+	}
+}
+
+// TestDistillEmptyWindow pins the nothing-new guard: an immediate second
+// distill (nothing journaled since marker #1) fails with a clear error
+// instead of re-running the agent over an empty transcript and writing a
+// note that summarizes nothing.
+func TestDistillEmptyWindow(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 1\n\nFirst folded epoch.\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[],"user":[],"reaffirm":[]}`)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	convID, d1 := runToDistill(t, rig, root)
+	if d1.WikiPath == "" {
+		t.Fatalf("distill #1 failed: %+v", d1)
+	}
+
+	d2 := rig.callExpectErr(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if !strings.Contains(d2.Error, "nothing journaled since the last distill") {
+		t.Errorf("empty-window distill error = %q", d2.Error)
+	}
+	if _, err := os.Stat(filepath.Join(root, "wiki", "main-epoch-2.md")); !os.IsNotExist(err) {
+		t.Errorf("empty-window distill wrote an epoch-2 note (stat err %v)", err)
+	}
+	// The failed distill must not move the epoch counter: a later real
+	// message + distill produces epoch 2, not 3.
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 2\n\nSecond folded epoch.\n")
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Update hello.txt"})
+	rig.pollUntilDone(t, convID)
+	d3 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if d3.WikiPath == "" {
+		t.Fatalf("distill after the empty-window rejection failed: %+v", d3)
+	}
+	if _, err := os.Stat(filepath.Join(root, "wiki", "main-epoch-2.md")); err != nil {
+		t.Errorf("epoch-2 note missing after real distill: %v", err)
+	}
+}
+
 // TestLearnerVetoesWeakEvidence covers the daemon-side evidence gate: a
 // memory proposal whose evidence is not the just-written note name and a
 // user proposal backed by <2 distinct registered projects are dropped and
