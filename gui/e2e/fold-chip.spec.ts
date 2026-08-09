@@ -38,7 +38,7 @@ test("partial fold: chip announces count + note, Expand reveals and Collapse re-
   await expect(page.locator("text=Patch the daemon launch path")).toBeVisible();
   await expect(page.locator("text=Distilled · epoch 2")).toBeVisible();
 
-  await page.getByRole("button", { name: "Collapse" }).click();
+  await chip.getByRole("button", { name: "Collapse" }).click();
   await expect(page.locator("text=Patch the daemon launch path")).toHaveCount(0);
   await expect(page.locator(".bubble-user", { hasText: "socket perms" })).toBeVisible();
 });
