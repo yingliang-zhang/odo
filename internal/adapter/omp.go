@@ -116,8 +116,9 @@ func defaultWrapperPath() string {
 // enrichedEnv returns os.Environ() with a PATH that includes common
 // tool locations missing when the daemon is launched from a .app bundle
 // (macOS GUI apps get a minimal PATH like /usr/bin:/bin:/usr/sbin:/sbin).
-// Adds homebrew, ~/.local/bin, ~/.cargo/bin, ~/.omp/bin, and conda paths
-// so the wrapper can find omp, go, node, git, etc.
+// Adds homebrew, ~/.local/bin, ~/.cargo/bin, ~/.omp/bin, ~/.hermes/node/bin,
+// ~/go/bin, and conda (if present) so the wrapper and OMP's child processes
+// can find omp, go, node, git, python3, etc.
 func enrichedEnv() []string {
 	env := os.Environ()
 	home, _ := os.UserHomeDir()
@@ -128,6 +129,17 @@ func enrichedEnv() []string {
 		filepath.Join(home, ".cargo", "bin"),
 		filepath.Join(home, ".omp", "bin"),
 		filepath.Join(home, ".hermes", "node", "bin"),
+		filepath.Join(home, "go", "bin"),
+	}
+	// Add conda/miniconda paths if the directories exist.
+	for _, p := range []string{
+		"/opt/homebrew/Caskroom/miniconda/base/bin",
+		filepath.Join(home, "miniconda3", "bin"),
+		filepath.Join(home, "opt", "anaconda3", "bin"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			extraPaths = append(extraPaths, p)
+		}
 	}
 	found := false
 	for i, e := range env {

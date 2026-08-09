@@ -385,7 +385,7 @@ export default function ChatSurface({
   }, [submitDraft]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         void submitRef.current();
       }
