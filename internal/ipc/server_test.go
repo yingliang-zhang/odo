@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yingliang-zhang/odo-agent/internal/adapter"
-	"github.com/yingliang-zhang/odo-agent/internal/store"
-	"github.com/yingliang-zhang/odo-agent/internal/worktree"
+	"github.com/yingliang-zhang/odo/internal/adapter"
+	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo/internal/worktree"
 )
 
 // This file tests the M0 "visible loop" end to end through the real socket:

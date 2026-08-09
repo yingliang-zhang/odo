@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yingliang-zhang/odo-agent/internal/git"
+	"github.com/yingliang-zhang/odo/internal/git"
 )
 
 // Manager binds worktree + diff paths for one project.

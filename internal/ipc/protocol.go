@@ -3,8 +3,8 @@
 package ipc
 
 import (
-	"github.com/yingliang-zhang/odo-agent/internal/adapter"
-	"github.com/yingliang-zhang/odo-agent/internal/store"
+	"github.com/yingliang-zhang/odo/internal/adapter"
+	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // Settings aliases the adapter package's settings shape so IPC payloads and
