@@ -119,6 +119,9 @@ func defaultWrapperPath() string {
 // Adds homebrew, ~/.local/bin, ~/.cargo/bin, ~/.omp/bin, ~/.hermes/node/bin,
 // ~/go/bin, and conda (if present) so the wrapper and OMP's child processes
 // can find omp, go, node, git, python3, etc.
+// Also injects SUDO_CODING_KEY from ~/.zshrc — OMP's models.yml references
+// it by env-var name, and the .app launch environment doesn't source shell
+// profiles so it's missing.
 func enrichedEnv() []string {
 	env := os.Environ()
 	home, _ := os.UserHomeDir()
@@ -152,7 +155,47 @@ func enrichedEnv() []string {
 	if !found {
 		env = append(env, "PATH="+strings.Join(extraPaths, string(filepath.ListSeparator)))
 	}
+
+	// Inject SUDO_CODING_KEY from ~/.zshrc if not already in the
+	// environment. OMP's models.yml uses the env-var name as the apiKey
+	// value, and .app-launched daemons don't source shell profiles.
+	hasKey := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "SUDO_CODING_KEY=") {
+			hasKey = true
+			break
+		}
+	}
+	if !hasKey {
+		if key := extractExportFromZshrc(home, "SUDO_CODING_KEY"); key != "" {
+			env = append(env, "SUDO_CODING_KEY="+key)
+		}
+	}
+
 	return env
+}
+
+// extractExportFromZshrc reads ~/.zshrc and extracts the value of an
+// `export VAR="value"` line. Returns "" if not found or unreadable.
+// This is a lightweight parser — it doesn't source the file, just
+// regex-matches the export line.
+func extractExportFromZshrc(home, varName string) string {
+	data, err := os.ReadFile(filepath.Join(home, ".zshrc"))
+	if err != nil {
+		return ""
+	}
+	prefix := "export " + varName + "="
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			val := strings.TrimPrefix(line, prefix)
+			// Strip surrounding quotes if present.
+			val = strings.Trim(val, `"`)
+			val = strings.Trim(val, `'`)
+			return val
+		}
+	}
+	return ""
 }
 
 // NewOMP returns an OMP adapter. State (prompts, session dirs, output files)
