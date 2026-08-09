@@ -38,9 +38,11 @@ const (
 	// answer across the sudo gateway's upstreams.
 	defaultMaxTok = 16384
 
-	// defaultToolRounds bounds QueryWithTools' execute-and-continue loop:
-	// enough for read→grep→read chains, never unbounded.
-	defaultToolRounds = 8
+	// defaultToolRounds bounds QueryWithTools' execute-and-continue loop.
+	// 8 cut glm-5.2 off mid-chain (observed: a legitimate glob→grep→read
+	// chain filled 15 calls across 8 rounds before it could write the
+	// answer), so the default is the ceiling.
+	defaultToolRounds = 16
 	// maxToolRounds is the hard ceiling a caller can raise the cap to.
 	maxToolRounds = 16
 	// errBodyTail caps how much of a non-200 response body the error shows
@@ -151,10 +153,16 @@ type contentBlock struct {
 	IsError   bool            `json:"is_error,omitempty"`
 }
 
-// messageResponse is the Anthropic Messages API response body.
+// messageResponse is the Anthropic Messages API response body. rawContent
+// keeps the content array verbatim: thinking models emit blocks with fields
+// contentBlock doesn't model ("thinking", "signature"), and the protocol
+// requires those blocks be replayed untouched in the tool loop. Re-marshaling
+// the cooked struct drops them — the sudo gateway then rejects round 2 with
+// 400 "thinking.thinking: Field required" (observed with kimi-k3).
 type messageResponse struct {
 	Content    []contentBlock `json:"content"`
 	StopReason string         `json:"stop_reason"`
+	rawContent json.RawMessage
 	Usage      struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
@@ -224,6 +232,15 @@ func (c *Client) post(ctx context.Context, reqBody interface{}) (*messageRespons
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return nil, fmt.Errorf("moa: parse response: %w", err)
 	}
+	// Second pass captures the content array as raw bytes for verbatim
+	// assistant echo in the tool loop (see rawContent above).
+	var envelope struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, fmt.Errorf("moa: parse response content: %w", err)
+	}
+	msg.rawContent = envelope.Content
 	return &msg, nil
 }
 
@@ -324,9 +341,14 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 			return "", audits, fmt.Errorf("moa: tool loop exceeded %d rounds (model kept requesting tools)", maxRounds)
 		}
 
-		// Echo the assistant turn with every block (text + tool_use), then
-		// answer each call as a tool_result in one user turn.
-		messages = append(messages, messageEntry{Role: "assistant", Content: msg.Content})
+		// Echo the assistant turn verbatim (rawContent), then answer each call
+		// as a tool_result in one user turn. The cooked struct can't round-trip
+		// thinking blocks — the tool loop requires them byte-identical.
+		var assistantContent interface{} = msg.Content
+		if len(msg.rawContent) > 0 {
+			assistantContent = msg.rawContent
+		}
+		messages = append(messages, messageEntry{Role: "assistant", Content: assistantContent})
 		results := make([]contentBlock, 0, len(uses))
 		for _, tu := range uses {
 			call := ToolCall{ID: tu.ID, Name: tu.Name, Input: tu.Input}
