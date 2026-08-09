@@ -688,3 +688,13 @@ HEAD: 6ecbac0
 - DEFERRED: journal.sqlite reset — live daemon (SQLite WAL) holds it; needs Odo quit, then `rm .odo/journal.sqlite*` (bootstrap recreates)
 
 ### Op2 install to /Applications — PENDING (user deferred)
+
+## Rename Rollback odo-agent → odo (2026-08-09)
+
+### Rollback — DONE (commit 753d553)
+- User decision: rename was previously abandoned; rolled back in full
+- `gh repo rename odo -R yingliang-zhang/odo-agent` — repo back to `yingliang-zhang/odo`; old odo-agent URL auto-redirects
+- `origin` → git@github.com:yingliang-zhang/odo.git
+- `git revert --no-edit cb7bde4` — go.mod module path + 15 Go import files restored (26 lines)
+- Gates: `go build/vet/test ./...` all green (ipc 122.7s)
+- 80bd148 kept as history (append-only log); tauri identifier `com.yingliangzhang.odo` and local dir `~/Projects/odo` unchanged
