@@ -672,3 +672,19 @@ Uncommitted at HEAD c7bd684; GUI webview E2E (cua-driver) still outstanding.
 - Fixes: ⌃⌘⇧4 screenshot → paste → /vision (was ENOENT, now works)
 
 HEAD: 6ecbac0
+
+## Repo Rename odo → odo-agent + Artifact Cleanup (2026-08-09)
+
+### Op1 GitHub rename — DONE (commit cb7bde4, pushed)
+- `gh repo rename odo-agent` (API, user-authed gh); old URL auto-redirects
+- `origin` → git@github.com:yingliang-zhang/odo-agent.git
+- go.mod module path + 15 Go files rewritten (26 lines), `go build/vet/test ./...` all green
+- tauri identifier KEPT `com.yingliangzhang.odo` — app identity ≠ repo name; changing it would reset macOS perms + Tauri stores for zero pain-point value
+- Local dir `~/Projects/odo` NOT renamed (live worktrees/daemon paths; cosmetic)
+
+### Op3 clean test artifacts — DONE (safe set)
+- Deleted 6 stale session+prompt pairs (kept live session), gui/dist, gui/test-results; daemon.log truncated
+- wiki/, .odo/ledger.md already absent
+- DEFERRED: journal.sqlite reset — live daemon (SQLite WAL) holds it; needs Odo quit, then `rm .odo/journal.sqlite*` (bootstrap recreates)
+
+### Op2 install to /Applications — PENDING (user deferred)
