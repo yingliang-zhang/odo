@@ -210,6 +210,11 @@ func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	// Install the stub agent wrapper.
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 
+	// Use a temp HOME so the test doesn't read real ~/.odo/user.md
+	// (which would inject memory layers into the stub agent's output).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	rig := startRig(t, root)
 
 	// --- bootstrap: fresh project gets project/workstream/conversation ---
