@@ -27,7 +27,11 @@ const (
 	defaultKeyEnv  = "SUDO_CODING_KEY"
 	defaultModel   = "t9s/glm-5.2"
 	apiVersion     = "2023-06-01"
-	defaultMaxTok  = 4096
+	// 4096 truncated thinking models (kimi-k3, deepseek-v4-flash): their
+	// reasoning trace burns the same output budget, so /panel replies came
+	// back with stop_reason=max_tokens. 16384 leaves room for reasoning +
+	// answer across the sudo gateway's upstreams.
+	defaultMaxTok = 16384
 )
 
 // Client is a minimal Anthropic Messages API client.
