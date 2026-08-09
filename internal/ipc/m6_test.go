@@ -36,7 +36,33 @@ func seedAuthVsBuildNotes(t *testing.T, root string) {
 	t.Helper()
 	writeEpochNote(t, root, "main-epoch-1", "Authentication uses JWT with refresh tokens.\n")
 	for n := 2; n <= 5; n++ {
-		writeEpochNote(t, root, fmt.Sprintf("main-epoch-%d", n), "Build system notes for the project.\n")
+		writeEpochNote(t, root, fmt.Sprintf("main-epoch-%d", n), "Build system notes.\n")
+	}
+}
+
+// TestRecallCapOmittedMarker (§1b): the recall cap no longer drops notes
+// silently — the injected block names how many were held back and where to
+// pull them; under the cap there is no marker.
+func TestRecallCapOmittedMarker(t *testing.T) {
+	root := initRepo(t)
+	body := strings.Repeat("a", 2048)
+	for n := 1; n <= 7; n++ {
+		writeEpochNote(t, root, fmt.Sprintf("main-epoch-%d", n), body)
+	}
+	memory, items, _ := recallWikiNotes(root, "main", "zzz-no-match", nil)
+	if len(items) >= 7 {
+		t.Fatalf("all 7 notes fit under the cap — fixture assumption broken")
+	}
+	want := fmt.Sprintf("_%d more note(s) held back by the %dKB recall cap", 7-len(items), recallMemoryCap/1024)
+	if !strings.Contains(memory, want) {
+		t.Errorf("memory block missing omitted-count marker %q", want)
+	}
+
+	root2 := initRepo(t)
+	writeEpochNote(t, root2, "main-epoch-1", "short\n")
+	m2, _, _ := recallWikiNotes(root2, "main", "", nil)
+	if strings.Contains(m2, "held back") {
+		t.Error("omitted marker present under the cap")
 	}
 }
 

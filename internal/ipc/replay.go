@@ -3,6 +3,8 @@ package ipc
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -126,4 +128,122 @@ func buildReplay(events []store.Event) (block string, firstSeq, lastSeq, boundar
 	turns := collectReplayTurns(events, boundary)
 	block, firstSeq, lastSeq = renderReplay(turns)
 	return block, firstSeq, lastSeq, boundary
+}
+
+// recallCtxTurns bounds how many current-epoch turns seed the recall query
+// alongside the user's message (M6.1 token union). A lone short message —
+// CJK text tokenizes to almost nothing under the ASCII split — rarely
+// carries enough terms to hit the notes the thread is about; the last few
+// turns ARE the working topic.
+const recallCtxTurns = 3
+
+// recallQuery builds the M6 keyword-recall query (M6.1): the user's message
+// UNION the last recallCtxTurns replayable turn texts of the current epoch.
+// No events -> the message alone, so first-send behavior and receipts are
+// unchanged. Stop-words/duplicates are filtered by tokenizeQuery
+// downstream; seeds are per-turn truncated to replayTurnCap so a monster
+// reply (a /panel answer can be >30KB) cannot flood the term set.
+func recallQuery(text string, events []store.Event) string {
+	if len(events) == 0 {
+		return text
+	}
+	turns := collectReplayTurns(events, foldBoundary(events))
+	if n := len(turns); n > recallCtxTurns {
+		turns = turns[n-recallCtxTurns:]
+	}
+	var b strings.Builder
+	b.WriteString(text)
+	for _, t := range turns {
+		seed := t.text
+		if len(seed) > replayTurnCap {
+			seed = seed[:replayTurnCap]
+		}
+		b.WriteString("\n\n")
+		b.WriteString(seed)
+	}
+	return b.String()
+}
+
+// resumeCardCap bounds the injected open-loops section so a runaway section
+// cannot starve the replay and recall blocks (the /panel review's guard).
+const resumeCardCap = 2 * 1024
+
+// buildResumeCard renders the cold-start handoff block (R4): right after a
+// distill folds the epoch, the replay window is empty and the agent would
+// start over from lossy summaries alone. The newest distilled note's
+// `## Open loops` section is the minimal anchor for continuing prior work.
+// The caller gates on an empty replay, so the card fires for the first run
+// after a fold and self-limits as soon as the journal carries visible turns
+// again. Gated on a real fold in THIS conversation (boundary > 0): seq
+// numbering is per-conversation, so a "folded through seq N" stamp is
+// meaningless on a conversation that never distilled. Retraction is ignored
+// deliberately — retraction targets older notes contradicted by newer ones,
+// so the newest epoch note is never the contradicted side; notes older than
+// the newest are never consulted (their loops may already be resolved).
+// Returns the block and the source note's path (for the injection receipt),
+// or "", "" when there is nothing honest to hand off (no fold, no note, no
+// section, or the explicit None form).
+func buildResumeCard(projectRoot, wsName string, events []store.Event) (block, notePath string) {
+	boundary := foldBoundary(events)
+	if boundary == 0 {
+		return "", ""
+	}
+	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", wsName+"-epoch-*.md"))
+	if err != nil {
+		return "", ""
+	}
+	newest, maxEpoch := "", -1
+	for _, m := range matches {
+		if ep, ok := wikiNoteEpoch(m); ok && ep > maxEpoch {
+			newest, maxEpoch = m, ep
+		}
+	}
+	if newest == "" {
+		return "", ""
+	}
+	raw, err := os.ReadFile(newest)
+	if err != nil {
+		return "", ""
+	}
+	loops := capAtLineBoundary(openLoopsSection(string(raw)), resumeCardCap)
+	if loops == "" {
+		return "", ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Resume context (cold start: open loops from %s, folded through seq %d)\n\n",
+		filepath.Base(newest), boundary)
+	b.WriteString(loops)
+	fmt.Fprintf(&b, "\n\n> Distilled summary of folded events — details may be lossy, and anything after seq %d is not covered. The journal is authoritative: verify with `odo journal tail N` or `odo journal range A B` before relying on specifics.", boundary)
+	return b.String(), newest
+}
+
+// openLoopsSection extracts the body of the note's `## Open loops` H2
+// section (up to the next H2 or EOF; H3+ stays in the body). The heading
+// match is case-insensitive; the written convention stays `## Open loops`.
+// "" when the section is absent, empty, or the explicit None form — a cold
+// start with nothing open gets no card.
+func openLoopsSection(note string) string {
+	var body []string
+	inSection := false
+	for _, line := range strings.Split(note, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			if inSection {
+				break
+			}
+			inSection = strings.EqualFold(strings.TrimSpace(trimmed[len("## "):]), "open loops")
+			continue
+		}
+		if inSection {
+			body = append(body, line)
+		}
+	}
+	out := strings.TrimSpace(strings.Join(body, "\n"))
+	if out == "" {
+		return ""
+	}
+	if norm := strings.TrimSuffix(strings.TrimPrefix(out, "- "), "."); strings.EqualFold(norm, "none") {
+		return ""
+	}
+	return out
 }

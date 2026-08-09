@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -128,7 +129,9 @@ func noteMatches(content, name string, terms []string) []string {
 // matching ≥1 query token rank first (match-count DESC, then epoch DESC),
 // unmatched notes follow (epoch DESC). The result is concatenated under
 // headers and truncated to recallMemoryCap on a note boundary — the cap and
-// the boundary cut are unchanged; only the ORDER changed. Notes named in
+// the boundary cut are unchanged; only the ORDER changed. Notes held back
+// by the cap are counted in a trailing marker line naming the pull path.
+// Notes named in
 // retracted (the journal's `<ws>-epoch-<N>` retraction set) are skipped.
 // Returns the memory block ("" when no notes exist), the included items
 // (paths + matched terms, for journaling), and noteBytes — the exact block
@@ -182,14 +185,23 @@ func recallWikiNotes(projectRoot, workstreamName, query string, retracted map[st
 	})
 
 	var b strings.Builder
-	for _, n := range notes {
+	omitted := 0
+	for i, n := range notes {
 		block := "## " + filepath.Base(n.path) + "\n\n" + n.content + "\n\n---\n\n"
 		if b.Len()+len(block) > recallMemoryCap {
-			break // cut on a note boundary: no note is half-included
+			omitted = len(notes) - i // cut on a note boundary: no note is half-included
+			break
 		}
 		b.WriteString(block)
 		items = append(items, recallItem{path: n.path, matchedTerms: n.matched})
 		noteBytes = append(noteBytes, []byte(block))
+	}
+	if omitted > 0 {
+		// M6.1 visibility signal: the cap's silent drop was the recall
+		// layer's accounting gap — name what is held back and where to pull
+		// it so "not recalled" never reads as "does not exist".
+		fmt.Fprintf(&b, "_%d more note(s) held back by the %dKB recall cap — pull them from `%s` (e.g. `odo wiki read main-epoch-3`)._\n",
+			omitted, recallMemoryCap/1024, filepath.Join(projectRoot, "wiki"))
 	}
 	if b.Len() == 0 {
 		return "", nil, nil

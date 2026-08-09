@@ -336,7 +336,10 @@ func (s *Server) generateAgentsMD() {
 	b.WriteString("## Project Rules\n\n")
 	b.WriteString("Odo injects current user memory, project rules, pins, wiki, and recalled\n")
 	b.WriteString("notes in the prompt prefix. Treat them as authoritative. If OMP's\n")
-	b.WriteString("hindsight memory conflicts with the prompt, follow the prompt.\n\n")
+	b.WriteString("hindsight memory conflicts with the prompt, follow the prompt. Older turns\n")
+	b.WriteString("folded by distills are not injected verbatim — when a summary or the replay\n")
+	b.WriteString("lacks a detail, run `odo journal folded|range|tail` (read-only) before\n")
+	b.WriteString("concluding it is lost.\n\n")
 	// Append project memory if it exists.
 	if data, err := os.ReadFile(filepath.Join(s.projectRoot, ".odo", "memory.md")); err == nil {
 		b.WriteString("## Memory\n\n")
@@ -552,14 +555,10 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
-	ml := s.memoryLayers(ctx, w.Name, c.ID, req.Text)
-
-	// R1: mechanical journal replay of the current epoch's turns. Listed
-	// BEFORE journaling this message, so the replay excludes the message
-	// itself (its text lands verbatim at the prompt's end).
-	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
-		ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter = buildReplay(events)
-	}
+	// R1+R4: replay (and its cold-start complement, the resume card) are
+	// assembled BEFORE journaling this message, so the replay excludes the
+	// message itself (its text lands verbatim at the prompt's end).
+	ml := s.runMemoryLayers(ctx, w.Name, c.ID, req.Text)
 
 	// Journal the user message with attachments (spec item 5).
 	msgPayload := map[string]interface{}{"text": req.Text}
@@ -632,6 +631,7 @@ type memoryLayers struct {
 	index         string             // wiki/index.md (M5: always-injected)
 	wiki          string             // recalled epoch notes block
 	memoryMap     string             // R2: pull-based read-back hints (wiki/ + ledger absolute paths)
+	resume        string             // R4: cold-start open-loops handoff (injected only when the replay window is empty)
 	replay        string             // R1: current-epoch journal replay block
 	replayFirst   int                // R1 receipt: first replayed journal seq
 	replayLast    int                // R1 receipt: last replayed journal seq
@@ -685,6 +685,33 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 	return ml
 }
 
+// runMemoryLayers assembles the full layer stack for a run prompt in one
+// pass (M6.1/R1/R4): the events list drives the recall query — the user's
+// text UNION the last few current-epoch turns, so short or CJK messages
+// still hit the notes the thread is about — then the memory layers, the R1
+// replay, and (only when that replay window is empty) the R4 resume card
+// with its receipt entry. The events list happens BEFORE the caller
+// journals the new message, so the replay never contains the message whose
+// text lands verbatim at the prompt's end.
+func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversationID int64, text string) memoryLayers {
+	var events []store.Event
+	if evs, lerr := s.store.ListEvents(ctx, conversationID, 0); lerr == nil {
+		events = evs
+	}
+	ml := s.memoryLayers(ctx, wsName, conversationID, recallQuery(text, events))
+	if events == nil {
+		return ml
+	}
+	ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter = buildReplay(events)
+	if ml.replay == "" {
+		if card, notePath := buildResumeCard(s.projectRoot, wsName, events); card != "" {
+			ml.resume = card
+			ml.receipt[notePath+"#open-loops"] = sha16([]byte(card))
+		}
+	}
+	return ml
+}
+
 // journalRecall serializes the recall payload for the user_message event
 // (M6): fixed-marker layers first in daemon order as {"path": …} objects
 // (matched_terms omitted — they are always-injected, not keyword-selected),
@@ -725,8 +752,9 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 // order (inv 6 extended, M5): user (global, durable user principles),
 // project (.odo/memory.md behavior rules), pins (.odo/pins.md, verbatim),
 // skills, index (wiki/index.md, always-injected), then recalled wiki notes,
-// the R2 read-back map, the R1 journal replay, attachment hints, and the
-// user's text last (cache-friendly stable prefix).
+// the R2 read-back map, the R4 resume card (cold start only), the R1
+// journal replay, attachment hints, and the user's text last
+// (cache-friendly stable prefix).
 func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	var b strings.Builder
 	if ml.user != "" {
@@ -761,6 +789,10 @@ func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	}
 	if ml.memoryMap != "" {
 		b.WriteString(ml.memoryMap)
+		b.WriteString("\n\n---\n\n")
+	}
+	if ml.resume != "" {
+		b.WriteString(ml.resume)
 		b.WriteString("\n\n---\n\n")
 	}
 	if ml.replay != "" {
@@ -805,7 +837,8 @@ func memoryMapBlock(projectRoot string) string {
 	if ledgerOK {
 		fmt.Fprintf(&b, "- Per-epoch metrics ledger: `%s`\n", ledger)
 	}
-	b.WriteString("From the main checkout you can also run `odo wiki read <name>` (e.g. `odo wiki read index`, `odo wiki read ledger`).")
+	b.WriteString("From the main checkout you can also run `odo wiki read <name>` (e.g. `odo wiki read index`, `odo wiki read ledger`).\n\n")
+	b.WriteString("Folded-out journal turns are NOT injected above, and every summary layer is lossy: when a summary or the replay lacks a detail, query the journal first (read-only; works from this worktree) — `odo journal folded`, `odo journal range A B`, `odo journal tail N` — instead of concluding it is lost.")
 	return b.String()
 }
 
@@ -964,12 +997,9 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 		return
 	}
 
-	ml := s.memoryLayers(ctx, w.Name, conversationID, prompt)
 	// R1: continuation runs replay the current epoch too — the previous
 	// run's agent_text is in the journal and the steering agent must see it.
-	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
-		ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter = buildReplay(events)
-	}
+	ml := s.runMemoryLayers(ctx, w.Name, conversationID, prompt)
 	fullPrompt := buildPrompt(prompt, nil, ml)
 
 	runDirID := worktree.NewRunID()
@@ -2410,10 +2440,13 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 }
 
 // distillPrompt renders journaled events into the summary prompt: the M1
-// spec's instruction line plus each event as raw payload JSON.
+// spec's instruction line, the Open loops mandate (R4 — the next epoch's
+// cold-start resume card is rendered from this section), then each event as
+// raw payload JSON.
 func distillPrompt(events []store.Event) string {
 	var b strings.Builder
 	b.WriteString("Summarize the key decisions, code changes, and open questions from this conversation. Format as markdown.\n\n")
+	b.WriteString("The note MUST end with a `## Open loops` section: one bullet per unresolved question, pending task, or decision still awaiting the user. If nothing is open, write `## Open loops` followed by the single line `None.` — never omit the section.\n\n")
 	for _, ev := range events {
 		fmt.Fprintf(&b, "### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
 	}
