@@ -1,4 +1,4 @@
-module github.com/yingliang-zhang/odo
+module github.com/yingliang-zhang/odo-agent
 
 go 1.26.5
 

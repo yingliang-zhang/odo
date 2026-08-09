@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
 )
 
 // M5 (Curation): the curator pass reads the FULL set of epoch notes across

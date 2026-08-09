@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
 )
 
 // M4 Learning tests. Two levels:

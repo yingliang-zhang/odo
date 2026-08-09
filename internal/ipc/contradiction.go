@@ -7,7 +7,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
 )
 
 // M6 (Precision + Ledger) §4: the distiller's contradiction pass. When a new

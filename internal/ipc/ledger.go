@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
 )
 
 // M6 (Precision + Ledger) §5: .odo/ledger.md — the daemon-only, append-only

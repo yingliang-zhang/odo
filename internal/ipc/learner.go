@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
 )
 
 // M4 (Learning): the learner pass runs at the distill epoch boundary,

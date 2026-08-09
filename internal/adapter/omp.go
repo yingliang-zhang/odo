@@ -31,7 +31,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/yingliang-zhang/odo/internal/worktree"
+	"github.com/yingliang-zhang/odo-agent/internal/worktree"
 )
 
 const (

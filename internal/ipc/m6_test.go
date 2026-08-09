@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
 )
 
 // M6 Precision + Ledger tests: keyword recall tiering (§1), retraction

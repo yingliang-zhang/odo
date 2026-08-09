@@ -19,11 +19,11 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/yingliang-zhang/odo/internal/adapter"
-	"github.com/yingliang-zhang/odo/internal/git"
-	"github.com/yingliang-zhang/odo/internal/moa"
-	"github.com/yingliang-zhang/odo/internal/store"
-	"github.com/yingliang-zhang/odo/internal/worktree"
+	"github.com/yingliang-zhang/odo-agent/internal/adapter"
+	"github.com/yingliang-zhang/odo-agent/internal/git"
+	"github.com/yingliang-zhang/odo-agent/internal/moa"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/worktree"
 )
 
 // runMeta tracks one in-flight (or recently finished) agent run in memory.

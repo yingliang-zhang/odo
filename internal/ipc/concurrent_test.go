@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo-agent/internal/store"
 )
 
 // asyncResult carries one round-trip's outcome back from a helper goroutine:
