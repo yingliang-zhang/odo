@@ -1091,6 +1091,12 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	}
 	if diffPath == "" {
 		meta.finished = true // agent changed nothing; run is complete
+		// Nothing to review, so retire immediately: previously only a review
+		// action retired runs, and every no-diff run leaked its worktree and
+		// workstream binding forever (P1). Retire BEFORE firing a
+		// continuation — the continuation's checkout needs the workstream
+		// branch free, and the binding must be cleared before it reads it.
+		s.retireRun(ctx, meta.conversationID)
 		// A2-lite: even with no diff, fire continuation if steers were queued.
 		if len(queuedSteers) > 0 && !meta.errored {
 			go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
@@ -1138,12 +1144,26 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 		// enforcement point (wiki/ is NOT gitignored, so this daemon-side
 		// guard is the sole protection for daemon-owned content). The diff
 		// stays pending on a violation; the user can still reject it.
-		if paths, gerr := diffTargetPaths(d.PathOnDisk); gerr == nil {
-			if perr := rejectProtectedPaths(paths); perr != nil {
+		// Both patch sides are guarded: renaming a file out of wiki/ is a
+		// memory write too, not just writing into it.
+		patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
+		if gerr == nil {
+			if perr := rejectProtectedPaths(patchPaths); perr != nil {
 				_, _ = s.store.AppendEvent(ctx, d.ConversationID, store.EventAgentError,
 					mustJSON(map[string]interface{}{"error": "accept_diff: " + perr.Error()}))
 				return Response{}, perr
 			}
+		}
+		// P1 retry guardrail: refuse to apply onto an in-progress conflict.
+		// A previous --3way attempt that hit conflicts leaves unmerged index
+		// entries behind; re-applying there mixes two merges, and the
+		// path-scoped stage would record half-resolved files. Stay pending —
+		// the user resolves or resets the conflict in the main checkout and
+		// retries the accept.
+		if conflicts, cerr := git.HasUnmergedEntries(s.projectRoot); cerr != nil {
+			return Response{}, fmt.Errorf("accept_diff: check index: %w", cerr)
+		} else if conflicts {
+			return Response{}, errors.New("accept_diff: main checkout has unresolved merge conflicts; resolve or reset them, then retry the accept")
 		}
 		// An unreadable patch file falls through to git apply, the authority
 		// on the patch format (its error names the file problem).
@@ -1151,11 +1171,13 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 			// Stay pending: review didn't conclude. The git error text says why.
 			return Response{}, fmt.Errorf("accept_diff: apply: %w", err)
 		}
-		// Commit the applied diff so the next worktree (created from HEAD)
-		// includes all previously accepted files. Without this, files applied
-		// via `git apply` but never committed don't appear in new worktrees,
-		// and the agent can't modify them in isolation.
-		if err := git.CommitAll(s.projectRoot, fmt.Sprintf("odo: accept diff #%d", diffID)); err != nil {
+		// Commit the applied diff — only its own paths (P0) — so the next
+		// worktree (created from HEAD) includes all previously accepted
+		// files. Without this, files applied via `git apply` but never
+		// committed don't appear in new worktrees, and the agent can't
+		// modify them in isolation. Unrelated changes the user staged or
+		// left dirty in the main checkout are never swept in.
+		if err := git.CommitPaths(s.projectRoot, fmt.Sprintf("odo: accept diff #%d", diffID), patchPaths); err != nil {
 			// Non-fatal: the file is already applied to the working tree.
 			// The commit just ensures worktree freshness for future runs.
 			log.Printf("accept_diff: auto-commit failed (non-fatal): %v", err)
@@ -1933,54 +1955,13 @@ func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response,
 	return Response{SearchResults: results}, nil
 }
 
-// diffTargetPaths reads the unified diff at pathOnDisk and returns the
-// target (b-side) path of each file header: from "+++ b/<path>" lines, or
-// the b-side of "diff --git a/<x> b/<y>" when +++ is absent (mode-only
-// changes). Malformed headers are skipped — git apply is the authority on
-// the patch format; this is an overlay check, not a parser.
-func diffTargetPaths(pathOnDisk string) ([]string, error) {
-	b, err := os.ReadFile(pathOnDisk)
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	pendingB := "" // b-side of a diff --git header with no +++ line yet
-	for _, line := range strings.Split(string(b), "\n") {
-		switch {
-		case strings.HasPrefix(line, "diff --git "):
-			if pendingB != "" {
-				paths = append(paths, pendingB)
-			}
-			pendingB = ""
-			// `diff --git a/<x> b/<y>` — the b-side follows the last " b/".
-			rest := strings.TrimPrefix(line, "diff --git ")
-			if i := strings.LastIndex(rest, " b/"); i >= 0 {
-				pendingB = rest[i+len(" b/"):]
-			}
-		case strings.HasPrefix(line, "+++ "):
-			pendingB = "" // resolved by this +++ line (even /dev/null)
-			target := strings.TrimPrefix(line, "+++ ")
-			if i := strings.IndexByte(target, '\t'); i >= 0 {
-				target = target[:i] // strip an optional trailing timestamp
-			}
-			target = strings.TrimSpace(target)
-			target = strings.Trim(target, "\"") // git C-quotes paths with non-ASCII bytes (+++ "b/<path>")
-			if strings.HasPrefix(target, "b/") {
-				paths = append(paths, strings.TrimPrefix(target, "b/"))
-			}
-		}
-	}
-	if pendingB != "" {
-		paths = append(paths, pendingB)
-	}
-	return paths, nil
-}
-
-// rejectProtectedPaths errs when any target path lives under a protected
+// rejectProtectedPaths errs when any patch path lives under a protected
 // prefix (ADR-0003 invariant 1: agents never write memory). Protected:
 // .odo/ (memory.md, memory-archive.md, pins.md, ledger.md, journal.sqlite,
 // worktrees) and wiki/ (epoch notes, topics, index.md — derived artifacts
-// owned by the daemon, not the agent).
+// owned by the daemon, not the agent). Callers pass both patch sides
+// (git.PatchPaths): deleting or renaming memory content is a memory write
+// too, so the pre-image side is guarded as well as the post-image side.
 func rejectProtectedPaths(paths []string) error {
 	for _, f := range paths {
 		if strings.HasPrefix(f, ".odo/") || strings.HasPrefix(f, "wiki/") {

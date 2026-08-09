@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yingliang-zhang/odo/internal/git"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
@@ -554,10 +555,11 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 		t.Errorf("hello.txt = %q, want hello", got)
 	}
 
-	// diffTargetPaths contract: +++ b/ lines and the mode-only b-side.
-	paths, err := diffTargetPaths(filepath.Join(root, ".odo", "diffs", "mode.diff"))
+	// git.PatchPaths contract: the mode-only change parses to its path from
+	// the "diff --git" header alone (no ---/+++ lines present).
+	paths, err := git.PatchPaths(filepath.Join(root, ".odo", "diffs", "mode.diff"))
 	if err != nil || len(paths) != 1 || paths[0] != ".odo/pins.md" {
-		t.Errorf("diffTargetPaths(mode.diff) = %v, %v; want [.odo/pins.md]", paths, err)
+		t.Errorf("PatchPaths(mode.diff) = %v, %v; want [.odo/pins.md]", paths, err)
 	}
 }
 
@@ -618,9 +620,10 @@ func TestLedgerZeroProposalsNoCrossEpoch(t *testing.T) {
 }
 
 // TestDiffGuardCQuotedPath (K3 hardening): git C-quotes the +++ header
-// when a path carries non-ASCII bytes (+++ "b/.odo/<escapes>"). The guard
-// must strip the quotes before the b/ prefix match — else a protected
-// target parses as unprotected-or-absent and the prefix check never fires.
+// when a path carries non-ASCII bytes (+++ "b/.odo/<escapes>"). The parser
+// must unquote the octal escapes back to real filesystem names — else a
+// protected target parses as unprotected-or-absent and the prefix check
+// never fires, and git pathspecs built from the raw escapes match nothing.
 // (Only the non-ASCII tail is octal-escaped; the .odo/ prefix stays literal.)
 func TestDiffGuardCQuotedPath(t *testing.T) {
 	patch := filepath.Join(t.TempDir(), "quoted.diff")
@@ -634,14 +637,17 @@ func TestDiffGuardCQuotedPath(t *testing.T) {
 	if err := os.WriteFile(patch, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	paths, err := diffTargetPaths(patch)
+	aPaths, bPaths, err := git.DiffPaths(patch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 1 || paths[0] != `.odo/m\303\251mory.md` {
-		t.Fatalf("diffTargetPaths = %v, want [.odo/m\\303\\251mory.md]", paths)
+	if len(bPaths) != 1 || bPaths[0] != ".odo/mémory.md" {
+		t.Fatalf("DiffPaths b-side = %v, want [.odo/mémory.md]", bPaths)
 	}
-	if err := rejectProtectedPaths(paths); err == nil || !strings.Contains(err.Error(), ".odo/") {
+	if len(aPaths) != 1 || aPaths[0] != ".odo/mémory.md" {
+		t.Fatalf("DiffPaths a-side = %v, want [.odo/mémory.md]", aPaths)
+	}
+	if err := rejectProtectedPaths(bPaths); err == nil || !strings.Contains(err.Error(), ".odo/") {
 		t.Errorf("rejectProtectedPaths = %v, want a protected-path error naming .odo/", err)
 	}
 
@@ -652,14 +658,11 @@ func TestDiffGuardCQuotedPath(t *testing.T) {
 	if err := os.WriteFile(benign, []byte(benignPatch), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	paths, err = diffTargetPaths(benign)
-	if err != nil {
+	if paths, err := git.PatchPaths(benign); err != nil {
 		t.Fatal(err)
-	}
-	if len(paths) != 1 || paths[0] != `src/f\303\251.go` {
-		t.Fatalf("diffTargetPaths(benign) = %v, want [src/f\\303\\251.go]", paths)
-	}
-	if err := rejectProtectedPaths(paths); err != nil {
+	} else if len(paths) != 1 || paths[0] != "src/fé.go" {
+		t.Fatalf("PatchPaths(benign) = %v, want [src/fé.go]", paths)
+	} else if err := rejectProtectedPaths(paths); err != nil {
 		t.Errorf("rejectProtectedPaths(benign) = %v, want nil", err)
 	}
 }

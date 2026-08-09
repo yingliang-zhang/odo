@@ -4,8 +4,12 @@ package git
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -39,17 +43,22 @@ func CreateWorktree(repoPath, worktreePath string) error {
 // it exists — safe because the worktree is a fresh checkout and accepted
 // diffs always land on the main working tree first (see AdvanceBranch).
 //
-// Git refuses -B when branch is already checked out in another worktree, so
-// concurrent runs of one workstream (cross-conversation runs)
-// fall back to checking the existing ref out in place (-f), which never moves
-// the ref out from under a live worktree.
+// Git refuses -B when branch is already checked out in another worktree:
+// concurrent runs of one workstream, or a leaked/zombie worktree still
+// holding the ref. The fallback is a DETACHED checkout at HEAD — never the
+// existing branch ref in place. The ref may lag HEAD arbitrarily (accepted
+// diffs land on the main working tree and AdvanceBranch is best-effort), so
+// checking it out bakes a stale base into the run: the agent diffs against
+// commits main has already moved past. Review applies the extracted diff to
+// the main working tree regardless of what the worktree's symbolic HEAD was,
+// so detaching costs the workstream-branch model nothing.
 func CreateWorktreeOnBranch(repoPath, worktreePath, branch string) error {
 	if _, err := run(repoPath, "worktree", "add", "-B", branch, worktreePath, "HEAD"); err != nil {
 		if !strings.Contains(err.Error(), "already used by worktree") {
 			return err
 		}
-		if _, ferr := run(repoPath, "worktree", "add", "--force", worktreePath, branch); ferr != nil {
-			return fmt.Errorf("%w (branch fallback: %w)", err, ferr)
+		if _, ferr := run(repoPath, "worktree", "add", "--detach", worktreePath, "HEAD"); ferr != nil {
+			return fmt.Errorf("%w (detached fallback: %w)", err, ferr)
 		}
 	}
 	return nil
@@ -92,26 +101,174 @@ func ExtractDiff(worktreePath string) (string, error) {
 }
 
 // ApplyDiff applies a unified diff file to the working tree of repoPath.
-// It stages all current files first (so untracked-but-applied files from
-// previous accepts are in the index), then uses --3way to handle cases
-// where the target file already exists with different content.
+//
+// P0 (accept must not sweep the main checkout): after a successful apply it
+// stages ONLY the paths the patch touches — both pre- and post-image, so
+// deletions and renames record correctly — never the user's unrelated
+// working-tree or index changes. The old `git add -A` folded whatever the
+// user had lying around (wiki restructures, half-finished edits) into the
+// accept commit.
+//
+// P1 (retry guardrail): it refuses to run while the index has unmerged
+// entries. --3way on top of an in-progress conflict conflates two merges,
+// and a retry of a previously-conflicted accept would stage half-resolved
+// files. The caller keeps the diff pending; the user resolves or resets the
+// conflict and retries.
+//
+// --3way handles targets whose content drifted since the diff's base.
 func ApplyDiff(repoPath, diffPath string) error {
-	if _, err := run(repoPath, "add", "-A"); err != nil {
-		return fmt.Errorf("stage before apply: %w", err)
+	if conflicts, err := HasUnmergedEntries(repoPath); err != nil {
+		return fmt.Errorf("check unmerged entries: %w", err)
+	} else if conflicts {
+		return errors.New("index has unmerged entries: resolve or reset the in-progress conflict first")
 	}
-	_, err := run(repoPath, "apply", "--3way", diffPath)
+	aPaths, bPaths, err := DiffPaths(diffPath)
+	if err != nil {
+		return fmt.Errorf("parse patch paths: %w", err)
+	}
+	if _, err := run(repoPath, "apply", "--3way", diffPath); err != nil {
+		return err
+	}
+	paths := unionPaths(aPaths, bPaths)
+	if len(paths) == 0 {
+		return nil
+	}
+	if _, err := run(repoPath, append([]string{"add", "--"}, paths...)...); err != nil {
+		return fmt.Errorf("stage patch paths: %w", err)
+	}
+	return nil
+}
+
+// HasUnmergedEntries reports whether repoPath's index carries unresolved
+// merge-conflict entries (stage > 0, per `git ls-files -u`).
+func HasUnmergedEntries(repoPath string) (bool, error) {
+	out, err := run(repoPath, "ls-files", "-u")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// CommitPaths creates a commit limited to the given paths: the current
+// working-tree state of exactly those paths, regardless of what else is
+// staged or dirty. Used after applying a diff so the next worktree (created
+// from HEAD) includes the accepted files without sweeping unrelated user
+// changes into the accept commit. Requires git user.name and user.email to
+// be configured.
+func CommitPaths(repoPath, message string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	args := append([]string{"commit", "-m", message, "--no-verify", "--"}, paths...)
+	_, err := run(repoPath, args...)
 	return err
 }
 
-// CommitAll stages all changes and creates a commit with the given message.
-// Used after applying a diff so the next worktree (created from HEAD) includes
-// the accepted files. Requires git user.name and user.email to be configured.
-func CommitAll(repoPath, message string) error {
-	if _, err := run(repoPath, "add", "-A"); err != nil {
-		return err
+// PatchPaths returns the deduplicated union of pre- and post-image paths of
+// every file the patch touches, in file order. Both sides are needed to
+// stage renames (old name deleted, new name added) and deletions (a-side
+// only), and to guard protected paths on either side of a rename.
+func PatchPaths(pathOnDisk string) ([]string, error) {
+	aPaths, bPaths, err := DiffPaths(pathOnDisk)
+	if err != nil {
+		return nil, err
 	}
-	_, err := run(repoPath, "commit", "-m", message, "--no-verify")
-	return err
+	return unionPaths(aPaths, bPaths), nil
+}
+
+// unionPaths concatenates a- and b-side patch paths deduplicated, keeping
+// file order. Pre-images come first so a rename's deletion stages alongside
+// its addition.
+func unionPaths(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, paths := range [][]string{a, b} {
+		for _, p := range paths {
+			if _, ok := seen[p]; !ok {
+				seen[p] = struct{}{}
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// diffGitLine splits the "a/<x> b/<y>" tail of a "diff --git" header.
+// Either side is C-quoted when it contains spaces or non-ASCII bytes.
+var diffGitLine = regexp.MustCompile(`^("a/(?:[^"\\]|\\.)*"|a/\S+) ("b/(?:[^"\\]|\\.)*"|b/\S+)$`)
+
+// DiffPaths parses the unified diff at pathOnDisk and returns the a-side
+// (pre-image) and b-side (post-image) path of every file header, in file
+// order. Paths come from "--- a/<x>" / "+++ b/<y>" lines, falling back to
+// the "diff --git" header for changes without content hunks (mode-only,
+// pure renames). C-quoted paths are unquoted to real filesystem names so
+// the results work directly as git pathspecs; malformed quoting is kept
+// verbatim and git apply stays the authority on the patch format. Pure
+// additions yield only a b-side, pure deletions only an a-side.
+func DiffPaths(pathOnDisk string) (aPaths, bPaths []string, err error) {
+	data, err := os.ReadFile(pathOnDisk)
+	if err != nil {
+		return nil, nil, err
+	}
+	pendingA, pendingB := "", "" // diff --git sides, used when no ---/+++ appears
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			if pendingA != "" {
+				aPaths = append(aPaths, pendingA)
+			}
+			if pendingB != "" {
+				bPaths = append(bPaths, pendingB)
+			}
+			pendingA, pendingB = "", ""
+			if m := diffGitLine.FindStringSubmatch(strings.TrimPrefix(line, "diff --git ")); m != nil {
+				pendingA = unquoteDiffPath(m[1], "a/")
+				pendingB = unquoteDiffPath(m[2], "b/")
+			}
+		case strings.HasPrefix(line, "--- "):
+			pendingA = "" // the --- line resolves the a-side (even /dev/null)
+			if p := unquoteDiffPath(strings.TrimPrefix(line, "--- "), "a/"); p != "" {
+				aPaths = append(aPaths, p)
+			}
+		case strings.HasPrefix(line, "+++ "):
+			pendingB = "" // the +++ line resolves the b-side (even /dev/null)
+			if p := unquoteDiffPath(strings.TrimPrefix(line, "+++ "), "b/"); p != "" {
+				bPaths = append(bPaths, p)
+			}
+		}
+	}
+	if pendingA != "" {
+		aPaths = append(aPaths, pendingA)
+	}
+	if pendingB != "" {
+		bPaths = append(bPaths, pendingB)
+	}
+	return aPaths, bPaths, nil
+}
+
+// unquoteDiffPath normalizes one path field of a diff header: drops an
+// optional trailing timestamp, resolves C-style quoting, and strips the
+// a//b/ prefix. Returns "" for /dev/null and for sides that don't carry
+// the expected prefix (malformed input — git apply adjudicates those).
+func unquoteDiffPath(target, prefix string) string {
+	if i := strings.IndexByte(target, '\t'); i >= 0 {
+		target = target[:i]
+	}
+	target = strings.TrimSpace(target)
+	if target == "/dev/null" {
+		return ""
+	}
+	if strings.HasPrefix(target, "\"") {
+		if u, err := strconv.Unquote(target); err == nil {
+			target = u
+		} else {
+			target = strings.Trim(target, "\"")
+		}
+	}
+	if !strings.HasPrefix(target, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(target, prefix)
 }
 
 // CurrentSHA returns the full HEAD commit SHA of repoPath.

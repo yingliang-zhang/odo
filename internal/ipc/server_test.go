@@ -101,6 +101,18 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// gitStatus returns untrimmed `git status --porcelain` output. (gitOut's
+// TrimSpace eats the leading space of an unstaged-modification marker when
+// it lands on the first line, making XY-column assertions lie.)
+func gitStatus(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
 // startRig builds a project repo and a live daemon bound to it.
 func startRig(t *testing.T, root string) *testRig {
 	t.Helper()
@@ -321,6 +333,108 @@ func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	resp := rig.callExpectErr(t, Request{Cmd: CmdAcceptDiff, DiffID: done2.Diff.ID})
 	if !strings.Contains(resp.Error, "already rejected") {
 		t.Errorf("double review error = %q", resp.Error)
+	}
+}
+
+// noopStubWrapper stands in for an agent that changes nothing: transcript
+// out, clean exit, empty worktree. Pins the no-diff code path.
+const noopStubWrapper = `#!/bin/sh
+output_file="$3"
+sleep 1
+printf 'Nothing needed changing.\n' > "$output_file"
+exit 0
+`
+
+// TestNoDiffRunRetiresWorktree pins the P1 leak fix: a run that leaves no
+// diff has nothing to review, so it is retired immediately — worktree
+// removed, workstream binding cleared, adapter run closed — instead of
+// leaking until a review action that can never come.
+func TestNoDiffRunRetiresWorktree(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, noopStubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "read only"})
+	bound := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if bound.Workstream == nil || bound.Workstream.WorktreePath == nil {
+		t.Fatal("run did not bind a worktree")
+	}
+	wtPath := *bound.Workstream.WorktreePath
+
+	done := rig.pollUntilDone(t, convID)
+	if got, want := fmt.Sprint(eventTypes(done.Events)), "[agent_text agent_done]"; got != want {
+		t.Fatalf("journaled agent events = %s, want %s", got, want)
+	}
+	if done.Diff != nil {
+		t.Errorf("no-diff run journaled a diff: %+v", done.Diff)
+	}
+	if len(done.Diffs) != 0 {
+		t.Errorf("no-diff run left pending diffs: %+v", done.Diffs)
+	}
+	// The worktree is gone and the binding cleared without a review action.
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("worktree %s still on disk after no-diff run", wtPath)
+	}
+	after := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if after.Workstream != nil && after.Workstream.WorktreePath != nil {
+		t.Errorf("workstream still bound to %s after no-diff run", *after.Workstream.WorktreePath)
+	}
+	if n := len(rig.server.runs); n != 0 {
+		t.Errorf("server still tracks %d runs after no-diff completion", n)
+	}
+	if n := len(rig.server.byConv); n != 0 {
+		t.Errorf("server still binds %d conversations after no-diff completion", n)
+	}
+}
+
+// TestAcceptDoesNotSweepMainCheckout pins P0 end to end through the socket:
+// accept commits only the diff's own files. Dirt the user left in the main
+// checkout — a modified tracked file and an untracked scratch file — is
+// neither staged, committed, nor reverted by the accept.
+func TestAcceptDoesNotSweepMainCheckout(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "make hello"})
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+
+	// User state in the main checkout: tracked edit + untracked scratch.
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# user edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scratch.txt"), []byte("scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	acc := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done.Diff.ID})
+	if !acc.Applied {
+		t.Fatalf("accept: %+v", acc)
+	}
+
+	// The accept commit contains exactly the diff's file.
+	if got := gitOut(t, root, "show", "--format=", "--name-only", "HEAD"); got != "hello.txt" {
+		t.Errorf("accept commit files = %q, want exactly hello.txt", got)
+	}
+	// The user's files survived the accept untouched and uncommitted.
+	status := gitStatus(t, root)
+	for _, want := range []string{" M README.md", "?? scratch.txt"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("status missing %q after accept:\n%s", want, status)
+		}
+	}
+	if got := readFileStr(t, filepath.Join(root, "README.md")); got != "# user edit\n" {
+		t.Errorf("README.md = %q, want the user's edit intact", got)
 	}
 }
 
