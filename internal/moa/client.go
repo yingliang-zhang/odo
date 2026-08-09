@@ -1,7 +1,12 @@
-// Package moa provides a direct LLM API client for text-only "thinking" tasks
+// Package moa provides a direct LLM API client for "thinking" tasks
 // (review, audit, design, research) using the Anthropic Messages protocol.
 // It bypasses the OMP agent process to avoid the overhead of spawning a full
-// agent runtime for a single text completion.
+// agent runtime for a single completion.
+//
+// Read-only tool use (E1): QueryWithTools exposes Anthropic-native tools —
+// the model emits tool_use blocks, the daemon-side executor answers them
+// under a scoped root, and the loop continues until end_turn or a round
+// cap. The daemon journals every executed call; no writes, no shell.
 //
 // The client talks to the Sudo gateway (https://coding.sudoai.cc/anthropic)
 // which translates /v1/messages to each upstream model's native protocol.
@@ -32,6 +37,16 @@ const (
 	// back with stop_reason=max_tokens. 16384 leaves room for reasoning +
 	// answer across the sudo gateway's upstreams.
 	defaultMaxTok = 16384
+
+	// defaultToolRounds bounds QueryWithTools' execute-and-continue loop:
+	// enough for read→grep→read chains, never unbounded.
+	defaultToolRounds = 8
+	// maxToolRounds is the hard ceiling a caller can raise the cap to.
+	maxToolRounds = 16
+	// errBodyTail caps how much of a non-200 response body the error shows
+	// (gateway diagnostics; the old "check server logs" text hid 400s that
+	// name the exact problem, e.g. an unsupported tools field).
+	errBodyTail = 512
 )
 
 // Client is a minimal Anthropic Messages API client.
@@ -57,7 +72,7 @@ func NewClient(baseURL, apiKey string) *Client {
 
 // NewClientFromEnv creates a client using the standard env/config defaults.
 // baseURL comes from the MOA_BASE_URL env var (if set) or the hardcoded
-// default; apiKey comes from the named env var (moa_key_env or SUDO_CODING_KEY).
+// default; apiKey comes from the named env variable (moa_key_env or SUDO_CODING_KEY).
 func NewClientFromEnv(prefsBaseURL, prefsKeyEnv string) *Client {
 	baseURL := prefsBaseURL
 	if baseURL == "" {
@@ -74,60 +89,112 @@ func NewClientFromEnv(prefsBaseURL, prefsKeyEnv string) *Client {
 	return NewClient(baseURL, apiKey)
 }
 
-// messageRequest is the Anthropic Messages API request body.
+// Tool describes one callable tool in the Anthropic tools protocol.
+type Tool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"input_schema"`
+}
+
+// ToolCall is one tool_use block the model emitted.
+type ToolCall struct {
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+// ToolAudit records one executed call for daemon-side journaling: what was
+// asked, how much came back, and whether it failed. Audit input is capped —
+// the full bytes live only in the request, not the journal.
+type ToolAudit struct {
+	Name        string `json:"name"`
+	Input       string `json:"input"`
+	ResultBytes int    `json:"result_bytes"`
+	Error       string `json:"error,omitempty"`
+}
+
+// auditInputCap bounds the echoed input inside a ToolAudit.
+const auditInputCap = 256
+
+// ToolExecutor runs one tool call and returns the result text handed back
+// to the model as a tool_result. An error is sent as an is_error
+// tool_result (the model sees the failure and can adapt) — it does not
+// abort the loop.
+type ToolExecutor func(ctx context.Context, call ToolCall) (string, error)
+
+// messageRequest is the Anthropic Messages API request body. Content is
+// either a plain string (text-only calls) or []contentBlock (tool loop).
 type messageRequest struct {
 	Model     string         `json:"model"`
 	MaxTokens int            `json:"max_tokens"`
 	System    string         `json:"system,omitempty"`
 	Messages  []messageEntry `json:"messages"`
+	Tools     []Tool         `json:"tools,omitempty"`
 }
 
 type messageEntry struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+// contentBlock covers every block shape the loop moves: text, tool_use
+// (assistant -> us) and tool_result (us -> assistant). Fields are omitted
+// when empty, so one struct marshals all three shapes.
+type contentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 }
 
 // messageResponse is the Anthropic Messages API response body.
 type messageResponse struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	StopReason string `json:"stop_reason"`
+	Content    []contentBlock `json:"content"`
+	StopReason string         `json:"stop_reason"`
 	Usage      struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
 }
 
-// Query sends a single text completion request to the Anthropic Messages API
-// and returns the concatenated text from all text-type content blocks.
-// Thinking blocks are silently dropped (they carry reasoning traces, not
-// visible output). If system is non-empty it becomes the top-level system
-// prompt (Anthropic-native, not in-band).
-func (c *Client) Query(ctx context.Context, model, system, prompt string) (string, error) {
-	if c.APIKey == "" {
-		return "", fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
+// text concatenates the text-type blocks (thinking blocks are dropped —
+// they carry reasoning traces, not visible output).
+func (r *messageResponse) text() string {
+	var texts []string
+	for _, block := range r.Content {
+		if block.Type == "text" && block.Text != "" {
+			texts = append(texts, block.Text)
+		}
 	}
-	if model == "" {
-		model = defaultModel
+	return strings.Join(texts, "\n\n")
+}
+
+// toolUses returns the tool_use blocks (none when the model is done).
+func (r *messageResponse) toolUses() []contentBlock {
+	var out []contentBlock
+	for _, block := range r.Content {
+		if block.Type == "tool_use" {
+			out = append(out, block)
+		}
 	}
-	reqBody := messageRequest{
-		Model:     model,
-		MaxTokens: defaultMaxTok,
-		System:    system,
-		Messages: []messageEntry{
-			{Role: "user", Content: prompt},
-		},
-	}
+	return out
+}
+
+// post sends one request body and returns the parsed response. The shared
+// transport for Query, QueryWithImages, and the tool loop.
+func (c *Client) post(ctx context.Context, reqBody interface{}) (*messageResponse, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("moa: marshal request: %w", err)
+		return nil, fmt.Errorf("moa: marshal request: %w", err)
 	}
 	url := c.BaseURL + "/v1/messages"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("moa: new request: %w", err)
+		return nil, fmt.Errorf("moa: new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", c.APIKey)
@@ -135,34 +202,154 @@ func (c *Client) Query(ctx context.Context, model, system, prompt string) (strin
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("moa: http request: %w", err)
+		return nil, fmt.Errorf("moa: http request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("moa: read response: %w", err)
+		return nil, fmt.Errorf("moa: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("moa: API returned %d (check server logs for details)", resp.StatusCode)
+		tail := strings.TrimSpace(string(raw))
+		if len(tail) > errBodyTail {
+			tail = tail[:errBodyTail] + "…"
+		}
+		if tail == "" {
+			tail = "(empty body)"
+		}
+		return nil, fmt.Errorf("moa: API returned %d: %s", resp.StatusCode, tail)
 	}
 	var msg messageResponse
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		return "", fmt.Errorf("moa: parse response: %w", err)
+		return nil, fmt.Errorf("moa: parse response: %w", err)
 	}
-	var texts []string
-	for _, block := range msg.Content {
-		if block.Type == "text" {
-			texts = append(texts, block.Text)
-		}
+	return &msg, nil
+}
+
+// validate guards the response's visible output: a max_tokens stop is an
+// error, never a partial answer or a truncated tool input.
+func (r *messageResponse) validate() error {
+	if r.StopReason == "max_tokens" {
+		return fmt.Errorf("moa: response truncated (stop_reason=max_tokens, %d output tokens used)", r.Usage.OutputTokens)
 	}
-	if msg.StopReason == "max_tokens" {
-		return "", fmt.Errorf("moa: response truncated (stop_reason=max_tokens, %d output tokens used)", msg.Usage.OutputTokens)
+	return nil
+}
+
+// Query sends a single text completion request to the Anthropic Messages API
+// and returns the concatenated text from all text-type content blocks.
+// If system is non-empty it becomes the top-level system prompt
+// (Anthropic-native, not in-band).
+func (c *Client) Query(ctx context.Context, model, system, prompt string) (string, error) {
+	if c.APIKey == "" {
+		return "", fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
 	}
-	if len(texts) == 0 {
+	if model == "" {
+		model = defaultModel
+	}
+	msg, err := c.post(ctx, messageRequest{
+		Model:     model,
+		MaxTokens: defaultMaxTok,
+		System:    system,
+		Messages: []messageEntry{
+			{Role: "user", Content: prompt},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := msg.validate(); err != nil {
+		return "", err
+	}
+	text := msg.text()
+	if text == "" {
 		return "", fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
 	}
-	return strings.Join(texts, "\n\n"), nil
+	return text, nil
+}
+
+// QueryWithTools runs the read-only tool loop (E1): the request advertises
+// tools; every response's tool_use blocks are executed (daemon-side, scoped
+// by the executor) and echoed back as tool_result; the loop ends when the
+// model stops calling tools (end_turn) or the round cap trips. The final
+// text and the audit of every executed call are returned.
+//
+// With no tools (or a nil executor) the call degrades to Query — a model or
+// gateway without tool support simply answers in one round as before.
+func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt string, tools []Tool, exec ToolExecutor, maxRounds int) (string, []ToolAudit, error) {
+	if len(tools) == 0 || exec == nil {
+		text, err := c.Query(ctx, model, system, prompt)
+		return text, nil, err
+	}
+	if c.APIKey == "" {
+		return "", nil, fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
+	}
+	if model == "" {
+		model = defaultModel
+	}
+	if maxRounds <= 0 {
+		maxRounds = defaultToolRounds
+	}
+	if maxRounds > maxToolRounds {
+		maxRounds = maxToolRounds
+	}
+
+	messages := []messageEntry{{Role: "user", Content: prompt}}
+	var audits []ToolAudit
+	for round := 1; ; round++ {
+		msg, err := c.post(ctx, messageRequest{
+			Model:     model,
+			MaxTokens: defaultMaxTok,
+			System:    system,
+			Messages:  messages,
+			Tools:     tools,
+		})
+		if err != nil {
+			return "", audits, err
+		}
+		// Never act on a truncated turn: a max_tokens tool_use carries a
+		// half-written JSON input, so executing it is unsafe.
+		if err := msg.validate(); err != nil {
+			return "", audits, err
+		}
+		uses := msg.toolUses()
+		if len(uses) == 0 {
+			text := msg.text()
+			if text == "" {
+				return "", audits, fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
+			}
+			return text, audits, nil
+		}
+		if round >= maxRounds {
+			return "", audits, fmt.Errorf("moa: tool loop exceeded %d rounds (model kept requesting tools)", maxRounds)
+		}
+
+		// Echo the assistant turn with every block (text + tool_use), then
+		// answer each call as a tool_result in one user turn.
+		messages = append(messages, messageEntry{Role: "assistant", Content: msg.Content})
+		results := make([]contentBlock, 0, len(uses))
+		for _, tu := range uses {
+			call := ToolCall{ID: tu.ID, Name: tu.Name, Input: tu.Input}
+			out, execErr := exec(ctx, call)
+			input := string(tu.Input)
+			if len(input) > auditInputCap {
+				input = input[:auditInputCap] + "…"
+			}
+			audits = append(audits, ToolAudit{
+				Name:        tu.Name,
+				Input:       input,
+				ResultBytes: len(out),
+			})
+			block := contentBlock{Type: "tool_result", ToolUseID: tu.ID, Content: out}
+			if execErr != nil {
+				audits[len(audits)-1].Error = execErr.Error()
+				block.IsError = true
+				block.Content = "error: " + execErr.Error()
+			}
+			results = append(results, block)
+		}
+		messages = append(messages, messageEntry{Role: "user", Content: results})
+	}
 }
 
 // QueryWithImages sends a request with both text and image content blocks.
@@ -205,7 +392,6 @@ func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt stri
 		"type": "text",
 		"text": prompt,
 	})
-	// Build request with array content instead of string.
 	reqBody := map[string]interface{}{
 		"model":      model,
 		"max_tokens": defaultMaxTok,
@@ -216,47 +402,16 @@ func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt stri
 	if system != "" {
 		reqBody["system"] = system
 	}
-	body, err := json.Marshal(reqBody)
+	msg, err := c.post(ctx, reqBody)
 	if err != nil {
-		return "", fmt.Errorf("moa: marshal request: %w", err)
+		return "", err
 	}
-	url := c.BaseURL + "/v1/messages"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("moa: new request: %w", err)
+	if err := msg.validate(); err != nil {
+		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.APIKey)
-	req.Header.Set("anthropic-version", apiVersion)
-
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("moa: http request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("moa: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("moa: API returned %d (check server logs for details)", resp.StatusCode)
-	}
-	var msg messageResponse
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		return "", fmt.Errorf("moa: parse response: %w", err)
-	}
-	var texts []string
-	for _, block := range msg.Content {
-		if block.Type == "text" {
-			texts = append(texts, block.Text)
-		}
-	}
-	if msg.StopReason == "max_tokens" {
-		return "", fmt.Errorf("moa: response truncated (stop_reason=max_tokens, %d output tokens used)", msg.Usage.OutputTokens)
-	}
-	if len(texts) == 0 {
+	text := msg.text()
+	if text == "" {
 		return "", fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
 	}
-	return strings.Join(texts, "\n\n"), nil
+	return text, nil
 }

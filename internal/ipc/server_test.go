@@ -206,6 +206,10 @@ func eventTypes(events []store.Event) []string {
 
 func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	root := initRepo(t)
+	// HOME isolation: readUserMemory injects real ~/.odo/user.md into every
+	// prompt otherwise, and hello.txt (the stub echoes its prompt) stops
+	// matching the bare message text in the accept/reject assertions below.
+	t.Setenv("HOME", t.TempDir())
 
 	// Install the stub agent wrapper.
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
@@ -1370,7 +1374,7 @@ func TestRecallEmptyWhenNoWiki(t *testing.T) {
 	if done.Diff == nil {
 		t.Fatal("no diff")
 	}
-	want := buildPrompt(text, nil, "", "", "", "", "", "")
+	want := buildPrompt(text, nil, memoryLayers{})
 	if want != text {
 		t.Fatalf("buildPrompt(%q, nil, empty layers) = %q, want the text unchanged", text, want)
 	}

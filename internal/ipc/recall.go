@@ -20,6 +20,35 @@ import (
 // note is half-included.
 const recallMemoryCap = 12 * 1024 // 12 KB ≈ 3k tokens
 
+// foldBoundary returns the journal position of the latest epoch fold (R3):
+// the last_seq recorded on the newest review_action{action:"distill"}
+// payload, falling back to that event's OWN seq for pre-schema distills
+// (the legacy implicit contract ChatSurface also implements). Events are
+// seq-ascending; the boundary is the max over all distill markers.
+func foldBoundary(events []store.Event) int {
+	boundary := 0
+	for _, ev := range events {
+		if ev.Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action  string `json:"action"`
+			LastSeq int    `json:"last_seq"`
+		}
+		if json.Unmarshal(ev.Payload, &p) != nil || p.Action != "distill" {
+			continue
+		}
+		b := p.LastSeq
+		if b <= 0 {
+			b = ev.Seq // pre-R3 distill: its own seq is the fold position
+		}
+		if b > boundary {
+			boundary = b
+		}
+	}
+	return boundary
+}
+
 // wikiEpochRe parses the epoch number out of a wiki note name
 // (<workstream>-epoch-<N>.md).
 var wikiEpochRe = regexp.MustCompile(`-epoch-(\d+)\.md$`)

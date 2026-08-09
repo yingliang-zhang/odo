@@ -37,6 +37,7 @@ exit 0
 
 func TestStreamingVisibleLoopPreview(t *testing.T) {
 	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir()) // hermetic user.md injection (suite-wide convention)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, streamingStubWrapper))
 
 	rig := startRig(t, root)

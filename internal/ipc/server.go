@@ -554,6 +554,13 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	}
 	ml := s.memoryLayers(ctx, w.Name, c.ID, req.Text)
 
+	// R1: mechanical journal replay of the current epoch's turns. Listed
+	// BEFORE journaling this message, so the replay excludes the message
+	// itself (its text lands verbatim at the prompt's end).
+	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
+		ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter = buildReplay(events)
+	}
+
 	// Journal the user message with attachments (spec item 5).
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
@@ -565,12 +572,21 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if len(ml.receipt) > 0 {
 		msgPayload["receipt"] = ml.receipt
 	}
+	if ml.replay != "" {
+		// R1 receipt: the covered seq range + the fold boundary it follows.
+		msgPayload["replay"] = map[string]interface{}{
+			"after_seq": ml.replayAfter,
+			"first_seq": ml.replayFirst,
+			"last_seq":  ml.replayLast,
+			"bytes":     len(ml.replay),
+		}
+	}
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
 	}
 
-	prompt := buildPrompt(req.Text, req.Attachments, ml.user, ml.project, ml.pins, ml.index, ml.wiki, ml.skills)
+	prompt := buildPrompt(req.Text, req.Attachments, ml)
 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
@@ -615,6 +631,11 @@ type memoryLayers struct {
 	skillReceipts []skillReceiptItem // M8: per-skill path + block hash for receipt
 	index         string             // wiki/index.md (M5: always-injected)
 	wiki          string             // recalled epoch notes block
+	memoryMap     string             // R2: pull-based read-back hints (wiki/ + ledger absolute paths)
+	replay        string             // R1: current-epoch journal replay block
+	replayFirst   int                // R1 receipt: first replayed journal seq
+	replayLast    int                // R1 receipt: last replayed journal seq
+	replayAfter   int                // R1 receipt: fold boundary the window starts after
 	recall        []recallItem       // M6: was []string, now per-note with matched terms
 	receipt       map[string]string
 }
@@ -640,6 +661,7 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 	retracted := s.retractedNotes(ctx, conversationID)
 	m, items, noteBytes := recallWikiNotes(s.projectRoot, wsName, query, retracted)
 	ml.wiki = m
+	ml.memoryMap = memoryMapBlock(s.projectRoot)
 	if ml.user != "" {
 		ml.receipt["~/.odo/user.md"] = sha16([]byte(ml.user))
 	}
@@ -700,40 +722,49 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 }
 
 // buildPrompt renders the agent prompt. Layers inject in ADR-0003's stable
-// order (inv 6 extended, M5): userMem (global, durable user principles),
-// projectMem (.odo/memory.md behavior rules), pins (.odo/pins.md, verbatim),
-// index (wiki/index.md, always-injected), then recalled wiki notes,
-// attachment hints, and the user's text last (cache-friendly stable prefix).
-func buildPrompt(text string, attachments []string, userMem, projectMem, pins, index, memory, skills string) string {
+// order (inv 6 extended, M5): user (global, durable user principles),
+// project (.odo/memory.md behavior rules), pins (.odo/pins.md, verbatim),
+// skills, index (wiki/index.md, always-injected), then recalled wiki notes,
+// the R2 read-back map, the R1 journal replay, attachment hints, and the
+// user's text last (cache-friendly stable prefix).
+func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	var b strings.Builder
-	if userMem != "" {
+	if ml.user != "" {
 		b.WriteString("## User memory (durable cross-project principles)\n\n")
-		b.WriteString(userMem)
+		b.WriteString(ml.user)
 		b.WriteString("\n\n---\n\n")
 	}
-	if projectMem != "" {
+	if ml.project != "" {
 		b.WriteString("## Project memory (behavior rules)\n\n")
-		b.WriteString(projectMem)
+		b.WriteString(ml.project)
 		b.WriteString("\n\n---\n\n")
 	}
-	if pins != "" {
+	if ml.pins != "" {
 		b.WriteString("## Pins (user-authored, verbatim)\n\n")
-		b.WriteString(pins)
+		b.WriteString(ml.pins)
 		b.WriteString("\n\n---\n\n")
 	}
-	if skills != "" {
+	if ml.skills != "" {
 		b.WriteString("## Relevant skills (procedures)\n\n")
-		b.WriteString(skills)
+		b.WriteString(ml.skills)
 		b.WriteString("\n\n---\n\n")
 	}
-	if index != "" {
+	if ml.index != "" {
 		b.WriteString("## Wiki index\n\n")
-		b.WriteString(index)
+		b.WriteString(ml.index)
 		b.WriteString("\n\n---\n\n")
 	}
-	if memory != "" {
+	if ml.wiki != "" {
 		b.WriteString("## Prior notes (recalled)\n\n")
-		b.WriteString(memory)
+		b.WriteString(ml.wiki)
+		b.WriteString("\n\n---\n\n")
+	}
+	if ml.memoryMap != "" {
+		b.WriteString(ml.memoryMap)
+		b.WriteString("\n\n---\n\n")
+	}
+	if ml.replay != "" {
+		b.WriteString(ml.replay)
 		b.WriteString("\n\n---\n\n")
 	}
 	if len(attachments) > 0 {
@@ -741,6 +772,40 @@ func buildPrompt(text string, attachments []string, userMem, projectMem, pins, i
 			strings.Join(attachments, ", "))
 	}
 	b.WriteString(text)
+	return b.String()
+}
+
+// memoryMapBlock is the R2 "memory map": ~6 lines telling the agent that the
+// injected extracts are a keyword-selected slice and the full distilled
+// knowledge base is pull-readable. Absolute MAIN-CHECKOUT paths are named
+// because the agent runs in a run worktree whose checkout only carries
+// tracked files — wiki/ notes and .odo/ledger.md live outside it. Returns ""
+// when the project has neither a wiki dir nor a ledger yet (fresh project:
+// nothing to pull, no noise).
+func memoryMapBlock(projectRoot string) string {
+	wikiDir := filepath.Join(projectRoot, "wiki")
+	ledger := ledgerPath(projectRoot)
+	wikiOK := false
+	if st, err := os.Stat(wikiDir); err == nil && st.IsDir() {
+		wikiOK = true
+	}
+	ledgerOK := false
+	if st, err := os.Stat(ledger); err == nil && !st.IsDir() {
+		ledgerOK = true
+	}
+	if !wikiOK && !ledgerOK {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Memory read-back (pull-based recall)\n\n")
+	b.WriteString("The extracts above are a keyword-selected slice. The full distilled knowledge base lives in the MAIN project checkout (this worktree only has tracked files):\n")
+	if wikiOK {
+		fmt.Fprintf(&b, "- Wiki notes, topic pages, index: `%s` (plain markdown, read directly)\n", wikiDir)
+	}
+	if ledgerOK {
+		fmt.Fprintf(&b, "- Per-epoch metrics ledger: `%s`\n", ledger)
+	}
+	b.WriteString("From the main checkout you can also run `odo wiki read <name>` (e.g. `odo wiki read index`, `odo wiki read ledger`).")
 	return b.String()
 }
 
@@ -900,7 +965,12 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 	}
 
 	ml := s.memoryLayers(ctx, w.Name, conversationID, prompt)
-	fullPrompt := buildPrompt(prompt, nil, ml.user, ml.project, ml.pins, ml.index, ml.wiki, ml.skills)
+	// R1: continuation runs replay the current epoch too — the previous
+	// run's agent_text is in the journal and the steering agent must see it.
+	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
+		ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter = buildReplay(events)
+	}
+	fullPrompt := buildPrompt(prompt, nil, ml)
 
 	runDirID := worktree.NewRunID()
 	wtPath, err := s.mgr.Create(runDirID, workstreamGitBranch(w))
@@ -1333,6 +1403,15 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 
 	// Fan out to N models via direct API (parallel, no OMP process).
 	client := moa.NewClientFromEnv("", "")
+	// E1: read-only, home-scoped FS tools (read_file/grep/glob) let panel
+	// models ground answers in real files instead of hand-pasted context.
+	// Round 0 → moa default cap. Every executed call is journaled below.
+	exec := newFSToolExecutor()
+	tools := moaFSTools()
+	system := "You are an expert advisor. Provide a thorough, independent analysis." +
+		"\n\nYou have read-only tools over the user's files: read_file, grep, glob. " +
+		exec.describeScope() +
+		" Use them to ground your answer in the actual files whenever the question touches code or documents — do not ask the user to paste content. Every read is journaled."
 	results := make([]PanelResult, len(models))
 	var wg sync.WaitGroup
 	for i, m := range models {
@@ -1340,12 +1419,12 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		go func() {
 			defer wg.Done()
 			label := m.model + "@" + m.provider
-			resp, err := client.Query(ctx, m.model, "You are an expert advisor. Provide a thorough, independent analysis.", text)
+			resp, calls, err := client.QueryWithTools(ctx, m.model, system, text, tools, exec.Execute, 0)
 			if err != nil {
-				results[i] = PanelResult{Model: label, Error: err.Error()}
+				results[i] = PanelResult{Model: label, Error: err.Error(), ToolCalls: calls}
 				return
 			}
-			results[i] = PanelResult{Model: label, Text: resp}
+			results[i] = PanelResult{Model: label, Text: resp, ToolCalls: calls}
 		}()
 	}
 	wg.Wait()
@@ -1368,11 +1447,15 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	return Response{OK: true}, nil
 }
 
-// PanelResult is one model's response from a /panel query.
+// PanelResult is one model's response from a /panel query. ToolCalls (E1)
+// is the daemon-side audit of every read the model made through the
+// scoped FS tools — journaled with the result so /panel answers are
+// traceable to the exact files they saw.
 type PanelResult struct {
-	Model string `json:"model"`
-	Text  string `json:"text"`
-	Error string `json:"error,omitempty"`
+	Model     string          `json:"model"`
+	Text      string          `json:"text"`
+	Error     string          `json:"error,omitempty"`
+	ToolCalls []moa.ToolAudit `json:"tool_calls,omitempty"`
 }
 
 // formatPanelResults renders the N model responses as readable text for the
@@ -1393,8 +1476,51 @@ func formatPanelResults(results []PanelResult) string {
 		} else {
 			b.WriteString(r.Text)
 		}
+		if len(r.ToolCalls) > 0 {
+			b.WriteString("\n\n— tools: ")
+			b.WriteString(summarizeToolCalls(r.ToolCalls))
+		}
 	}
 	return b.String()
+}
+
+// summarizeToolCalls renders a one-line E1 audit: per-tool counts, bytes
+// returned, and error marks (grouped in first-seen order).
+func summarizeToolCalls(calls []moa.ToolAudit) string {
+	type agg struct{ n, bytes, errs int }
+	var order []string
+	aggs := map[string]*agg{}
+	for _, c := range calls {
+		a, ok := aggs[c.Name]
+		if !ok {
+			a = &agg{}
+			aggs[c.Name] = a
+			order = append(order, c.Name)
+		}
+		a.n++
+		a.bytes += c.ResultBytes
+		if c.Error != "" {
+			a.errs++
+		}
+	}
+	parts := make([]string, 0, len(order))
+	for _, name := range order {
+		a := aggs[name]
+		p := fmt.Sprintf("%s×%d (%s)", name, a.n, humanBytes(a.bytes))
+		if a.errs > 0 {
+			p += fmt.Sprintf(", %d err", a.errs)
+		}
+		parts = append(parts, p)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// humanBytes renders a byte count compactly (B under 1KB, else KB).
+func humanBytes(n int) string {
+	if n < 1024 {
+		return fmt.Sprintf("%dB", n)
+	}
+	return fmt.Sprintf("%.1fKB", float64(n)/1024)
 }
 
 // parseVerdict extracts the verdict (the first line that IS or STARTS WITH
@@ -1636,12 +1762,25 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	if err != nil {
 		return Response{}, err
 	}
+	// R3: the fold boundary is explicit schema, not UI inference. The epoch
+	// window is (previous fold boundary, last journaled seq at distill time];
+	// note_path/note_sha bind the note that replaces the window. Replay (R1)
+	// and the future fold chip read these fields directly.
+	foldFrom := foldBoundary(events) + 1
+	foldTo := 0
+	if len(events) > 0 {
+		foldTo = events[len(events)-1].Seq
+	}
 	distillEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":         "distill",
 		"epoch":          newEpoch,
 		"wiki_path":      wikiPath,
 		"duration_ms":    time.Since(start).Milliseconds(), // M6: ledger metric
 		"contradictions": contradictions,                   // M6: contradiction report count
+		"first_seq":      foldFrom,
+		"last_seq":       foldTo,
+		"note_path":      filepath.Join("wiki", noteName+".md"),
+		"note_sha":       sha16([]byte(note)),
 	}))
 	if err != nil {
 		return Response{}, err
