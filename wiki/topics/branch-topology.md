@@ -1,6 +1,6 @@
-# Branch Topology and odo/main Work Branch
+# Branch Topology and Accept Flow
 
-- No merge of `odo/main` into `main` was ever needed: `odo/main` is fully contained in `main` (0 ahead, 5 then 7 behind); merge-base equals the `odo/main` tip (epoch-3)
-- The "two mains" are explained by M11c design: workstreams store bare name `main`, git consumers prefix `odo/` (server.go:453), run worktrees check out `odo/main` via CreateWorktreeOnBranch (`git worktree add -B odo/main`, git.go:41) (epoch-2)
-- Accept flow lands on `main`, then AdvanceBranch fast-forwards `odo/main` (server.go:1147); the 7-commit lag (SUDO_CODING_KEY, IME, PATH fixes + rename/revert pair) self-corrects on the next accept (epoch-3)
-- A work session ran from worktree `.odo/worktrees/6a7852d9-*` on branch `odo/main` (epoch-3)
+- odo/main is Odo's internal work branch with a literal '/' (M11c design): workstreams store bare main, git consumers prefix odo/ (server.go:453); run worktrees check out odo/main via CreateWorktreeOnBranch; accept lands on main, then AdvanceBranch fast-forwards odo/main (epoch-2)
+- No merge needed: odo/main was fully contained in main (merge-base = ac8bed8 = odo/main tip); main was strictly ahead with IME/PATH/SUDO_CODING_KEY fixes (epoch-3)
+- odo/main left deliberately 6–7 commits behind main — AdvanceBranch fast-forwards it automatically on the next accept (epoch-7)
+- memory/log.md HEAD marker was observed stale (logged 6ecbac0 vs actual ac8bed8+) (epoch-5)

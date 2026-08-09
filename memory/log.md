@@ -698,3 +698,38 @@ HEAD: 6ecbac0
 - `git revert --no-edit cb7bde4` — go.mod module path + 15 Go import files restored (26 lines)
 - Gates: `go build/vet/test ./...` all green (ipc 122.7s)
 - 80bd148 kept as history (append-only log); tauri identifier `com.yingliangzhang.odo` and local dir `~/Projects/odo` unchanged
+
+## accept_diff #2 Failure + Manual Recovery (2026-08-09)
+
+### Root cause chain
+- accept #1 (1de583c) landed `defaultMaxTok` 16384 on main; `AdvanceBranch` to odo/main FAILED — stale worktree 6a7852d9 held the branch (daemon.log 18:47, "non-fatal")
+- Next runs: `git worktree add -B odo/main` refused (branch busy) → `--force` fallback chained new worktrees onto STALE odo/main @ ac8bed8, missing accept #1
+- Diff #2 (E1 fstools) touched client.go — same file as accept #1 → `git apply --3way` conflict → "accept failed", diff stayed pending
+- Retry clicks nested conflict markers (5× `<<<<<<< ours`) — no dirty-tree guard in handleDiffAction
+- P0 side effect: `ApplyDiff`'s `git add -A` on the MAIN checkout staged 17 unrelated user wiki files; a successful auto-commit would have swept them into the odo commit
+
+### Recovery — DONE (commit 83bea0b)
+- Resolved client.go: E1 postimage blob f9ee487 + reapplied 16384 hunk; staged set = exactly diff #2's 7 Go files
+- `git restore --staged wiki/` — user's 17 uncommitted wiki files returned to unstaged, untouched
+- Committed as `odo: accept diff #2`; journal: diffs #2 → accepted + review_action event; build green, moa/git tests pass
+- Retired 14 leaked worktrees (all clean ac8bed8 checkouts, incl. diff #2's 6a786f8e); 16→3 remaining
+
+### Outstanding
+- Worktree 6a786cb2-9f278d39c13f PRESERVED: orphan run holding real uncommitted epoch-fold chip work (12M+3?? files — ChatSurface/WikiBrowser/cmd_journal.go/fold-chip.spec.ts) — extract or resume, user decides
+- Systemic fixes NOT yet implemented: ApplyDiff path-scoped add+commit, CreateWorktreeOnBranch stale-base fallback (→ detached at main HEAD), retry guard vs unmerged index, worktree leak reap
+- .git/REBASE_HEAD is stale detritus from an old aborted rebase (no active rebase); harmless
+
+## accept_diff #3/#4 Landed + Accept-Loop Systemic Fixes (2026-08-09)
+
+- Stuck accept diagnosed as a repeated-retry nested-conflict mess (6x `<<<<<<< ours`): reset ONLY the 15 patch paths to HEAD, left the user's wiki/log files unstaged and untouched, then re-applied diff #3 cleanly — 14 files clean, server.go 1 semantic conflict.
+- Diff #3 (epoch-fold chip, 15 files, 52K) landed as **81ae13b**. server.go resolution: kept the accepted R3 marker incl. `note_path`, adopted theirs' exact-window math (re-list events at marker time) as exported `FoldWindow` — required by new `cmd_journal.go` (ipc.FoldWindow) and asserted by TestDistillFoldSchema (last_seq == marker.seq-1). TestFoldWindow 5 subcases, TestDistillFoldSchema, GUI tsc+vite build: all green.
+- Diff #4 (accept-loop fixes, 5 files) landed as **46be84c**:
+  - P0: `ApplyDiff` stages/commits ONLY patch paths (`CommitPaths`, `DiffPaths` parser handles adds/deletes/renames/mode-only/C-quoted); user state can no longer ride into accept commits — TestApplyDiffPathScopedCommit + TestAcceptDoesNotSweepMainCheckout (e2e via socket).
+  - P0: `CreateWorktreeOnBranch` fallback is now **detached at main HEAD**, never the stale branch ref — kills the stale-base chain that caused both the #2 and #3 conflicts. TestCreateWorktreeOnBranchFallback pins detached-at-HEAD + ref untouched.
+  - P1: accept refuses onto an index with unmerged entries (clear retry guidance) — TestApplyDiffRefusesUnmerged; diff stays pending.
+  - P1: no-diff runs retire immediately in drainRun (worktree removed, binding cleared) instead of leaking forever — TestNoDiffRunRetiresWorktree.
+  - One comment-only conflict in server_test.go (HOME isolation), kept ours.
+- Journal mirrored manually while daemon was live: diffs #3/#4 → accepted + review_action events (seq recomputed; first insert lost a UNIQUE race to the daemon journaling THIS run's tool results — the run doing this maintenance is conversation 1, live in worktree 6a787660).
+- Retired worktrees 6a786cb2 + 6a787369 (post-commit) and 6a787200 (empty no-diff leak). Remaining worktrees: main checkout + the live run's own.
+- Gates: `go test ./...` full suite green (ipc 124.7s); GUI build green. Pushed `83bea0b..46be84c` (fold chip + all four fixes now on origin/main).
+- PENDING USER ACTION: fixes live in daemon code — rebuild `go build -o odo .` in ~/Projects/odo and restart Odo.app (daemon is the app child at <repo>/odo) before clicking accept again; then run gui/e2e/fold-chip.spec.ts against the restarted daemon.
