@@ -567,11 +567,17 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// message itself (its text lands verbatim at the prompt's end).
 	ml := s.runMemoryLayers(ctx, w.Name, c.ID, req.Text)
 
+	// buildPrompt is a pure render of ml + the request, so assembling it
+	// before journaling lets the user_message receipt carry the assembled
+	// prompt size (item D) without changing the replay ordering above.
+	prompt := buildPrompt(req.Text, req.Attachments, ml)
+
 	// Journal the user message with attachments (spec item 5).
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
 	}
+	msgPayload["total_prompt_bytes"] = len(prompt)
 	if jr := ml.journalRecall(); len(jr) > 0 {
 		msgPayload["recall"] = jr
 	}
@@ -579,20 +585,23 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		msgPayload["receipt"] = ml.receipt
 	}
 	if ml.replay != "" {
-		// R1 receipt: the covered seq range + the fold boundary it follows.
-		msgPayload["replay"] = map[string]interface{}{
+		// R1 receipt: the covered seq range + the fold boundary it follows,
+		// + the dropped window (first,last) when the cap cut older turns.
+		rp := map[string]interface{}{
 			"after_seq": ml.replayAfter,
 			"first_seq": ml.replayFirst,
 			"last_seq":  ml.replayLast,
 			"bytes":     len(ml.replay),
 		}
+		if len(ml.replayDropped) == 2 {
+			rp["dropped_seqs"] = ml.replayDropped
+		}
+		msgPayload["replay"] = rp
 	}
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
 	}
-
-	prompt := buildPrompt(req.Text, req.Attachments, ml)
 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
@@ -643,6 +652,7 @@ type memoryLayers struct {
 	replayFirst   int                // R1 receipt: first replayed journal seq
 	replayLast    int                // R1 receipt: last replayed journal seq
 	replayAfter   int                // R1 receipt: fold boundary the window starts after
+	replayDropped []int              // R1 receipt: [first,last] dropped seq window (nil without drops)
 	recall        []recallItem       // M6: was []string, now per-note with matched terms
 	receipt       map[string]string
 }
@@ -709,7 +719,7 @@ func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversatio
 	if events == nil {
 		return ml
 	}
-	ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter = buildReplay(events)
+	ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter, ml.replayDropped = buildReplay(events)
 	if ml.replay == "" {
 		if card, notePath := buildResumeCard(s.projectRoot, wsName, events); card != "" {
 			ml.resume = card
@@ -1462,13 +1472,21 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	if len(models) == 0 {
 		return Response{}, errors.New("No review models configured for /panel. Set the 'review:' line in prefs.md.")
 	}
-
-	// Journal the user message.
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(map[string]interface{}{
-		"text": "/panel " + text,
-	})); err != nil {
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
 		return Response{}, err
 	}
+
+	// Assemble the shared slash context BEFORE journaling the /panel
+	// user_message (mirroring the send path's runMemoryLayers ordering), so
+	// the block never contains the panel question itself. The recall query
+	// reuses the send-path shape: slash text UNION the last current-epoch
+	// turns.
+	var events []store.Event
+	if evs, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
+		events = evs
+	}
+	scope := resolvePanelContextScope()
 
 	// Fan out to N models via direct API (parallel, no OMP process).
 	client := moa.NewClientFromEnv("", "")
@@ -1481,6 +1499,18 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		"\n\nYou have read-only tools over the user's files: read_file, grep, glob. " +
 		exec.describeScope() +
 		" Use them to ground your answer in the actual files whenever the question touches code or documents — do not ask the user to paste content. Every read is journaled."
+	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, recallQuery(text, events), slashModePanel)
+	if block != "" {
+		system += "\n\n---\n\n" + block
+	}
+
+	// Journal the user message with the injection receipt, the effective
+	// context scope, and the assembled prompt size (item D).
+	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(
+		slashUserMessagePayload("/panel", text, receipt, scope, len(system)+len(text))))
+	if err != nil {
+		return Response{}, err
+	}
 	results := make([]PanelResult, len(models))
 	var wg sync.WaitGroup
 	for i, m := range models {
@@ -1513,7 +1543,7 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		return Response{}, err
 	}
 
-	return Response{OK: true}, nil
+	return Response{Event: &ev}, nil
 }
 
 // PanelResult is one model's response from a /panel query. ToolCalls (E1)
@@ -1605,17 +1635,31 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	}
 	// K3 is the only vision-capable model (confirmed in ~/.omp/agent/models.yml).
 	const visionModel = "t9s/kimi-k3"
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		return Response{}, err
+	}
 
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(map[string]interface{}{
-		"text": "/vision " + text,
-	})); err != nil {
+	// Same slash-context ordering as /panel: the block is assembled before
+	// the /vision user_message journals, so it never contains the vision
+	// question itself.
+	scope := resolvePanelContextScope()
+	system := "You are a vision-capable coding assistant. Analyze the image or screenshot described in the prompt. Identify visual issues, layout problems, or design suggestions."
+	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, text, slashModeVision)
+	if block != "" {
+		system += "\n\n---\n\n" + block
+	}
+
+	// Journal the user message with the injection receipt, the effective
+	// context scope, and the assembled prompt size (item D).
+	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(
+		slashUserMessagePayload("/vision", text, receipt, scope, len(system)+len(text))))
+	if err != nil {
 		return Response{}, err
 	}
 
 	client := moa.NewClientFromEnv("", "")
-	system := "You are a vision-capable coding assistant. Analyze the image or screenshot described in the prompt. Identify visual issues, layout problems, or design suggestions."
 	var resp string
-	var err error
 	if len(attachments) > 0 {
 		resp, err = client.QueryWithImages(ctx, visionModel, system, text, attachments)
 	} else {
@@ -1641,7 +1685,7 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 		return Response{}, err
 	}
 
-	return Response{OK: true}, nil
+	return Response{Event: &ev}, nil
 }
 
 // A line like "I cannot accept this" must NOT match — only a verdict token

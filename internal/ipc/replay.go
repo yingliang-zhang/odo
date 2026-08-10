@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
@@ -21,14 +23,57 @@ import (
 // "everything reconstructs from the journal" invariant holds.
 
 const (
-	// replayTotalCap bounds the whole replay block (user 4KB / project 4KB /
-	// recall 12KB scale). Newest turns win; the cut drops OLD turns (they
-	// had the best chance of being distilled/recalled already).
-	replayTotalCap = 8 * 1024
-	// replayTurnCap bounds one turn so a single monster reply (a /panel
-	// answer can be >30KB) cannot starve every other turn.
-	replayTurnCap = 4 * 1024
+	// replayTotalCapDefault bounds the whole replay block (user 4KB /
+	// project 4KB / recall 12KB scale) when prefs.md sets nothing. Newest
+	// turns win; the cut drops OLD turns (they had the best chance of being
+	// distilled/recalled already).
+	replayTotalCapDefault = 8 * 1024
+	// replayTurnCapDefault bounds one turn so a single monster reply (a
+	// /panel answer can be >30KB) cannot starve every other turn.
+	replayTurnCapDefault = 4 * 1024
+
+	// Clamp ranges for the prefs-configurable caps: below 4KB total the
+	// replay block carries almost nothing; above 64KB it crowds out the
+	// memory layers it follows.
+	replayTotalKBMin, replayTotalKBMax = 4, 64
+	replayTurnKBMin, replayTurnKBMax   = 1, 16
 )
+
+// replayCaps carries the effective replay byte caps for one assembly.
+// Resolved per call (prefs.md re-read, resolveMaxConcurrent pattern) —
+// never package globals, so a prefs edit takes effect on the next send.
+type replayCaps struct {
+	total int // whole replay block
+	turn  int // per-turn truncation
+}
+
+// resolveReplayCaps reads replay_total_kb / replay_turn_kb from prefs.md.
+// Missing or unparseable values fail closed to the defaults (today's
+// behavior); parseable out-of-range values clamp into [min,max] KB.
+func resolveReplayCaps() replayCaps {
+	caps := replayCaps{total: replayTotalCapDefault, turn: replayTurnCapDefault}
+	if v := adapter.LoadPrefsRaw("replay_total_kb"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			caps.total = clampKB(n, replayTotalKBMin, replayTotalKBMax) * 1024
+		}
+	}
+	if v := adapter.LoadPrefsRaw("replay_turn_kb"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			caps.turn = clampKB(n, replayTurnKBMin, replayTurnKBMax) * 1024
+		}
+	}
+	return caps
+}
+
+func clampKB(n, min, max int) int {
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
 
 // replayTurn is one chat turn eligible for replay, with its journal seq.
 type replayTurn struct {
@@ -70,22 +115,34 @@ func collectReplayTurns(events []store.Event, boundary int) []replayTurn {
 	return turns
 }
 
-// renderReplay builds the prompt block for the current epoch's turns. Turns
-// accumulate newest-first until the total cap, then reverse back to
-// chronological order so the prompt reads like a conversation. The header
-// names the covered seq range — the visible receipt — and flags when older
-// turns were dropped by the cap. Returns "", 0, 0 when nothing falls in the
-// window (fresh epoch, or everything already folded).
-func renderReplay(turns []replayTurn) (block string, firstSeq, lastSeq int) {
+// renderReplay builds the prompt block for the current epoch's turns under
+// the effective caps. Returns "", 0, 0, nil when nothing falls in the
+// window (fresh epoch, or everything already folded). droppedSeqs is the
+// omitted window's [first,last] seq pair for the replay receipt (nil when
+// nothing was dropped).
+func renderReplay(turns []replayTurn, caps replayCaps) (block string, firstSeq, lastSeq int, droppedSeqs []int) {
 	if len(turns) == 0 {
-		return "", 0, 0
+		return "", 0, 0, nil
 	}
+	return renderConvBlock(
+		"## Recent conversation (journal replay: current epoch",
+		"These turns are replayed verbatim from the journal (no summarization). The user's current message follows at the end.",
+		turns, caps.total, caps.turn)
+}
+
+// renderConvBlock accumulates turns newest-first under totalCap (per-turn
+// truncation at turnCap), then reverses back to chronological order so the
+// block reads like a conversation. The header appends the covered seq
+// range — the visible receipt — and, when older turns were dropped, the
+// omission marker: the exact dropped seq window and the journal pull
+// command, so "not visible" always carries its retrieval path.
+func renderConvBlock(header, blurb string, turns []replayTurn, totalCap, turnCap int) (block string, firstSeq, lastSeq int, droppedSeqs []int) {
 	var lines []string
 	used := 0
 	dropped := 0
 	for i := len(turns) - 1; i >= 0; i-- {
-		line := formatReplayTurn(turns[i])
-		if used+len(line) > replayTotalCap && len(lines) > 0 {
+		line := formatReplayTurn(turns[i], turnCap)
+		if used+len(line) > totalCap && len(lines) > 0 {
 			dropped = i + 1 // remaining older turns (0..i inclusive)
 			break
 		}
@@ -100,34 +157,38 @@ func renderReplay(turns []replayTurn) (block string, firstSeq, lastSeq int) {
 	firstSeq, lastSeq = included[0].seq, included[len(included)-1].seq
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Recent conversation (journal replay: current epoch, seq %d–%d)", firstSeq, lastSeq)
+	fmt.Fprintf(&b, "%s, seq %d–%d)", header, firstSeq, lastSeq)
 	if dropped > 0 {
-		fmt.Fprintf(&b, " — %d older turn(s) beyond the %dKB cap omitted; they remain in the journal", dropped, replayTotalCap/1024)
+		a, z := turns[0].seq, turns[dropped-1].seq
+		droppedSeqs = []int{a, z}
+		fmt.Fprintf(&b, " — %d older turn(s) (seq %d–%d) omitted by the %dKB cap; pull with `odo journal range %d %d` or browse the tail via `odo journal tail 200`",
+			dropped, a, z, totalCap/1024, a, z)
 	}
-	b.WriteString("\n\nThese turns are replayed verbatim from the journal (no summarization). The user's current message follows at the end.\n\n")
+	b.WriteString("\n\n" + blurb + "\n\n")
 	b.WriteString(strings.Join(lines, "\n\n"))
-	return b.String(), firstSeq, lastSeq
+	return b.String(), firstSeq, lastSeq, droppedSeqs
 }
 
-// formatReplayTurn renders one turn, truncating the text at replayTurnCap
-// so no single turn dominates the block (marker keeps the receipt honest).
-func formatReplayTurn(t replayTurn) string {
+// formatReplayTurn renders one turn, truncating the text at turnCap so no
+// single turn dominates the block (marker keeps the receipt honest).
+func formatReplayTurn(t replayTurn, turnCap int) string {
 	text := t.text
-	if len(text) > replayTurnCap {
-		text = strings.TrimRight(text[:replayTurnCap], " \t\r\n") +
-			fmt.Sprintf(" … [truncated at %dKB]", replayTurnCap/1024)
+	if len(text) > turnCap {
+		text = strings.TrimRight(text[:turnCap], " \t\r\n") +
+			fmt.Sprintf(" … [truncated at %dKB]", turnCap/1024)
 	}
 	return fmt.Sprintf("**%s** (seq %d): %s", t.role, t.seq, text)
 }
 
 // buildReplay is the one-call helper for send paths: fold boundary (R3,
 // legacy fallback for pre-schema distills) -> turns -> capped block. The
-// returned boundary is journaled as replay receipt context.
-func buildReplay(events []store.Event) (block string, firstSeq, lastSeq, boundary int) {
+// returned boundary and dropped seq window are journaled as replay receipt
+// context.
+func buildReplay(events []store.Event) (block string, firstSeq, lastSeq, boundary int, droppedSeqs []int) {
 	boundary = foldBoundary(events)
 	turns := collectReplayTurns(events, boundary)
-	block, firstSeq, lastSeq = renderReplay(turns)
-	return block, firstSeq, lastSeq, boundary
+	block, firstSeq, lastSeq, droppedSeqs = renderReplay(turns, resolveReplayCaps())
+	return block, firstSeq, lastSeq, boundary, droppedSeqs
 }
 
 // recallCtxTurns bounds how many current-epoch turns seed the recall query
@@ -141,8 +202,8 @@ const recallCtxTurns = 3
 // UNION the last recallCtxTurns replayable turn texts of the current epoch.
 // No events -> the message alone, so first-send behavior and receipts are
 // unchanged. Stop-words/duplicates are filtered by tokenizeQuery
-// downstream; seeds are per-turn truncated to replayTurnCap so a monster
-// reply (a /panel answer can be >30KB) cannot flood the term set.
+// downstream; seeds are per-turn truncated to the effective turn cap so a
+// monster reply (a /panel answer can be >30KB) cannot flood the term set.
 func recallQuery(text string, events []store.Event) string {
 	if len(events) == 0 {
 		return text
@@ -151,12 +212,13 @@ func recallQuery(text string, events []store.Event) string {
 	if n := len(turns); n > recallCtxTurns {
 		turns = turns[n-recallCtxTurns:]
 	}
+	turnCap := resolveReplayCaps().turn
 	var b strings.Builder
 	b.WriteString(text)
 	for _, t := range turns {
 		seed := t.text
-		if len(seed) > replayTurnCap {
-			seed = seed[:replayTurnCap]
+		if len(seed) > turnCap {
+			seed = seed[:turnCap]
 		}
 		b.WriteString("\n\n")
 		b.WriteString(seed)

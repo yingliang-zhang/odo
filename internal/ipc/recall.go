@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 )
@@ -93,7 +94,14 @@ var stopWords = map[string]bool{
 var queryTokenRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 // tokenizeQuery lowercases text, splits it on non-alphanumeric runs, drops
-// stop-words, and de-duplicates preserving first-seen order.
+// stop-words, and de-duplicates preserving first-seen order. Runs of CJK
+// codepoints are additionally tokenized into overlapping bigrams (an
+// isolated single character becomes a unigram): CJK scripts carry no
+// whitespace, so the ASCII split drops every CJK run into its separator and
+// pure-Chinese queries used to yield ZERO terms (recall degraded to silent
+// newest-first). Latin/digit behavior is unchanged — CJK bigrams append
+// after the latin tokens, in reading order, de-duplicating against the same
+// seen set.
 func tokenizeQuery(text string) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -104,7 +112,39 @@ func tokenizeQuery(text string) []string {
 		seen[tok] = true
 		out = append(out, tok)
 	}
+	var run []rune
+	flush := func() {
+		if len(run) == 1 {
+			if tok := string(run[0]); !seen[tok] {
+				seen[tok] = true
+				out = append(out, tok)
+			}
+		} else {
+			for i := 0; i+1 < len(run); i++ {
+				if tok := string(run[i : i+2]); !seen[tok] {
+					seen[tok] = true
+					out = append(out, tok)
+				}
+			}
+		}
+		run = nil
+	}
+	for _, r := range text {
+		if isCJKRune(r) {
+			run = append(run, r)
+		} else {
+			flush()
+		}
+	}
+	flush()
 	return out
+}
+
+// isCJKRune reports whether r belongs to a CJK script whose words carry no
+// whitespace separators (Han, Hiragana, Katakana, Hangul).
+func isCJKRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r)
 }
 
 // noteMatches returns the subset of terms found as case-insensitive
@@ -139,6 +179,13 @@ func noteMatches(content, name string, terms []string) []string {
 // injection receipt can hash precisely what the prompt carried. An empty
 // query degrades to pure newest-first (the pre-M6 behavior).
 func recallWikiNotes(projectRoot, workstreamName, query string, retracted map[string]bool) (memory string, items []recallItem, noteBytes [][]byte) {
+	return recallWikiNotesCapped(projectRoot, workstreamName, query, retracted, recallMemoryCap)
+}
+
+// recallWikiNotesCapped is recallWikiNotes with the injection budget as a
+// parameter: slash-command context blocks (/panel) buy a tighter slice of
+// the same machinery instead of the send path's full recallMemoryCap.
+func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted map[string]bool, capBytes int) (memory string, items []recallItem, noteBytes [][]byte) {
 	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", workstreamName+"-epoch-*.md"))
 	if err != nil {
 		return "", nil, nil
@@ -188,7 +235,7 @@ func recallWikiNotes(projectRoot, workstreamName, query string, retracted map[st
 	omitted := 0
 	for i, n := range notes {
 		block := "## " + filepath.Base(n.path) + "\n\n" + n.content + "\n\n---\n\n"
-		if b.Len()+len(block) > recallMemoryCap {
+		if b.Len()+len(block) > capBytes {
 			omitted = len(notes) - i // cut on a note boundary: no note is half-included
 			break
 		}
@@ -201,7 +248,7 @@ func recallWikiNotes(projectRoot, workstreamName, query string, retracted map[st
 		// layer's accounting gap — name what is held back and where to pull
 		// it so "not recalled" never reads as "does not exist".
 		fmt.Fprintf(&b, "_%d more note(s) held back by the %dKB recall cap — pull them from `%s` (e.g. `odo wiki read main-epoch-3`)._\n",
-			omitted, recallMemoryCap/1024, filepath.Join(projectRoot, "wiki"))
+			omitted, capBytes/1024, filepath.Join(projectRoot, "wiki"))
 	}
 	if b.Len() == 0 {
 		return "", nil, nil
