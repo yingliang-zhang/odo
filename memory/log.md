@@ -758,3 +758,12 @@ HEAD: 43ea5ac (pushed, daemon binaries rebuilt)
 - Outstanding for Batch 3: D-cross hybrid (topics+sibling matched-only push, default both), miss-audit → FTS5 → bge-m3 embedding spike (pre-registered thresholds), gofmt hygiene on pre-existing dirty files, slash dropped-seq symmetric journaling.
 
 HEAD: 505bc25 (6 commits unpushed)
+
+## M12 Batch 3a — cross-workstream recall push + recall miss-audit (2026-08-10)
+
+- `91da261` D-cross: matched-only push (NO newest-first fallback — junk-drawer guard) — top-2 topic pages (≤3KB, ws-qualified sources) + single newest *other*-workstream matched epoch note (≤2KB, `[from workstream]` label); send + /panel include, /vision excluded; pref `cross_ws_recall: off|topics|sibling|both` (default both, fail-to-default); receipts per-source sha16 + origin/matched_terms; budgets +5KB rows (soft re-based 55KB, hard 128KB untouched). `odo recall audit [--last N] [--json]`: read-only miss-audit over journaled recall payloads (miss = ≥3 query terms ∧ zero matched notes).
+- Tri-review: GLM+DSF ACCEPT / K3 NEEDS_FIXES (2/3) → fixes `c0e1325`: (F1) slash messages carry no recall key — audit now excludes them into their own bucket, real dogfood miss rate 26.9%→**13.6%** (the spike's GO gate now sees true numbers); (F2) sibling push gains per-own-workstream retraction gate (contradiction-pass guarantee no longer bypassed cross-ws); negative-cap panic guard, header/marker wording.
+- Gates: full `go test ./... -count=1` green (ipc 208-217s across rounds); 9 new pin tests for the fixes.
+- First real recall telemetry: 13.6% miss rate on the last-40 window, main-epoch-6/5 dominate matches — pending ~2 weeks of dogfooding before the D-semantic FTS5/bge-m3 spike reads this pool.
+
+HEAD: c0e1325 (2 commits unpushed)
