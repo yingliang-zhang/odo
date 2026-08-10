@@ -745,3 +745,16 @@ HEAD: 6ecbac0
 - Outstanding: slash dropped-seq symmetric journaling; vision image bytes in receipt; recallQuery seed byte-cut (feeds tokenizer only); 3 pre-existing gofmt-dirty test files; auto-distill GUI-lifecycle fallback (needs user decision); working-state Now card (Batch 2 candidate, shape locked: derived, rule-based, no storage); distill prompt has no memory layers (GLM finding, observe).
 
 HEAD: 43ea5ac (pushed, daemon binaries rebuilt)
+
+## M12 Memory (Batch 2) — daemon auto-distill/curate + durable todo (2026-08-10)
+
+- DESIGN LOCK `docs/milestones/m12-memory.md` (`c840a40`): tri-model design round (K3/GLM/DSF blind) + five-system comparative audit; user confirmed 7 decisions (cancel-then-send; todo journal+no-file; cross-ws default both (Batch 3); auto default ON; budgets 128/2h/12d/4notes-7d; bge-m3 local spike; stale 3 folds).
+- `ed769e8` D-budget registry (Σdefaults≤soft, Σclamp≤128KB both enforced) + D-auto: daemon-side triggers T1 run-finished+idle(120s) / T2 startup compensation / T3 urgent≥128KB / T4 manual; eligibility ≥6ev+16KB with panel/vision bytes excluded; caps 2/h+12/day; backoff 5m→30m→2h→suspend (journal-derived); cancel-before-note on send AND steer (auto only); slash gate closes live fold-lie bug; coverage-honesty skip; conditional auto-curate (≥4 notes OR 7d + citation-liveness pre-write + notes_read SHA + ws-qualified citations + legacy chain removed); GUI timer deleted → countdown chip + disarm; settings flip auto_distill on_idle (default ON).
+- `4a9a714` deflake: retry_after parsed with tolerance window (exact-string match decayed below the step).
+- `f17ed12` D-todo durable plan layer: agent emits fenced odo-todo JSON ops in agent_text → daemon mechanical parse+merge (ADR-0003 inv 1 scoped amendment; daemon sole writer); journal-only snapshots+sha (no table, no file); ids t<N> monotonic; open survives folds, swept/stale(3 folds); injection 1.5KB between resume and replay with journal#todo receipt; distill prompt seeded with open items; `odo todo` CLI; ADR-0003 Amendments section; GUI PlanChip popover.
+- Round-1 tri-review: K3+DSF NEEDS_FIXES / GLM ACCEPT → P1s fixed in `72ca4b3`: (F1) armed idle timer supersedes to urgent; (F2) post-checkpoint truth — committed flag (no more cancelled_by_send lies) + marker pinned to render-time window (fold marker can never claim unseen messages again) + superseded-by-activity path with orphan cleanup; P2 bundle (reject byte caps, AGENTS.md anti-quote, PlanChip empty/struck states, docs, guards). Round-2 re-review **3/3 ACCEPT** (K3/GLM/DSF).
+- Follow-up polish `505bc25`: unownedFoldGrowth allowlist extended to daemon bookkeeping (curator/index/pins); GUI fold consumers use payload.last_seq (pinned schema) with marker-row filter; timer claim-by-identity; orphan-remove error logged. fold-chip e2e 4/4.
+- Gates at HEAD: go build/vet/gofmt clean; full `go test ./... -count=1` green (ipc 214s); tsc+vite build green. Daemon binary NOT yet rebuilt (needs restart to take effect).
+- Outstanding for Batch 3: D-cross hybrid (topics+sibling matched-only push, default both), miss-audit → FTS5 → bge-m3 embedding spike (pre-registered thresholds), gofmt hygiene on pre-existing dirty files, slash dropped-seq symmetric journaling.
+
+HEAD: 505bc25 (6 commits unpushed)
