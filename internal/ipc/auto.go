@@ -18,9 +18,11 @@ package ipc
 //                        window_exceeds_prompt_budget | run_active |
 //                        distill_active | slash_active | disarmed_by_send |
 //                        disarmed_by_user | superseded_by_manual |
-//                        superseded_by_urgent
+//                        superseded_by_urgent | superseded_by_activity
 //   cancelled_by_send  — a send/steer/slash cancelled an in-flight AUTO
-//                        distill before the note write (cancel-before-note)
+//                        distill at the pre-note checkpoint (cancel-before-
+//                        note); post-checkpoint the fold is committed and
+//                        inputs proceed without cancelling, so no row
 //   failed             — the distill attempt errored (feeds failure backoff)
 //
 // Failure backoff is derived from the journal, so it survives daemon
@@ -56,6 +58,13 @@ const (
 // the cancelling send already journaled the cancellation.
 var errAutoDistillCancelled = errors.New("auto distill cancelled before note")
 
+// errAutoDistillSuperseded is distillCore's committed-phase abort: the
+// journal grew past the rendered window with rows the fold did not author
+// and no post-commit input passed the gate. distillCore has already
+// journaled skipped{superseded_by_activity} and deleted the orphan note;
+// runAutoDistill re-arms for a fresh fold instead of journaling failed.
+var errAutoDistillSuperseded = errors.New("auto distill superseded by journal activity")
+
 // autoBackoffSteps maps consecutive auto-distill failure counts (1-indexed)
 // to the wait before the next attempt may fire; counts beyond the list are
 // suspended until the next user event.
@@ -75,10 +84,17 @@ type autoPendingEntry struct {
 // autoInFlight is the cancel-before-note handle for a fired auto distill:
 // a send/steer/slash flips cancelled + calls cancel; distillCore checks
 // cancelled after the one-shot returns, before any artifact is written.
+// committed flips at that checkpoint — past it the fold must complete, so
+// the gate stops cancelling (a cancelled_by_send row would lie about a
+// fold that lands). inputPassed records a post-commit gate pass: the
+// input's journaled rows are then ATTRIBUTED mid-fold growth for the
+// marker-time supersession probe (they sit above the pinned window).
 type autoInFlight struct {
-	trigger   string
-	cancel    context.CancelFunc
-	cancelled bool
+	trigger     string
+	cancel      context.CancelFunc
+	cancelled   bool
+	committed   bool
+	inputPassed bool
 }
 
 // autoPrefs is the resolved auto-distill/auto-curate preference set
@@ -122,6 +138,9 @@ func intPref(key string, def int) int {
 // resolveAutoPrefs reads the seven auto_* prefs plus auto_distill's on/off.
 // Called per evaluation (not cached) so a prefs edit takes effect on the
 // next activity — same discipline as resolveMaxConcurrent/resolveReplayCaps.
+// There is no separate auto_curate on/off: `auto_distill: never` disables
+// the conditional auto-curate too (fail-closed — one switch stops every
+// daemon-driven memory write; the manual curate is unaffected).
 func (s *Server) resolveAutoPrefs() autoPrefs {
 	p := autoPrefs{
 		enabled:        !s.autoDisabled && adapter.LoadPrefsRaw("auto_distill") != "never", // M12 flip: "on_idle" is the default
@@ -198,10 +217,14 @@ func (s *Server) journalAuto(ctx context.Context, convID int64, cause, detail st
 
 // gateAutoDistillForSendLocked enforces user-input precedence over
 // auto-distill: any send/steer/slash disarms a scheduled auto-distill
-// (journaled) and cancels an in-flight AUTO distill before the note is
-// written (journaled cancelled_by_send, then the input proceeds — NO
-// refusal). A MANUAL distill keeps let-finish + the historical refusal
-// text. Caller holds s.mu.
+// (journaled) and cancels an in-flight AUTO distill at the pre-note
+// checkpoint (journaled cancelled_by_send, then the input proceeds — NO
+// refusal). Past the checkpoint the fold is COMMITTED: cancelling would
+// journal a cancelled_by_send lie (the cancel is a no-op on the fold's
+// WithoutCancel context and the marker lands anyway), so the gate only
+// records the pass — the input's rows land above the pinned marker
+// window, attributed for the supersession probe. A MANUAL distill keeps
+// let-finish + the historical refusal text. Caller holds s.mu.
 func (s *Server) gateAutoDistillForSendLocked(ctx context.Context, convID int64) error {
 	kind, ok := s.distillKind[convID]
 	if !ok {
@@ -212,6 +235,10 @@ func (s *Server) gateAutoDistillForSendLocked(ctx context.Context, convID int64)
 		return fmt.Errorf("send_message: distill in progress for conversation %d", convID)
 	}
 	if ifl := s.autoInFlight[convID]; ifl != nil && !ifl.cancelled {
+		if ifl.committed {
+			ifl.inputPassed = true
+			return nil // fold completes; no cancel, no cancelled_by_send row
+		}
 		ifl.cancelled = true
 		ifl.cancel()
 		s.journalAuto(ctx, convID, "cancelled_by_send",
@@ -251,17 +278,18 @@ func (s *Server) releaseSlashSlot(ctx context.Context, convID int64) {
 // maybeAutoAfterActivityLocked is the T1/T3 evaluation at every activity
 // completion (drainRun finish, slash-query finish): urgency upgrades the
 // trigger and the delay, eligibility + coverage-honesty skips journal,
-// and an eligible window arms one idle timer. Concurrency coexistence
-// (live run, in-flight distill, live slash) and double-arming short-circuit
-// silently — those states re-visit this function on their own completion.
-// Caller holds s.mu.
+// and an eligible window arms one idle timer. An already-armed timer
+// short-circuits re-arming but NOT re-measurement: a window that crossed
+// the urgent threshold since the arm supersedes its idle timer (T3's
+// "fire without idle" has no expiry — the upgrade also keeps the
+// window_exceeds_prompt_budget corner reachable instead of waiting out a
+// doomed idle). Concurrency coexistence (live run, in-flight distill,
+// live slash) short-circuits silently — those states re-visit this
+// function on their own completion. Caller holds s.mu.
 func (s *Server) maybeAutoAfterActivityLocked(ctx context.Context, convID int64) {
 	prefs := s.resolveAutoPrefs()
 	if !prefs.enabled {
 		return
-	}
-	if s.autoPending[convID] != nil {
-		return // already armed — never double-schedule
 	}
 	if _, ok := s.distillKind[convID]; ok {
 		return // a fold is imminent; its marker is the record
@@ -280,6 +308,20 @@ func (s *Server) maybeAutoAfterActivityLocked(ctx context.Context, convID int64)
 	}
 	window := windowEvents(events)
 	stats := measureWindow(window)
+
+	if entry := s.autoPending[convID]; entry != nil {
+		if entry.trigger != distillTriggerIdle || stats.eligibleBytes < prefs.urgentBytes {
+			return // already armed, still sub-urgent — never double-schedule
+		}
+		// K3 F1: the window crossed urgent while an idle timer was armed.
+		// Supersede it (journaled) and fall through to the fresh evaluation
+		// below, which re-arms as trigger=urgent with delay 0.
+		entry.timer.Stop()
+		delete(s.autoPending, convID)
+		s.journalAuto(ctx, convID, "skipped", fmt.Sprintf(
+			"trigger=%s window_events=%d window_bytes=%d reason=superseded_by_urgent",
+			entry.trigger, stats.events, stats.eligibleBytes))
+	}
 
 	// Coverage honesty: an auto fold whose prompt would silently drop
 	// oldest events never fires — skip + journal + surface the block via
@@ -317,7 +359,9 @@ func (s *Server) maybeAutoAfterActivityLocked(ctx context.Context, convID int64)
 
 // armAutoLocked installs the pending timer and journals the scheduled row.
 // trigger stays fixed at arm time; the fire re-evaluates eligibility but
-// never reclassifies urgency. Caller holds s.mu.
+// never reclassifies urgency (mid-idle urgency crossings are handled by
+// supersession: disarm + journaled skip + fresh arm, not a retag). Caller
+// holds s.mu.
 func (s *Server) armAutoLocked(ctx context.Context, convID int64, trigger string, delay time.Duration, stats windowStats) {
 	if s.autoPending[convID] != nil {
 		return // belt: maybeAutoAfterActivityLocked already checked
@@ -472,6 +516,17 @@ func (s *Server) runAutoDistill(convID int64, trigger string) {
 		if wasCancelled {
 			return
 		}
+		if errors.Is(err, errAutoDistillSuperseded) {
+			// P1-2: the supersession journaled itself; nothing failed, so
+			// no failed row (backoff must not count it). Re-arm as a T1
+			// idle timer: the fresh fold renders the grown window, and the
+			// idle delay converges when the unattributed writer is still
+			// active (an immediate retry could supersede-loop).
+			s.mu.Lock()
+			s.armAutoLocked(ctx, convID, distillTriggerIdle, s.resolvedIdle(prefs), stats)
+			s.mu.Unlock()
+			return
+		}
 		log.Printf("auto-distill: conversation %d: %v", convID, err)
 		s.journalAuto(ctx, convID, "failed", fmt.Sprintf("trigger=%s error=%s", trigger, err))
 	}
@@ -558,6 +613,9 @@ func (s *Server) StartupAutoScan(ctx context.Context) error {
 			if err != nil {
 				log.Printf("auto-distill startup scan: list events for conversation %d: %v", c.ID, err)
 				continue
+			}
+			if len(events) == 0 {
+				continue // defensive: the freshness check below indexes the tail
 			}
 			window := windowEvents(events)
 			stats := measureWindow(window)

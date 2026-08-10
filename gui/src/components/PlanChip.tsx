@@ -58,7 +58,10 @@ export default function PlanChip({
     setBusyId(null);
   }, [items]);
 
-  if (visible.length === 0) return null;
+  // Render whenever a conversation exists — even with zero items, so the
+  // "+ add" popover stays reachable to seed the plan's first entry. Only a
+  // missing conversation hides the chip.
+  if (conversationId == null) return null;
 
   const run = async (action: TodoUpdateAction, todoId?: string, text?: string) => {
     if (conversationId == null) return;
@@ -115,9 +118,21 @@ export default function PlanChip({
                 <button
                   type="button"
                   className={`plan-check${it.status === "done" ? " checked" : ""}`}
-                  title={it.status === "done" ? "Reopen this item" : "Mark this item done"}
-                  aria-label={it.status === "done" ? `Reopen ${it.text}` : `Done ${it.text}`}
-                  disabled={busyId != null}
+                  title={
+                    it.status === "done"
+                      ? "Reopen this item"
+                      : it.status === "struck"
+                        ? "Struck items are closed — reopen via a new item"
+                        : "Mark this item done"
+                  }
+                  aria-label={
+                    it.status === "done"
+                      ? `Reopen ${it.text}`
+                      : it.status === "struck"
+                        ? `${it.text} (struck)`
+                        : `Done ${it.text}`
+                  }
+                  disabled={busyId != null || it.status === "struck"}
                   onClick={() => void run(it.status === "done" ? "reopen" : "done", it.id)}
                 >
                   {it.status === "done" && <Check size={11} />}

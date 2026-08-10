@@ -395,7 +395,9 @@ func (s *Server) generateAgentsMD() {
 	b.WriteString("`t2`, …): added items get their ids from the `## Current plan` section of\n")
 	b.WriteString("your NEXT prompt, and only journaled ids are valid — never invent one.\n")
 	b.WriteString("Open items survive epoch folds; done/struck items stay visible for the\n")
-	b.WriteString("rest of the current epoch. Read-only view of the plan: `odo todo`.\n\n")
+	b.WriteString("rest of the current epoch. Read-only view of the plan: `odo todo`.\n")
+	b.WriteString("Never quote this block inside explanations (docs, examples, echoes) —\n")
+	b.WriteString("the merge is mechanical; emit it only to change the plan.\n\n")
 	// Append project memory if it exists.
 	if data, err := os.ReadFile(filepath.Join(s.projectRoot, ".odo", "memory.md")); err == nil {
 		b.WriteString("## Memory\n\n")
@@ -1945,6 +1947,14 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		return Response{}, fmt.Errorf("distill: nothing journaled since the last distill")
 	}
 	winStats := measureWindow(window)
+	// Pin the marker window NOW, against the exact snapshot the prompt
+	// renders from (P1-2). INVARIANT: a marker's window is always exactly
+	// the rendered window — never a post-hoc re-list. The old re-list
+	// after the learner/gate tail claimed rows the note never saw (fold
+	// bookkeeping, and any user message a committed-phase send journaled
+	// mid-fold), and those rows then sat below the replay boundary,
+	// invisible to future prompts.
+	firstSeq, lastSeq := FoldWindow(events)
 
 	// M12 (D-todo): surviving open plan items ride the distill prompt as
 	// labeled authoritative state → the note's Open loops are seeded from
@@ -1965,7 +1975,15 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// and the trigger re-arms off the send's own activity.
 	if trigger != distillTriggerManual {
 		s.mu.Lock()
-		cancelled := s.autoInFlight[c.ID] != nil && s.autoInFlight[c.ID].cancelled
+		ifl := s.autoInFlight[c.ID]
+		cancelled := ifl != nil && ifl.cancelled
+		if !cancelled && ifl != nil {
+			// P1-2: commit the fold. Past this point the gate stops
+			// cancelling (inputPassed records the pass instead), because a
+			// cancelled_by_send row for a fold that then lands is a
+			// journal lie — the cancel below is a no-op by design.
+			ifl.committed = true
+		}
 		s.mu.Unlock()
 		if cancelled {
 			return Response{}, errAutoDistillCancelled
@@ -2055,6 +2073,31 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		}
 	}
 
+	// P1-2 committed-phase supersession probe (auto triggers only): the
+	// pinned window above keeps every marker honest, but journal growth
+	// past lastSeq that this fold did not author — its own mid-fold rows
+	// are contradiction retracts, skill_gate discards, and the
+	// memory_propose batch — with no post-commit input through the gate
+	// means the conversation moved under the fold unattributed. Abandon:
+	// no marker, no epoch move; the orphan note is deleted (the journal
+	// never links it), the skip is journaled, and runAutoDistill re-arms
+	// a fresh fold that renders the grown window. A post-commit
+	// send/steer/slash (inputPassed) is attributed: the fold lands and
+	// those rows stay above the boundary for the next epoch.
+	if trigger != distillTriggerManual {
+		probe, perr := s.store.ListEvents(ctx, c.ID, 0)
+		s.mu.Lock()
+		inputPassed := s.autoInFlight[c.ID] != nil && s.autoInFlight[c.ID].inputPassed
+		s.mu.Unlock()
+		if perr == nil && !inputPassed && unownedFoldGrowth(probe, lastSeq) {
+			_ = os.Remove(wikiPath) // orphan note: never marker-linked, never kept
+			s.journalAuto(ctx, c.ID, "skipped", fmt.Sprintf(
+				"trigger=%s window_events=%d window_bytes=%d reason=superseded_by_activity",
+				trigger, winStats.events, winStats.eligibleBytes))
+			return Response{}, errAutoDistillSuperseded
+		}
+	}
+
 	newEpoch, err := s.store.IncrementEpoch(ctx, c.ID)
 	if err != nil {
 		return Response{}, err
@@ -2062,16 +2105,9 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// Fold provenance (epoch-fold root fix): the marker records the folded
 	// window [first_seq, last_seq] explicitly instead of letting consumers
 	// reverse-derive it from journal scans, plus the note's content hash so
-	// the fold is falsifiable against the artifact on disk. Re-list events
-	// so the window is exact no matter which sub-passes (contradictions,
-	// learner, gate) journaled since the distill started; a list failure
-	// degrades to the events snapshot from distill start, never to a
-	// failed distill.
-	foldEvents, lerr := s.store.ListEvents(ctx, c.ID, 0)
-	if lerr != nil {
-		foldEvents = events
-	}
-	firstSeq, lastSeq := FoldWindow(foldEvents)
+	// the fold is falsifiable against the artifact on disk. The window is
+	// the render-time pin from above (the INVARIANT there) — rows the fold
+	// itself journaled after the render sit ABOVE it for the next epoch.
 	distillEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":         "distill",
 		"epoch":          newEpoch,
@@ -2109,26 +2145,59 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: len(batchProposals)}, nil
 }
 
+// isDistillMarkerEvent reports whether ev is a review_action{action:
+// "distill"} fold marker.
+func isDistillMarkerEvent(ev store.Event) bool {
+	if ev.Type != store.EventReviewAction {
+		return false
+	}
+	var p struct {
+		Action string `json:"action"`
+	}
+	return json.Unmarshal(ev.Payload, &p) == nil && p.Action == "distill"
+}
+
 // FoldWindow computes the journal window [firstSeq, lastSeq] that a new
-// distill marker folds: everything after the previous distill marker
-// through the newest journaled event. events is seq-ascending and does NOT
-// yet include the marker about to be appended. An empty log (or nothing
-// journaled since the last marker) yields lastSeq < firstSeq — consumers
-// treat that as an empty window. Exported: the rehydration CLI derives
-// legacy markers' windows with the same arithmetic (single convention).
+// distill marker folds: the first content row past the newest fold
+// boundary through the newest journaled event. events is seq-ascending and
+// does NOT yet include the marker about to be appended. The boundary comes
+// from the newest marker's explicit last_seq payload when present (the
+// pinned schema — rows in (last_seq, marker_seq) the fold did NOT render
+// stay visible), falling back to the marker's own seq for pre-schema
+// markers (the legacy implicit contract). Marker rows themselves are never
+// window content: firstSeq walks past any marker sitting inside the
+// boundary gap (a pinned marker always lands after its own last_seq, so a
+// fold's bookkeeping and committed-phase inputs are covered by the NEXT
+// note while the marker row belongs to neither window). An empty log (or
+// nothing journaled since the last marker) yields lastSeq < firstSeq —
+// consumers treat that as an empty window. Exported: the rehydration CLI
+// derives legacy markers' windows with the same arithmetic (single
+// convention).
 func FoldWindow(events []store.Event) (firstSeq, lastSeq int) {
-	firstSeq = 1
+	boundary := 0 // folded: rows with seq <= boundary are out of view
 	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != store.EventReviewAction {
+		if !isDistillMarkerEvent(events[i]) {
 			continue
 		}
 		var p struct {
-			Action string `json:"action"`
+			LastSeq *int `json:"last_seq"`
 		}
-		if json.Unmarshal(events[i].Payload, &p) == nil && p.Action == "distill" {
-			firstSeq = events[i].Seq + 1
-			break
+		if json.Unmarshal(events[i].Payload, &p) == nil && p.LastSeq != nil {
+			boundary = *p.LastSeq // pinned schema
+		} else {
+			boundary = events[i].Seq // legacy implicit contract
 		}
+		break
+	}
+	firstSeq = boundary + 1
+	for _, ev := range events {
+		if ev.Seq < firstSeq {
+			continue
+		}
+		if !isDistillMarkerEvent(ev) {
+			break // first content row
+		}
+		firstSeq = ev.Seq + 1
 	}
 	if len(events) > 0 {
 		lastSeq = events[len(events)-1].Seq
@@ -2137,12 +2206,60 @@ func FoldWindow(events []store.Event) (firstSeq, lastSeq int) {
 }
 
 // windowEvents returns the events the next distill note should cover: the
-// window FoldWindow computes, sliced out of the seq-ascending list. The
-// result shares the input's backing array (callers render read-only).
+// window FoldWindow computes, sliced out of the seq-ascending list with
+// fold-marker rows filtered out — markers are bookkeeping, never note
+// content (a pinned marker whose own seq sits inside its boundary gap must
+// not render into the next fold's prompt, keeping the invariant: a
+// marker's window is always exactly the rendered window).
 func windowEvents(events []store.Event) []store.Event {
 	firstSeq, _ := FoldWindow(events)
 	i := sort.Search(len(events), func(i int) bool { return events[i].Seq >= firstSeq })
-	return events[i:]
+	tail := events[i:]
+	out := make([]store.Event, 0, len(tail))
+	for _, ev := range tail {
+		if isDistillMarkerEvent(ev) {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// unownedFoldGrowth reports whether the journal grew past a fold's pinned
+// window end with rows the fold itself could not have authored — the only
+// rows distillCore journals between render and marker are contradiction
+// retracts (memory_update{layer:note, cause:retract}), skill_gate discards,
+// the memory_propose batch, and their journal-failure fallbacks. Anything
+// else (a user message, a slash answer, a diff accept, a todo merge, …)
+// is unattributed growth: the conversation moved under the fold.
+func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
+	for i := len(events) - 1; i >= 0 && events[i].Seq > lastSeq; i-- {
+		ev := events[i]
+		switch ev.Type {
+		case store.EventReviewAction:
+			var p struct {
+				Action string `json:"action"`
+			}
+			if jsonUnmarshalOK(ev.Payload, &p) && (p.Action == "skill_gate" || p.Action == "memory_propose") {
+				continue
+			}
+			return true
+		case store.EventMemoryUpdate:
+			var p struct {
+				Layer string `json:"layer"`
+				Cause string `json:"cause"`
+			}
+			if jsonUnmarshalOK(ev.Payload, &p) && ((p.Layer == "note" && p.Cause == "retract") ||
+				(p.Layer == "skills" && p.Cause == "gate_journal_failed") ||
+				(p.Layer == "learner" && p.Cause == "failed")) {
+				continue
+			}
+			return true
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // journalDistillLedger appends the distill's section to .odo/ledger.md from

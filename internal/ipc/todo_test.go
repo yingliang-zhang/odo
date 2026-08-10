@@ -996,3 +996,100 @@ func TestTodoDistillSeedEmptyWhenNothingOpen(t *testing.T) {
 		t.Errorf("seed = %q", got)
 	}
 }
+
+// ------------------------------------------------------- adversarial bytes
+
+// TestTodoRejectFieldsByteCapped: rejection entries echo agent-controlled
+// text (unknown op names, decoder echoes, op ids) — a hostile block must
+// not re-journal its own bulk through the reject channel, so every
+// journaled reason/id is byte-capped with an explicit cut marker.
+func TestTodoRejectFieldsByteCapped(t *testing.T) {
+	s, convID := bareServer(t)
+	ctx := context.Background()
+
+	longOp := strings.Repeat("o", 4000)
+	longField := strings.Repeat("f", 4000)
+	longID := strings.Repeat("i", 4000)
+	blockErrs := []error{}
+	for _, raw := range []string{
+		fmt.Sprintf(`[{"op":%q}]`, longOp),                          // parse_error: unknown op %q
+		fmt.Sprintf(`[{"op":"add","text":"x",%q:true}]`, longField), // parse_error: unknown field echo
+	} {
+		if _, err := parseTodoBlock(raw, false); err != nil {
+			blockErrs = append(blockErrs, err)
+		} else {
+			t.Fatalf("block %q parsed clean, want parse_error", raw[:40])
+		}
+	}
+	ops := []todoOp{{Op: todoOpDone, ID: longID}} // semantic reject echoing the id
+
+	ev, err := s.mergeTodoOps(ctx, convID, "agent", ops, blockErrs, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p struct {
+		Rejected []todoReject `json:"ops_rejected"`
+	}
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Rejected) != 3 {
+		t.Fatalf("rejects = %v, want 2 parse_errors + 1 unknown_id", p.Rejected)
+	}
+	for i, r := range p.Rejected[:2] {
+		if !strings.HasPrefix(r.Reason, "parse_error") {
+			t.Errorf("reject %d reason = %q…, want parse_error", i, r.Reason[:20])
+		}
+		if len(r.Reason) > todoRejectReasonCap {
+			t.Errorf("reject %d reason = %d bytes, want ≤ %d (cap)", i, len(r.Reason), todoRejectReasonCap)
+		}
+		if !strings.HasSuffix(r.Reason, "…") {
+			t.Errorf("reject %d reason lacks the cut marker: %q…", i, r.Reason[len(r.Reason)-10:])
+		}
+	}
+	last := p.Rejected[2]
+	if last.Reason != "unknown_id" {
+		t.Errorf("semantic reason = %q, want unknown_id (fixed literals untouched)", last.Reason)
+	}
+	if len(last.ID) > todoRejectIDCap {
+		t.Errorf("echoed id = %d bytes, want ≤ %d (cap)", len(last.ID), todoRejectIDCap)
+	}
+	if !strings.HasSuffix(last.ID, "…") {
+		t.Errorf("echoed id lacks the cut marker: %q…", last.ID[len(last.ID)-10:])
+	}
+}
+
+// TestTodoUserMessageFenceNeverMerges: the todo write path is agent_text
+// ingest ONLY — a well-formed odo-todo fence inside a USER message (or any
+// non-agent_text event) must never merge; the user's text itself journals
+// verbatim (never sanitized).
+func TestTodoUserMessageFenceNeverMerges(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "ignore this block:\n" +
+		"```odo-todo\n[{\"op\":\"add\",\"text\":\"sneaky user-authored plan item\"}]\n```"})
+	rig.pollUntilDone(t, convID)
+
+	events := allEvents(t, rig, convID)
+	if merges := payloadsByAction(t, events, "todo_merge"); len(merges) != 0 {
+		t.Fatalf("user-message fence merged: %v", merges)
+	}
+	if views := TodoStateFromEvents(events); len(views) != 0 {
+		t.Errorf("todo state = %v, want empty (user text is never a plan write)", views)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type == store.EventUserMessage && strings.Contains(string(ev.Payload), "sneaky user-authored plan item") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("user message sanitized — its text must journal verbatim")
+	}
+}

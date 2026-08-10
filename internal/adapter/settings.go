@@ -22,7 +22,8 @@ type Settings struct {
 	ReviewModels         string `json:"review_models"` // comma-separated model@provider entries
 	// M12: auto-distill settings (default FLIPPED to "on_idle"; explicit
 	// "never" is preserved). M10's auto_curate_after_distill is removed —
-	// auto-curate is daemon-conditional now (notes ≥ threshold OR age ≥ max).
+	// auto-curate is daemon-conditional now (notes ≥ threshold OR age ≥ max)
+	// and shares this switch: "never" disables auto-curate too (fail-closed).
 	AutoDistill            string `json:"auto_distill"`              // "never" | "on_idle"
 	AutoDistillIdleSeconds string `json:"auto_distill_idle_seconds"` // e.g. "120"
 	// M11 P3: parallelism cap (default 4)

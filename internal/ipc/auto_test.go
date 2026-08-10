@@ -121,6 +121,42 @@ func armPendingNow(srv *Server, convID int64, trigger string) {
 	srv.mu.Unlock()
 }
 
+// autoSlowLearnerWrapper sleeps inside the LEARNER one-shot instead: the
+// fold parks in its COMMITTED phase (post-checkpoint, pre-marker) for ~3s,
+// so P1-2 tests can drive sends / synthetic journal growth at a
+// deterministic point of the fold. The distill one-shot and agent runs
+// stay fast.
+const autoSlowLearnerWrapper = `#!/bin/sh
+prompt_file="$2"
+output_file="$3"
+if grep -q "memory learner pass" "$prompt_file"; then
+  sleep 3
+  cat "$ODO_LEARNER_OUTPUT" > "$output_file"
+  exit 0
+fi
+if grep -q "Summarize the key decisions" "$prompt_file"; then
+  cat "$ODO_DISTILL_OUTPUT" > "$output_file"
+  exit 0
+fi
+sleep 1
+cp "$prompt_file" hello.txt
+printf 'Created hello.txt as requested.\n' > "$output_file"
+exit 0
+`
+
+// waitCommitted blocks until the conversation's in-flight auto fold has
+// passed the pre-note checkpoint (committed=true — the start of the slow
+// learner window in the P1-2 tests).
+func waitCommitted(t *testing.T, srv *Server, convID int64) {
+	t.Helper()
+	waitForCond(t, 10*time.Second, "fold committed (post-checkpoint)", func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		ifl := srv.autoInFlight[convID]
+		return ifl != nil && ifl.committed
+	})
+}
+
 // autoSlowDistillWrapper sleeps inside the distill one-shot, widening the
 // cancel-before-note / slash-gate race windows; agent runs stay 1s.
 const autoSlowDistillWrapper = `#!/bin/sh
@@ -1125,4 +1161,238 @@ func projectIDOf(t *testing.T, rig *testRig, convID int64) int64 {
 		t.Fatalf("get workstream: %v", err)
 	}
 	return w.ProjectID
+}
+
+// TestAutoUrgentUpgradeSupersedesIdle (P1-1, K3 F1): a window armed under
+// the urgent threshold that later crosses it supersedes its idle timer —
+// journaled skipped{superseded_by_urgent} + a fresh scheduled{urgent} with
+// eta ≈ 0 (T3's "fire without idle" does not expire at arm time).
+func TestAutoUrgentUpgradeSupersedesIdle(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Note\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0) // prefs idle (120s): the first arm cannot fire mid-test
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	evaluate := func() {
+		rig.server.mu.Lock()
+		rig.server.maybeAutoAfterActivityLocked(context.Background(), convID)
+		rig.server.mu.Unlock()
+	}
+
+	journalWindow(t, rig, convID, 6, 16384) // ≈99KB rendered — eligible, sub-urgent
+	evaluate()
+	entry := pendingEntry(rig.server, convID)
+	if entry == nil || entry.trigger != distillTriggerIdle {
+		t.Fatalf("first arm = %+v, want an idle entry", entry)
+	}
+	if eta := time.Until(entry.fireAt); eta < 100*time.Second || eta > 125*time.Second {
+		t.Fatalf("idle eta = %s, want ≈120s (prefs default)", eta.Round(time.Second))
+	}
+
+	journalWindow(t, rig, convID, 3, 14000) // +≈41KB → ≈140KB ≥ 128KB urgent
+	evaluate()
+
+	// The upgraded entry is read FIRST — the 0-delay timer claims it on its
+	// own goroutine almost immediately (same pattern as T3's test).
+	entry = pendingEntry(rig.server, convID)
+	if entry == nil || entry.trigger != distillTriggerUrgent {
+		t.Fatalf("upgraded entry = %+v, want an urgent entry", entry)
+	}
+	if eta := time.Until(entry.fireAt); eta > 2*time.Second {
+		t.Errorf("urgent eta = %s, want immediate (no idle)", eta)
+	}
+
+	// Synchronously journaled at the upgrade: one idle arm + one urgent arm.
+	rows := autoRows(t, rig, convID, "scheduled")
+	if len(rows) != 2 {
+		t.Fatalf("scheduled rows = %d, want 2 (idle arm + urgent upgrade): %v", len(rows), rows)
+	}
+	if d := rows[0]["detail"].(string); !strings.Contains(d, "trigger=idle") {
+		t.Errorf("first scheduled detail = %q, want trigger=idle", d)
+	}
+	if d := rows[1]["detail"].(string); !strings.Contains(d, "trigger=urgent") {
+		t.Errorf("second scheduled detail = %q, want trigger=urgent", d)
+	}
+	skips := autoRows(t, rig, convID, "skipped")
+	if len(skips) != 1 || !strings.Contains(skips[0]["detail"].(string), "superseded_by_urgent") {
+		t.Fatalf("skipped rows = %v, want exactly one superseded_by_urgent", skips)
+	}
+
+	// The stopped idle timer must not fire: exactly one fire, urgent.
+	waitForCond(t, 15*time.Second, "urgent distill marker", func() bool {
+		for _, m := range payloadsByAction(t, allEvents(t, rig, convID), "distill") {
+			if m["trigger"] == distillTriggerUrgent {
+				return true
+			}
+		}
+		return false
+	})
+	if rows := autoRows(t, rig, convID, "fired"); len(rows) != 1 {
+		t.Fatalf("fired rows = %v, want exactly 1 (the superseded idle timer must be stopped)", rows)
+	}
+}
+
+// TestAutoCommittedPhaseSendFoldsPinnedWindow (P1-2, K3 F2 + DSF P1): a
+// send arriving AFTER the pre-note checkpoint does not cancel and journals
+// NO cancelled_by_send row — the fold completes, its marker claims exactly
+// the rendered window [first_seq, last_seq] pinned at prompt build, and the
+// send's user message sits ABOVE that boundary: visible in the next epoch's
+// window and replay instead of folded-away-unseen.
+func TestAutoCommittedPhaseSendFoldsPinnedWindow(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, autoSlowLearnerWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Pinned fold\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	journalWindow(t, rig, convID, 6, 3000)
+
+	armPendingNow(rig.server, convID, distillTriggerIdle)
+	done := make(chan struct{})
+	go func() {
+		rig.server.runAutoDistill(convID, distillTriggerIdle)
+		close(done)
+	}()
+	// The fold commits at the checkpoint; the learner one-shot then sleeps
+	// 3s, holding the fold open in its committed phase for the send.
+	waitCommitted(t, rig.server, convID)
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"}) // must not refuse
+
+	var marker map[string]interface{}
+	waitForCond(t, 15*time.Second, "committed-phase distill marker", func() bool {
+		for _, m := range payloadsByAction(t, allEvents(t, rig, convID), "distill") {
+			marker = m
+		}
+		return marker != nil
+	})
+	<-done
+
+	if rows := autoRows(t, rig, convID, "cancelled_by_send"); len(rows) != 0 {
+		t.Fatalf("cancelled_by_send rows = %v, want zero (post-checkpoint gate must not cancel)", rows)
+	}
+	events := allEvents(t, rig, convID)
+	var sendSeq int
+	for _, ev := range events {
+		if ev.Type == store.EventUserMessage && strings.Contains(string(ev.Payload), "Create hello.txt") {
+			sendSeq = ev.Seq
+		}
+	}
+	if sendSeq == 0 {
+		t.Fatal("the send's user_message never journaled")
+	}
+	// Pinned to the render snapshot: the pre-fold journal ended with the
+	// scheduler's `fired` row, immediately before the send's message.
+	if marker["first_seq"] != float64(1) {
+		t.Errorf("marker first_seq = %v, want 1 (no prior fold)", marker["first_seq"])
+	}
+	if marker["last_seq"] != float64(sendSeq-1) {
+		t.Errorf("marker last_seq = %v, want %d (render-time pin — the message must NOT be folded)",
+			marker["last_seq"], sendSeq-1)
+	}
+	// The message is above the fold boundary and stays visible: the replay
+	// derivation and the next epoch's render window both include it.
+	if b := foldBoundary(events); b != sendSeq-1 {
+		t.Errorf("fold boundary = %d, want %d (payload last_seq, not the marker's own seq)", b, sendSeq-1)
+	}
+	visible := false
+	for _, ev := range windowEvents(events) {
+		if ev.Seq == sendSeq {
+			visible = true
+		}
+		if isDistillMarkerEvent(ev) {
+			t.Errorf("marker row seq %d leaked into the next epoch's render window", ev.Seq)
+		}
+	}
+	if !visible {
+		t.Error("the send's message is invisible to the next epoch (folded but never rendered)")
+	}
+	if c, err := rig.store.GetConversation(context.Background(), convID); err != nil || c.Epoch != 2 {
+		t.Errorf("epoch = %d, want 2 (the committed fold must complete)", c.Epoch)
+	}
+	// The send proceeded normally — its run drained to agent_done (plain
+	// poll: the run typically ENDED during the slow learner, so the
+	// agent_running precondition of pollUntilDone does not hold here).
+	polled := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0})
+	sawDone := false
+	for _, ev := range polled.Events {
+		if ev.Type == store.EventAgentDone {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Error("the send's run never completed (no agent_done)")
+	}
+}
+
+// TestAutoCommittedPhaseSupersededByActivity (P1-2): journal growth past
+// the rendered window the fold did NOT author — and with no post-commit
+// input through the gate — abandons the fold instead of landing a marker:
+// skipped{superseded_by_activity} journaled once, no marker, no epoch
+// move, the orphan note deleted, and an idle timer re-armed for a fresh
+// fold over the grown window.
+func TestAutoCommittedPhaseSupersededByActivity(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, autoSlowLearnerWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Should never be linked\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	journalWindow(t, rig, convID, 6, 3000)
+
+	armPendingNow(rig.server, convID, distillTriggerIdle)
+	done := make(chan struct{})
+	go func() {
+		rig.server.runAutoDistill(convID, distillTriggerIdle)
+		close(done)
+	}()
+	waitCommitted(t, rig.server, convID)
+	// Unattributed growth: a row appended without passing the send gate
+	// (the gate flips inputPassed; this write simulates every other
+	// journaled writer — a todo merge, a diff accept, …).
+	if _, err := rig.store.AppendEvent(context.Background(), convID, "user_message",
+		mustJSON(map[string]interface{}{"text": "concurrent write"})); err != nil {
+		t.Fatal(err)
+	}
+
+	<-done
+	skips := autoRows(t, rig, convID, "skipped")
+	count := 0
+	for _, row := range skips {
+		if strings.Contains(row["detail"].(string), "superseded_by_activity") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("superseded_by_activity rows = %d, want exactly 1 (skips: %v)", count, skips)
+	}
+	if markers := payloadsByAction(t, allEvents(t, rig, convID), "distill"); len(markers) != 0 {
+		t.Errorf("superseded fold left a marker: %v", markers)
+	}
+	if _, err := os.Stat(filepath.Join(root, "wiki", "main-epoch-1.md")); !os.IsNotExist(err) {
+		t.Error("superseded fold kept the orphan note (must be deleted — the journal never links it)")
+	}
+	if c, err := rig.store.GetConversation(context.Background(), convID); err != nil || c.Epoch != 1 {
+		t.Errorf("epoch = %d, want 1 (superseded fold must not move the epoch)", c.Epoch)
+	}
+	if rows := autoRows(t, rig, convID, "failed"); len(rows) != 0 {
+		t.Errorf("supersession journaled as failure (poisons backoff): %v", rows)
+	}
+	entry := pendingEntry(rig.server, convID)
+	if entry == nil || entry.trigger != distillTriggerIdle {
+		t.Fatalf("re-arm = %+v, want an idle pending entry (fresh fold over the grown window)", entry)
+	}
+	if eta := time.Until(entry.fireAt); eta < 100*time.Second || eta > 125*time.Second {
+		t.Errorf("re-arm eta = %s, want ≈idle 120s (never an immediate supersede-loop)", eta.Round(time.Second))
+	}
 }

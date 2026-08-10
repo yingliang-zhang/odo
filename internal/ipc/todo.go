@@ -71,6 +71,13 @@ const (
 	// rejects_truncated count fields the rest (an adversarial block must
 	// not bloat the journal).
 	todoRejectsMax = 50
+	// todoRejectReasonCap bounds one journaled reject reason (bytes);
+	// todoRejectIDCap bounds the echoed id. parse_error strings embed
+	// agent-controlled text (unknown op names, decoder echoes) and op ids
+	// echo verbatim — a hostile block must not re-journal its own bulk
+	// through the reject channel.
+	todoRejectReasonCap = 200
+	todoRejectIDCap     = 64
 	// todoStaleFolds is the untouched-fold count that marks an open item
 	// stale (synthetic `~` marker; never auto-struck).
 	todoStaleFolds = 3
@@ -654,6 +661,19 @@ func snapshotForJournal(items []todoEntry, boundary int) []todoEntry {
 	return out
 }
 
+// capTodoRejectField truncates a journaled reject field to at most cap
+// bytes total, marking the cut with an ellipsis (rune-boundary safe).
+func capTodoRejectField(s string, cap int) string {
+	if len(s) <= cap {
+		return s
+	}
+	body := cap - len("…")
+	for body > 0 && (s[body]&0xC0) == 0x80 {
+		body-- // don't split a UTF-8 continuation byte
+	}
+	return s[:body] + "…"
+}
+
 // mergeTodoOps runs one merge: load the journaled state, apply ops,
 // journal the full new snapshot. Returns the journaled event.
 func (s *Server) mergeTodoOps(ctx context.Context, conversationID int64, origin string, ops []todoOp, blockErrs []error, seq int) (store.Event, error) {
@@ -684,6 +704,14 @@ func (s *Server) journalTodoMerge(ctx context.Context, conversationID int64, ori
 		rejects = append(rejects, todoReject{Reason: berr.Error()})
 	}
 	applied := st.applyTodoOps(ops, seq, &rejects)
+
+	// Byte-cap every journaled reject field BEFORE the count cap: reasons
+	// embed decoder echoes / unknown op names and ids echo verbatim (all
+	// agent-controlled) — the reject channel must stay bulk-proof.
+	for i := range rejects {
+		rejects[i].Reason = capTodoRejectField(rejects[i].Reason, todoRejectReasonCap)
+		rejects[i].ID = capTodoRejectField(rejects[i].ID, todoRejectIDCap)
+	}
 
 	truncated := 0
 	if len(rejects) > todoRejectsMax {

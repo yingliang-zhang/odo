@@ -412,6 +412,67 @@ func TestWindowEvents(t *testing.T) {
 	}
 }
 
+// TestFoldWindowPinnedSchema (P1-2): a marker carrying last_seq (the
+// pinned schema) bounds the fold at last_seq, NOT at the marker's own seq
+// — rows in (last_seq, marker_seq) the fold never rendered stay visible,
+// while marker rows themselves are never window content. Legacy
+// payload-less markers keep the marker-seq boundary.
+func TestFoldWindowPinnedSchema(t *testing.T) {
+	pinned := func(seq, last int) store.Event {
+		return store.Event{Seq: seq, Type: store.EventReviewAction,
+			Payload: json.RawMessage(fmt.Sprintf(`{"action":"distill","last_seq":%d}`, last))}
+	}
+	legacy := func(seq int) store.Event {
+		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"distill"}`)}
+	}
+	msg := func(seq int) store.Event {
+		return store.Event{Seq: seq, Type: store.EventUserMessage, Payload: json.RawMessage(`{"text":"hi"}`)}
+	}
+	windowSeqs := func(events []store.Event) []int {
+		var out []int
+		for _, ev := range windowEvents(events) {
+			out = append(out, ev.Seq)
+		}
+		return out
+	}
+
+	// Committed-phase send journaled at 5 after the render ended at 4: the
+	// pinned marker claims [1,4]; row 5 stays in the next window — the
+	// marker row 6 does not.
+	events := []store.Event{msg(1), msg(2), msg(3), msg(4), msg(5), pinned(6, 4), msg(7)}
+	if first, last := FoldWindow(events); first != 5 || last != 7 {
+		t.Errorf("FoldWindow = (%d, %d), want (5, 7)", first, last)
+	}
+	if got := windowSeqs(events); fmt.Sprint(got) != "[5 7]" {
+		t.Errorf("windowEvents = %v, want [5 7] (marker row filtered out)", got)
+	}
+
+	// No post-render growth: the next window starts right after the marker
+	// row — the pinned and legacy arithmetic agree.
+	events = []store.Event{msg(1), msg(2), msg(3), pinned(4, 3), msg(5)}
+	if first, last := FoldWindow(events); first != 5 || last != 5 {
+		t.Errorf("FoldWindow = (%d, %d), want (5, 5)", first, last)
+	}
+	if got := windowSeqs(events); fmt.Sprint(got) != "[5]" {
+		t.Errorf("windowEvents = %v, want [5]", got)
+	}
+
+	// Trailing pinned marker: empty window (lastSeq < firstSeq).
+	events = []store.Event{msg(1), pinned(2, 1)}
+	if first, last := FoldWindow(events); first != 3 || last != 2 {
+		t.Errorf("FoldWindow = (%d, %d), want (3, 2) — the empty-window shape", first, last)
+	}
+	if got := windowSeqs(events); len(got) != 0 {
+		t.Errorf("windowEvents = %v, want empty", got)
+	}
+
+	// Legacy marker: the boundary stays the marker's own seq.
+	events = []store.Event{msg(1), legacy(2), msg(3)}
+	if first, last := FoldWindow(events); first != 3 || last != 3 {
+		t.Errorf("FoldWindow = (%d, %d), want (3, 3) for a legacy marker", first, last)
+	}
+}
+
 // TestCapEvents pins the budget walk: newest events survive, the boundary
 // event is dropped whole (never half-rendered), and a single oversized
 // event is still kept — dropping it would distill nothing.
