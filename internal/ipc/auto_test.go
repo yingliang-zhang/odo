@@ -1396,3 +1396,116 @@ func TestAutoCommittedPhaseSupersededByActivity(t *testing.T) {
 		t.Errorf("re-arm eta = %s, want ≈idle 120s (never an immediate supersede-loop)", eta.Round(time.Second))
 	}
 }
+
+// TestAutoCommittedPhaseBookkeepingKeepsFold (GLM+DSF): metadata
+// bookkeeping landing in the committed phase — a /pin row and an
+// auto-curate pass (review_action{action:"curate"} +
+// memory_update{layer:"curator"|"index"}) — is attributed growth, so the
+// fold COMPLETES: no supersede skip, marker pinned at the render-time
+// last_seq, the bookkeeping rows above the boundary (visible, unclaimed),
+// and the epoch moves.
+func TestAutoCommittedPhaseBookkeepingKeepsFold(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, autoSlowLearnerWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Fold with mid-fold bookkeeping\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	journalWindow(t, rig, convID, 6, 3000)
+
+	armPendingNow(rig.server, convID, distillTriggerIdle)
+	done := make(chan struct{})
+	go func() {
+		rig.server.runAutoDistill(convID, distillTriggerIdle)
+		close(done)
+	}()
+	waitCommitted(t, rig.server, convID)
+	// The render-time pin: the last journaled row when the fold committed
+	// (the scheduler's `fired` row) — every bookkeeping row below must land
+	// ABOVE the marker's last_seq.
+	committed := allEvents(t, rig, convID)
+	renderPin := committed[len(committed)-1].Seq
+
+	// A /pin row (memory_update{layer:"pins"}) …
+	if _, err := rig.store.AppendEvent(context.Background(), convID, store.EventMemoryUpdate,
+		mustJSON(map[string]interface{}{"layer": "pins", "cause": "pin", "detail": "Never deploy on Fridays."})); err != nil {
+		t.Fatal(err)
+	}
+	// … and a full auto-curate pass (marker + curator/index bookkeeping).
+	journalMarker(t, rig, convID, map[string]interface{}{"action": "curate", "trigger": "auto_notes", "topics": 0})
+	for _, row := range []map[string]interface{}{
+		{"layer": "curator", "cause": "gate_failed", "detail": "dead citation(s): wiki/ghost.md"},
+		{"layer": "index", "cause": "curate", "before_sha": "a", "after_sha": "b"},
+	} {
+		if _, err := rig.store.AppendEvent(context.Background(), convID, store.EventMemoryUpdate, mustJSON(row)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var marker map[string]interface{}
+	waitForCond(t, 15*time.Second, "distill marker with mid-fold bookkeeping", func() bool {
+		for _, m := range payloadsByAction(t, allEvents(t, rig, convID), "distill") {
+			marker = m
+		}
+		return marker != nil
+	})
+	<-done
+
+	for _, row := range autoRows(t, rig, convID, "skipped") {
+		if strings.Contains(row["detail"].(string), "superseded_by_activity") {
+			t.Fatalf("bookkeeping in the committed phase superseded the fold: %v", row)
+		}
+	}
+	if marker["last_seq"] != float64(renderPin) {
+		t.Errorf("marker last_seq = %v, want %d (render-time pin — bookkeeping rows stay above the boundary)",
+			marker["last_seq"], renderPin)
+	}
+	if b := foldBoundary(allEvents(t, rig, convID)); b != renderPin {
+		t.Errorf("fold boundary = %d, want %d", b, renderPin)
+	}
+	if c, err := rig.store.GetConversation(context.Background(), convID); err != nil || c.Epoch != 2 {
+		t.Errorf("epoch = %d, want 2 (the committed fold must complete)", c.Epoch)
+	}
+}
+
+// TestAutoStaleTimerCallbackCannotClaimRearm (K3): a timer that fires
+// after its entry was superseded (stopped + re-armed fresh, the urgent
+// upgrade shape) must exit silently — claiming the fresh entry would run
+// it early with the stale trigger label and orphan the fresh timer.
+func TestAutoStaleTimerCallbackCannotClaimRearm(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	stats := windowStats{events: 6, eligibleBytes: 20000}
+	rig.server.mu.Lock()
+	rig.server.armAutoLocked(context.Background(), convID, distillTriggerIdle, time.Millisecond, stats)
+	stale := rig.server.autoPending[convID]
+	// Supersede: stop + replace BEFORE the stale callback can acquire s.mu
+	// (the test holds it through the re-arm, so the callback — fired or
+	// about to fire — parks in Lock until the swap is complete).
+	stale.timer.Stop()
+	delete(rig.server.autoPending, convID)
+	rig.server.armAutoLocked(context.Background(), convID, distillTriggerUrgent, time.Hour, stats)
+	fresh := rig.server.autoPending[convID]
+	rig.server.mu.Unlock()
+	defer fresh.timer.Stop()
+	if stale == nil || fresh == nil || stale == fresh {
+		t.Fatalf("arm->supersede->re-arm left entries stale=%p fresh=%p, want two distinct", stale, fresh)
+	}
+
+	// The 1ms stale timer fires well inside this window; claim-by-identity
+	// must leave the fresh urgent entry installed and unclaimed.
+	time.Sleep(300 * time.Millisecond)
+	if got := pendingEntry(rig.server, convID); got != fresh {
+		t.Fatalf("pending entry = %+v, want the re-armed urgent entry %p (stale timer claimed it)", got, fresh)
+	}
+}

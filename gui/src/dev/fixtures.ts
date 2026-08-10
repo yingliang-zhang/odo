@@ -142,6 +142,11 @@ export const events: OdoEvent[] = [
   // the journaled window. Post-fold activity stays visible.
   ev("user_message", { text: "Patch the daemon launch path" }, 3),
   ev("agent_done", { summary: "Daemon launch path patched" }, 3),
+  // Committed-phase shape (K3): this message journaled while the fold's
+  // learner pass slept — above the pinned last_seq but BELOW the marker in
+  // journal order. It must stay visible above the fold chip (the fold
+  // never rendered it).
+  ev("user_message", { text: "Wait — also handle the stale socket" }, 3),
   ev("review_action", {
     action: "distill",
     epoch: 2,

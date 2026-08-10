@@ -33,6 +33,12 @@ test("partial fold: chip announces count + note, Expand reveals and Collapse re-
   await expect(page.locator(".bubble-user", { hasText: "socket perms" })).toBeVisible();
   await expect(page.locator("text=Patch the daemon launch path")).toHaveCount(0);
 
+  // The committed-phase row sits BELOW the marker in journal order but
+  // above its pinned last_seq — it stays visible above the chip.
+  await expect(page.locator(".bubble-user", { hasText: "stale socket" })).toBeVisible();
+  // … while the pinned marker itself stays bookkeeping: chip, not badge.
+  await expect(page.locator("text=Distilled · epoch 2")).toHaveCount(0);
+
   // Expand reveals the folded record, including the distill marker itself.
   await chip.getByRole("button", { name: "Expand" }).click();
   await expect(page.locator("text=Patch the daemon launch path")).toBeVisible();

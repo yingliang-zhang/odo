@@ -26,6 +26,22 @@ function distillMarkerSeqs(events: OdoEvent[]): number[] {
   return seqs;
 }
 
+// foldBoundary mirrors the daemon's (internal/ipc/recall.go): the newest
+// marker's payload last_seq when carried (pinned schema — an update
+// journaled in the fold's committed phase, seq in (last_seq, marker_seq),
+// sits ABOVE the boundary and must not sweep yet), else the marker's own
+// seq (legacy). Max over all markers; events are seq-ordered.
+function foldBoundary(events: OdoEvent[]): number {
+  let boundary = 0;
+  for (const e of events) {
+    if (e.type !== "review_action" || e.payload?.action !== "distill") continue;
+    const ls = e.payload?.last_seq;
+    const b = ls != null && ls > 0 ? ls : e.seq;
+    if (b > boundary) boundary = b;
+  }
+  return boundary;
+}
+
 // latestTodoSnapshot returns the newest todo_merge snapshot in id order,
 // or null when the conversation has no plan yet.
 function latestTodoSnapshot(events: OdoEvent[]): TodoViewItem[] | null {
@@ -65,7 +81,7 @@ export function deriveTodoState(events: OdoEvent[]): TodoViewItem[] {
   const items = latestTodoSnapshot(events);
   if (items == null) return [];
   const markers = distillMarkerSeqs(events);
-  const boundary = markers.length > 0 ? markers[markers.length - 1] : 0;
+  const boundary = foldBoundary(events);
   for (const it of items) {
     if (it.status !== "open" && boundary > 0 && it.updated_seq <= boundary) {
       it.swept = true;

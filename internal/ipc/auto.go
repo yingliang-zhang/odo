@@ -367,13 +367,29 @@ func (s *Server) armAutoLocked(ctx context.Context, convID int64, trigger string
 		return // belt: maybeAutoAfterActivityLocked already checked
 	}
 	fireAt := time.Now().Add(delay)
-	s.autoPending[convID] = &autoPendingEntry{
+	entry := &autoPendingEntry{
 		trigger: trigger,
 		fireAt:  fireAt,
-		timer: time.AfterFunc(delay, func() {
-			go s.runAutoDistill(convID, trigger)
-		}),
 	}
+	// Claim-by-identity (K3): the callback proceeds only while the pending
+	// slot still holds THIS entry. Supersession stops the timer and re-arms
+	// a fresh entry (urgent upgrade, disarm + re-arm), and time.Timer.Stop
+	// cannot retract a callback that has already started — without the
+	// identity check that stale callback would spawn runAutoDistill with
+	// its old trigger label, and the run would claim (and so mislabel and
+	// orphan) the fresh entry. The callback blocks on s.mu, which the
+	// armer is holding, so the entry is always installed before any
+	// callback can observe the slot.
+	entry.timer = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		if s.autoPending[convID] != entry {
+			s.mu.Unlock()
+			return // superseded between arm and fire: the fresh entry owns the slot
+		}
+		s.mu.Unlock()
+		go s.runAutoDistill(convID, trigger)
+	})
+	s.autoPending[convID] = entry
 	s.journalAuto(ctx, convID, "scheduled", fmt.Sprintf(
 		"trigger=%s eta=%s window_events=%d window_bytes=%d",
 		trigger, fireAt.UTC().Format(time.RFC3339), stats.events, stats.eligibleBytes))

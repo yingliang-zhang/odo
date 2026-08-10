@@ -2077,7 +2077,9 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// pinned window above keeps every marker honest, but journal growth
 	// past lastSeq that this fold did not author — its own mid-fold rows
 	// are contradiction retracts, skill_gate discards, and the
-	// memory_propose batch — with no post-commit input through the gate
+	// memory_propose batch, and the attributed metadata bookkeeping
+	// (curate/index/pins layers) is read fresh at prompt time rather than
+	// render-covered — with no post-commit input through the gate
 	// means the conversation moved under the fold unattributed. Abandon:
 	// no marker, no epoch move; the orphan note is deleted (the journal
 	// never links it), the skip is journaled, and runAutoDistill re-arms
@@ -2090,7 +2092,12 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		inputPassed := s.autoInFlight[c.ID] != nil && s.autoInFlight[c.ID].inputPassed
 		s.mu.Unlock()
 		if perr == nil && !inputPassed && unownedFoldGrowth(probe, lastSeq) {
-			_ = os.Remove(wikiPath) // orphan note: never marker-linked, never kept
+			// Orphan note: never marker-linked, never kept. Best-effort —
+			// a failed remove only strands an unlinked file, but log it so
+			// the hole is visible instead of silently discarded.
+			if rerr := os.Remove(wikiPath); rerr != nil {
+				log.Printf("auto-distill: remove orphan note %s: %v", wikiPath, rerr)
+			}
 			s.journalAuto(ctx, c.ID, "skipped", fmt.Sprintf(
 				"trigger=%s window_events=%d window_bytes=%d reason=superseded_by_activity",
 				trigger, winStats.events, winStats.eligibleBytes))
@@ -2229,9 +2236,17 @@ func windowEvents(events []store.Event) []store.Event {
 // window end with rows the fold itself could not have authored — the only
 // rows distillCore journals between render and marker are contradiction
 // retracts (memory_update{layer:note, cause:retract}), skill_gate discards,
-// the memory_propose batch, and their journal-failure fallbacks. Anything
-// else (a user message, a slash answer, a diff accept, a todo merge, …)
-// is unattributed growth: the conversation moved under the fold.
+// the memory_propose batch, and their journal-failure fallbacks. Also
+// attributed (never render-covered, but safe): the daemon's curated-wiki
+// and pins bookkeeping — review_action{action:"curate"} and
+// memory_update{layer: curator | index | pins}, all causes. Those rows
+// describe metadata layers read FRESH at prompt time (wiki topics,
+// index.md, pins.md), not conversation coverage the note claims, so an
+// auto-curate or /pin landing mid-fold must not abort it: the pinned
+// marker handles them honestly (above lastSeq → visible in the window and
+// replay, merely unclaimed by this epoch's note). Anything else (a user
+// message, a slash answer, a diff accept, a todo merge, …) is
+// unattributed growth: the conversation moved under the fold.
 func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 	for i := len(events) - 1; i >= 0 && events[i].Seq > lastSeq; i-- {
 		ev := events[i]
@@ -2240,7 +2255,8 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 			var p struct {
 				Action string `json:"action"`
 			}
-			if jsonUnmarshalOK(ev.Payload, &p) && (p.Action == "skill_gate" || p.Action == "memory_propose") {
+			if jsonUnmarshalOK(ev.Payload, &p) && (p.Action == "skill_gate" || p.Action == "memory_propose" ||
+				p.Action == "curate") {
 				continue
 			}
 			return true
@@ -2251,7 +2267,8 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 			}
 			if jsonUnmarshalOK(ev.Payload, &p) && ((p.Layer == "note" && p.Cause == "retract") ||
 				(p.Layer == "skills" && p.Cause == "gate_journal_failed") ||
-				(p.Layer == "learner" && p.Cause == "failed")) {
+				(p.Layer == "learner" && p.Cause == "failed") ||
+				p.Layer == "curator" || p.Layer == "index" || p.Layer == "pins") {
 				continue
 			}
 			return true

@@ -177,7 +177,8 @@ interface RunGroup {
 // journals first_seq/last_seq/note_sha), else from the derived boundary
 // arithmetic — identical because per-conversation seqs are gap-free.
 interface Fold {
-  boundarySeq: number; // the marker's own seq: events ≤ it are folded
+  boundarySeq: number; // visibility split: the marker's payload last_seq when carried (pinned schema — events ≤ it are folded), else the marker's own seq (legacy); mirrors the daemon's foldBoundary
+  markerSeq: number; // the marker's own seq: per-fold identity (expansion key — consecutive folds can share a boundarySeq)
   count: number; // events folded out of view
   notePath?: string; // folded epoch's wiki note, when the marker names one
   noteName?: string; // its basename without .md, for display
@@ -571,7 +572,10 @@ export default function ChatSurface({
     const marker = events[latestIdx];
     let first = marker.payload?.first_seq;
     let last = marker.payload?.last_seq;
+    let boundary: number;
     if (first == null || last == null) {
+      // Legacy marker (no journaled window): derive the window from
+      // journal order and bound at the marker's own seq.
       first = 1;
       for (let i = latestIdx - 1; i >= 0; i--) {
         const e = events[i];
@@ -581,11 +585,19 @@ export default function ChatSurface({
         }
       }
       last = marker.seq - 1;
+      boundary = marker.seq;
+    } else {
+      // Pinned schema (K3): the fold claims exactly [first_seq, last_seq].
+      // Rows journaled during the committed phase land in
+      // (last_seq, marker_seq) — the fold never rendered them, so they
+      // stay visible above the chip (daemon foldBoundary semantics).
+      boundary = last;
     }
     const notePath = marker.payload?.wiki_path || undefined;
     const noteName = notePath ? basename(notePath).replace(/\.md$/, "") : undefined;
     return {
-      boundarySeq: marker.seq,
+      boundarySeq: boundary,
+      markerSeq: marker.seq,
       count: Math.max(0, last - first + 1),
       notePath,
       noteName,
@@ -597,11 +609,21 @@ export default function ChatSurface({
   // distill moves the boundary and re-collapses, and a workstream switch
   // can never display another conversation's journal unfolded by default.
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
-  const foldKey = fold ? `${conversationId ?? "default"}:${fold.boundarySeq}` : null;
+  const foldKey = fold ? `${conversationId ?? "default"}:${fold.markerSeq}` : null;
   const expanded = foldKey !== null && expandedKey === foldKey;
 
+  // Collapsed = above the fold boundary. Distill markers themselves are
+  // filtered too — bookkeeping, never window content (the daemon's
+  // windowEvents does the same): a pinned marker's own seq sits above its
+  // last_seq, and the fold chip is its collapsed surface. Expanded shows
+  // the raw journal, markers included.
   const visibleEvents = useMemo(
-    () => (expanded ? events : events.filter((e) => e.seq > lastDistillSeq)),
+    () =>
+      expanded
+        ? events
+        : events.filter(
+            (e) => e.seq > lastDistillSeq && !(e.type === "review_action" && e.payload?.action === "distill"),
+          ),
     [events, lastDistillSeq, expanded],
   );
 
