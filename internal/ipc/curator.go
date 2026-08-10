@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -116,17 +117,20 @@ func allEpochNotes(projectRoot string) ([]epochNote, error) {
 
 // curatorPrompt renders the curator one-shot prompt: the instruction plus
 // every epoch note under a `--- <name> (workstream: <ws>, epoch: <N>) ---`
-// header, newest-first.
+// header, newest-first. M12: citations are workstream-qualified
+// "(main-epoch-3)" — the bare "(epoch-N)" form collides across workstreams
+// (epoch numbering restarts per workstream), and the daemon validates +
+// repairs citations before any page is rewritten.
 func curatorPrompt(notes []epochNote) string {
 	var b strings.Builder
 	b.WriteString(`You are running odo's memory curator pass. Synthesize the epoch notes below into topic pages — one per topic area (e.g., "authentication", "build-system", "testing").
 
 Output JSON ONLY (no prose, no markdown fence), exactly this shape:
-{"topics":[{"title":"<Topic Title>","slug":"<topic-slug>","bullets":["- <statement> (epoch-N)","- <statement> (epoch-N)"]}]}
+{"topics":[{"title":"<Topic Title>","slug":"<topic-slug>","bullets":["- <statement> (main-epoch-3)","- <statement> (ui-epoch-2)"]}]}
 
 Rules:
 - Each topic groups related decisions across workstreams and epochs.
-- Every bullet MUST end with a "(epoch-N)" citation naming the source epoch note.
+- Every bullet MUST end with a workstream-qualified citation naming its source note: "(<workstream>-epoch-N)", e.g. "(main-epoch-3)". The note headers below give each note's exact name — copy it verbatim.
 - A bullet without a citation is allowed but will be flagged in the UI as "uncited."
 - The slug is lowercase, hyphenated, no spaces (e.g., "authentication").
 - Do NOT copy previous topic pages — write from the source notes only (generation-1).
@@ -191,6 +195,77 @@ func parseCuratorOutput(raw string) (*curatorResult, error) {
 		return nil, fmt.Errorf("curator output JSON: %w", err)
 	}
 	return &res, nil
+}
+
+// Citation shapes accepted from the curator (M12). Qualified citations are
+// the only emitted form; the bare epoch form is repaired when it resolves
+// unambiguously and fails the gate otherwise — unqualified "(epoch-N)"
+// collides across workstreams (epoch numbering restarts per workstream),
+// so guessing would attach a claim to the wrong note.
+var (
+	// wsEpochCiteRe matches "(<ws>-epoch-N)" including workstreams that
+	// themselves contain dashes (greedy up to the final -epoch-N segment).
+	wsEpochCiteRe = regexp.MustCompile(`\(([A-Za-z0-9][A-Za-z0-9._-]*-epoch-\d+)\)`)
+	// bareEpochCiteRe matches the legacy unqualified "(epoch-N)" form.
+	bareEpochCiteRe = regexp.MustCompile(`\(epoch-(\d+)\)`)
+)
+
+// deadCitation is one citation that failed the liveness pre-check.
+type deadCitation struct {
+	slug  string // topic the bullet belongs to
+	token string // the citation text as emitted, e.g. "(ui-epoch-9)" or "(epoch-3)"
+}
+
+// checkTopicCitations enforces citation liveness BEFORE any topic page is
+// rewritten: qualified citations must name an on-disk wiki note; bare
+// "(epoch-N)" citations are repaired in place when exactly one note of
+// that epoch exists project-wide and fail the gate when none or several
+// do (a collision can never resolve silently to the wrong workstream).
+// Returns the repaired topics plus every dead citation found.
+func checkTopicCitations(projectRoot string, topics []topic) (repaired []topic, dead []deadCitation) {
+	repaired = make([]topic, 0, len(topics))
+	for _, t := range topics {
+		t.Bullets = repairBullets(projectRoot, t.Slug, t.Bullets, &dead)
+		repaired = append(repaired, t)
+	}
+	return repaired, dead
+}
+
+// repairBullets rewrites one topic's bullet list, qualifying bare
+// citations and collecting tokens that name no on-disk note.
+func repairBullets(projectRoot, slug string, bullets []string, dead *[]deadCitation) []string {
+	out := make([]string, len(bullets))
+	for i, bullet := range bullets {
+		out[i] = wsEpochCiteRe.ReplaceAllStringFunc(bullet, func(tok string) string {
+			name := strings.TrimSuffix(strings.TrimPrefix(tok, "("), ")")
+			if noteExists(projectRoot, name) {
+				return tok
+			}
+			*dead = append(*dead, deadCitation{slug: slug, token: tok})
+			return tok
+		})
+		out[i] = bareEpochCiteRe.ReplaceAllStringFunc(out[i], func(tok string) string {
+			m := bareEpochCiteRe.FindStringSubmatch(tok)
+			matches, _ := filepath.Glob(filepath.Join(projectRoot, "wiki", "*-epoch-"+m[1]+".md"))
+			switch len(matches) {
+			case 0:
+				*dead = append(*dead, deadCitation{slug: slug, token: tok})
+			case 1:
+				return "(" + strings.TrimSuffix(filepath.Base(matches[0]), ".md") + ")" // repair: qualify
+			default:
+				*dead = append(*dead, deadCitation{slug: slug, token: tok})
+			}
+			return tok
+		})
+	}
+	return out
+}
+
+// noteExists reports whether wiki/<name>.md is a readable note file —
+// the citation-liveness pre-check's source of truth (on disk, not prompt).
+func noteExists(projectRoot, name string) bool {
+	fi, err := os.Stat(filepath.Join(projectRoot, "wiki", name+".md"))
+	return err == nil && !fi.IsDir()
 }
 
 // renderTopicPage renders one topic page: `# <Title>` + one bullet per
@@ -271,13 +346,17 @@ func readIndex(projectRoot string) string {
 	return capAtLineBoundary(string(b), indexCap)
 }
 
-// handleCurate runs the curator pass: read the full epoch-note set, one
-// orchestrator one-shot, rewrite topic pages + index.md from scratch.
-// Unlike the learner (which degrades silently inside distill), curate is a
-// standalone command: a failure journals memory_update{layer:curator,
-// cause:failed} AND returns the error to the caller (spec §1).
+// handleCurate runs the manual curator pass (trigger "manual"): read the
+// full epoch-note set, one orchestrator one-shot, rewrite topic pages +
+// index.md from scratch. Unlike the learner (which degrades silently
+// inside distill), curate is a standalone command: a failure journals
+// memory_update{layer:curator, cause:failed} AND returns the error to the
+// caller (spec §1). M12: the trigger, citation liveness, and marker
+// provenance live in curateCore, shared with the daemon's conditional
+// auto-curate.
 func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error) {
-	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
+	p, err := s.resolveProject(ctx, req.ProjectRoot)
+	if err != nil {
 		return Response{}, fmt.Errorf("curate: %w", err)
 	}
 	c, err := s.checkConversation(ctx, req.ConversationID)
@@ -299,12 +378,38 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 		s.curating = false
 		s.mu.Unlock()
 	}()
+	notesSince := 0
+	if n, _, err := s.store.AutoCurateState(ctx, p.ID); err == nil {
+		notesSince = n
+	}
+	if err := s.curateCore(ctx, c.ID, distillTriggerManual, notesSince); err != nil {
+		return Response{}, err
+	}
+	// MemoryProposals stays 0: the field names PENDING learner proposals and
+	// a curate proposes none; the sidebar topic count comes from list_topics.
+	return Response{WikiPath: "wiki/index.md"}, nil
+}
+
+// curateCore is the manual + M12 auto-curate shared pipeline. trigger is
+// "manual" | "auto_notes" | "auto_age" (journaled); notesSince is the
+// caller's count of distill markers since the latest passing curate (the
+// auto trigger's own evidence). Failures journal
+// memory_update{layer:curator, cause:failed|gate_failed} and return the
+// error — the manual caller relays it to the GUI, the auto caller logs it.
+func (s *Server) curateCore(ctx context.Context, convID int64, trigger string, notesSince int) error {
 	notes, err := allEpochNotes(s.projectRoot)
 	if err != nil {
-		return Response{}, fmt.Errorf("curate: %w", err)
+		return fmt.Errorf("curate: %w", err)
 	}
 	if len(notes) == 0 {
-		return Response{}, fmt.Errorf("curate: no epoch notes to curate — distill first")
+		return fmt.Errorf("curate: no epoch notes to curate — distill first")
+	}
+	// notesRead is the marker's input provenance: every note the curator
+	// was shown, with its content hash (the pass is falsifiable against
+	// the notes on disk).
+	notesRead := make([]map[string]string, 0, len(notes))
+	for _, n := range notes {
+		notesRead = append(notesRead, map[string]string{"name": n.name, "sha16": sha16([]byte(n.content))})
 	}
 
 	// fail journals memory_update{layer:curator, cause:failed} before
@@ -313,13 +418,13 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 	// failure after the stale-clear must land in the journal — the same
 	// asymmetry the parse path never had) and the empty-topics refusal
 	// passes "empty topics".
-	fail := func(err error, detail string) (Response, error) {
-		_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+	fail := func(err error, detail string) error {
+		_, _ = s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":  "curator",
 			"cause":  "failed",
 			"detail": detail,
 		}))
-		return Response{}, err
+		return err
 	}
 
 	ad := s.distillAdapter
@@ -328,8 +433,7 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 	}
 	raw, err := runOneShot(ctx, ad, curatorPrompt(notes), curatorTimeout)
 	if err != nil {
-		werr := fmt.Errorf("curate: curator run: %w", err)
-		return fail(werr, werr.Error())
+		return fail(fmt.Errorf("curate: curator run: %w", err), err.Error())
 	}
 	res, err := parseCuratorOutput(raw)
 	if err != nil {
@@ -344,38 +448,67 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 		return fail(fmt.Errorf("curate: curator returned 0 topics — nothing to write"), "empty topics")
 	}
 
+	// M12 citation-liveness gate: every parsed citation must resolve to an
+	// on-disk note BEFORE any topic page is rewritten (bare "(epoch-N)"
+	// forms are repaired when unambiguous). A dead citation skips the WHOLE
+	// curate: the old generation survives on disk, the gate_failed marker +
+	// memory_update journal what refused to land.
+	topics, dead := checkTopicCitations(s.projectRoot, topics)
+	if len(dead) > 0 {
+		tokens := make([]string, 0, len(dead))
+		for _, d := range dead {
+			tokens = append(tokens, fmt.Sprintf("%s (topic %s)", d.token, d.slug))
+		}
+		if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
+			"action":           "curate",
+			"topics":           0,
+			"notes_read":       notesRead,
+			"trigger":          trigger,
+			"notes_since_last": notesSince,
+			"gate":             "failed",
+			"dead_citations":   tokens,
+		})); err != nil {
+			return err
+		}
+		_, _ = s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "curator",
+			"cause":  "gate_failed",
+			"detail": fmt.Sprintf("dead citation(s): %s", strings.Join(tokens, ", ")),
+		}))
+		return fmt.Errorf("curate: citation gate: dead citation(s): %s", strings.Join(tokens, ", "))
+	}
+
 	// before_sha covers the pre-curate index ("" when absent) — the M4
 	// before/after convention for injected layers.
 	oldIndex := readFileFull(filepath.Join(s.projectRoot, "wiki", "index.md"))
 	if _, err := writeTopicPages(s.projectRoot, topics); err != nil {
-		werr := fmt.Errorf("curate: %w", err)
-		return fail(werr, "write error: "+err.Error())
+		return fail(fmt.Errorf("curate: %w", err), "write error: "+err.Error())
 	}
 	indexContent, err := writeIndex(s.projectRoot, topics)
 	if err != nil {
-		werr := fmt.Errorf("curate: %w", err)
-		return fail(werr, "write error: "+err.Error())
+		return fail(fmt.Errorf("curate: %w", err), "write error: "+err.Error())
 	}
 
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
-		"action":     "curate",
-		"topics":     len(topics),
-		"notes_read": len(notes),
+	if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action":           "curate",
+		"topics":           len(topics),
+		"notes_read":       notesRead, // M12: input provenance [{name,sha16}]
+		"trigger":          trigger,
+		"notes_since_last": notesSince,
+		"gate":             "pass",
 	})); err != nil {
-		return Response{}, err
+		return err
 	}
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+	if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 		"layer":      "index",
 		"cause":      "curate",
 		"before_sha": sha16([]byte(oldIndex)),
 		"after_sha":  sha16([]byte(indexContent)),
 		"detail":     fmt.Sprintf("rewrote %d topics + index", len(topics)),
 	})); err != nil {
-		return Response{}, err
+		return err
 	}
-	// MemoryProposals stays 0: the field names PENDING learner proposals and
-	// a curate proposes none; the sidebar topic count comes from list_topics.
-	return Response{WikiPath: "wiki/index.md"}, nil
+	return nil
 }
 
 // handleListTopics lists the curator's topic pages under wiki/topics/ for

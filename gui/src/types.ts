@@ -265,9 +265,10 @@ export interface Settings {
   orchestrator_provider: string;
   omp_timeout: string;
   review_models: string;
+  // M12: default flipped to "on_idle"; the auto_curate_after_distill pref
+  // is gone (auto-curate is daemon-conditional now).
   auto_distill: string;
   auto_distill_idle_seconds: string;
-  auto_curate_after_distill: string;
   max_concurrent_runs: string;
 }
 
@@ -321,14 +322,39 @@ export interface ReadWikiResponse {
   wiki_content?: string;
 }
 
+// M12 (D-auto): one scheduled (or blocked) auto-distill as reported by the
+// daemon's pending_counts. eta_unix drives the composer countdown chip; a
+// blocked_reason entry has eta 0 and means the fold is paused for honesty
+// reasons (the window outgrew the distill prompt budget) until a manual
+// distill lands.
+export interface AutoDistillCountdown {
+  conversation_id: number;
+  eta_unix: number;
+  trigger: string;
+  blocked_reason?: string;
+}
+
 // Daemon `pending_counts` (spec §3c fallback): per-workstream pending-diff
 // counts plus the workstreams with a live run. JSON object keys arrive as
-// strings; the caller converts to number keys.
+// strings; the caller converts to number keys. M12: also the auto-distill
+// countdowns and in-flight distill state — the GUI discloses daemon
+// triggers, it never owns them.
 export interface PendingCountsResponse {
   ok: boolean;
   error?: string;
   pending_counts?: Record<string, number>;
   running_workstreams?: number[];
+  auto_distill?: AutoDistillCountdown[];
+  distilling?: boolean;
+  distilling_convs?: number[];
+}
+
+// Daemon `auto_distill_ctl` (M12): the chip's Cancel — disarms a scheduled
+// (not yet fired) auto-distill. disarmed=false when nothing was armed.
+export interface AutoDistillCtlResponse {
+  ok: boolean;
+  error?: string;
+  disarmed?: boolean;
 }
 
 // ---------- M4: learning (memory.md / user.md proposals + apply) ----------

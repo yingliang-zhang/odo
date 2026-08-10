@@ -154,7 +154,17 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- Visibility ----------
     case "pending_counts": {
-      return { ok: true, pending_counts: fx.pendingCounts, running_workstreams: fx.runningWorkstreams };
+      return {
+        ok: true,
+        pending_counts: fx.pendingCounts,
+        running_workstreams: fx.runningWorkstreams,
+        auto_distill: fx.autoDistill ?? [],
+        distilling: false,
+        distilling_convs: [],
+      };
+    }
+    case "auto_distill_ctl": {
+      return { ok: true, disarmed: true };
     }
 
     // ---------- Search ----------

@@ -26,9 +26,13 @@ const USER_MD_HINT =
 // M5: topic pages live under wiki/topics/ — the reader flags their bullets.
 const TOPICS_MARKER = "/wiki/topics/";
 
-// M5 (spec §9): a topic-page bullet must trace to a source epoch note via a
-// trailing "(epoch-N)" citation; bullets without one are flagged "uncited".
-const CITATION_RE = /\(epoch-(\d+)\)$/;
+// M12: citations are workstream-qualified — a bullet must trace to its
+// source note via a trailing "(<ws>-epoch-N)" citation; bullets without
+// one are flagged "uncited". The captured note name jumps directly (no
+// cross-workstream collision: epoch numbering restarts per workstream).
+const CITATION_RE = /\(([A-Za-z0-9][A-Za-z0-9._-]*-epoch-\d+)\)$/;
+// Legacy pre-M12 pages may still carry bare "(epoch-N)" citations.
+const LEGACY_CITATION_RE = /\(epoch-(\d+)\)$/;
 
 interface Props {
   conversationId: number;
@@ -176,11 +180,17 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
     };
   }, [selected, projectRoot]);
 
-  // M5 (spec §9): a citation click jumps to the source epoch note in the
-  // Notes tab ONLY when exactly one note in the current workstream matches
-  // — curation is project-wide, so a citation can name an epoch no note
-  // here carries, or an epoch several workstreams share; both degrade to a
-  // no-op (spec risk #3) rather than jumping to the wrong note.
+  // M12: a qualified citation names its note exactly — the click jumps to
+  // it, cross-workstream included. A bare legacy citation jumps to the
+  // source epoch note in the Notes tab ONLY when exactly one note matches
+  // (several workstreams can share an epoch; both degrade to a no-op
+  // rather than jumping to the wrong note).
+  const jumpToNote = (name: string) => {
+    const target = (notes ?? []).find((n) => n.name === name);
+    if (!target) return;
+    setTab("notes");
+    setSelected(target.path);
+  };
   const jumpToEpoch = (epoch: number) => {
     const matches = notes?.filter((n) => n.epoch === epoch) ?? [];
     if (matches.length !== 1) return;
@@ -320,7 +330,7 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
           {!contentLoading && content !== null && content !== "" && isTopicPage && (
             <div className="wiki-content wiki-topic-content">
               {content.split("\n").map((line, i) => (
-                <TopicLine key={i} line={line} onJumpToEpoch={jumpToEpoch} />
+                <TopicLine key={i} line={line} onJumpToNote={jumpToNote} onJumpToEpoch={jumpToEpoch} />
               ))}
             </div>
           )}
@@ -337,20 +347,23 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
 }
 
 // TopicLine renders one line of a topic page. A bullet ending in
-// "(epoch-N)" gets a clickable citation that jumps to the source note; a
-// bullet without a citation is flagged "⚠ uncited" (still injected into
-// prompts — the flag is the user's verification surface, spec §9).
+// "(<ws>-epoch-N)" (M12; bare "(epoch-N)" on legacy pages) gets a
+// clickable citation that jumps to the source note; a bullet without a
+// citation is flagged "⚠ uncited" (still injected into prompts — the flag
+// is the user's verification surface, spec §9).
 function TopicLine({
   line,
+  onJumpToNote,
   onJumpToEpoch,
 }: {
   line: string;
+  onJumpToNote: (name: string) => void;
   onJumpToEpoch: (epoch: number) => void;
 }) {
   if (!line.startsWith("- ")) {
     return <div className="wiki-topic-line">{line}</div>;
   }
-  const match = line.match(CITATION_RE);
+  const match = line.match(CITATION_RE) ?? line.match(LEGACY_CITATION_RE);
   if (!match) {
     return (
       <div className="wiki-topic-line wiki-line-uncited">
@@ -358,8 +371,8 @@ function TopicLine({
       </div>
     );
   }
-  const epoch = Number(match[1]);
-  // trimEnd drops the spacer before "(epoch-N)" — otherwise the bullet
+  const qualified = match[1].includes("-epoch-");
+  // trimEnd drops the spacer before the citation — otherwise the bullet
   // text ends with a space AND the JSX renders one between text and the
   // citation button (a visible double space).
   const text = line.slice(0, match.index).trimEnd();
@@ -369,8 +382,8 @@ function TopicLine({
       <button
         type="button"
         className="wiki-epoch-link"
-        title={`Jump to the epoch ${epoch} source note (Notes tab)`}
-        onClick={() => onJumpToEpoch(epoch)}
+        title={`Jump to the ${match[1]} source note (Notes tab)`}
+        onClick={() => (qualified ? onJumpToNote(match[1]) : onJumpToEpoch(Number(match[1])))}
       >
         {match[0]}
       </button>

@@ -319,26 +319,14 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
                     <span>Idle seconds</span>
                     <input
                       type="number"
-                      min="5"
-                      max="300"
+                      min="15"
+                      max="600"
                       disabled={settings.auto_distill !== "on_idle"}
                       value={settings.auto_distill_idle_seconds}
                       onChange={(e) =>
                         set("auto_distill_idle_seconds", e.target.value)
                       }
                     />
-                  </label>
-                  <label className="settings-field">
-                    <span>Auto-curate after distill</span>
-                    <select
-                      value={settings.auto_curate_after_distill}
-                      onChange={(e) =>
-                        set("auto_curate_after_distill", e.target.value)
-                      }
-                    >
-                      <option value="false">No (manual)</option>
-                      <option value="true">Yes (chain after distill)</option>
-                    </select>
                   </label>
                 </>
               )}

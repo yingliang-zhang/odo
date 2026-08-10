@@ -5,6 +5,7 @@
 
 import type {
   AcceptDiffResponse,
+  AutoDistillCountdown,
   BootstrapResponse,
   CancelResponse,
   ContradictionsResponse,
@@ -201,8 +202,7 @@ export const defaultSettings: Settings = {
   omp_timeout: "600",
   review_models: "t9s/kimi-k3@sudo,t9s/glm-5.2@sudo,t9s/deepseek-v4-flash@sudo",
   auto_distill: "on_idle",
-  auto_distill_idle_seconds: "300",
-  auto_curate_after_distill: "false",
+  auto_distill_idle_seconds: "120",
   max_concurrent_runs: "3",
 };
 
@@ -227,6 +227,10 @@ export const userContent = `# USER.md
 
 export const pendingCounts: Record<string, number> = { 1: 1, 2: 0, 3: 0, 10: 0 };
 export const runningWorkstreams: number[] = [];
+// M12: no scheduled auto-distill in the default fixture — the composer
+// chip stays hidden, matching pre-M12 screens. E2E adds its own entry when
+// it wants the countdown visible.
+export const autoDistill: AutoDistillCountdown[] = [];
 
 // ---------- M8 Skills ----------
 

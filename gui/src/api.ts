@@ -29,6 +29,7 @@ import type {
   AcceptDiffResponse,
   ApplyMemoryRequest,
   ApplyMemoryResponse,
+  AutoDistillCtlResponse,
   BootstrapResponse,
   CancelResponse,
   ContradictionsResponse,
@@ -234,6 +235,13 @@ export function readWiki(path: string, projectRoot?: string): Promise<ReadWikiRe
 // runs and pending diffs — poll_events is per-conversation.
 export function pendingCounts(projectRoot: string): Promise<PendingCountsResponse> {
   return invoke<PendingCountsResponse>("pending_counts", { projectRoot });
+}
+
+// M12 (D-auto): the composer countdown chip's Cancel — disarm a scheduled
+// auto-distill. The daemon journals the disarm; in-flight distills are not
+// touched (a send cancels those).
+export function autoDistillCtl(conversationId: number, action: "disarm", projectRoot?: string): Promise<AutoDistillCtlResponse> {
+  return invoke<AutoDistillCtlResponse>("auto_distill_ctl", { conversationId, action, projectRoot: projectRoot ?? null });
 }
 
 // M4 learning: read the three canonical memory files (project memory.md,

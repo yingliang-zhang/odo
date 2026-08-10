@@ -12,7 +12,7 @@ import {
 } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
-import type { OdoEvent, PreviewEvent } from "../types";
+import type { AutoDistillCountdown, OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
 import { saveAttachment } from "../api";
 import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown } from "lucide-react";
@@ -57,6 +57,76 @@ interface Props {
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
   onSearchClose: () => void;
+  // M12 (D-auto): the daemon's auto-distill disclosure for the active
+  // conversation — pending countdown (chip with Cancel), coverage-honesty
+  // block (paused until a manual fold), and the in-flight indicator.
+  autoDistill?: AutoDistillCountdown;
+  autoDistillBlocked?: AutoDistillCountdown;
+  distillInFlight?: boolean;
+  onDisarmAutoDistill?: () => void;
+  // Composer lock during a MANUAL distill only: an auto distill is
+  // send-cancelled (cancel-before-note) and never blocks typing.
+  distillLocked?: boolean;
+}
+
+// AutoDistillChip discloses the daemon's auto-distill state above the
+// composer: scheduled countdown with a Cancel (auto_distill_ctl disarm),
+// an in-flight "Distilling…" while the fold runs, or the coverage-honesty
+// pause when the window outgrew the distill prompt budget. Data comes from
+// pending_counts — the GUI never owns the trigger.
+function AutoDistillChip({
+  entry,
+  blocked,
+  inFlight,
+  onDisarm,
+}: {
+  entry?: AutoDistillCountdown;
+  blocked?: AutoDistillCountdown;
+  inFlight: boolean;
+  onDisarm?: () => void;
+}) {
+  const [nowUnix, setNowUnix] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (entry == null) return;
+    const timer = window.setInterval(() => setNowUnix(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [entry]);
+  if (inFlight) {
+    return <div className="auto-distill-chip" title="The daemon is distilling this conversation's epoch">Distilling…</div>;
+  }
+  if (blocked != null) {
+    return (
+      <div
+        className="auto-distill-chip blocked"
+        title="The un-folded window outgrew the distill prompt budget — auto-distill never claims coverage it did not see. Run a manual Distill."
+      >
+        Auto-distill paused — window exceeds prompt budget · distill manually
+      </div>
+    );
+  }
+  if (entry == null) return null;
+  const remaining = Math.max(0, entry.eta_unix - nowUnix);
+  const m = Math.floor(remaining / 60);
+  const s = remaining % 60;
+  return (
+    <div className="auto-distill-chip" title={
+      entry.trigger === "urgent"
+        ? "The conversation window crossed the size trigger — the daemon will fold it now"
+        : entry.trigger === "startup"
+          ? "Compensating for idle time while the app was closed"
+          : "The daemon will fold this conversation's epoch after the idle quiet period"
+    }>
+      Distilling in {m}:{String(s).padStart(2, "0")}
+      {onDisarm && (
+        <>
+          {" · "}
+          <button type="button" className="chip-link" onClick={onDisarm}>
+            Cancel
+          </button>
+        </>
+      )}
+    </div>
+  );
 }
 
 // Belt B: the text a search query is matched against per event. Kept in
@@ -233,6 +303,11 @@ export default function ChatSurface({
   searchQuery,
   onSearchQueryChange,
   onSearchClose,
+  autoDistill,
+  autoDistillBlocked,
+  distillInFlight = false,
+  onDisarmAutoDistill,
+  distillLocked = false,
 }: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -824,6 +899,12 @@ export default function ChatSurface({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        <AutoDistillChip
+          entry={autoDistill}
+          blocked={autoDistillBlocked}
+          inFlight={distillInFlight}
+          onDisarm={onDisarmAutoDistill}
+        />
         {attachments.length > 0 && (
           <div className="attachment-chips">
             {attachments.map((path) => (
@@ -889,7 +970,9 @@ export default function ChatSurface({
                   ? "Steer the running agent… (Esc stops)"
                   : "Describe the change you want…"
             }
-            disabled={sendDisabled || sending}
+            // M12: locked during a MANUAL distill only — an auto distill
+            // is send-cancelled daemon-side and never blocks typing.
+            disabled={sendDisabled || sending || distillLocked}
             autoFocus
           />
           {agentRunning && (
@@ -902,12 +985,12 @@ export default function ChatSurface({
               Stop
             </button>
           )}
-          <button type="submit" disabled={sendDisabled || sending || !canSend}>
+          <button type="submit" disabled={sendDisabled || sending || distillLocked || !canSend}>
             {agentRunning ? "Steer" : "Send"}
           </button>
         </form>
         <div className="composer-hint">
-          ⌘↵ send · Shift+↵ newline{agentRunning ? " · Esc stop" : ""}
+          ⌘↵ send · Shift+↵ newline{agentRunning ? " · Esc stop" : ""}{distillLocked ? " · distilling…" : ""}
         </div>
       </div>
     </section>

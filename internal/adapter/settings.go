@@ -20,10 +20,11 @@ type Settings struct {
 	OrchestratorProvider string `json:"orchestrator_provider"`
 	OMPTimeout           string `json:"omp_timeout"`
 	ReviewModels         string `json:"review_models"` // comma-separated model@provider entries
-	// M10: auto-distill settings (opt-in, default "never")
-	AutoDistill              string `json:"auto_distill"`               // "never" | "on_idle"
-	AutoDistillIdleSeconds   string `json:"auto_distill_idle_seconds"`  // e.g. "30"
-	AutoCurateAfterDistill   string `json:"auto_curate_after_distill"` // "true" | "false"
+	// M12: auto-distill settings (default FLIPPED to "on_idle"; explicit
+	// "never" is preserved). M10's auto_curate_after_distill is removed —
+	// auto-curate is daemon-conditional now (notes ≥ threshold OR age ≥ max).
+	AutoDistill            string `json:"auto_distill"`              // "never" | "on_idle"
+	AutoDistillIdleSeconds string `json:"auto_distill_idle_seconds"` // e.g. "120"
 	// M11 P3: parallelism cap (default 4)
 	MaxConcurrentRuns string `json:"max_concurrent_runs"` // e.g. "4"
 }
@@ -96,8 +97,8 @@ func resolveTimeout(def string) string {
 // present, the compiled-in adapter defaults elsewhere.
 func ReadSettings() Settings {
 	s := Settings{
-		OMPTimeout:     resolveTimeout(defaultTimeoutSeconds),
-		ReviewModels:   LoadPrefsRaw("review"),
+		OMPTimeout:   resolveTimeout(defaultTimeoutSeconds),
+		ReviewModels: LoadPrefsRaw("review"),
 	}
 	s.CodingModel, s.CodingProvider = LoadPrefsByKey("coding")
 	if s.CodingModel == "" {
@@ -113,18 +114,14 @@ func ReadSettings() Settings {
 	if s.OrchestratorProvider == "" {
 		s.OrchestratorProvider = defaultProvider
 	}
-	// M10: auto-distill settings (opt-in, default "never")
+	// M12: auto-distill defaults flipped to on (explicit "never" preserved).
 	s.AutoDistill = LoadPrefsRaw("auto_distill")
 	if s.AutoDistill == "" {
-		s.AutoDistill = "never"
+		s.AutoDistill = "on_idle"
 	}
 	s.AutoDistillIdleSeconds = LoadPrefsRaw("auto_distill_idle_seconds")
 	if s.AutoDistillIdleSeconds == "" {
-		s.AutoDistillIdleSeconds = "30"
-	}
-	s.AutoCurateAfterDistill = LoadPrefsRaw("auto_curate_after_distill")
-	if s.AutoCurateAfterDistill == "" {
-		s.AutoCurateAfterDistill = "false"
+		s.AutoDistillIdleSeconds = "120"
 	}
 	s.MaxConcurrentRuns = LoadPrefsRaw("max_concurrent_runs")
 	if s.MaxConcurrentRuns == "" {
@@ -173,15 +170,12 @@ func UpdateSettings(up Settings) error {
 	if up.OMPTimeout != "" {
 		set("omp_timeout", up.OMPTimeout)
 	}
-	// M10: auto-distill settings
+	// M12: auto-distill settings
 	if up.AutoDistill != "" {
 		set("auto_distill", up.AutoDistill)
 	}
 	if up.AutoDistillIdleSeconds != "" {
 		set("auto_distill_idle_seconds", up.AutoDistillIdleSeconds)
-	}
-	if up.AutoCurateAfterDistill != "" {
-		set("auto_curate_after_distill", up.AutoCurateAfterDistill)
 	}
 	if up.MaxConcurrentRuns != "" {
 		set("max_concurrent_runs", up.MaxConcurrentRuns)
@@ -210,6 +204,60 @@ func UpdateSettings(up Settings) error {
 		return fmt.Errorf("prefs: rename: %w", err)
 	}
 	return nil
+}
+
+// RemovePrefsKey deletes the `key:` line from ~/.odo/prefs.md (all other
+// lines preserved verbatim, same atomic write as UpdateSettings) and
+// reports whether a line was removed. Used by migrations that retire a
+// managed pref (M12: auto_curate_after_distill).
+func RemovePrefsKey(key string) (bool, error) {
+	path, err := prefsPath()
+	if err != nil {
+		return false, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	prefix := key + ":"
+	var kept []string
+	removed := false
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			removed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !removed {
+		return false, nil
+	}
+	content := ""
+	if len(kept) > 0 && !(len(kept) == 1 && kept[0] == "") {
+		content = strings.Join(kept, "\n") + "\n"
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".prefs-*.tmp")
+	if err != nil {
+		return false, fmt.Errorf("prefs: create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return false, fmt.Errorf("prefs: write temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return false, fmt.Errorf("prefs: close temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return false, fmt.Errorf("prefs: rename: %w", err)
+	}
+	return true, nil
 }
 
 // mergeModelPair reconciles an updated model/provider pair against the

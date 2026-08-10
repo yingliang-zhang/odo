@@ -475,6 +475,20 @@ async fn curate(conversation_id: i64, project_root: Option<String>) -> Result<Va
     run_command(root, req, CURATE_READ_TIMEOUT).await
 }
 
+// M12 (D-auto): the composer countdown chip's Cancel — disarm a scheduled
+// (not yet fired) auto-distill for one conversation. The daemon journals
+// the disarm; in-flight auto distills are cancelled by sends instead.
+#[tauri::command]
+async fn auto_distill_ctl(
+    conversation_id: i64,
+    action: String,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "auto_distill_ctl", "conversation_id": conversation_id, "action": action});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M5 curation: store one verbatim pin line in .odo/pins.md (no LLM
 // processing; overflow refuses with an error naming the pin text).
 #[tauri::command]
@@ -896,6 +910,7 @@ pub fn run() {
             rename_workstream,
             delete_workstream,
             distill,
+            auto_distill_ctl,
             review_diff,
             get_settings,
             update_settings,

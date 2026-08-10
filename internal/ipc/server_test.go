@@ -132,6 +132,10 @@ func startRig(t *testing.T, root string) *testRig {
 	}
 	omp := adapter.NewOMP(mgr.StateDir())
 	srv := NewServer(st, root, omp, mgr)
+	// M12: the auto subsystem defaults ON in production; pre-M12 tests
+	// assert byte-stable journals, so rigs dark-launch it (auto_test.go
+	// opts back in per test).
+	srv.autoDisabled = true
 
 	// Socket in its own short dir: macOS caps sun_path at ~104 chars and
 	// t.TempDir() paths under /var/folders are already ~60.
@@ -151,6 +155,14 @@ func startRig(t *testing.T, root string) *testRig {
 
 func (r *testRig) stop(t *testing.T) {
 	t.Helper()
+	// M12: disarm pending auto-distill timers before closing the store —
+	// a 120s timer firing into a closed journal outlives its test.
+	r.server.mu.Lock()
+	for id, entry := range r.server.autoPending {
+		entry.timer.Stop()
+		delete(r.server.autoPending, id)
+	}
+	r.server.mu.Unlock()
 	r.adapter.CloseAll()
 	r.listen.Close()
 	if err := r.store.Close(); err != nil {
@@ -1277,35 +1289,34 @@ func TestGetSettings(t *testing.T) {
 		t.Fatal("get_settings: settings missing")
 	}
 	want := Settings{
-		CodingModel:             "t9s/kimi-k3",
-		CodingProvider:          "sudo",
-		OrchestratorModel:       "t9s/kimi-k3",
-		OrchestratorProvider:    "sudo",
-		OMPTimeout:              "600",
-		ReviewModels:            "",
-		AutoDistill:             "never",
-		AutoDistillIdleSeconds:  "30",
-		AutoCurateAfterDistill:  "false",
-		MaxConcurrentRuns:       "4",
+		CodingModel:            "t9s/kimi-k3",
+		CodingProvider:         "sudo",
+		OrchestratorModel:      "t9s/kimi-k3",
+		OrchestratorProvider:   "sudo",
+		OMPTimeout:             "600",
+		ReviewModels:           "",
+		AutoDistill:            "on_idle",
+		AutoDistillIdleSeconds: "120",
+		MaxConcurrentRuns:      "4",
 	}
 	if *got.Settings != want {
 		t.Errorf("defaults = %+v, want %+v", *got.Settings, want)
 	}
 
-	// A full prefs.md overrides every field.
-	writePrefs(t, home, "# my prefs\ncoding: glm-5.2@sudo\norchestrator: orch-model@orch-prov\nreview: rm1@test,rm2@test\nomp_timeout: 900\n")
+	// A full prefs.md overrides every field. Explicit auto_distill: never
+	// survives the M12 default flip.
+	writePrefs(t, home, "# my prefs\ncoding: glm-5.2@sudo\norchestrator: orch-model@orch-prov\nreview: rm1@test,rm2@test\nomp_timeout: 900\nauto_distill: never\n")
 	got = rig.call(t, Request{Cmd: CmdGetSettings, ProjectRoot: root})
 	want = Settings{
-		CodingModel:             "glm-5.2",
-		CodingProvider:          "sudo",
-		OrchestratorModel:       "orch-model",
-		OrchestratorProvider:    "orch-prov",
-		OMPTimeout:              "900",
-		ReviewModels:            "rm1@test,rm2@test",
-		AutoDistill:             "never",
-		AutoDistillIdleSeconds:  "30",
-		AutoCurateAfterDistill:  "false",
-		MaxConcurrentRuns:       "4",
+		CodingModel:            "glm-5.2",
+		CodingProvider:         "sudo",
+		OrchestratorModel:      "orch-model",
+		OrchestratorProvider:   "orch-prov",
+		OMPTimeout:             "900",
+		ReviewModels:           "rm1@test,rm2@test",
+		AutoDistill:            "never",
+		AutoDistillIdleSeconds: "120",
+		MaxConcurrentRuns:      "4",
 	}
 	if *got.Settings != want {
 		t.Errorf("from prefs = %+v, want %+v", *got.Settings, want)
@@ -1334,9 +1345,9 @@ func TestUpdateSettings(t *testing.T) {
 		Cmd:         CmdUpdateSettings,
 		ProjectRoot: root,
 		Settings: &Settings{
-			CodingModel:    "t9s/kimi-k3", // provider keeps the file's "sudo"
-			ReviewModels:   "rm1@test,rm2@test",
-			OMPTimeout:     "900",
+			CodingModel:  "t9s/kimi-k3", // provider keeps the file's "sudo"
+			ReviewModels: "rm1@test,rm2@test",
+			OMPTimeout:   "900",
 		},
 	})
 	s := *upd.Settings
@@ -1372,7 +1383,6 @@ func TestUpdateSettings(t *testing.T) {
 		t.Errorf("prefs.md after second update = %q, want %q", content, want)
 	}
 }
-
 
 // --- M3: memory recall (~/.odo/user.md + wiki notes) + wiki browser IPC ---
 //
@@ -1652,7 +1662,6 @@ func TestRecallCapsSize(t *testing.T) {
 		}
 	}
 }
-
 
 // TestListWiki verifies the list_wiki IPC: notes come back newest-epoch
 // first with parsed name/epoch and a non-empty modified_at; a fresh

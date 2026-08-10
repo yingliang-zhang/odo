@@ -47,10 +47,12 @@ exit 0
 `
 
 // curatorStubJSON is the shape-conformant curator answer used by most tests:
-// two topics, every bullet carrying an (epoch-N) citation.
+// two topics, every bullet carrying a workstream-qualified
+// (<ws>-epoch-N) citation (M12: bare (epoch-N) cites collide across
+// workstreams; the daemon validates + repairs them before writing).
 const curatorStubJSON = `{"topics":[
-  {"title":"Authentication","slug":"authentication","bullets":["- JWT auth with refresh at /auth/refresh (epoch-1)","- Token TTL is 15 minutes (epoch-2)"]},
-  {"title":"Build System","slug":"build-system","bullets":["- Boring build over clever (epoch-1)"]}
+  {"title":"Authentication","slug":"authentication","bullets":["- JWT auth with refresh at /auth/refresh (main-epoch-1)","- Token TTL is 15 minutes (main-epoch-2)"]},
+  {"title":"Build System","slug":"build-system","bullets":["- Boring build over clever (feature-epoch-1)"]}
 ]}`
 
 // writeNote seeds one epoch note on disk (what distill would have written).
@@ -91,14 +93,14 @@ func TestCurateRewritesTopicPages(t *testing.T) {
 	}
 
 	authPath := filepath.Join(root, "wiki", "topics", "authentication.md")
-	wantAuth := "# Authentication\n\n- JWT auth with refresh at /auth/refresh (epoch-1)\n- Token TTL is 15 minutes (epoch-2)\n"
+	wantAuth := "# Authentication\n\n- JWT auth with refresh at /auth/refresh (main-epoch-1)\n- Token TTL is 15 minutes (main-epoch-2)\n"
 	if got := readFileStr(t, authPath); got != wantAuth {
 		t.Errorf("authentication.md = %q, want %q", got, wantAuth)
 	}
-	if got := readFileStr(t, authPath); !strings.Contains(got, "(epoch-1)") || !strings.Contains(got, "(epoch-2)") {
-		t.Errorf("authentication.md is missing (epoch-N) citations: %q", got)
+	if got := readFileStr(t, authPath); !strings.Contains(got, "(main-epoch-1)") || !strings.Contains(got, "(main-epoch-2)") {
+		t.Errorf("authentication.md is missing (<ws>-epoch-N) citations: %q", got)
 	}
-	wantBuild := "# Build System\n\n- Boring build over clever (epoch-1)\n"
+	wantBuild := "# Build System\n\n- Boring build over clever (feature-epoch-1)\n"
 	if got := readFileStr(t, filepath.Join(root, "wiki", "topics", "build-system.md")); got != wantBuild {
 		t.Errorf("build-system.md = %q, want %q", got, wantBuild)
 	}
@@ -119,8 +121,36 @@ func TestCurateRewritesTopicPages(t *testing.T) {
 	if len(curates) != 1 {
 		t.Fatalf("review_action{action:curate} count = %d, want 1", len(curates))
 	}
-	if curates[0]["topics"] != float64(2) || curates[0]["notes_read"] != float64(3) {
-		t.Errorf("curate payload = %v, want topics 2, notes_read 3", curates[0])
+	if curates[0]["topics"] != float64(2) {
+		t.Errorf("curate payload = %v, want topics 2", curates[0])
+	}
+	// M12: the marker carries input provenance — every note shown to the
+	// curator with its content hash — plus trigger + gate.
+	if curates[0]["trigger"] != "manual" || curates[0]["gate"] != "pass" {
+		t.Errorf("curate marker = %v, want trigger manual, gate pass", curates[0])
+	}
+	notesRead, ok := curates[0]["notes_read"].([]interface{})
+	if !ok || len(notesRead) != 3 {
+		t.Fatalf("notes_read = %v, want 3 note entries", curates[0]["notes_read"])
+	}
+	wantShas := map[string]string{
+		"main-epoch-1":    sha16([]byte("# Epoch 1 (main)\n\nAuthentication uses JWT with refresh tokens at /auth/refresh.\n")),
+		"main-epoch-2":    sha16([]byte("# Epoch 2 (main)\n\nToken TTL set to 15 minutes.\n")),
+		"feature-epoch-1": sha16([]byte("# Epoch 1 (feature)\n\nKeep the build boring.\n")),
+	}
+	for _, raw := range notesRead {
+		entry, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("notes_read entry = %v, want an object", raw)
+		}
+		name, _ := entry["name"].(string)
+		if want, ok := wantShas[name]; !ok || entry["sha16"] != want {
+			t.Errorf("notes_read entry %q sha16 = %v, want %q", name, entry["sha16"], want)
+		}
+		delete(wantShas, name)
+	}
+	if len(wantShas) != 0 {
+		t.Errorf("notes_read missing entries: %v", wantShas)
 	}
 	updates := memoryUpdatesByCause(t, events, "curate")
 	if len(updates) != 1 {
@@ -147,6 +177,8 @@ func TestCurateGeneration2Rule(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	// The bare (epoch-1) citation is unambiguous here (only main-epoch-1
+	// exists) — the daemon repairs it to the qualified form (M12).
 	setOneShotEnv(t, "ODO_CURATOR_OUTPUT", `{"topics":[{"title":"Authentication","slug":"authentication","bullets":["- JWT auth with refresh at /auth/refresh (epoch-1)"]}]}`)
 	rig := startRig(t, root)
 	defer rig.stop(t)
@@ -171,8 +203,8 @@ func TestCurateGeneration2Rule(t *testing.T) {
 	if strings.Contains(got, "FABRICATED") {
 		t.Errorf("new topic page contains the fabricated bullet: %q", got)
 	}
-	if !strings.Contains(got, "JWT auth with refresh at /auth/refresh (epoch-1)") {
-		t.Errorf("new topic page = %q, want the content sourced from the notes only", got)
+	if !strings.Contains(got, "JWT auth with refresh at /auth/refresh (main-epoch-1)") {
+		t.Errorf("new topic page = %q, want the repaired qualified citation", got)
 	}
 }
 
@@ -548,6 +580,8 @@ func TestListTopics(t *testing.T) {
 	}
 
 	writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nAuthentication uses JWT with refresh tokens.\n")
+	writeNote(t, root, "main-epoch-2", "# Epoch 2\n\nToken TTL.\n")
+	writeNote(t, root, "feature-epoch-1", "# Epoch 1 (feature)\n\nBoring build.\n")
 	rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
 
 	list := rig.call(t, Request{Cmd: CmdListTopics, ProjectRoot: root})
@@ -605,9 +639,10 @@ func TestReadWikiTopicsPath(t *testing.T) {
 
 // TestUncitedBulletDetection pins the contract the browser's uncited-badge
 // consumes at the Go level: the daemon serves the topic page verbatim and
-// the frontend's detection regex (`\(epoch-\d+\)$`, the same pattern pinned
-// in WikiBrowser.tsx) classifies cited bullets as cited and uncited ones as
-// uncited. Uncited bullets are still served (flagging, not removal).
+// the frontend's detection regex (workstream-qualified since M12, the same
+// pattern pinned in WikiBrowser.tsx, with a legacy bare fallback)
+// classifies cited bullets as cited and uncited ones as uncited. Uncited
+// bullets are still served (flagging, not removal).
 func TestUncitedBulletDetection(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
@@ -616,7 +651,7 @@ func TestUncitedBulletDetection(t *testing.T) {
 	defer rig.stop(t)
 
 	content := "# Authentication\n\n" +
-		"- JWT auth with refresh at /auth/refresh (epoch-1)\n" +
+		"- JWT auth with refresh at /auth/refresh (main-epoch-1)\n" +
 		"- summary synthesis that names no source note\n"
 	topicPath := filepath.Join(root, "wiki", "topics", "authentication.md")
 	if err := os.MkdirAll(filepath.Dir(topicPath), 0o755); err != nil {
@@ -630,15 +665,17 @@ func TestUncitedBulletDetection(t *testing.T) {
 	if got.WikiContent != content {
 		t.Fatalf("read_wiki topic page = %q, want %q", got.WikiContent, content)
 	}
-	// The exact regex the frontend applies per bullet line.
-	citationRe := regexp.MustCompile(`\(epoch-\d+\)$`)
+	// The exact regexes the frontend applies per bullet line (M12
+	// qualified form + legacy bare fallback, same as WikiBrowser.tsx).
+	citationRe := regexp.MustCompile(`\([A-Za-z0-9][A-Za-z0-9._-]*-epoch-\d+\)$`)
+	legacyRe := regexp.MustCompile(`\(epoch-\d+\)$`)
 	var bullets, cited, uncited int
 	for _, line := range strings.Split(strings.TrimRight(got.WikiContent, "\n"), "\n") {
 		if !strings.HasPrefix(line, "- ") {
 			continue
 		}
 		bullets++
-		if citationRe.MatchString(line) {
+		if citationRe.MatchString(line) || legacyRe.MatchString(line) {
 			cited++
 		} else {
 			uncited++
@@ -664,7 +701,11 @@ func TestCurateWriteFailureJournals(t *testing.T) {
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
+	// The stub's qualified citations must resolve (M12 liveness gate runs
+	// before any write) so the failure lands on the write path itself.
 	writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nAuthentication uses JWT with refresh tokens.\n")
+	writeNote(t, root, "main-epoch-2", "# Epoch 2\n\nToken TTL.\n")
+	writeNote(t, root, "feature-epoch-1", "# Epoch 1 (feature)\n\nBoring build.\n")
 	// A FILE at wiki/topics makes the topics-dir creation fail.
 	if err := os.WriteFile(filepath.Join(root, "wiki", "topics"), []byte("not a dir"), 0o644); err != nil {
 		t.Fatal(err)
@@ -708,11 +749,14 @@ func TestCurateDuplicateSlugs(t *testing.T) {
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
 	writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nAuth and build notes.\n")
+	writeNote(t, root, "main-epoch-2", "# Epoch 2\n\nMore auth notes.\n")
 
 	rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
 
 	got := readFileStr(t, filepath.Join(root, "wiki", "topics", "authentication.md"))
-	if !strings.Contains(got, "first page wins (epoch-1)") {
+	// The bare (epoch-N) citations were unambiguous and got repaired
+	// (M12); the duplicate slug still loses to the first occurrence.
+	if !strings.Contains(got, "first page wins (main-epoch-1)") {
 		t.Errorf("authentication.md = %q, want the first occurrence's page", got)
 	}
 	if strings.Contains(got, "duplicate must be skipped") {

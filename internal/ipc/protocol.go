@@ -54,6 +54,10 @@ const (
 	CmdUpdateSkill    = "update_skill"
 	CmdDeleteSkill    = "delete_skill"
 	CmdSaveAttachment = "save_attachment"
+	// M12 (D-auto): auto_distill_ctl disarms a scheduled (not yet fired)
+	// auto-distill for one conversation — the composer countdown chip's
+	// Cancel. The disarm is journaled.
+	CmdAutoDistillCtl = "auto_distill_ctl"
 )
 
 // Request is one command line on the socket.
@@ -76,6 +80,19 @@ type Request struct {
 	// A1: save_attachment writes a base64-encoded file to .odo/attachments/.
 	Data     string         `json:"data,omitempty"`     // save_attachment: base64-encoded file content
 	Accepted []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
+	// M12: auto_distill_ctl's verb (only "disarm" today).
+	Action string `json:"action,omitempty"`
+}
+
+// AutoDistillInfo is one scheduled (or blocked) auto-distill for the
+// pending_counts response: the countdown chip renders EtaUnix against the
+// client clock; a BlockedReason entry is a coverage-honesty skip surfaced
+// for manual action (its EtaUnix is 0).
+type AutoDistillInfo struct {
+	ConversationID int64  `json:"conversation_id"`
+	EtaUnix        int64  `json:"eta_unix"`
+	Trigger        string `json:"trigger"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
 }
 
 // MemoryAccept references one proposal out of a pending memory_propose batch:
@@ -170,6 +187,14 @@ type Response struct {
 	// contract the frontend implements.
 	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`
 	RunningWorkstreams []int64       `json:"running_workstreams,omitempty"`
+	// M12 (D-auto): pending_counts also reports scheduled auto-distills
+	// (countdown chip) and in-flight distills (manual or auto — the GUI
+	// locks the composer for manual, badges for auto).
+	AutoDistill     []AutoDistillInfo `json:"auto_distill,omitempty"`
+	Distilling      bool              `json:"distilling,omitempty"`
+	DistillingConvs []int64           `json:"distilling_convs,omitempty"`
+	// auto_distill_ctl: whether a scheduled auto-distill was disarmed.
+	Disarmed bool `json:"disarmed,omitempty"`
 	// search_events: cross-conversation search results.
 	SearchResults []store.SearchResult `json:"search_results,omitempty"`
 	// M8 (Skills): list_skills returns all discovered skill metadata;

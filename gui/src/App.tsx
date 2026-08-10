@@ -3,6 +3,7 @@ import { Plus, Sparkles, Wand2, MapPin, FileText, Settings, Square, ChevronLeft,
 import {
   acceptDiff,
   addProject,
+  autoDistillCtl,
   bootstrap,
   cancel,
   createWorkstream,
@@ -10,7 +11,6 @@ import {
   deleteWorkstream,
   distill,
   errorMessage,
-  getSettings,
   listProjects,
   listTopics,
   listWiki,
@@ -38,7 +38,7 @@ import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { notifyRunDone } from "./notify";
-import type { BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, ProjectEntry, Workstream } from "./types";
+import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, ProjectEntry, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -232,9 +232,12 @@ export default function App() {
   // minutes; polling is paused for the duration instead of queueing up
   // certain timeout failures.
   const distillingRef = useRef(false);
-  // M10: auto-distill idle timer. Armed when agentRunning flips false;
-  // cancelled on send, workstream/project switch, or manual distill.
-  const autoDistillTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // M12: auto-distill is daemon-driven — the GUI discloses daemon state,
+  // it never owns a trigger (the M10 idle timer is gone). Fed from
+  // pending_counts: countdown entries (eta seconds, per conversation),
+  // coverage blocks, and the in-flight distill list.
+  const [autoDistill, setAutoDistill] = useState<AutoDistillCountdown[]>([]);
+  const [distillingConvs, setDistillingConvs] = useState<number[]>([]);
   // M5: curate blocks daemon-side like distill (one connection at a time),
   // so the poll loop pauses for the curator one-shot the same way.
   const curatingRef = useRef(false);
@@ -290,6 +293,30 @@ export default function App() {
         clearTimeout(memoryChipTimer.current);
         memoryChipTimer.current = window.setTimeout(() => setLastMemoryUpdate(null), DAEMON_CHIP_MS);
       }
+    }
+  }, []);
+
+  // M3 (spec §3c) + M12: one fetch feeds the sidebar badges and the
+  // auto-distill disclosure (countdown chip / blocked state / in-flight
+  // indicator). Extracted so send/distill/ctl paths re-fetch promptly
+  // instead of waiting for the poll loop's every-4th-tick cadence.
+  const refreshPendingCounts = useCallback(async () => {
+    const root = projectRootRef.current;
+    if (root == null) return;
+    try {
+      const counts = await fetchPendingCounts(root);
+      if (!counts.ok) return;
+      const pending: Record<number, number> = {};
+      for (const [k, v] of Object.entries(counts.pending_counts ?? {})) {
+        const id = Number(k);
+        if (Number.isFinite(id)) pending[id] = v;
+      }
+      setPendingCounts(pending);
+      setRunningWorkstreams(counts.running_workstreams ?? []);
+      setAutoDistill(counts.auto_distill ?? []);
+      setDistillingConvs(counts.distilling_convs ?? []);
+    } catch {
+      // Stale badges are fine; never disturb the poll loop.
     }
   }, []);
 
@@ -444,25 +471,10 @@ export default function App() {
           setPanelTab("changes");
         }
         prevDiffsCountRef.current = newDiffs.length;
-        // M3 (spec §3c): project-wide visibility every ~4th tick (~6 s
-        // idle, ~1.4 s while a run streams).
-        // Guarded: a daemon without the command (or any failure) leaves the
-        // previous badge state untouched.
-        if (pollTickRef.current % 4 === 0 && projectRootRef.current != null) {
-          try {
-            const counts = await fetchPendingCounts(projectRootRef.current);
-            if (counts.ok) {
-              const pending: Record<number, number> = {};
-              for (const [k, v] of Object.entries(counts.pending_counts ?? {})) {
-                const id = Number(k);
-                if (Number.isFinite(id)) pending[id] = v;
-              }
-              setPendingCounts(pending);
-              setRunningWorkstreams(counts.running_workstreams ?? []);
-            }
-          } catch {
-            // Stale badges are fine; never disturb the poll loop.
-          }
+        // M3 (spec §3c) + M12 (D-auto disclosure): project-wide visibility
+        // every ~4th tick (~6 s idle, ~1.4 s while a run streams).
+        if (pollTickRef.current % 4 === 0) {
+          await refreshPendingCounts();
         }
         setError(null);
         // E P2: reset consecutive failure counter on success
@@ -488,7 +500,7 @@ export default function App() {
       agentRunning ? POLL_INTERVAL_RUNNING_MS : POLL_INTERVAL_IDLE_MS,
     );
     return () => clearInterval(timer);
-  }, [booted, recordEvents, agentRunning]);
+  }, [booted, recordEvents, agentRunning, refreshPendingCounts]);
 
   // M11 P2: cross-project status poll — every 5s, fetch pending_counts for
   // all registered projects except the active one (whose counts come from the
@@ -516,7 +528,9 @@ export default function App() {
     async (text: string, attachments: string[], steer: boolean) => {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
-      cancelAutoDistill(); // M10: user sent a message — cancel pending auto-distill
+      // M12: the daemon disarms/cancels auto-distill on send itself; the
+      // chip just re-reads promptly.
+      void refreshPendingCounts();
       // J: show a spinner for /panel and /vision while the daemon blocks.
       const isPanel = text.trim().startsWith("/panel") || text.trim().startsWith("/vision");
       if (isPanel) setPanelThinking(true);
@@ -539,7 +553,7 @@ export default function App() {
         if (isPanel) setPanelThinking(false);
       }
     },
-    [recordEvents],
+    [recordEvents, refreshPendingCounts],
   );
 
   // Belt A: stop the running agent. ok:false ("no active run") is the
@@ -645,7 +659,6 @@ export default function App() {
     async (workstreamId: number, projectRoot?: string) => {
       const root = projectRoot ?? project?.root_path;
       if (workstreamId === workstream?.id && projectRoot === undefined) return;
-      cancelAutoDistill(); // M10: switching workstreams cancels pending auto-distill
       try {
         const resp = unwrap(await bootstrap(root, workstreamId));
         // Phase 5: when switching to a foreign project's workstream, adopt
@@ -679,7 +692,6 @@ export default function App() {
   const handleSwitchProject = useCallback(
     async (root: string) => {
       if (root === activeProjectRoot) return;
-      cancelAutoDistill(); // M10: switching projects cancels pending auto-distill
       try {
         const resp = unwrap(await bootstrap(root));
         setActiveProjectRoot(root);
@@ -844,7 +856,6 @@ export default function App() {
   const handleDistill = useCallback(async () => {
     const cid = conversationRef.current;
     if (cid == null) return; // the action buttons are disabled without a conversation
-    cancelAutoDistill(); // M10: manual distill cancels any pending auto-distill
     distillingRef.current = true;
     setDistillBusy(true);
     try {
@@ -873,8 +884,11 @@ export default function App() {
     } finally {
       distillingRef.current = false;
       setDistillBusy(false);
+      // The daemon's schedule/in-flight state flipped too (manual distill
+      // supersedes any pending auto trigger).
+      void refreshPendingCounts();
     }
-  }, [refreshWikiCount, refreshMemoryProposals, pushToast, openPanelTab]);
+  }, [refreshWikiCount, refreshMemoryProposals, pushToast, openPanelTab, refreshPendingCounts]);
 
   // M5: the curator one-shot rewrites every topic page + wiki/index.md
   // from the full epoch-note set. Blocks daemon-side like distill, so the
@@ -908,55 +922,21 @@ export default function App() {
     }
   }, [refreshWikiCount, pushToast, openPanelTab]);
 
-  // M10: auto-distill — arm idle timer ONLY on genuine agentRunning true→false.
-  // Cancel on send, workstream/project switch, or manual distill.
-  const cancelAutoDistill = useCallback(() => {
-    if (autoDistillTimerRef.current) {
-      clearTimeout(autoDistillTimerRef.current);
-      autoDistillTimerRef.current = null;
+  // M12: the countdown chip's Cancel — disarm the daemon's scheduled
+  // auto-distill for the active conversation (the daemon journals the
+  // disarm; any send disarms too, and an in-flight one is send-cancelled,
+  // never chip-cancelled).
+  const handleDisarmAutoDistill = useCallback(async () => {
+    const cid = conversationRef.current;
+    if (cid == null) return;
+    try {
+      unwrap(await autoDistillCtl(cid, "disarm", projectRootRef.current ?? undefined));
+    } catch (e) {
+      setError(`cancel auto-distill failed: ${errorMessage(e)}`);
+    } finally {
+      void refreshPendingCounts();
     }
-  }, []);
-
-  // Track previous agentRunning to detect true→false transitions only.
-  const prevAgentRunningRef = useRef(false);
-
-  useEffect(() => {
-    const wasRunning = prevAgentRunningRef.current;
-    prevAgentRunningRef.current = agentRunning;
-
-    if (agentRunning) {
-      // Agent started — cancel any pending auto-distill.
-      cancelAutoDistill();
-      return;
-    }
-    // Only arm on genuine true→false transition, not initial load or switch.
-    if (!wasRunning || !conversation?.id) return;
-    const armCid = conversation.id;
-    let idleSec = 30;
-    let cancelled = false;
-    getSettings(projectRootRef.current ?? undefined).then((raw) => {
-      if (cancelled) return;
-      const s = unwrap(raw);
-      if (!s.settings || s.settings.auto_distill !== "on_idle") return;
-      if (s.settings.auto_distill_idle_seconds) {
-        const n = parseInt(s.settings.auto_distill_idle_seconds, 10);
-        if (!isNaN(n) && n >= 5) idleSec = n;
-      }
-      cancelAutoDistill();
-      autoDistillTimerRef.current = setTimeout(async () => {
-        autoDistillTimerRef.current = null;
-        // Re-check: same conversation, no new run, not distilling/curating.
-        if (conversationRef.current !== armCid || agentRunningRef.current || distillingRef.current || curatingRef.current) return;
-        await handleDistill();
-        // Chain auto-curate if enabled.
-        if (s.settings?.auto_curate_after_distill === "true" && conversationRef.current === armCid) {
-          await handleCurate();
-        }
-      }, idleSec * 1000);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentRunning, conversation?.id, cancelAutoDistill, handleDistill, handleCurate]);
+  }, [refreshPendingCounts]);
 
   // M5: a pin is a verbatim user statement hoovered into .odo/pins.md — no
   // LLM processing, no poll pause (returns immediately). The journaled
@@ -1285,6 +1265,15 @@ export default function App() {
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
           onSearchClose={() => setSearchOpen(false)}
+          // M12: the composer chip discloses the daemon's auto-distill
+          // state for the active conversation; the lock covers MANUAL
+          // distill only — an auto distill is send-cancelled, it never
+          // blocks typing.
+          autoDistill={conversation ? autoDistill.find((a) => a.conversation_id === conversation.id && !a.blocked_reason) : undefined}
+          autoDistillBlocked={conversation ? autoDistill.find((a) => a.conversation_id === conversation.id && a.blocked_reason != null) : undefined}
+          distillInFlight={conversation != null && distillingConvs.includes(conversation.id)}
+          onDisarmAutoDistill={handleDisarmAutoDistill}
+          distillLocked={distillBusy}
         />
       </main>
       <ContextPanel

@@ -73,6 +73,29 @@ type Server struct {
 	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
 	curating   bool               // a curate pass is in flight (M11 P0)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
+
+	// M12 (D-auto): daemon-side auto-distill state. All guarded by mu.
+	// distillKind replaces the bare distilling bit where the kind matters:
+	// "manual" keeps let-finish + send refusal; auto triggers ("idle",
+	// "startup", "urgent") carry a cancel-before-note handle in
+	// autoInFlight that a send/steer/slash fires to abort pre-note.
+	distillKind  map[int64]string            // conversationID -> kind of in-flight distill
+	autoPending  map[int64]*autoPendingEntry // conversationID -> scheduled (not yet fired) auto-distill
+	autoInFlight map[int64]*autoInFlight     // conversationID -> firing/fired auto-distill cancel handle
+	slashing     map[int64]int               // conversationID -> live /panel+//vision queries (fold-integrity gate)
+	autoBlocked  map[int64]string            // conversationID -> coverage-honesty skip reason surfaced via pending_counts
+
+	// Test seams (zero in production): autoIdle overrides the prefs-resolved
+	// idle (bypasses the 15s daemon floor); autoJitter caps the T2 startup
+	// jitter (0.1–60s by default via rand; tests set ≤1ms); autoCurateAge
+	// overrides the auto-curate age threshold (time travel without SQL);
+	// autoDisabled dark-launches the whole auto subsystem for the
+	// pre-M12 tests whose journals must stay byte-stable (production never
+	// sets it — the M12 default is ON).
+	autoDisabled  bool
+	autoIdle      time.Duration
+	autoJitter    time.Duration
+	autoCurateAge time.Duration
 }
 
 // NewServer builds a Server bound to one project root. ad becomes the default
@@ -93,6 +116,12 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		runs:         make(map[string]*runMeta),
 		byConv:       make(map[int64]string),
 		distilling:   make(map[int64]struct{}),
+		distillKind:  make(map[int64]string),
+		autoPending:  make(map[int64]*autoPendingEntry),
+		autoInFlight: make(map[int64]*autoInFlight),
+		slashing:     make(map[int64]int),
+		autoBlocked:  make(map[int64]string),
+		autoJitter:   autoStartupJitterMax,
 	}
 	s.adapters[""] = ad
 	s.adapters["omp"] = ad
@@ -230,6 +259,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handlePin(ctx, req)
 	case CmdReadPins:
 		resp, err = s.handleReadPins(ctx, req)
+	case CmdAutoDistillCtl:
+		resp, err = s.handleAutoDistillCtl(ctx, req)
 	case CmdListTopics:
 		resp, err = s.handleListTopics(ctx, req)
 	case CmdListSkills:
@@ -475,24 +506,14 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	}
 	// /panel slash command: route to MoA thinking (3 models via direct API).
 	// Must be outside s.mu — the fan-out blocks for up to N×HTTP_TIMEOUT.
+	// The run/distill gates live inside the handler (M12): the gate and the
+	// slash-slot registration must be one critical section, or a distill
+	// starting between the two folds the slash answer into last_seq unseen.
 	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/panel"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
 		c, err := s.checkConversation(ctx, req.ConversationID)
 		if err != nil {
 			return Response{}, err
 		}
-		// Reject /panel while an agent run is active (same invariant as send).
-		s.mu.Lock()
-		if runID, ok := s.byConv[c.ID]; ok {
-			if meta := s.runs[runID]; meta != nil && !meta.finished {
-				s.mu.Unlock()
-				return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
-			}
-		}
-		if _, ok := s.distilling[c.ID]; ok {
-			s.mu.Unlock()
-			return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
-		}
-		s.mu.Unlock()
 		return s.handlePanelQuery(ctx, &c, strings.TrimSpace(rest))
 	}
 	// /vision slash command: route to K3 (vision-capable) via direct API.
@@ -502,18 +523,6 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		if err != nil {
 			return Response{}, err
 		}
-		s.mu.Lock()
-		if runID, ok := s.byConv[c.ID]; ok {
-			if meta := s.runs[runID]; meta != nil && !meta.finished {
-				s.mu.Unlock()
-				return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
-			}
-		}
-		if _, ok := s.distilling[c.ID]; ok {
-			s.mu.Unlock()
-			return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
-		}
-		s.mu.Unlock()
 		return s.handleVisionQuery(ctx, &c, strings.TrimSpace(rest), req.Attachments)
 	}
 	// Held for the entire handler (M11 P0): the byConv check and
@@ -523,6 +532,15 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	defer s.mu.Unlock()
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
+		return Response{}, err
+	}
+	// M12 (D-auto): user input — a send OR a steer — disarms a scheduled
+	// auto-distill and cancels an in-flight AUTO distill before the note is
+	// written (cancel-before-note; journaled, then the input proceeds
+	// normally). A MANUAL distill keeps let-finish + refusal. This gate
+	// must sit above the steer branch: steers used to bypass the distill
+	// gate entirely and could journal into a folding window.
+	if err := s.gateAutoDistillForSendLocked(ctx, c.ID); err != nil {
 		return Response{}, err
 	}
 	// M8: steering is handled by handleSteering when req.Steer is set.
@@ -546,12 +564,6 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
 		}
-	}
-	// M11 P0 (DS review): reject sends during distill — the distill's
-	// unlocked 10-min window would let a new run journal events into
-	// the epoch the distill is about to roll.
-	if _, ok := s.distilling[c.ID]; ok {
-		return Response{}, fmt.Errorf("send_message: distill in progress for conversation %d", c.ID)
 	}
 	// M11 P3: parallelism cap — reject when too many concurrent runs.
 	if cap := resolveMaxConcurrent(); s.activeRunCount() >= cap {
@@ -1134,6 +1146,8 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		_, _ = s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError,
 			mustJSON(map[string]interface{}{"error": fmt.Sprintf("extract diff: %v", err)}))
 		meta.finished = true // mark finished so polling stops even on diff failure
+		// M12: the run ended — the window grew, so evaluate auto-distill too.
+		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 		return nil
 	}
 	if diffPath == "" {
@@ -1147,6 +1161,10 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		// A2-lite: even with no diff, fire continuation if steers were queued.
 		if len(queuedSteers) > 0 && !meta.errored {
 			go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+		} else {
+			// M12 (T1/T3): run-finished is an auto-distill evaluation point —
+			// arm the idle timer, or fire urgently when the window is huge.
+			s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 		}
 		return nil
 	}
@@ -1156,6 +1174,8 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			"error": "diff save failed: " + err.Error(),
 		}))
 		meta.finished = true
+		// M12: the run ended — the window grew, so evaluate auto-distill too.
+		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 		return nil
 	}
 	meta.finished = true // mark finished only after the diff row exists
@@ -1166,6 +1186,9 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// run with full memory-layer injection, not a silent file it never reads.
 	if len(queuedSteers) > 0 && !meta.errored {
 		go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+	} else {
+		// M12 (T1/T3): idle/urgent auto-distill evaluation at run finish.
+		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 	}
 	return nil
 }
@@ -1468,6 +1491,28 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	if text == "" {
 		return Response{}, fmt.Errorf("/panel: prompt text is required after /panel")
 	}
+	// M12: the gates run against the slash-slot registration in one critical
+	// section. Distill side: manual distills refuse (same error text as
+	// send, which is where this check lived before); an in-flight AUTO
+	// distill is cancelled pre-note and the query proceeds. Run side:
+	// unchanged refusal. The slot itself makes the reciprocal race
+	// impossible — a distill (manual refused, auto skipped+journaled) can no
+	// longer start mid-/panel and fold this answer into last_seq unseen.
+	s.mu.Lock()
+	if runID, ok := s.byConv[c.ID]; ok {
+		if meta := s.runs[runID]; meta != nil && !meta.finished {
+			s.mu.Unlock()
+			return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
+		}
+	}
+	if err := s.gateAutoDistillForSendLocked(ctx, c.ID); err != nil {
+		s.mu.Unlock()
+		return Response{}, err
+	}
+	s.slashing[c.ID]++
+	s.mu.Unlock()
+	defer s.releaseSlashSlot(ctx, c.ID)
+
 	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
 	if len(models) == 0 {
 		return Response{}, errors.New("No review models configured for /panel. Set the 'review:' line in prefs.md.")
@@ -1636,6 +1681,23 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	if text == "" {
 		return Response{}, fmt.Errorf("/vision: prompt text is required after /vision")
 	}
+	// M12: same gates + slash-slot registration as /panel (one critical
+	// section — see handlePanelQuery).
+	s.mu.Lock()
+	if runID, ok := s.byConv[c.ID]; ok {
+		if meta := s.runs[runID]; meta != nil && !meta.finished {
+			s.mu.Unlock()
+			return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
+		}
+	}
+	if err := s.gateAutoDistillForSendLocked(ctx, c.ID); err != nil {
+		s.mu.Unlock()
+		return Response{}, err
+	}
+	s.slashing[c.ID]++
+	s.mu.Unlock()
+	defer s.releaseSlashSlot(ctx, c.ID)
+
 	// K3 is the only vision-capable model (confirmed in ~/.omp/agent/models.yml).
 	const visionModel = "t9s/kimi-k3"
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
@@ -1761,7 +1823,6 @@ const distillTimeout = 10 * time.Minute
 // connection (M11 P0) and never touches the user's working tree. Old events
 // stay in the append-only journal; only the epoch counter moves (ADR-0002).
 func (s *Server) handleDistill(ctx context.Context, req Request) (Response, error) {
-	start := time.Now() // M6: distill duration metric (ledger)
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
@@ -1770,6 +1831,9 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	// drop the lock for the 10-minute agent run so other connections
 	// (poll_events, cancel, …) stay responsive throughout the distill.
 	s.mu.Lock()
+	// M12: a manual distill supersedes any scheduled auto-distill (Journaled
+	// disarm — the trigger does not re-fire on top of the manual fold).
+	s.disarmAutoLocked(ctx, c.ID, "superseded_by_manual")
 	if _, ok := s.distilling[c.ID]; ok {
 		s.mu.Unlock()
 		return Response{}, fmt.Errorf("distill: already in progress for conversation %d", c.ID)
@@ -1780,13 +1844,47 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 			return Response{}, fmt.Errorf("distill: agent still running for conversation %d", c.ID)
 		}
 	}
+	// M12 (slash gate, reciprocal half): a live /panel or /vision query is
+	// about to journal answers into this conversation; folding now would
+	// mark them distilled unseen. Refuse like a live run does.
+	if s.slashing[c.ID] > 0 {
+		s.mu.Unlock()
+		return Response{}, fmt.Errorf("distill: slash query in progress for conversation %d", c.ID)
+	}
 	s.distilling[c.ID] = struct{}{}
+	s.distillKind[c.ID] = distillTriggerManual
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.distilling, c.ID)
+		delete(s.distillKind, c.ID)
 		s.mu.Unlock()
 	}()
+	resp, err := s.distillCore(ctx, c, distillTriggerManual)
+	if err != nil {
+		// M12: failed manual distills journal too — an error toast alone
+		// leaves no durable trace (the daemon.log line rides on the GUI
+		// actually watching the log).
+		_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "distill",
+			"cause":  "failed",
+			"detail": err.Error(),
+		}))
+		return Response{}, err
+	}
+	return resp, nil
+}
+
+// distillCore is the shared distill pipeline both the manual command and
+// the M12 auto-distill scheduler drive: render the epoch window, one-shot
+// the note, learner + skill gate, then the fold marker. trigger is one of
+// distillTriggerManual/idle/startup/urgent and lands verbatim in the
+// marker payload with the measured window stats (spend per trigger class
+// becomes a SQL query). Errors are returned WITHOUT journaling — the
+// caller owns outcome journaling (manual: layer "distill"; auto:
+// layer "auto_distill" with its backoff semantics).
+func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger string) (Response, error) {
+	start := time.Now() // M6: distill duration metric (ledger)
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
 	if err != nil {
 		return Response{}, err
@@ -1806,10 +1904,31 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	if len(window) == 0 {
 		return Response{}, fmt.Errorf("distill: nothing journaled since the last distill")
 	}
+	winStats := measureWindow(window)
 
 	note, err := s.runDistillAgent(ctx, window)
 	if err != nil {
 		return Response{}, fmt.Errorf("distill: %w", err)
+	}
+
+	// M12 cancel-before-note: an auto distill that a send/steer/slash
+	// cancelled while the one-shot was in flight aborts HERE — after the
+	// agent returned, before any artifact. Zero writes happened, the
+	// cancelled_by_send row is already journaled by the cancelling send,
+	// and the trigger re-arms off the send's own activity.
+	if trigger != distillTriggerManual {
+		s.mu.Lock()
+		cancelled := s.autoInFlight[c.ID] != nil && s.autoInFlight[c.ID].cancelled
+		s.mu.Unlock()
+		if cancelled {
+			return Response{}, errAutoDistillCancelled
+		}
+		// Past the pre-note checkpoint the fold must complete: cancel only
+		// guards against a phantom marker for a window the user just
+		// resumed; once the note write starts, journal work switches to a
+		// cancel-free context so an in-flight cancel can never half-land
+		// (note on disk, marker append failed).
+		ctx = context.WithoutCancel(ctx)
 	}
 
 	wikiDir := filepath.Join(s.projectRoot, "wiki")
@@ -1916,6 +2035,13 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 		"last_seq":       lastSeq,
 		"note_path":      filepath.Join("wiki", noteName+".md"),
 		"note_sha":       sha16([]byte(note)),
+		// M12: provenance for spend-per-trigger-class queries. window_events
+		// counts every journaled event in the folded window; window_bytes is
+		// the eligibility-measured render size (/panel and /vision agent_text
+		// bytes excluded — advisory answers must not inflate fold cadence).
+		"trigger":       trigger,
+		"window_events": winStats.events,
+		"window_bytes":  winStats.eligibleBytes,
 	}))
 	if err != nil {
 		return Response{}, err
@@ -1925,6 +2051,14 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	// citable). Section header uses c.Epoch — the distilled note's epoch,
 	// not newEpoch (the counter after increment).
 	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
+
+	// M12: the fold retired the window — clear any coverage-honesty block
+	// the badge was surfacing, then evaluate the conditional auto-curate
+	// (never chained: it fires only when the notes/age thresholds say so).
+	s.mu.Lock()
+	delete(s.autoBlocked, c.ID)
+	s.mu.Unlock()
+	s.maybeAutoCurate(w.ProjectID, c.ID)
 	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: len(batchProposals)}, nil
 }
 
@@ -2011,8 +2145,28 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 			running = append(running, meta.workstreamID)
 		}
 	}
+	// M12 (D-auto): scheduled auto-distills (composer countdown chip),
+	// coverage-honesty blocks, and in-flight distills ride the same badge
+	// poll — the GUI never owns a trigger, it only discloses daemon state.
+	var auto []AutoDistillInfo
+	for convID, entry := range s.autoPending {
+		auto = append(auto, AutoDistillInfo{ConversationID: convID, EtaUnix: entry.fireAt.Unix(), Trigger: entry.trigger})
+	}
+	for convID, reason := range s.autoBlocked {
+		auto = append(auto, AutoDistillInfo{ConversationID: convID, BlockedReason: reason})
+	}
+	var distillingConvs []int64
+	for convID := range s.distilling {
+		distillingConvs = append(distillingConvs, convID)
+	}
 	s.mu.Unlock()
-	return Response{PendingCounts: counts, RunningWorkstreams: running}, nil
+	return Response{
+		PendingCounts:      counts,
+		RunningWorkstreams: running,
+		AutoDistill:        auto,
+		Distilling:         len(distillingConvs) > 0,
+		DistillingConvs:    distillingConvs,
+	}, nil
 }
 
 // handleLedger returns the .odo/ledger.md content as memory_content (same
@@ -2484,6 +2638,12 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 	var texts []string
 	var runErr string
 	for {
+		// M12 cancel-before-note: a cancelled ctx (auto-distill aborted by a
+		// user send) stops the poll promptly instead of riding out the agent.
+		// The deferred Close kills the wrapper process.
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		evs, err := ad.Events(ctx, runID, consumed)
 		if err != nil {
 			return "", err

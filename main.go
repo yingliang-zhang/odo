@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"log"
@@ -80,6 +81,16 @@ func main() {
 	distillOMP := adapter.NewOMPForKey(mgr.StateDir(), "orchestrator")
 	srv := ipc.NewServer(st, root, omp, mgr)
 	srv.SetDistillAdapter(distillOMP)
+
+	// M12 (D-auto): startup compensation — arm startup triggers for active
+	// conversations whose un-folded window went stale while the app was
+	// closed (the missed-fold hole), run the legacy auto-curate pref
+	// migration, and evaluate the conditional auto-curate. Best-effort:
+	// failures are logged per conversation; a hard failure must not stop
+	// the daemon from serving.
+	if err := srv.StartupAutoScan(context.Background()); err != nil {
+		log.Printf("auto-distill startup scan: %v", err)
+	}
 
 	socket := socketFlag
 	if socket == "" {
