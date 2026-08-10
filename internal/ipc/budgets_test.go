@@ -18,14 +18,16 @@ import (
 //
 // Soft bound: 48 KB when the registry landed (M12 D-budget), re-based to
 // 50 KB with the M12 D-todo layer (+1.5 KB/send, landed in the same
-// milestone): the bound tracks the current effective send stack by
-// definition, and the registry Σ bills replay_turn nested inside
-// replay_total (the pessimistic convention below) — 47 KB + 1.5 KB =
-// 48.5 KB against ~44.5 KB physically injected. The 128 KB hard bound —
-// the actual model-context guard — is unchanged.
+// milestone), re-based to 55 KB with the M12 Batch 3a D-cross layer
+// (+5 KB/send: cross_topics 3 KB + cross_sibling 2 KB): the bound tracks
+// the current effective send stack by definition, and the registry Σ bills
+// replay_turn nested inside replay_total (the pessimistic convention
+// below) — 47 KB + 1.5 KB + 5 KB = 53.5 KB against ~44.5 KB physically
+// injected. The 128 KB hard bound — the actual model-context guard — is
+// unchanged.
 func TestPromptBudgetSumsWithinBounds(t *testing.T) {
 	const (
-		softBound = 50 * 1024 // re-based for the D-todo row (see header)
+		softBound = 55 * 1024 // re-based for the D-cross rows (see header)
 		hardBound = 128 * 1024
 	)
 	for _, path := range []string{budgetPathSend, budgetPathSlash} {

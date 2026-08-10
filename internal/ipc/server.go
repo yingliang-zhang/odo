@@ -678,6 +678,8 @@ type memoryLayers struct {
 	skillReceipts []skillReceiptItem // M8: per-skill path + block hash for receipt
 	index         string             // wiki/index.md (M5: always-injected)
 	wiki          string             // recalled epoch notes block
+	cross         string             // M12 Batch 3a (D-cross): matched-only cross-workstream block
+	crossItems    []crossSource      // D-cross: per-source path/origin/matched terms + chunk sha
 	memoryMap     string             // R2: pull-based read-back hints (wiki/ + ledger absolute paths)
 	resume        string             // R4: cold-start open-loops handoff (injected only when the replay window is empty)
 	todo          string             // M12 (D-todo): durable plan block (journaled todo state, durable across folds)
@@ -711,6 +713,12 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 	retracted := s.retractedNotes(ctx, conversationID)
 	m, items, noteBytes := recallWikiNotes(s.projectRoot, wsName, query, retracted)
 	ml.wiki = m
+	// M12 Batch 3a (D-cross): matched-only cross-workstream push — empty
+	// unless the query earned it (no fallback tier leaks cross-ws).
+	if block, sources := crossWsBlock(s.projectRoot, wsName, query); block != "" {
+		ml.cross = block
+		ml.crossItems = sources
+	}
 	ml.memoryMap = memoryMapBlock(s.projectRoot)
 	if ml.user != "" {
 		ml.receipt["~/.odo/user.md"] = sha16([]byte(ml.user))
@@ -732,6 +740,11 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 		ml.receipt[it.path] = sha16(noteBytes[i])
 	}
 	ml.recall = items
+	// M12 Batch 3a (D-cross): per-source receipt entries — real wiki
+	// paths → sha16 of the section chunk each source contributed.
+	for _, src := range ml.crossItems {
+		ml.receipt[src.path] = src.sha
+	}
 	return ml
 }
 
@@ -802,6 +815,15 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 		}
 		out = append(out, item)
 	}
+	// M12 Batch 3a (D-cross): cross-workstream sources carry origin +
+	// matched_terms (optional-field style, ADR-0002 preserved).
+	for _, src := range ml.crossItems {
+		item := map[string]interface{}{"path": src.path, "origin": src.origin}
+		if len(src.matchedTerms) > 0 {
+			item["matched_terms"] = src.matchedTerms
+		}
+		out = append(out, item)
+	}
 	return out
 }
 
@@ -809,9 +831,10 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 // order (inv 6 extended, M5): user (global, durable user principles),
 // project (.odo/memory.md behavior rules), pins (.odo/pins.md, verbatim),
 // skills, index (wiki/index.md, always-injected), then recalled wiki notes,
-// the R2 read-back map, the R4 resume card (cold start only), the M12
-// durable plan block, the R1 journal replay, attachment hints, and the
-// user's text last (cache-friendly stable prefix).
+// the M12 Batch 3a matched-only cross-workstream block (D-cross), the R2
+// read-back map, the R4 resume card (cold start only), the M12 durable plan
+// block, the R1 journal replay, attachment hints, and the user's text last
+// (cache-friendly stable prefix).
 func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	var b strings.Builder
 	if ml.user != "" {
@@ -842,6 +865,13 @@ func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	if ml.wiki != "" {
 		b.WriteString("## Prior notes (recalled)\n\n")
 		b.WriteString(ml.wiki)
+		b.WriteString("\n\n---\n\n")
+	}
+	if ml.cross != "" {
+		// M12 Batch 3a (D-cross): matched-only cross-workstream push sits
+		// after the home-workstream notes and before the memory map —
+		// earned context, never a fallback tier.
+		b.WriteString(ml.cross)
 		b.WriteString("\n\n---\n\n")
 	}
 	if ml.memoryMap != "" {

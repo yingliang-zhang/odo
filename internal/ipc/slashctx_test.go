@@ -414,6 +414,128 @@ func TestVisionContextScopeProjectOnly(t *testing.T) {
 	}
 }
 
+// TestPanelIncludesCrossWsBlock pins the /panel contract for M12 Batch 3a
+// (D-cross): the panel advises on the project as a whole, so matched
+// topic pages and the newest matched sibling epoch note ride its system
+// block — after the recalled home-workstream notes, before the
+// conversation tail — with labeled provenance headers and journaled
+// receipts.
+func TestPanelIncludesCrossWsBlock(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	writePrefs(t, home, "review: pm1@test\n")
+	// Cross-workstream fixture: a topic page and a sibling-workstream epoch
+	// note, both matching the CJK panel query. The fixture's OWN
+	// main-epoch-1 note matches too but is the home layer's — never a
+	// "sibling".
+	writeTopicPage(t, root, "sidebar-topic", "# Sidebar\n\n侧边栏 决策记录。 (ui-epoch-2)\n")
+	writeEpochNote(t, root, "ui-epoch-3", "# UI 3\n\n侧边栏 width decision.\n")
+	rec := &moaRecorder{}
+	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "panel-answer", rec).URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	// One genuine exchange so the conversation tail section exists.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "crossws-marker please"})
+	rig.pollUntilDone(t, convID)
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel 侧边栏怎么看"})
+	system := rec.all()[0].System
+	for _, want := range []string{
+		"## Cross-workstream context (project topic pages — other workstreams)",
+		"### topics/sidebar-topic.md [matched: 侧边, 边栏] · sources: ui-epoch-2",
+		"### ui-epoch-3.md [from workstream \"ui\"] [matched: 侧边, 边栏]",
+		"侧边栏 决策记录。 (ui-epoch-2)",
+		"侧边栏 width decision.",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("panel cross-workstream block missing %q", want)
+		}
+	}
+	// Sibling provenance never points at the HOME workstream: the fixture's
+	// matching main-epoch-1 note stays in the home recall section only.
+	if strings.Contains(system, "[from workstream \"main\"]") {
+		t.Error("sibling header pointed at the current workstream — home notes are not siblings")
+	}
+	// Position: after the recalled notes, before the conversation tail.
+	iNotes := strings.Index(system, "## Prior notes (recalled)")
+	iCross := strings.Index(system, "## Cross-workstream context")
+	iConv := strings.Index(system, "## Conversation so far")
+	if !(iNotes >= 0 && iCross > iNotes && iConv > iCross) {
+		t.Errorf("cross block out of order: notes=%d cross=%d conv=%d", iNotes, iCross, iConv)
+	}
+	// Journaled receipts: both real wiki paths → sha16.
+	var p struct {
+		Receipt map[string]string `json:"receipt"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	var topicRcpt, sibRcpt bool
+	for path, sha := range p.Receipt {
+		switch {
+		case strings.HasSuffix(path, filepath.Join("topics", "sidebar-topic.md")):
+			topicRcpt = len(sha) == 16
+		case strings.HasSuffix(path, "ui-epoch-3.md"):
+			sibRcpt = len(sha) == 16
+		}
+	}
+	if !topicRcpt || !sibRcpt {
+		t.Errorf("panel receipt missing cross sources (topic=%v sibling=%v): %v", topicRcpt, sibRcpt, p.Receipt)
+	}
+}
+
+// TestVisionExcludesCrossWsBlock pins the /vision lean contract: with the
+// same matched cross-workstream fixture on disk, the vision block carries
+// no cross-workstream layer and journals no receipts for it.
+func TestVisionExcludesCrossWsBlock(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	writeTopicPage(t, root, "sidebar-topic", "# Sidebar\n\n侧边栏 决策记录。 (ui-epoch-2)\n")
+	writeEpochNote(t, root, "ui-epoch-3", "# UI 3\n\n侧边栏 width decision.\n")
+	rec := &moaRecorder{}
+	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "vision-answer", rec).URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/vision 侧边栏 describe"})
+	system := rec.all()[len(rec.all())-1].System
+	for _, absent := range []string{
+		"## Cross-workstream context",
+		"### topics/sidebar-topic.md",
+		"[from workstream",
+		"侧边栏 width decision.",
+	} {
+		if strings.Contains(system, absent) {
+			t.Errorf("vision block must exclude cross-workstream content, found %q", absent)
+		}
+	}
+	var p struct {
+		Receipt map[string]string `json:"receipt"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	for path := range p.Receipt {
+		if strings.Contains(path, string(filepath.Separator)+"topics"+string(filepath.Separator)) || strings.HasSuffix(path, "ui-epoch-3.md") {
+			t.Errorf("vision receipt lists cross-workstream content it never injected: %q", path)
+		}
+	}
+}
+
 // TestSlashTailClampsTurnCap pins the slash tail's per-turn cap: a
 // replay_turn_kb setting above slashConvCap must not let the newest turn
 // blow past the 4KB block cap through the newest-turn anti-starvation

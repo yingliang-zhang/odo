@@ -102,6 +102,18 @@ func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID in
 			}
 			section("## Prior notes (recalled)", mem)
 		}
+		// M12 Batch 3a (D-cross): the panel advises on the project as a
+		// whole, so it buys the same matched-only cross-workstream layer as
+		// the send path. Topic pages are project-scoped by definition, so
+		// panel_context_scope: project-only does NOT exclude this layer
+		// (the scope gate is about ~/.odo/user.md only). /vision stays
+		// excluded — lean contract.
+		if block, sources := crossWsBlock(s.projectRoot, wsName, query); block != "" {
+			for _, src := range sources {
+				receipt[src.path] = src.sha
+			}
+			sections = append(sections, block) // carries its own "##" header
+		}
 	}
 	if conv := slashConversation(events, mode); conv != "" {
 		sections = append(sections, conv) // carries its own header + receipt range

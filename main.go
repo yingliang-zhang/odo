@@ -40,7 +40,9 @@ func main() {
 	// M6: subcommand dispatch. `odo wiki read <page>` / `odo ledger [tail N]`
 	// are pull-based recall CLIs that read files directly (no daemon);
 	// `odo journal <sub>` is the read-only rehydration CLI for folded
-	// events. Any other invocation without a subcommand runs the daemon.
+	// events; `odo recall audit` (M12 Batch 3a) is the read-only recall
+	// miss-rate report. Any other invocation without a subcommand runs the
+	// daemon.
 	if args := flag.Args(); len(args) > 0 {
 		switch args[0] {
 		case "wiki":
@@ -51,6 +53,8 @@ func main() {
 			os.Exit(runJournalCLI(args[1:]))
 		case "todo":
 			os.Exit(runTodoCLI(args[1:]))
+		case "recall":
+			os.Exit(runRecallCLI(args[1:]))
 		}
 	}
 

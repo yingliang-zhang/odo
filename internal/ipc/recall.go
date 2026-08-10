@@ -90,6 +90,12 @@ var stopWords = map[string]bool{
 	"i": true, "you": true, "we": true, "they": true, "me": true, "my": true,
 }
 
+// TokenizeQuery is the command-side spelling of tokenizeQuery (M12 Batch
+// 3a recall miss-audit): the audit must classify misses with EXACTLY the
+// tokenization the recall path used, so `odo recall audit` imports it
+// rather than re-implementing it.
+func TokenizeQuery(text string) []string { return tokenizeQuery(text) }
+
 // queryTokenRe splits the lowercased query on non-alphanumeric runs.
 var queryTokenRe = regexp.MustCompile(`[^a-z0-9]+`)
 
