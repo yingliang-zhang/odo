@@ -48,3 +48,48 @@ func writePrefsForTest(t *testing.T, home, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestAutoApplyPref pins the M15 rung-0 contract: the pref parses with
+// default "off", unknown values read back fail-closed as "off", and
+// UpdateSettings rejects invalid values (writing nothing).
+func TestAutoApplyPref(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Absent pref -> default off.
+	if s := ReadSettings(); s.AutoApply != "off" {
+		t.Errorf("AutoApply = %q, want off (no prefs.md)", s.AutoApply)
+	}
+
+	// Every valid value round-trips.
+	for _, v := range []string{"off", "branch", "main", "all"} {
+		writePrefsForTest(t, home, "auto_apply: "+v+"\n")
+		if s := ReadSettings(); s.AutoApply != v {
+			t.Errorf("AutoApply = %q, want %q", s.AutoApply, v)
+		}
+	}
+
+	// Unknown value in the file reads fail-closed as off.
+	writePrefsForTest(t, home, "auto_apply: yolo\n")
+	if s := ReadSettings(); s.AutoApply != "off" {
+		t.Errorf("AutoApply = %q, want off (fail-closed on unknown)", s.AutoApply)
+	}
+
+	// UpdateSettings validates BEFORE writing.
+	writePrefsForTest(t, home, "coding: glm-5.2@sudo\n")
+	if err := UpdateSettings(Settings{AutoApply: "everything"}); err == nil {
+		t.Fatal("UpdateSettings(invalid auto_apply) = nil error, want validation error")
+	}
+	if s := ReadSettings(); s.AutoApply != "off" {
+		t.Errorf("after rejected update AutoApply = %q, want off (file untouched)", s.AutoApply)
+	}
+	if err := UpdateSettings(Settings{AutoApply: "branch"}); err != nil {
+		t.Fatal(err)
+	}
+	if s := ReadSettings(); s.AutoApply != "branch" {
+		t.Errorf("after update AutoApply = %q, want branch", s.AutoApply)
+	}
+	if s := ReadSettings(); s.CodingModel != "glm-5.2" {
+		t.Errorf("CodingModel = %q, want glm-5.2 (other keys preserved)", s.CodingModel)
+	}
+}

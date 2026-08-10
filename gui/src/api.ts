@@ -26,6 +26,7 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return tauriInvoke<T>(cmd, args);
 }
 import type {
+  AutonomyStatusResponse,
   AcceptDiffResponse,
   ApplyMemoryRequest,
   ApplyMemoryResponse,
@@ -202,6 +203,12 @@ export function rejectDiff(diffId: number, projectRoot?: string): Promise<Reject
 // grades the diff; the Rust bridge uses a matching long read timeout.
 export function reviewDiff(diffId: number, projectRoot?: string): Promise<ReviewDiffResponse> {
   return invoke<ReviewDiffResponse>("review_diff", { diffId, projectRoot: projectRoot ?? null });
+}
+
+// M15 (O-1 rung-0): the autonomy streak snapshot the DiffViewer header
+// shows on open; a read-only journal computation daemon-side.
+export function autonomyStatus(projectRoot?: string): Promise<AutonomyStatusResponse> {
+  return invoke<AutonomyStatusResponse>("autonomy_status", { projectRoot: projectRoot ?? null });
 }
 
 // M2 settings: the bridge resolves its default project root when none is

@@ -7,8 +7,10 @@ import (
 )
 
 // AppendEvent journals an event with the next per-conversation sequence
-// number (monotonic, gap-free under the store's single connection).
-// payloadJSON must be valid JSON; an empty payload is stored as "{}".
+// number (monotonic, gap-free: the store's single sqlite connection
+// serializes seq allocation even under M11's goroutine-per-connection
+// IPC serving). payloadJSON must be valid JSON; an empty payload is
+// stored as "{}".
 func (s *Store) AppendEvent(ctx context.Context, conversationID int64, eventType, payloadJSON string) (Event, error) {
 	if payloadJSON == "" {
 		payloadJSON = "{}"

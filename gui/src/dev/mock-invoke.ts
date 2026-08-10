@@ -88,6 +88,32 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         ],
       };
     }
+    // M15 (O-1 rung-0): a small static snapshot so the DiffViewer header
+    // renders its one-liner in dev/e2e without a daemon.
+    case "autonomy_status": {
+      return {
+        ok: true,
+        autonomy: {
+          project_root: args?.projectRoot ?? "",
+          journal: "",
+          workstreams_scanned: 1,
+          conversations_scanned: 1,
+          resolutions: 0,
+          unreadable_diffs: 0,
+          auto_apply: "off",
+          current_rung: 0,
+          rung_thresholds: { rung_1: 10, rung_2: 30 },
+          revert_check: "heuristic: >=80% mirrored lines, >=1 shared path, within 7d",
+          classes: [
+            { class: "C0", description: "never-auto", accepted: 0, rejected: 0, streak: 0, next_threshold: 0, eligible: "" },
+            { class: "C1", description: "docs", accepted: 0, rejected: 0, streak: 0, next_threshold: 10, eligible: "" },
+            { class: "C2", description: "tests", accepted: 0, rejected: 0, streak: 0, next_threshold: 10, eligible: "" },
+            { class: "C3", description: "small in-scope", accepted: 0, rejected: 0, streak: 0, next_threshold: 10, eligible: "" },
+            { class: "unclassified", description: "other", accepted: 0, rejected: 0, streak: 0, next_threshold: 0, eligible: "" },
+          ],
+        },
+      };
+    }
 
     // ---------- Settings ----------
     case "get_settings": {

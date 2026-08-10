@@ -66,6 +66,28 @@ func (s *Store) UpdateDiffStatus(ctx context.Context, diffID int64, status strin
 	return nil
 }
 
+// ListDiffs returns every diff for a conversation, ordered by id (insertion
+// order). Read-only consumers (outcome audits) use it to join diff rows to
+// the run events that produced them.
+func (s *Store) ListDiffs(ctx context.Context, conversationID int64) ([]Diff, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, conversation_id, path_on_disk, base_sha, status, created_at
+		 FROM diffs WHERE conversation_id = ? ORDER BY id`, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list diffs: %w", err)
+	}
+	defer rows.Close()
+	var diffs []Diff
+	for rows.Next() {
+		d, err := s.scanDiff(rows)
+		if err != nil {
+			return nil, err
+		}
+		diffs = append(diffs, d)
+	}
+	return diffs, rows.Err()
+}
+
 // ListPendingDiffs returns all pending diffs for a conversation, ordered by id.
 func (s *Store) ListPendingDiffs(ctx context.Context, conversationID int64) ([]Diff, error) {
 	rows, err := s.db.QueryContext(ctx,

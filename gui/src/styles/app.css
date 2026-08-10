@@ -1976,6 +1976,20 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   font-weight: 600;
 }
 
+/* M15 (O-1 rung-0): the autonomy one-liner — a muted hint, never an
+   action surface. margin-right: auto keeps the toggle/actions pinned
+   right whether or not the hint is present. */
+.diff-autonomy {
+  margin-left: 12px;
+  margin-right: auto;
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .diff-actions {
   display: flex;
   gap: 8px;

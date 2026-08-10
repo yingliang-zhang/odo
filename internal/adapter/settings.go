@@ -28,7 +28,18 @@ type Settings struct {
 	AutoDistillIdleSeconds string `json:"auto_distill_idle_seconds"` // e.g. "120"
 	// M11 P3: parallelism cap (default 4)
 	MaxConcurrentRuns string `json:"max_concurrent_runs"` // e.g. "4"
+	// M15 (O-1 rung-0): autonomy pref. off|branch|main|all, default off.
+	// PARSED AND DISPLAYED ONLY — no behavior consumes it yet; writing
+	// auto-apply behavior above rung 0 is out of scope for rung-0
+	// instrumentation.
+	AutoApply string `json:"auto_apply"`
 }
+
+// autoApplyValues are the valid auto_apply pref values (rung-0 contract).
+var autoApplyValues = map[string]bool{"off": true, "branch": true, "main": true, "all": true}
+
+// ValidAutoApply reports whether v is a valid auto_apply pref value.
+func ValidAutoApply(v string) bool { return autoApplyValues[v] }
 
 // prefsPath returns ~/.odo/prefs.md.
 func prefsPath() (string, error) {
@@ -128,6 +139,13 @@ func ReadSettings() Settings {
 	if s.MaxConcurrentRuns == "" {
 		s.MaxConcurrentRuns = "4"
 	}
+	// M15 (O-1 rung-0): fail-closed — an unknown or absent value reads as
+	// "off". When a future rung consumes this pref, a typo must never
+	// silently widen apply scope.
+	s.AutoApply = LoadPrefsRaw("auto_apply")
+	if !ValidAutoApply(s.AutoApply) {
+		s.AutoApply = "off"
+	}
 	return s
 }
 
@@ -180,6 +198,16 @@ func UpdateSettings(up Settings) error {
 	}
 	if up.MaxConcurrentRuns != "" {
 		set("max_concurrent_runs", up.MaxConcurrentRuns)
+	}
+	// M15 (O-1 rung-0): auto_apply is validated BEFORE anything is
+	// written — reject unknown values outright rather than persisting a
+	// value this daemon will read back as "off" while the file claims
+	// otherwise.
+	if up.AutoApply != "" {
+		if !ValidAutoApply(up.AutoApply) {
+			return fmt.Errorf("prefs: auto_apply must be one of off|branch|main|all, got %q", up.AutoApply)
+		}
+		set("auto_apply", up.AutoApply)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

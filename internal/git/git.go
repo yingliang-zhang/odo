@@ -271,6 +271,122 @@ func unquoteDiffPath(target, prefix string) string {
 	return strings.TrimPrefix(target, prefix)
 }
 
+// FileStat is one file's change stats inside a unified diff.
+type FileStat struct {
+	Path        string // b-side (post-image); a-side for deletions
+	Added       int
+	Removed     int
+	NewFile     bool
+	DeletedFile bool
+	CommentOnly bool // every changed content line is blank or starts a comment
+}
+
+// PatchStat aggregates one patch file's per-file and total line stats.
+type PatchStat struct {
+	Files   []FileStat
+	Added   int
+	Removed int
+}
+
+// commentMarkers classify a trimmed content line as comment-only. The set
+// is deliberately language-agnostic (the autonomy classifier treats any
+// change composed solely of these lines as C1 regardless of file type).
+var commentMarkers = []string{"//", "#", "/*", "*", "<!--", "-->"}
+
+// PatchStats parses the unified diff at pathOnDisk into per-file and total
+// line stats. Paths follow the same a/b-side and C-quoting rules as
+// DiffPaths. A file with zero content lines (mode-only changes) reports
+// CommentOnly false — there is no evidence either way.
+func PatchStats(pathOnDisk string) (PatchStat, error) {
+	data, err := os.ReadFile(pathOnDisk)
+	if err != nil {
+		return PatchStat{}, err
+	}
+	var stat PatchStat
+	idx := -1 // current file in stat.Files, -1 = outside any file block
+	var pendNew, pendDel bool
+	nonComment := map[int]bool{} // files with at least one non-comment content line
+	appendFile := func(p string) {
+		stat.Files = append(stat.Files, FileStat{Path: p, NewFile: pendNew, DeletedFile: pendDel})
+		idx = len(stat.Files) - 1
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			idx, pendNew, pendDel = -1, false, false
+		case strings.HasPrefix(line, "new file mode"):
+			pendNew = true
+		case strings.HasPrefix(line, "deleted file mode"):
+			pendDel = true
+		case strings.HasPrefix(line, "--- "):
+			if p := unquoteDiffPath(strings.TrimPrefix(line, "--- "), "a/"); p != "" {
+				appendFile(p)
+			}
+		case strings.HasPrefix(line, "+++ "):
+			if p := unquoteDiffPath(strings.TrimPrefix(line, "+++ "), "b/"); p != "" {
+				// Post-image name wins (renames): the change is reviewed
+				// under the new path.
+				if idx >= 0 {
+					stat.Files[idx].Path = p
+				} else {
+					appendFile(p)
+				}
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		var content string
+		switch {
+		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+			stat.Files[idx].Added++
+			stat.Added++
+			content = line[1:]
+		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+			stat.Files[idx].Removed++
+			stat.Removed++
+			content = line[1:]
+		default:
+			continue
+		}
+		if trimmed := strings.TrimSpace(content); trimmed != "" && !hasAnyPrefix(trimmed, commentMarkers) {
+			nonComment[idx] = true
+		}
+	}
+	for i := range stat.Files {
+		f := &stat.Files[i]
+		f.CommentOnly = f.Added+f.Removed > 0 && !nonComment[i]
+	}
+	return stat, nil
+}
+
+// hasAnyPrefix reports whether s starts with any of the given prefixes.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ListTreeNames lists the top-level entry names of the tree at sha
+// (read-only). Used by the autonomy classifier's new-top-level-directory
+// check against a diff's base commit.
+func ListTreeNames(repoPath, sha string) ([]string, error) {
+	out, err := run(repoPath, "ls-tree", "--name-only", sha)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
 // CurrentSHA returns the full HEAD commit SHA of repoPath.
 func CurrentSHA(repoPath string) (string, error) {
 	out, err := run(repoPath, "rev-parse", "HEAD")

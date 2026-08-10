@@ -1,7 +1,7 @@
-import { useMemo, useRef, useState, type UIEvent, type ReactNode } from "react";
-import { errorMessage, reviewDiff, unwrap } from "../api";
+import { useEffect, useMemo, useRef, useState, type UIEvent, type ReactNode } from "react";
+import { autonomyStatus, errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
-import type { Diff, ReviewResult } from "../types";
+import type { AutonomyReport, Diff, ReviewResult } from "../types";
 
 interface Props {
   diff: Diff;
@@ -323,6 +323,19 @@ function renderCode(prefix: string, code: string, lang: Language | null): ReactN
 }
 
 // Presents one diff from the daemon with Accept/Reject review actions.
+// autonomyHint renders the rung-0 streak suffix (" · C1 4/10 · C2 1/10")
+// for the rung classes only — C0/unclassified never carry rung progress.
+function autonomyHint(r: AutonomyReport): string {
+  const parts = r.classes
+    .filter((c) => c.class === "C1" || c.class === "C2" || c.class === "C3")
+    .map((c) =>
+      c.next_threshold > 0
+        ? `${c.class} ${Math.min(c.streak, c.next_threshold)}/${c.next_threshold}`
+        : `${c.class} ${c.streak}`,
+    );
+  return parts.length > 0 ? " · " + parts.join(" · ") : "";
+}
+
 // Only a `pending` diff is actionable; afterwards this becomes a record card.
 export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, agentRunning }: Props) {
   const [acting, setActing] = useState(false);
@@ -330,6 +343,23 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   const [consensus, setConsensus] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  // M15 (O-1 rung-0): the muted header one-liner — auto-apply pref plus
+  // per-class streaks, computed daemon-side when the card opens.
+  const [autonomy, setAutonomy] = useState<AutonomyReport | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    autonomyStatus(projectRoot ?? undefined)
+      .then((r) => {
+        if (!cancelled) setAutonomy(unwrap(r).autonomy ?? null);
+      })
+      .catch(() => {
+        // Observability hint only — a daemon without the command (or a
+        // failed read) must never block the diff card.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectRoot]);
   // Belt D: inline (unified) vs split (old | new) rendering.
   const [split, setSplit] = useState(false);
   // P1-3: inline diff comments — Map<lineIndex, comment text>
@@ -535,6 +565,12 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         <span className="diff-title">
           Diff #{diff.id}
         </span>
+        {autonomy !== null && (
+          <span className="diff-autonomy" title={autonomy.revert_check}>
+            Auto-apply: {autonomy.auto_apply}
+            {autonomyHint(autonomy)}
+          </span>
+        )}
         {diff.content !== "" && (
           <span className="diff-toggle" role="group" aria-label="Diff view mode">
             <button

@@ -28,8 +28,10 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// 10-minute `distillTimeout`) followed by the M4 learner one-shot (bounded
 /// by the 5-minute `learnerTimeout`) and the M9 tri-model skill gate
 /// (bounded by the 5-minute skill-gate HTTP client timeout) — all synchronously before
-/// the daemon answers, and the daemon serves one connection at a time, so
-/// the read timeout covers all three plus margin (10m + 5m + 5m + margin).
+/// the daemon answers. The older rationale cited the daemon serving "one
+/// connection at a time"; since M11 each call is a fresh connection served
+/// by its own goroutine, but the chain still runs synchronously per call,
+/// so the read timeout covers all three plus margin (10m + 5m + 5m + margin).
 const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(1900);
 
 /// `curate` runs the curator one-shot (bounded by the daemon's 10-minute
@@ -341,9 +343,13 @@ async fn delete_workstream(project_root: Option<String>, workstream_id: i64) -> 
 #[tauri::command]
 async fn distill(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    // The daemon's distillTimeout is 10 minutes and it serves one connection
-    // at a time: this command holds the daemon until the note is written.
-    // The frontend pauses its poll loop while a distill is in flight.
+    // The daemon's distillTimeout is 10 minutes and the chain runs
+    // synchronously before the daemon answers this call. ("One connection
+    // at a time" was the pre-M11 rationale; today each call is a fresh
+    // connection served by its own goroutine, but this call's response
+    // still waits for the whole chain.) The frontend pauses its own poll
+    // loop while a distill is in flight instead of queueing up certain
+    // timeout failures.
     let req = json!({"cmd": "distill", "conversation_id": conversation_id});
     run_command(root, req, DISTILL_READ_TIMEOUT).await
 }
@@ -423,6 +429,15 @@ async fn read_wiki(path: String, project_root: Option<String>) -> Result<Value, 
 async fn pending_counts(project_root: Option<String>) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     let req = json!({"cmd": "pending_counts", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// M15 (O-1 rung-0): the autonomy streak snapshot the DiffViewer header
+// shows on open; a read-only journal computation daemon-side.
+#[tauri::command]
+async fn autonomy_status(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "autonomy_status", "project_root": root});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -940,6 +955,7 @@ pub fn run() {
             list_wiki,
             read_wiki,
             pending_counts,
+            autonomy_status,
             read_memory,
             memory_proposals,
             apply_memory,

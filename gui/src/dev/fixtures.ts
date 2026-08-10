@@ -224,6 +224,7 @@ export const defaultSettings: Settings = {
   auto_distill: "on_idle",
   auto_distill_idle_seconds: "120",
   max_concurrent_runs: "3",
+  auto_apply: "off",
 };
 
 // ---------- Memory ----------

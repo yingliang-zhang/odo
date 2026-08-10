@@ -266,6 +266,41 @@ export interface ReviewDiffResponse {
   consensus?: string; // A4-lite: deterministic 2/3 verdict ("accept" | "reject" | "needs_fixes")
 }
 
+// ---------- M15 (O-1 rung-0): autonomy streak snapshot ----------
+
+// One diff-class row of the autonomy report (daemon `autonomy_status`).
+export interface AutonomyClassReport {
+  class: string; // "C0" | "C1" | "C2" | "C3" | "unclassified"
+  description: string;
+  accepted: number;
+  rejected: number;
+  streak: number;
+  next_threshold: number; // 0 = none (terminal / non-rung class)
+  eligible: string; // "" | "rung-1" | "rung-2" (eligibility math only — rung 0 applies nothing)
+}
+
+// Rung-0 observability snapshot. The auto_apply pref is displayed, never
+// consumed — no auto-apply behavior exists.
+export interface AutonomyReport {
+  project_root: string;
+  journal: string;
+  workstreams_scanned: number;
+  conversations_scanned: number;
+  resolutions: number;
+  unreadable_diffs: number;
+  auto_apply: string;
+  current_rung: number; // always 0 today
+  rung_thresholds: Record<string, number>;
+  revert_check: string;
+  classes: AutonomyClassReport[];
+}
+
+export interface AutonomyStatusResponse {
+  ok: boolean;
+  error?: string;
+  autonomy?: AutonomyReport;
+}
+
 // Daemon-managed project settings (daemon `get_settings` / `update_settings`).
 export interface Settings {
   coding_model: string;
@@ -279,6 +314,8 @@ export interface Settings {
   auto_distill: string;
   auto_distill_idle_seconds: string;
   max_concurrent_runs: string;
+  // M15 (O-1 rung-0): off|branch|main|all — parsed and displayed only.
+  auto_apply: string;
 }
 
 // P1-1: Known sudo-provider models (Hermes custom_providers). Hardcoded for

@@ -228,9 +228,12 @@ export default function App() {
   const workstreamNameRef = useRef<string | null>(null);
   const projectRootRef = useRef<string | null>(null);
   const pollTickRef = useRef(0);
-  // The daemon serves one connection at a time and distill can block for
-  // minutes; polling is paused for the duration instead of queueing up
-  // certain timeout failures.
+  // Distill's bridge call can block for minutes. The daemon serves a
+  // goroutine per connection (M11), so other clients are unaffected;
+  // distillingRef (like curatingRef below) only pauses THIS client's own
+  // poll loop while its distill request is in flight — each call is a
+  // fresh connection, and pausing avoids queueing up requests that would
+  // hit certain client-side timeout failures.
   const distillingRef = useRef(false);
   // M12: auto-distill is daemon-driven — the GUI discloses daemon state,
   // it never owns a trigger (the M10 idle timer is gone). Fed from
@@ -238,8 +241,11 @@ export default function App() {
   // coverage blocks, and the in-flight distill list.
   const [autoDistill, setAutoDistill] = useState<AutoDistillCountdown[]>([]);
   const [distillingConvs, setDistillingConvs] = useState<number[]>([]);
-  // M5: curate blocks daemon-side like distill (one connection at a time),
-  // so the poll loop pauses for the curator one-shot the same way.
+  // M5: curate's bridge call blocks for minutes (like distill). The daemon
+  // itself serves other connections throughout (M11 goroutine-per-
+  // connection); curatingRef only suspends this client's own poll loop
+  // while its curate request is in flight — a GUI choice, not daemon
+  // serialization.
   const curatingRef = useRef(false);
   // Auto-dismiss timer for the memory_update chip.
   const memoryChipTimer = useRef<number | undefined>(undefined);

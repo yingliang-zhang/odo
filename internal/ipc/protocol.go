@@ -1,5 +1,7 @@
 // Package ipc implements the daemon's Unix-socket API: line-delimited JSON
-// requests and responses. One connection at a time (M0).
+// requests and responses. M11 P0: goroutine-per-connection serving; one
+// connection processes its requests sequentially, but connections never
+// block each other.
 package ipc
 
 import (
@@ -62,6 +64,9 @@ const (
 	// reopen/reword) from the composer "Plan" popover; the merge journals
 	// with origin:"user" exactly like an agent-emitted odo-todo block.
 	CmdTodoUpdate = "todo_update"
+	// M15 (O-1 rung-0): autonomy_status returns the rung-0 streak snapshot
+	// for the DiffViewer header (same journal reads as odo autonomy audit).
+	CmdAutonomyStatus = "autonomy_status"
 )
 
 // Request is one command line on the socket.
@@ -211,4 +216,6 @@ type Response struct {
 	SkillContent string      `json:"skill_content,omitempty"`
 	// A1: save_attachment returns the absolute path of the written file.
 	Path string `json:"path,omitempty"`
+	// autonomy_status: the rung-0 observability snapshot (M15 O-1).
+	Autonomy *AutonomyReport `json:"autonomy,omitempty"`
 }

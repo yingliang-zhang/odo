@@ -41,8 +41,9 @@ func main() {
 	// are pull-based recall CLIs that read files directly (no daemon);
 	// `odo journal <sub>` is the read-only rehydration CLI for folded
 	// events; `odo recall audit` (M12 Batch 3a) is the read-only recall
-	// miss-rate report. Any other invocation without a subcommand runs the
-	// daemon.
+	// miss-rate report; `odo skills audit` / `odo autonomy audit` (M15)
+	// are read-only outcome-observability reports. Any other invocation
+	// without a subcommand runs the daemon.
 	if args := flag.Args(); len(args) > 0 {
 		switch args[0] {
 		case "wiki":
@@ -55,6 +56,10 @@ func main() {
 			os.Exit(runTodoCLI(args[1:]))
 		case "recall":
 			os.Exit(runRecallCLI(args[1:]))
+		case "skills":
+			os.Exit(runSkillsCLI(args[1:]))
+		case "autonomy":
+			os.Exit(runAutonomyCLI(args[1:]))
 		}
 	}
 

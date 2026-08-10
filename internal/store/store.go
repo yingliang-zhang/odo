@@ -89,8 +89,9 @@ type Diff struct {
 	CreatedAt      string  `json:"created_at"`
 }
 
-// Store owns the journal database. SQLite is opened with a single connection
-// (sequential single-connection IPC model), so all access is serialized.
+// Store owns the journal database. SQLite is opened with a single
+// connection (a DB-handle choice — all access serializes on it regardless
+// of who calls; the IPC layer is goroutine-per-connection since M11).
 type Store struct {
 	db *sql.DB
 }

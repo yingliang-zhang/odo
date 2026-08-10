@@ -1298,6 +1298,7 @@ func TestGetSettings(t *testing.T) {
 		AutoDistill:            "on_idle",
 		AutoDistillIdleSeconds: "120",
 		MaxConcurrentRuns:      "4",
+		AutoApply:              "off",
 	}
 	if *got.Settings != want {
 		t.Errorf("defaults = %+v, want %+v", *got.Settings, want)
@@ -1317,6 +1318,7 @@ func TestGetSettings(t *testing.T) {
 		AutoDistill:            "never",
 		AutoDistillIdleSeconds: "120",
 		MaxConcurrentRuns:      "4",
+		AutoApply:              "off",
 	}
 	if *got.Settings != want {
 		t.Errorf("from prefs = %+v, want %+v", *got.Settings, want)

@@ -150,8 +150,8 @@ func (s *Server) adapterFor(name string) adapter.Adapter {
 	return s.adapters[""]
 }
 
-// Serve accepts connections and handles each on its own goroutine (M11 P0;
-// M0 was one connection at a time). Shared run bookkeeping is guarded by
+// Serve accepts connections and handles each on its own goroutine (since
+// M11 P0; M0 serialized connections). Shared run bookkeeping is guarded by
 // s.mu. Serve returns when the listener is closed (net.ErrClosed) or on a
 // fatal accept error; in-flight handler goroutines keep running — call Wait
 // to drain them during shutdown.
@@ -229,6 +229,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleDiffAction(ctx, req.DiffID, "reject")
 	case CmdReviewDiff:
 		resp, err = s.handleReviewDiff(ctx, req)
+	case CmdAutonomyStatus:
+		resp, err = s.handleAutonomyStatus(ctx, req)
 	case CmdGetSettings:
 		resp, err = s.handleGetSettings(ctx, req)
 	case CmdUpdateSettings:
@@ -1449,8 +1451,12 @@ type reviewModel struct {
 
 // handleReviewDiff implements review_diff: the diff is sent to every
 // model on the prefs.md `review:` line via direct HTTP API (moa.Query),
-// in parallel. The call blocks until all finish — like distill, it
-// blocks the single-connection daemon.
+// in parallel. The call blocks until all finish — but only its own
+// connection: M11 made the daemon goroutine-per-connection and this
+// handler holds neither s.mu nor any per-conversation lock, so an
+// in-flight tri-model review never blocks other requests, including a
+// new send in the same conversation (it serializes only on the single
+// sqlite connection inside the store).
 // Results are journaled as a review_action event with action "moa_review".
 func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, error) {
 	if req.DiffID == 0 {

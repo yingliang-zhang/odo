@@ -1,0 +1,121 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/yingliang-zhang/odo/internal/ipc"
+	"github.com/yingliang-zhang/odo/internal/store"
+)
+
+// The autonomy CLI is a thin wrapper over ipc.ComputeAutonomy (covered by
+// the ipc battery) — these tests pin the wrapper: no-data copy, --json
+// shape, usage errors, and that the read-only journal path sees seeded
+// resolutions end to end.
+
+// seedAutonomyJournal plants one conversation with two resolved docs
+// diffs (the autonomy audit classifies patch content, so the diffs carry
+// real patch text).
+func seedAutonomyJournal(t *testing.T, root string, withData bool) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(root, ".odo", "journal.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := st.CreateOrGetProject(ctx, root, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withData {
+		patch := "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n+docs line\n"
+		diffPath := filepath.Join(t.TempDir(), "r.diff")
+		if err := os.WriteFile(diffPath, []byte(patch), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		w, err := st.CreateOrGetWorkstream(ctx, p.ID, "main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := st.CreateConversation(ctx, w.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			d, err := st.InsertDiff(ctx, c.ID, diffPath, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.AppendEvent(ctx, c.ID, store.EventReviewAction,
+				fmt.Sprintf(`{"action":"accept","diff_id":%d}`, d.ID)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAutonomyAuditNoData(t *testing.T) {
+	root := t.TempDir()
+	seedAutonomyJournal(t, root, false)
+	t.Setenv("HOME", t.TempDir()) // auto_apply reads defaults ("off"); never a real ~/.odo/prefs.md
+	t.Chdir(root)
+
+	stdout, stderr, code := captureCLI(t, func() int {
+		return runAutonomyCLI([]string{"audit"})
+	})
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "no data") {
+		t.Errorf("stdout %q, want the no-data line", stdout)
+	}
+	if !strings.Contains(stdout, "auto-apply: off") {
+		t.Errorf("stdout %q, want the auto-apply pref line", stdout)
+	}
+}
+
+func TestAutonomyAuditJSON(t *testing.T) {
+	root := t.TempDir()
+	seedAutonomyJournal(t, root, true)
+	t.Chdir(root)
+
+	stdout, stderr, code := captureCLI(t, func() int {
+		return runAutonomyCLI([]string{"audit", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	var report ipc.AutonomyReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("--json: %v\n%s", err, stdout)
+	}
+	if report.Resolutions != 2 {
+		t.Errorf("resolutions = %d, want 2", report.Resolutions)
+	}
+	for _, c := range report.Classes {
+		if c.Class == "C1" {
+			if c.Accepted != 2 || c.Streak != 2 {
+				t.Errorf("C1 = %+v, want 2 accepted / streak 2", c)
+			}
+			return
+		}
+	}
+	t.Errorf("C1 row missing: %+v", report.Classes)
+}
+
+func TestAutonomyAuditUsage(t *testing.T) {
+	_, stderr, code := captureCLI(t, func() int {
+		return runAutonomyCLI([]string{"bogus"})
+	})
+	if code != 2 || !strings.Contains(stderr, "usage: odo autonomy audit") {
+		t.Errorf("exit %d stderr %q, want usage on exit 2", code, stderr)
+	}
+}
