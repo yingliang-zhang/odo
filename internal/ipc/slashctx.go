@@ -65,15 +65,17 @@ func resolvePanelContextScope() string {
 // path's ordering at runMemoryLayers), so the block never contains the
 // slash question itself. query is the recall query the caller already
 // built (slash text UNION the last current-epoch turns, as recallQuery
-// does); vision skips the recall section entirely.
-func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID int64, query string, mode slashContextMode) (block string, receipt map[string]string) {
+// does); vision skips the recall section entirely. The caller resolves the
+// context scope and fetches the events ONCE (it needs both for the
+// journal receipt and, on the panel path, the recall query), so one slash
+// call costs one prefs read and one events read like the send path.
+func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID int64, query string, events []store.Event, scope string, mode slashContextMode) (block string, receipt map[string]string) {
 	receipt = map[string]string{}
 	var sections []string
 	section := func(header, body string) {
 		sections = append(sections, header+"\n\n"+body)
 	}
 
-	scope := resolvePanelContextScope()
 	if scope == panelScopeFull {
 		if user := readUserMemory(); user != "" {
 			receipt["~/.odo/user.md"] = sha16([]byte(user))
@@ -101,21 +103,20 @@ func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID in
 			section("## Prior notes (recalled)", mem)
 		}
 	}
-	if conv := s.slashConversation(ctx, convID, mode); conv != "" {
+	if conv := slashConversation(events, mode); conv != "" {
 		sections = append(sections, conv) // carries its own header + receipt range
 	}
 	return strings.Join(sections, "\n\n---\n\n"), receipt
 }
 
-// slashConversation renders the "## Conversation so far" section: the
-// current-epoch turn tail under slashConvCap with the same receipt header
-// shape as the main replay. Vision keeps only the last visionConvTurns
-// turns; panel takes the newest-first-capped tail.
-func (s *Server) slashConversation(ctx context.Context, convID int64, mode slashContextMode) string {
-	var events []store.Event
-	if evs, err := s.store.ListEvents(ctx, convID, 0); err == nil {
-		events = evs
-	}
+// slashConversation renders the "## Conversation so far" section from the
+// caller-fetched events: the current-epoch turn tail under slashConvCap
+// with the same receipt header shape as the main replay. Vision keeps only
+// the last visionConvTurns turns; panel takes the newest-first-capped
+// tail. The per-turn cap clamps to slashConvCap: replay_turn_kb above 4KB
+// would otherwise let the newest turn sail past the block cap through the
+// anti-starvation exception (the newest line is always kept).
+func slashConversation(events []store.Event, mode slashContextMode) string {
 	turns := collectSlashTurns(events, foldBoundary(events))
 	if mode == slashModeVision && len(turns) > visionConvTurns {
 		turns = turns[len(turns)-visionConvTurns:]
@@ -123,7 +124,7 @@ func (s *Server) slashConversation(ctx context.Context, convID int64, mode slash
 	if len(turns) == 0 {
 		return ""
 	}
-	conv, _, _ := renderSlashConversation(turns, slashConvCap, resolveReplayCaps().turn)
+	conv, _, _ := renderSlashConversation(turns, slashConvCap, min(resolveReplayCaps().turn, slashConvCap))
 	return conv
 }
 

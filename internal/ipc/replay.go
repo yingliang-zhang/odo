@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -174,10 +175,27 @@ func renderConvBlock(header, blurb string, turns []replayTurn, totalCap, turnCap
 func formatReplayTurn(t replayTurn, turnCap int) string {
 	text := t.text
 	if len(text) > turnCap {
-		text = strings.TrimRight(text[:turnCap], " \t\r\n") +
+		text = strings.TrimRight(runeSafeCut(text, turnCap), " \t\r\n") +
 			fmt.Sprintf(" … [truncated at %dKB]", turnCap/1024)
 	}
 	return fmt.Sprintf("**%s** (seq %d): %s", t.role, t.seq, text)
+}
+
+// runeSafeCut trims text to at most maxBytes bytes without splitting a
+// multi-byte rune: a raw byte cut (text[:maxBytes]) can land mid-rune and
+// leave invalid UTF-8, and CJK text (3 bytes/rune) makes that the common
+// case, not the edge. A truncated rune is at most 3 trailing bytes, so
+// trimming back one byte at a time terminates immediately. maxBytes must
+// be >= 0.
+func runeSafeCut(text string, maxBytes int) string {
+	if len(text) <= maxBytes {
+		return text
+	}
+	cut := text[:maxBytes]
+	for !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 // buildReplay is the one-call helper for send paths: fold boundary (R3,

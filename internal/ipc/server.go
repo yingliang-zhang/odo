@@ -1481,11 +1481,14 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	// user_message (mirroring the send path's runMemoryLayers ordering), so
 	// the block never contains the panel question itself. The recall query
 	// reuses the send-path shape: slash text UNION the last current-epoch
-	// turns.
+	// turns. One events fetch feeds both that query and the block's
+	// conversation tail.
 	var events []store.Event
 	if evs, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
 		events = evs
 	}
+	// Resolve the scope once — the context block's layer gate and the
+	// journaled receipt must agree.
 	scope := resolvePanelContextScope()
 
 	// Fan out to N models via direct API (parallel, no OMP process).
@@ -1499,7 +1502,7 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		"\n\nYou have read-only tools over the user's files: read_file, grep, glob. " +
 		exec.describeScope() +
 		" Use them to ground your answer in the actual files whenever the question touches code or documents — do not ask the user to paste content. Every read is journaled."
-	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, recallQuery(text, events), slashModePanel)
+	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, recallQuery(text, events), events, scope, slashModePanel)
 	if block != "" {
 		system += "\n\n---\n\n" + block
 	}
@@ -1642,10 +1645,14 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 
 	// Same slash-context ordering as /panel: the block is assembled before
 	// the /vision user_message journals, so it never contains the vision
-	// question itself.
+	// question itself. One events fetch feeds the conversation tail.
+	var events []store.Event
+	if evs, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
+		events = evs
+	}
 	scope := resolvePanelContextScope()
 	system := "You are a vision-capable coding assistant. Analyze the image or screenshot described in the prompt. Identify visual issues, layout problems, or design suggestions."
-	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, text, slashModeVision)
+	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, text, events, scope, slashModeVision)
 	if block != "" {
 		system += "\n\n---\n\n" + block
 	}

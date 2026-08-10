@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 )
@@ -425,5 +426,38 @@ func TestReplayDroppedSeqsReceiptAndPromptBytes(t *testing.T) {
 		p3.Replay.DroppedSeqs[0], p3.Replay.DroppedSeqs[1])
 	if !strings.Contains(done3.Diff.Content, marker) {
 		t.Errorf("prompt missing actionable omission marker %q", marker)
+	}
+}
+
+// TestFormatReplayTurnRuneSafe pins the rune-safe per-turn cut: the byte
+// cap must not split a multi-byte rune. CJK text (3 bytes/rune) makes a
+// mid-rune cut the common case, not the edge, and this renderer is shared
+// by the slash conversation tail (renderConvBlock), so one fix covers
+// both. The truncated line stays valid UTF-8 and the truncation marker
+// still reports the cut.
+func TestFormatReplayTurnRuneSafe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no prefs.md: resolveReplayCaps → defaults
+	// replayTurnCapDefault (4096) is not a multiple of 3, so a byte cut of
+	// 回-heavy text lands mid-rune — exactly the case that used to corrupt.
+	cjk := strings.Repeat("回复", replayTurnCapDefault/3)
+	line := formatReplayTurn(replayTurn{seq: 1, role: "user", text: cjk}, resolveReplayCaps().turn)
+	if !utf8.ValidString(line) {
+		t.Errorf("truncated turn is invalid UTF-8: %q…", line[:min(60, len(line))])
+	}
+	if !strings.Contains(line, "[truncated at 4KB]") {
+		t.Errorf("truncation marker missing from %q…", line[:min(60, len(line))])
+	}
+
+	// Block level: a CJK-heavy epoch rendered through renderReplay (the
+	// shared renderer) also stays valid UTF-8 and keeps the marker.
+	block, _, _, _ := renderReplay([]replayTurn{
+		{seq: 1, role: "user", text: cjk},
+		{seq: 2, role: "agent", text: cjk},
+	}, resolveReplayCaps())
+	if !utf8.ValidString(block) {
+		t.Error("rendered replay block is invalid UTF-8")
+	}
+	if !strings.Contains(block, "[truncated at 4KB]") {
+		t.Error("block-level truncation marker missing")
 	}
 }

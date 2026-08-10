@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // capturedMoaRequest is the slice of the gateway call these tests assert
@@ -362,5 +364,76 @@ func TestVisionContextBlock(t *testing.T) {
 	}
 	if want := len(system) + len(visionText); p.TotalBytes != want {
 		t.Errorf("total_prompt_bytes = %d, want %d (system block + user text)", p.TotalBytes, want)
+	}
+}
+
+// TestVisionContextScopeProjectOnly mirrors TestPanelContextScopeProjectOnly
+// for the vision path: under panel_context_scope: project-only the vision
+// block and its journaled receipt exclude ~/.odo/user.md (no phantom
+// entry), while the project layers stay.
+func TestVisionContextScopeProjectOnly(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	writePrefs(t, home, "panel_context_scope: project-only\n")
+	rec := &moaRecorder{}
+	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "vision-answer", rec).URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/vision scoped question"})
+	got := rec.all()
+	if len(got) == 0 {
+		t.Fatal("/vision made no gateway call")
+	}
+	system := got[len(got)-1].System
+	if strings.Contains(system, "USERPRINCIPLE") || strings.Contains(system, "## User memory") {
+		t.Error("project-only scope must exclude user.md from the vision block")
+	}
+	if !strings.Contains(system, "SLASHPROJECTRULE") {
+		t.Error("project-only scope still carries the project memory layer")
+	}
+	var p struct {
+		Receipt map[string]string `json:"receipt"`
+		Scope   string            `json:"context_scope"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if p.Scope != "project-only" {
+		t.Errorf("context_scope = %q, want project-only", p.Scope)
+	}
+	if _, has := p.Receipt["~/.odo/user.md"]; has {
+		t.Error("receipt must not list user.md it never injected (ADR-0003 inv 5)")
+	}
+}
+
+// TestSlashTailClampsTurnCap pins the slash tail's per-turn cap: a
+// replay_turn_kb setting above slashConvCap must not let the newest turn
+// blow past the 4KB block cap through the newest-turn anti-starvation
+// exception (renderConvBlock always keeps the first — newest — line). With
+// replay_turn_kb: 16 the tail still truncates its turn at 4KB.
+func TestSlashTailClampsTurnCap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "replay_turn_kb: 16\n")
+	events := []store.Event{
+		chatEvent(1, store.EventUserMessage, strings.Repeat("x", 3*slashConvCap)),
+	}
+	block := slashConversation(events, slashModePanel)
+	if !strings.Contains(block, "[truncated at 4KB]") {
+		t.Errorf("slash tail must truncate the newest turn at the 4KB block cap, got:\n%.200s", block)
+	}
+	// Total stays at slashConvCap plus one turn's fixed overhead (header,
+	// blurb, role/seq prefix, truncation marker ≈ 160B) — not the 16KB
+	// per-turn prefs cap.
+	if len(block) > slashConvCap+256 {
+		t.Errorf("slash tail = %d bytes, want ≤ %d (cap + one turn's overhead)", len(block), slashConvCap+256)
 	}
 }
