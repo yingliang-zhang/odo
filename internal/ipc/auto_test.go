@@ -467,6 +467,27 @@ func TestAutoFrequencyCaps(t *testing.T) {
 	}
 }
 
+// retryAfterWithin reports whether detail contains a backoff retry_after=dur
+// whose parsed duration falls within (step-10s, step]. The journaled value is
+// the remaining time at journal-write moment, which decays below the nominal
+// step by the time the assertion runs — exact-string matching flakes.
+func retryAfterWithin(detail string, step time.Duration) bool {
+	const prefix = "backoff retry_after="
+	i := strings.Index(detail, prefix)
+	if i < 0 {
+		return false
+	}
+	rest := detail[i+len(prefix):]
+	if j := strings.IndexAny(rest, " \t"); j >= 0 {
+		rest = rest[:j]
+	}
+	d, err := time.ParseDuration(rest)
+	if err != nil {
+		return false
+	}
+	return d > step-10*time.Second && d <= step
+}
+
 // TestAutoBackoffFromJournal: consecutive failed rows impose 5m → 30m → 2h
 // → suspended backoff (journaled skips with retry re-arms), and the next
 // user event clears the streak entirely.
@@ -498,8 +519,8 @@ func TestAutoBackoffFromJournal(t *testing.T) {
 	armPendingNow(rig.server, convID, distillTriggerIdle)
 	rig.server.runAutoDistill(convID, distillTriggerIdle)
 	rows := autoRows(t, rig, convID, "skipped")
-	if n := len(rows); n == 0 || !strings.Contains(rows[n-1]["detail"].(string), "backoff retry_after=5m") {
-		t.Fatalf("skips = %v, want backoff retry_after=5m…", rows)
+	if n := len(rows); n == 0 || !retryAfterWithin(rows[n-1]["detail"].(string), 5*time.Minute) {
+		t.Fatalf("skips = %v, want backoff retry_after≈5m", rows)
 	}
 	if entry := pendingEntry(rig.server, convID); entry == nil ||
 		time.Until(entry.fireAt) < 4*time.Minute || time.Until(entry.fireAt) > 6*time.Minute {
@@ -516,8 +537,8 @@ func TestAutoBackoffFromJournal(t *testing.T) {
 	armPendingNow(rig.server, convID, distillTriggerIdle)
 	rig.server.runAutoDistill(convID, distillTriggerIdle)
 	rows = autoRows(t, rig, convID, "skipped")
-	if n := len(rows); !strings.Contains(rows[n-1]["detail"].(string), "backoff retry_after=2h") {
-		t.Fatalf("skips = %v, want backoff retry_after=2h…", rows)
+	if n := len(rows); !retryAfterWithin(rows[n-1]["detail"].(string), 2*time.Hour) {
+		t.Fatalf("skips = %v, want backoff retry_after≈2h", rows)
 	}
 	rig.server.mu.Lock()
 	rig.server.disarmAutoLocked(context.Background(), convID, "test cleanup")
