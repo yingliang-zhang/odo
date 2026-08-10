@@ -9,6 +9,9 @@ interface Props {
   projectRoot?: string | null;
   onAccept: (diffId: number) => Promise<void>;
   onReject: (diffId: number) => Promise<void>;
+  // D2: cosmetic guard — the daemon's retireRun already refuses to kill a
+  // live run; disabling here just makes the safe state visible/click-proof.
+  agentRunning?: boolean;
   // P1-3: fire-and-forget comment delivery — App routes through send_message
   // (steer when the agent is running). Rejects on IPC failure.
   onSendComments?: (text: string) => Promise<void>;
@@ -321,7 +324,7 @@ function renderCode(prefix: string, code: string, lang: Language | null): ReactN
 
 // Presents one diff from the daemon with Accept/Reject review actions.
 // Only a `pending` diff is actionable; afterwards this becomes a record card.
-export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments }: Props) {
+export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, agentRunning }: Props) {
   const [acting, setActing] = useState(false);
   const [reviews, setReviews] = useState<ReviewResult[] | null>(null);
   const [consensus, setConsensus] = useState<string | null>(null);
@@ -572,10 +575,20 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
             >
               {reviewing ? "Reviewing…" : "Review"}
             </button>
-            <button className="btn-accept" disabled={acting || hasReject} onClick={() => void act(onAccept)}>
+            <button
+              className="btn-accept"
+              disabled={acting || hasReject || agentRunning}
+              title={agentRunning ? "Agent is running — review after it finishes" : undefined}
+              onClick={() => void act(onAccept)}
+            >
               Accept
             </button>
-            <button className="btn-reject" disabled={acting} onClick={() => void act(onReject)}>
+            <button
+              className="btn-reject"
+              disabled={acting || agentRunning}
+              title={agentRunning ? "Agent is running — review after it finishes" : undefined}
+              onClick={() => void act(onReject)}
+            >
               Reject
             </button>
           </span>

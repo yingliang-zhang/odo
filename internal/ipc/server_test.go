@@ -391,6 +391,81 @@ func TestNoDiffRunRetiresWorktree(t *testing.T) {
 	}
 }
 
+// TestReviewDuringLiveRunKeepsLiveRun pins the live-run guard in retireRun:
+// the diff under review is the product of an EARLIER finished run, but
+// byConv now binds a new in-flight run on the same conversation. Reviewing
+// the old diff must retire nothing — previously the unconditional retire
+// killed the in-flight agent (adapter.Close) and deleted its worktree
+// mid-write, surfacing as "accept interrupted my session".
+func TestReviewDuringLiveRunKeepsLiveRun(t *testing.T) {
+	root := initRepo(t)
+	// HOME isolation: readUserMemory injects the real ~/.odo/user.md into
+	// the prompt the stub copies into hello.txt.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Run 1: full visible loop up to a pending diff.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "run one"})
+	done1 := rig.pollUntilDone(t, convID)
+	if done1.Diff == nil {
+		t.Fatal("run 1: no diff")
+	}
+
+	// Run 2 starts on the same conversation while run 1's diff is still
+	// pending — the review-during-run window. The slow stub keeps run 2 in
+	// flight while the review of run 1's diff lands.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "run two"})
+	bound := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if bound.Workstream == nil || bound.Workstream.WorktreePath == nil {
+		t.Fatal("run 2 did not bind a worktree")
+	}
+	liveWT := *bound.Workstream.WorktreePath
+
+	acc := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done1.Diff.ID})
+	if !acc.Applied {
+		t.Fatalf("accept run-1 diff: %+v", acc)
+	}
+	// The accept itself still landed run 1's change.
+	if got := readFileStr(t, filepath.Join(root, "hello.txt")); got != "run one" {
+		t.Errorf("hello.txt = %q, want run one's accepted content", got)
+	}
+
+	// The live run survived the review: still bound and still tracked as
+	// unfinished. (Run 1's finished meta lingers in the map until its
+	// conversation binds the next review — pre-existing, in-memory only.)
+	runID2 := rig.server.byConv[convID]
+	if runID2 == "" {
+		t.Fatal("accept unbound the live run's conversation")
+	}
+	if meta2 := rig.server.runs[runID2]; meta2 == nil || meta2.finished {
+		t.Errorf("live run after review = %+v, want tracked and unfinished", meta2)
+	}
+	// Its worktree is still on disk and the workstream stays bound to it.
+	if _, err := os.Stat(liveWT); err != nil {
+		t.Errorf("live run worktree removed by review: %v", err)
+	}
+	still := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if still.Workstream == nil || still.Workstream.WorktreePath == nil || *still.Workstream.WorktreePath != liveWT {
+		t.Errorf("workstream binding after review = %+v, want worktree %s", still.Workstream, liveWT)
+	}
+
+	// Run 2 completes undisturbed (pollUntilDone asserts agent_running=true
+	// on its first poll — direct evidence the review didn't kill it) and
+	// produces its own diff carrying its own prompt.
+	done2 := rig.pollUntilDone(t, convID)
+	if done2.Diff == nil {
+		t.Fatal("run 2: no diff after surviving the review")
+	}
+	if !strings.Contains(done2.Diff.Content, "run two") {
+		t.Errorf("run 2 diff missing its own prompt:\n%s", done2.Diff.Content)
+	}
+}
+
 // TestAcceptDoesNotSweepMainCheckout pins P0 end to end through the socket:
 // accept commits only the diff's own files. Dirt the user left in the main
 // checkout — a modified tracked file and an untracked scratch file — is

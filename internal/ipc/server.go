@@ -1295,6 +1295,16 @@ func (s *Server) retireRun(ctx context.Context, conversationID int64) {
 	var wtPath string
 	if runID, ok := s.byConv[conversationID]; ok {
 		if meta := s.runs[runID]; meta != nil {
+			if !meta.finished {
+				// The conversation's binding is a LIVE run, so the reviewed
+				// diff came from an earlier finished run. Closing here would
+				// kill the in-flight agent and delete its worktree mid-write
+				// (accept/reject interrupting a running agent). Leave run,
+				// maps, worktree, and binding untouched; the concluded run's
+				// stale worktree is reaped by the next review, a later
+				// no-diff retire, or `git worktree prune`.
+				return
+			}
 			wtPath = meta.worktreePath
 			_ = s.adapterFor(meta.adapter).Close(ctx, runID)
 			delete(s.runs, runID)
