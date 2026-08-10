@@ -108,7 +108,7 @@ func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID in
 		// panel_context_scope: project-only does NOT exclude this layer
 		// (the scope gate is about ~/.odo/user.md only). /vision stays
 		// excluded — lean contract.
-		if block, sources := crossWsBlock(s.projectRoot, wsName, query); block != "" {
+		if block, sources := crossWsBlock(ctx, s.store, s.projectRoot, wsName, query); block != "" {
 			for _, src := range sources {
 				receipt[src.path] = src.sha
 			}

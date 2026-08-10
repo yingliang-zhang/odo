@@ -12,7 +12,12 @@ package ipc
 //   - topic pages (wiki/topics/*.md): project-scoped, cross-workstream by
 //     construction — top 2 matched pages under a 3KB page-boundary cap.
 //   - sibling epoch notes (wiki/*-epoch-*.md from OTHER workstreams): the
-//     single newest matched note under a 2KB line-boundary cap.
+//     single newest matched note under a 2KB line-boundary cap. A note
+//     retracted in its own workstream's active conversation is never
+//     pushed (the siblingRetractionGate below): retraction is gated at
+//     the candidate's OWN workstream — the current conversation's
+//     retraction set only covers home-workstream notes and cannot see
+//     alien ones.
 //
 // Injection: the send path (after "## Prior notes (recalled)", before the
 // memory map) and the /panel slash block (it advises on the project as a
@@ -22,6 +27,7 @@ package ipc
 // matched_terms (optional fields, ADR-0002 preserved).
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +35,7 @@ import (
 	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
+	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // Budgets for the cross-workstream layer (mirrored in budgets.go — the
@@ -82,9 +89,9 @@ type crossSource struct {
 // the page ("sources:" tells the agent WHOSE knowledge this is). Ranking
 // is match-count DESC, name ASC (deterministic under ties); the top
 // crossTopicsMax pages share crossTopicsCap with a page-boundary cut — no
-// page is half-included, held-back matched pages are named by a count
-// marker (M6.1 visibility). Zero matched pages ⇒ "" — matched-only by
-// principle.
+// page is half-included. Held-back matched pages are named by a count
+// marker per cause (M6.1 visibility): past the top-crossTopicsMax limit,
+// or cut by the cap. Zero matched pages ⇒ "" — matched-only by principle.
 func recallTopicPages(projectRoot, query string) (body string, items []recallItem, chunks [][]byte) {
 	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", "topics", "*.md"))
 	if err != nil {
@@ -122,13 +129,19 @@ func recallTopicPages(projectRoot, query string) (body string, items []recallIte
 		}
 		return pages[i].name < pages[j].name
 	})
+	// Two distinct hold-back classes, each named by its own marker: pages
+	// past the top-crossTopicsMax limit never enter the budget at all,
+	// while pages inside it are cut on a page boundary when the cap runs
+	// out. Conflating them misreports WHY a page was held back.
+	heldByLimit := 0
 	if len(pages) > crossTopicsMax {
+		heldByLimit = len(pages) - crossTopicsMax
 		pages = pages[:crossTopicsMax]
 	}
 
 	const sep = "\n\n---\n\n"
 	var b strings.Builder
-	omitted := 0
+	heldByCap := 0
 	for i, pg := range pages {
 		header := fmt.Sprintf("### %s [matched: %s]", pg.name, strings.Join(pg.matched, ", "))
 		if sources := topicCitations(pg.content); len(sources) > 0 {
@@ -140,7 +153,7 @@ func recallTopicPages(projectRoot, query string) (body string, items []recallIte
 			add += len(sep)
 		}
 		if b.Len()+add > crossTopicsCap {
-			omitted = len(pages) - i // cut on a page boundary: no page is half-included
+			heldByCap = len(pages) - i // cut on a page boundary: no page is half-included
 			break
 		}
 		if b.Len() > 0 {
@@ -150,9 +163,13 @@ func recallTopicPages(projectRoot, query string) (body string, items []recallIte
 		items = append(items, recallItem{path: pg.path, matchedTerms: pg.matched})
 		chunks = append(chunks, []byte(chunk))
 	}
-	if omitted > 0 {
+	if heldByLimit > 0 {
+		fmt.Fprintf(&b, "\n\n_%d more matched topic page(s) held back by the top-%d limit — pull them from `%s`._\n",
+			heldByLimit, crossTopicsMax, filepath.Join(projectRoot, "wiki", "topics"))
+	}
+	if heldByCap > 0 {
 		fmt.Fprintf(&b, "\n\n_%d more matched topic page(s) held back by the %dKB cross-workstream cap — pull them from `%s`._\n",
-			omitted, crossTopicsCap/1024, filepath.Join(projectRoot, "wiki", "topics"))
+			heldByCap, crossTopicsCap/1024, filepath.Join(projectRoot, "wiki", "topics"))
 	}
 	if len(items) == 0 {
 		return "", nil, nil
@@ -177,21 +194,85 @@ func topicCitations(content string) []string {
 	return out
 }
 
+// siblingRetractionGate answers whether a sibling candidate note is
+// retracted in its OWN workstream's active conversation. The current
+// conversation's retraction set cannot see alien notes — the contradiction
+// pass only ever retracts home-workstream notes — so gating per candidate
+// is the only correct reading of the retraction record. Sets are cached
+// per workstream per call: one send costs at most one events scan per
+// distinct sibling workstream. Every store-level failure (unregistered
+// project, deleted workstream, no active conversation) fails OPEN — a
+// missing retraction record must never break recall. A nil store means
+// no journal is in play and disables the gate.
+type siblingRetractionGate struct {
+	ctx         context.Context
+	st          *store.Store
+	projectRoot string
+	resolved    bool             // wsByID resolution attempted (fail-open outcome cached too)
+	wsByID      map[string]int64 // ws name → id for the bound project
+	sets        map[string]map[string]bool
+}
+
+// retracted reports whether <wsName>-epoch note name sits in that
+// workstream's active-conversation retraction set, loading and caching the
+// set on first use per workstream.
+func (g *siblingRetractionGate) retracted(wsName, name string) bool {
+	if g.st == nil {
+		return false
+	}
+	if g.sets == nil {
+		g.sets = map[string]map[string]bool{}
+	}
+	set, cached := g.sets[wsName]
+	if !cached {
+		if wsID, ok := g.workstreamID(wsName); ok {
+			if conv, err := g.st.GetActiveConversation(g.ctx, wsID); err == nil {
+				set = retractedNoteSet(g.ctx, g.st, conv.ID)
+			}
+		}
+		g.sets[wsName] = set
+	}
+	return set[name]
+}
+
+// workstreamID resolves the project's workstream name → id map once;
+// resolution failures fail open (unknown id) and are cached as such.
+func (g *siblingRetractionGate) workstreamID(wsName string) (int64, bool) {
+	if !g.resolved {
+		g.resolved = true
+		if p, err := g.st.GetProjectByRoot(g.ctx, g.projectRoot); err == nil {
+			if streams, err := g.st.ListWorkstreams(g.ctx, p.ID); err == nil {
+				g.wsByID = map[string]int64{}
+				for _, w := range streams {
+					g.wsByID[w.Name] = w.ID
+				}
+			}
+		}
+	}
+	id, ok := g.wsByID[wsName]
+	return id, ok
+}
+
 // recallSiblingNote selects the single newest sibling epoch note the query
 // earned: wiki/*-epoch-*.md MINUS the current workstream's own notes
 // (already recalled by the home-workstream layer), only notes with ≥1
 // matched term, newest by epoch number (mtime tie-break, name as final
-// deterministic order). The section is the labeled header plus the note
-// content line-cut so header+content stay under crossSiblingCap. No
-// matched sibling ⇒ ok=false — another workstream's narrative is pushed
-// only when the query earned it.
-func recallSiblingNote(projectRoot, currentWsName, query string) (chunk string, item recallItem, ok bool) {
+// deterministic order). A candidate retracted in its own workstream's
+// active conversation is skipped — the newest-first fallback then lands on
+// the next-newest un-retracted candidate. The section is the labeled
+// header plus the note content line-cut so header+content stay under
+// crossSiblingCap; a header that alone exceeds the cap yields nothing (a
+// negative content budget would slice-panic). No matched sibling ⇒
+// ok=false — another workstream's narrative is pushed only when the query
+// earned it.
+func recallSiblingNote(ctx context.Context, st *store.Store, projectRoot, currentWsName, query string) (chunk string, item recallItem, ok bool) {
 	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", "*-epoch-*.md"))
 	if err != nil {
 		return "", recallItem{}, false
 	}
 	terms := tokenizeQuery(query)
 	ownPrefix := currentWsName + "-epoch-"
+	gate := siblingRetractionGate{ctx: ctx, st: st, projectRoot: projectRoot}
 	type cand struct {
 		path    string
 		name    string // <ws>-epoch-<N> (basename without .md)
@@ -221,8 +302,8 @@ func recallSiblingNote(projectRoot, currentWsName, query string) (chunk string, 
 		}
 		name := strings.TrimSuffix(base, ".md")
 		var mtime int64
-		if st, err := os.Stat(m); err == nil {
-			mtime = st.ModTime().UnixNano()
+		if finfo, err := os.Stat(m); err == nil {
+			mtime = finfo.ModTime().UnixNano()
 		}
 		c := cand{
 			path:    m,
@@ -232,6 +313,9 @@ func recallSiblingNote(projectRoot, currentWsName, query string) (chunk string, 
 			mtimeNs: mtime,
 			matched: matched,
 			content: string(content),
+		}
+		if gate.retracted(c.ws, c.name) {
+			continue // retracted in its OWN workstream: never push what its home conversation disowned
 		}
 		switch {
 		case best == nil,
@@ -247,7 +331,11 @@ func recallSiblingNote(projectRoot, currentWsName, query string) (chunk string, 
 	header := fmt.Sprintf("### %s.md [from workstream %q] [matched: %s]",
 		best.name, best.ws, strings.Join(best.matched, ", "))
 	content := best.content
-	if budget := crossSiblingCap - len(header) - len("\n\n"); len(content) > budget {
+	budget := crossSiblingCap - len(header) - len("\n\n")
+	if budget < 0 {
+		return "", recallItem{}, false // header alone exceeds the cap — never let the cut slice negative
+	}
+	if len(content) > budget {
 		content = capAtLineBoundary(content, budget)
 		if content == "" {
 			return "", recallItem{}, false // no complete line fits: say nothing rather than a naked header
@@ -262,22 +350,28 @@ func recallSiblingNote(projectRoot, currentWsName, query string) (chunk string, 
 // rendered block plus one receipt/journal source per injected section
 // (real path → sha16 of its rendered chunk). "" and no sources when every
 // enabled source came back unmatched — the block declares itself with its
-// own "##" header, so callers render-or-skip on the empty string.
-func crossWsBlock(projectRoot, currentWsName, query string) (string, []crossSource) {
+// own "##" header, so callers render-or-skip on the empty string. The
+// header names the contents honestly: "project topic pages" only when a
+// topic slice is actually present; a sibling-only block gets the neutral
+// "other workstreams" header. The store threads through to the sibling
+// retraction gate (nil store: no journal in play, gate disabled).
+func crossWsBlock(ctx context.Context, st *store.Store, projectRoot, currentWsName, query string) (string, []crossSource) {
 	mode := resolveCrossWsRecall()
 	const sep = "\n\n---\n\n"
 	var sections []string
 	var sources []crossSource
+	header := "## Cross-workstream context (other workstreams)"
 	if mode == crossWsTopics || mode == crossWsBoth {
 		if body, items, chunks := recallTopicPages(projectRoot, query); len(items) > 0 {
 			for i, it := range items {
 				sources = append(sources, crossSource{path: it.path, origin: "topic", matchedTerms: it.matchedTerms, sha: sha16(chunks[i])})
 			}
+			header = "## Cross-workstream context (project topic pages — other workstreams)"
 			sections = append(sections, body)
 		}
 	}
 	if mode == crossWsSibling || mode == crossWsBoth {
-		if chunk, item, ok := recallSiblingNote(projectRoot, currentWsName, query); ok {
+		if chunk, item, ok := recallSiblingNote(ctx, st, projectRoot, currentWsName, query); ok {
 			sources = append(sources, crossSource{path: item.path, origin: "sibling", matchedTerms: item.matchedTerms, sha: sha16([]byte(chunk))})
 			sections = append(sections, chunk)
 		}
@@ -285,6 +379,5 @@ func crossWsBlock(projectRoot, currentWsName, query string) (string, []crossSour
 	if len(sections) == 0 {
 		return "", nil
 	}
-	return "## Cross-workstream context (project topic pages — other workstreams)\n\n" +
-		strings.Join(sections, sep), sources
+	return header + "\n\n" + strings.Join(sections, sep), sources
 }

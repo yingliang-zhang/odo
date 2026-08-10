@@ -529,6 +529,9 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// The run/distill gates live inside the handler (M12): the gate and the
 	// slash-slot registration must be one critical section, or a distill
 	// starting between the two folds the slash answer into last_seq unseen.
+	// cmd_recall_audit.go's auditSlashCommands mirrors the two slash routes
+	// below (/panel, /vision) — keep them in sync: slash user_messages
+	// journal no recall key, so the audit excludes them from the miss class.
 	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/panel"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
 		c, err := s.checkConversation(ctx, req.ConversationID)
 		if err != nil {
@@ -714,8 +717,10 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 	m, items, noteBytes := recallWikiNotes(s.projectRoot, wsName, query, retracted)
 	ml.wiki = m
 	// M12 Batch 3a (D-cross): matched-only cross-workstream push — empty
-	// unless the query earned it (no fallback tier leaks cross-ws).
-	if block, sources := crossWsBlock(s.projectRoot, wsName, query); block != "" {
+	// unless the query earned it (no fallback tier leaks cross-ws). The
+	// store threads through to the sibling retraction gate (a note
+	// retracted in its own workstream is never pushed).
+	if block, sources := crossWsBlock(ctx, s.store, s.projectRoot, wsName, query); block != "" {
 		ml.cross = block
 		ml.crossItems = sources
 	}

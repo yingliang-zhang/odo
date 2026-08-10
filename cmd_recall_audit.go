@@ -23,7 +23,11 @@ import (
 // messages, recall items per message, the miss class (zero matched notes
 // despite ≥3 extracted query terms), the matched_terms distribution, the
 // top matched vs never-matched note names, and the newest miss-class
-// queries — the labeled pool for the embedding spike.
+// queries — the labeled pool for the embedding spike. Slash-command
+// messages (/panel, /vision) journal no recall key — they carry only
+// receipt+context_scope+total_prompt_bytes — so they are excluded from
+// the miss class and reported as their own bucket; the miss rate counts
+// only evidence-bearing runs.
 //
 // Like `odo journal` / `odo todo`, the transport is the agent's own shell
 // — no daemon, no socket; the journal is opened READ-ONLY (query_only) so
@@ -43,8 +47,31 @@ const recallAuditUsage = `usage: odo recall audit [--last N] [--json]
 
 // missAuditTermFloor is the extracted-query-term floor for the miss class:
 // below 3 terms a query never gave keyword recall enough substance to
-// blame it for finding nothing.
+// blame it for finding nothing. The audit counts terms from the journaled
+// message text alone, while production recall queries union that text with
+// the last 3 current-epoch turns (recallQuery/recallCtxTurns) — so this
+// floor is a conservative lower bound on the term count production saw.
 const missAuditTermFloor = 3
+
+// auditSlashCommands mirrors the slash commands handleSendMessage routes
+// in internal/ipc/server.go (/panel, /vision) — keep the two in sync.
+// Slash user_messages journal no recall key, so text-tokenized recall
+// evidence does not exist for them; without this gate every slash message
+// with ≥ missAuditTermFloor terms would classify as a miss.
+var auditSlashCommands = []string{"/panel", "/vision"}
+
+// isSlashMessage reports whether a journaled user_message text is a slash
+// payload, mirroring the daemon's routing rule: the trimmed text is
+// "<cmd>" or "<cmd> <args>" for a routed command.
+func isSlashMessage(text string) bool {
+	t := strings.TrimSpace(text)
+	for _, cmd := range auditSlashCommands {
+		if t == cmd || strings.HasPrefix(t, cmd+" ") {
+			return true
+		}
+	}
+	return false
+}
 
 // missPoolSize bounds the labeled query pool printed for the spike.
 const missPoolSize = 10
@@ -62,7 +89,7 @@ type recallAuditNote struct {
 // extracted query terms whose recall carried zero matched notes.
 type recallAuditMiss struct {
 	Count int     `json:"count"`
-	Rate  float64 `json:"rate"` // count / user_messages (0 when no messages)
+	Rate  float64 `json:"rate"` // count / evidence-bearing messages (user − excluded slash; 0 when none)
 }
 
 // recallAuditMissQuery is one labeled miss-class query (journal
@@ -88,6 +115,7 @@ type recallAuditReport struct {
 	MeanItemsPerMessage    float64                `json:"mean_items_per_message"`    // recall items, fixed layers included
 	MatchedTermsPerMessage map[string]int         `json:"matched_terms_per_message"` // buckets: 0, 1, 2, 3, 4, 5+
 	Miss                   recallAuditMiss        `json:"miss"`                      // ≥3 query terms, zero matched notes
+	ExcludedSlashMessages  int                    `json:"excluded_slash_messages"`   // slash payloads journal no recall key — no miss evidence
 	TopMatchedNotes        []recallAuditNote      `json:"top_matched_notes"`
 	NeverMatchedNotes      []recallAuditNote      `json:"never_matched_notes"`
 	MissQueries            []recallAuditMissQuery `json:"miss_queries,omitempty"`
@@ -130,7 +158,8 @@ type auditMsg struct {
 	seq       int
 	createdAt string
 	text      string
-	terms     int // extracted query terms (exactly the recall tokenization)
+	slash     bool // routed slash payload: journals no recall key, excluded from the miss class
+	terms     int  // extracted query terms (exactly the recall tokenization)
 	items     []auditItem
 }
 
@@ -217,7 +246,7 @@ func collectRecallAudit(ctx context.Context, jp journalProj, lastN int) (msgs []
 			text, items := parseRecallMsg(ev.Payload)
 			convMsgs = append(convMsgs, auditMsg{
 				ws: w.Name, convID: c.ID, seq: ev.Seq, createdAt: ev.CreatedAt,
-				text: text, terms: len(ipc.TokenizeQuery(text)), items: items,
+				text: text, slash: isSlashMessage(text), terms: len(ipc.TokenizeQuery(text)), items: items,
 			})
 		}
 		if lastN > 0 && len(convMsgs) > lastN {
@@ -271,7 +300,12 @@ func tallyInto(report *recallAuditReport, m auditMsg, matched, never map[string]
 			never[name]++
 		}
 	}
-	if m.isMiss() {
+	// Slash messages journal no recall key — excluded from the miss class
+	// and counted in their own bucket so the rate sees only
+	// evidence-bearing runs.
+	if m.slash {
+		report.ExcludedSlashMessages++
+	} else if m.isMiss() {
 		report.Miss.Count++
 	}
 }
@@ -281,13 +315,17 @@ func tallyInto(report *recallAuditReport, m auditMsg, matched, never map[string]
 func finalizeReport(report *recallAuditReport, msgs []auditMsg, matched, never map[string]int) {
 	if report.UserMessages > 0 {
 		report.MeanItemsPerMessage /= float64(report.UserMessages)
-		report.Miss.Rate = float64(report.Miss.Count) / float64(report.UserMessages)
+	}
+	// The miss rate counts only evidence-bearing runs: slash messages
+	// journal no recall key, so they can neither hit nor miss.
+	if evidence := report.UserMessages - report.ExcludedSlashMessages; evidence > 0 {
+		report.Miss.Rate = float64(report.Miss.Count) / float64(evidence)
 	}
 	report.TopMatchedNotes = topNotes(matched, noteTallySize)
 	report.NeverMatchedNotes = topNotes(never, noteTallySize)
 	var misses []recallAuditMissQuery
 	for _, m := range msgs {
-		if !m.isMiss() {
+		if m.slash || !m.isMiss() {
 			continue
 		}
 		misses = append(misses, recallAuditMissQuery{
@@ -368,8 +406,12 @@ func renderAuditHuman(r recallAuditReport) {
 		r.MeanItemsPerMessage, bucketLine(r.ItemsPerMessage, []string{"0", "1", "2", "3-5", "6+"}))
 	fmt.Printf("matched terms/message: buckets %s\n",
 		bucketLine(r.MatchedTermsPerMessage, []string{"0", "1", "2", "3", "4", "5+"}))
+	evidence := r.UserMessages - r.ExcludedSlashMessages
 	fmt.Printf("miss class (≥%d query terms, zero matched notes): %d/%d (%.1f%%)\n",
-		missAuditTermFloor, r.Miss.Count, r.UserMessages, r.Miss.Rate*100)
+		missAuditTermFloor, r.Miss.Count, evidence, r.Miss.Rate*100)
+	if r.ExcludedSlashMessages > 0 {
+		fmt.Printf("excluded slash (no recall evidence journaled): %d\n", r.ExcludedSlashMessages)
+	}
 
 	if len(r.TopMatchedNotes) > 0 {
 		fmt.Println("\ntop matched notes (messages):")

@@ -271,3 +271,85 @@ func TestParseRecallMsgLegacyShape(t *testing.T) {
 		t.Error("unparseable payload must yield no items")
 	}
 }
+
+// TestRecallAuditSlashExclusion (F1): slash messages journal no recall
+// key (receipt+context_scope+total_prompt_bytes only), yet their text
+// tokenizes to ≥3 terms — without the exclusion every /panel or /vision
+// message inflates the miss class (in the dogfood journal 4 of 7 misses
+// were slash). They are excluded and reported in their own bucket; the
+// miss rate counts only evidence-bearing messages.
+func TestRecallAuditSlashExclusion(t *testing.T) {
+	root := t.TempDir()
+	main := []string{
+		// /panel payload: 5 tokenized terms, NO recall key — the live
+		// false positive; not a miss, goes to the excluded bucket.
+		`{"text":"/panel compare sqlite wal modes","context_scope":"full","total_prompt_bytes":1234,"receipt":{}}`,
+		// Plain miss: 3 terms, zero matched notes ⇒ miss count 1.
+		`{"text":"tokenizer config v2","recall":[{"path":"/root/wiki/main-epoch-1.md"}]}`,
+		// A hit: one matched note ⇒ 2 evidence-bearing messages, 1 miss.
+		`{"text":"fix fold bug","recall":[{"path":"/root/wiki/main-epoch-2.md","matched_terms":["fold"]}]}`,
+	}
+	seedAuditJournal(t, root, main, nil)
+	t.Chdir(root)
+
+	stdout, _, code := captureCLI(t, func() int {
+		return runRecallCLI([]string{"audit", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("audit --json: exit %d", code)
+	}
+	var r recallAuditReport
+	if err := json.Unmarshal([]byte(stdout), &r); err != nil {
+		t.Fatalf("--json output: %v\n%s", err, stdout)
+	}
+	if r.UserMessages != 3 {
+		t.Errorf("user_messages = %d, want 3 (slash stays in the scan)", r.UserMessages)
+	}
+	if r.ExcludedSlashMessages != 1 {
+		t.Errorf("excluded_slash_messages = %d, want 1 (the /panel payload)", r.ExcludedSlashMessages)
+	}
+	if r.Miss.Count != 1 {
+		t.Errorf("miss.count = %d, want 1 — the slash payload must NOT count as a miss", r.Miss.Count)
+	}
+	if r.Miss.Rate != 0.5 {
+		t.Errorf("miss.rate = %v, want 0.5 — 1 miss over 2 evidence-bearing messages", r.Miss.Rate)
+	}
+	if len(r.MissQueries) != 1 || r.MissQueries[0].Query != "tokenizer config v2" {
+		t.Errorf("miss_queries = %+v, want only the plain miss (slash never enters the pool)", r.MissQueries)
+	}
+
+	// Human report: evidence-bearing denominator + its own bucket line.
+	stdout, _, code = captureCLI(t, func() int {
+		return runRecallCLI([]string{"audit"})
+	})
+	if code != 0 {
+		t.Fatalf("audit: exit %d", code)
+	}
+	for _, want := range []string{
+		"miss class (≥3 query terms, zero matched notes): 1/2 (50.0%)",
+		"excluded slash (no recall evidence journaled): 1",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("human report missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestIsSlashMessage pins the routing mirror: the daemon accepts
+// "<cmd>" and "<cmd> <args>" for /panel and /vision — and nothing else
+// (e.g. /panels is a normal message).
+func TestIsSlashMessage(t *testing.T) {
+	for text, want := range map[string]bool{
+		"/panel":                  true,
+		"/panel analyze this":     true,
+		"  /vision what is here":  true,
+		"/panels are great tools": false, // prefix is not the command
+		"/panelx":                 false,
+		"what does /panel do?":    false, // must START with the command
+		"tokenizer config v2":     false,
+	} {
+		if got := isSlashMessage(text); got != want {
+			t.Errorf("isSlashMessage(%q) = %v, want %v", text, got, want)
+		}
+	}
+}

@@ -8,6 +8,7 @@ package ipc
 // matched_terms).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // writeTopicPage seeds one wiki topic page under root/wiki/topics.
@@ -76,14 +79,14 @@ func TestCrossZeroMatchNoFallback(t *testing.T) {
 	// (mind: short tokens like "no" substring-match "notes" — the query
 	// must be genuinely absent, not merely odd).
 	const noMatchQuery = "zzzqqq wxyz uvw"
-	if block, sources := crossWsBlock(root, "main", noMatchQuery); block != "" {
+	if block, sources := crossWsBlock(context.Background(), nil, root, "main", noMatchQuery); block != "" {
 		t.Errorf("zero-match block = %q (sources %v), want \"\" — matched-only, NO fallback", block, sources)
 	}
 	// The same pin at the component level.
 	if body, items, _ := recallTopicPages(root, noMatchQuery); body != "" || items != nil {
 		t.Errorf("zero-match topic recall = %q %+v, want empty", body, items)
 	}
-	if chunk, _, ok := recallSiblingNote(root, "main", noMatchQuery); ok || chunk != "" {
+	if chunk, _, ok := recallSiblingNote(context.Background(), nil, root, "main", noMatchQuery); ok || chunk != "" {
 		t.Errorf("zero-match sibling recall = %q ok=%v (newest sibling exists! fallback must NOT fire)", chunk, ok)
 	}
 }
@@ -146,7 +149,7 @@ func TestCrossSiblingExcludesCurrentWs(t *testing.T) {
 	writeEpochNote(t, root, "main-epoch-5", "zeta in the current workstream\n")
 	writeEpochNote(t, root, "ui-epoch-2", "zeta from the ui sibling\n")
 
-	chunk, item, ok := recallSiblingNote(root, "main", "zeta")
+	chunk, item, ok := recallSiblingNote(context.Background(), nil, root, "main", "zeta")
 	if !ok {
 		t.Fatal("sibling recall ok=false, want ui-epoch-2")
 	}
@@ -159,7 +162,7 @@ func TestCrossSiblingExcludesCurrentWs(t *testing.T) {
 
 	// Newest epoch wins.
 	writeEpochNote(t, root, "ui-epoch-3", "newer zeta\n")
-	_, item, _ = recallSiblingNote(root, "main", "zeta")
+	_, item, _ = recallSiblingNote(context.Background(), nil, root, "main", "zeta")
 	if !strings.HasSuffix(item.path, "ui-epoch-3.md") {
 		t.Errorf("sibling = %s, want ui-epoch-3.md (newest epoch)", item.path)
 	}
@@ -173,7 +176,7 @@ func TestCrossSiblingExcludesCurrentWs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, item, _ = recallSiblingNote(root, "main", "zeta")
+	_, item, _ = recallSiblingNote(context.Background(), nil, root, "main", "zeta")
 	if !strings.HasSuffix(item.path, "ui-epoch-3.md") {
 		t.Errorf("sibling = %s, want ui-epoch-3.md (epoch tie ⇒ mtime wins)", item.path)
 	}
@@ -186,7 +189,7 @@ func TestCrossSiblingLineBoundaryCap(t *testing.T) {
 	line := "zeta-padding-line\n"
 	writeEpochNote(t, root, "ui-epoch-2", strings.Repeat(line, 200))
 
-	chunk, _, ok := recallSiblingNote(root, "main", "zeta")
+	chunk, _, ok := recallSiblingNote(context.Background(), nil, root, "main", "zeta")
 	if !ok {
 		t.Fatal("sibling recall ok=false")
 	}
@@ -212,7 +215,7 @@ func TestCrossLabeledHeaders(t *testing.T) {
 	writeTopicPage(t, root, "folding", "- alpha decision (ui-epoch-2)\n- alpha followup (main-epoch-3)\n- more alpha (ui-epoch-2)\n- legacy (epoch-9)\n")
 	writeEpochNote(t, root, "ui-epoch-2", "alpha in ui\n")
 
-	block, _ := crossWsBlock(root, "main", "alpha")
+	block, _ := crossWsBlock(context.Background(), nil, root, "main", "alpha")
 	if !strings.HasPrefix(block, "## Cross-workstream context (project topic pages — other workstreams)\n\n") {
 		t.Errorf("block missing the layer header: %q", block[:min(80, len(block))])
 	}
@@ -265,7 +268,7 @@ func TestCrossWsRecallPrefMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		writePrefs(t, home, tc.prefs)
-		block, sources := crossWsBlock(root, "main", "alpha")
+		block, sources := crossWsBlock(context.Background(), nil, root, "main", "alpha")
 		gotTopic := strings.Contains(block, "### topics/alpha-topic.md")
 		gotSib := strings.Contains(block, "### ui-epoch-1.md")
 		if gotTopic != tc.wantTopic || gotSib != tc.wantSib {
@@ -379,4 +382,160 @@ func TestCrossWsSendPathReceipts(t *testing.T) {
 		t.Errorf("receipt missing cross sources (topic=%v sibling=%v): %v", topicRcpt, sibRcpt, p.Receipt)
 	}
 	rig.pollUntilDone(t, convID)
+}
+
+// seedCrossStore builds a journal at root with one active conversation per
+// named workstream and returns the store + per-workstream conversation IDs
+// (F2 fixtures journal retractions into the candidate's OWN workstream).
+func seedCrossStore(t *testing.T, root string, workstreams ...string) (*store.Store, map[string]int64) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(root, ".odo", "journal.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := st.CreateOrGetProject(ctx, root, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	convs := map[string]int64{}
+	for _, name := range workstreams {
+		w, err := st.CreateOrGetWorkstream(ctx, p.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := st.CreateConversation(ctx, w.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		convs[name] = c.ID
+	}
+	return st, convs
+}
+
+// retractNote journals one memory_update{layer:"note", cause:"retract"}
+// event (same parsing contract as retractedNoteSet).
+func retractNote(t *testing.T, st *store.Store, convID int64, note, by string) {
+	t.Helper()
+	if _, err := st.AppendEvent(context.Background(), convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+		"layer":  "note",
+		"cause":  "retract",
+		"detail": note + " contradicted by " + by + ": fixture",
+	})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCrossSiblingRetractionOwnWorkstream (F2): the sibling push honors
+// retractions journaled in the CANDIDATE'S OWN workstream — the current
+// conversation's retraction set cannot see alien notes. Newest matched
+// but retracted ⇒ the next-newest un-retracted wins; all retracted ⇒
+// nothing is pushed; an un-retracted newer note still wins while the
+// gate is active.
+func TestCrossSiblingRetractionOwnWorkstream(t *testing.T) {
+	root := t.TempDir()
+	writeEpochNote(t, root, "ui-epoch-2", "zeta in ui epoch two\n")
+	writeEpochNote(t, root, "ui-epoch-3", "newer zeta in ui epoch three\n")
+	st, convs := seedCrossStore(t, root, "main", "ui")
+	defer st.Close()
+	ctx := context.Background()
+
+	// Gate active, nothing retracted: the newer ui-epoch-3 still wins.
+	_, item, ok := recallSiblingNote(ctx, st, root, "main", "zeta")
+	if !ok || !strings.HasSuffix(item.path, "ui-epoch-3.md") {
+		t.Fatalf("unretracted: item = %+v ok=%v, want ui-epoch-3.md (gate must not disturb normal selection)", item, ok)
+	}
+
+	// Retract ui-epoch-3 in UI's OWN conversation: the newest matched
+	// candidate is retracted ⇒ fallback picks ui-epoch-2.
+	retractNote(t, st, convs["ui"], "ui-epoch-3", "ui-epoch-4")
+	_, item, ok = recallSiblingNote(ctx, st, root, "main", "zeta")
+	if !ok || !strings.HasSuffix(item.path, "ui-epoch-2.md") {
+		t.Fatalf("fallback: item = %+v ok=%v, want ui-epoch-2.md (newest retracted ⇒ next-newest)", item, ok)
+	}
+
+	// Retract ui-epoch-2 as well: every matched sibling is retracted in
+	// its own workstream ⇒ nothing is pushed into main.
+	retractNote(t, st, convs["ui"], "ui-epoch-2", "ui-epoch-3")
+	if chunk, _, ok := recallSiblingNote(ctx, st, root, "main", "zeta"); ok || chunk != "" {
+		t.Errorf("all retracted: chunk = %q ok=%v, want nothing pushed", chunk, ok)
+	}
+}
+
+// TestCrossSiblingRetractionScopedToOwnWs (F2): a retraction journaled in
+// the CURRENT conversation names home-workstream notes only — it must
+// not leak onto a sibling candidate.
+func TestCrossSiblingRetractionScopedToOwnWs(t *testing.T) {
+	root := t.TempDir()
+	writeEpochNote(t, root, "main-epoch-1", "zeta in the current workstream\n")
+	writeEpochNote(t, root, "ui-epoch-2", "zeta from the ui sibling\n")
+	st, convs := seedCrossStore(t, root, "main", "ui")
+	defer st.Close()
+
+	// main's conversation retracts main-epoch-1: home-scoped, irrelevant
+	// to the sibling push (which never offers main's own notes anyway).
+	retractNote(t, st, convs["main"], "main-epoch-1", "main-epoch-2")
+	_, item, ok := recallSiblingNote(context.Background(), st, root, "main", "zeta")
+	if !ok || !strings.HasSuffix(item.path, "ui-epoch-2.md") {
+		t.Errorf("item = %+v ok=%v, want ui-epoch-2.md — a conversation's retraction set is home-scoped", item, ok)
+	}
+}
+
+// TestCrossSiblingOversizeHeaderNoPanic (P2): a matched-terms list long
+// enough to push the section header past the 2KB cap yields nothing —
+// before the budget guard, the negative content allowance slice-panicked
+// inside capAtLineBoundary.
+func TestCrossSiblingOversizeHeaderNoPanic(t *testing.T) {
+	root := t.TempDir()
+	terms := make([]string, 0, 90)
+	for i := 0; i < 90; i++ {
+		terms = append(terms, fmt.Sprintf("term%02daaaaaaaaaaaaaaaaaaa", i))
+	}
+	query := strings.Join(terms, " ")
+	writeEpochNote(t, root, "ui-epoch-1", query+" body\n")
+	chunk, _, ok := recallSiblingNote(context.Background(), nil, root, "main", query)
+	if ok || chunk != "" {
+		t.Errorf("oversize header: ok=%v chunk=%d bytes, want nothing (header alone exceeds the cap)", ok, len(chunk))
+	}
+}
+
+// TestCrossSiblingOnlyHeader (P2): with no matched topic page on disk the
+// block header must not claim "topic pages" — it renders the neutral
+// other-workstreams header around the sibling slice.
+func TestCrossSiblingOnlyHeader(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeEpochNote(t, root, "ui-epoch-2", "alpha in ui without topics\n")
+	block, sources := crossWsBlock(context.Background(), nil, root, "main", "alpha")
+	if !strings.HasPrefix(block, "## Cross-workstream context (other workstreams)\n\n") {
+		t.Errorf("sibling-only header wrong: %q", block[:min(80, len(block))])
+	}
+	if strings.Contains(block, "topic pages") {
+		t.Errorf("sibling-only block must not claim topic pages: %q", block[:min(120, len(block))])
+	}
+	if len(sources) != 1 || sources[0].origin != "sibling" {
+		t.Errorf("sources = %+v, want exactly one sibling source", sources)
+	}
+}
+
+// TestCrossTopicLimitMarker (P2): matched pages past the top-2 limit are
+// held back with the LIMIT marker — distinct from the 3KB cap marker
+// pinned by TestCrossTopicPageBoundaryCap.
+func TestCrossTopicLimitMarker(t *testing.T) {
+	root := t.TempDir()
+	writeTopicPage(t, root, "a-gamma", "gamma small page a\n")
+	writeTopicPage(t, root, "b-gamma", "gamma small page b\n")
+	writeTopicPage(t, root, "c-gamma", "gamma small page c\n")
+	writeTopicPage(t, root, "d-gamma", "gamma small page d\n")
+
+	body, items, _ := recallTopicPages(root, "gamma")
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want top-2", len(items))
+	}
+	if !strings.Contains(body, "2 more matched topic page(s) held back by the top-2 limit") {
+		t.Errorf("limit marker missing: %q", body)
+	}
+	if strings.Contains(body, "held back by the 3KB") {
+		t.Errorf("cap marker must not appear without a cap cut: %q", body)
+	}
 }

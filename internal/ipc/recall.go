@@ -269,8 +269,16 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 // retract adds, an unretract removes (forward-compatible; M6 never emits
 // unretract, so a retraction stands for the milestone).
 func (s *Server) retractedNotes(ctx context.Context, conversationID int64) map[string]bool {
+	return retractedNoteSet(ctx, s.store, conversationID)
+}
+
+// retractedNoteSet is the store-level spelling of Server.retractedNotes:
+// cross-workstream sibling recall (recall_cross.go) must gate on the
+// retraction set of a candidate's OWN workstream conversation, which the
+// Server method — bound to the current conversation — cannot reach.
+func retractedNoteSet(ctx context.Context, st *store.Store, conversationID int64) map[string]bool {
 	out := map[string]bool{}
-	events, err := s.store.ListEvents(ctx, conversationID, 0)
+	events, err := st.ListEvents(ctx, conversationID, 0)
 	if err != nil {
 		return out
 	}
