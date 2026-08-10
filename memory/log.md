@@ -733,3 +733,15 @@ HEAD: 6ecbac0
 - Retired worktrees 6a786cb2 + 6a787369 (post-commit) and 6a787200 (empty no-diff leak). Remaining worktrees: main checkout + the live run's own.
 - Gates: `go test ./...` full suite green (ipc 124.7s); GUI build green. Pushed `83bea0b..46be84c` (fold chip + all four fixes now on origin/main).
 - PENDING USER ACTION: fixes live in daemon code — rebuild `go build -o odo .` in ~/Projects/odo and restart Odo.app (daemon is the app child at <repo>/odo) before clicking accept again; then run gui/e2e/fold-chip.spec.ts against the restarted daemon.
+
+## Context and Memory Batch 1 — tri-model design → implement → review (2026-08-10)
+
+- Trigger: user reported context memory feels incomplete in daily chat and /panel; multi-layer memory has no working-context layer.
+- Tri-model design review (K3/GLM/DSF blind, 3/3): root causes A (panel/vision zero context base), B (8KB replay hole), C (no working-state layer) all confirmed. Fourth-hole divergence: cross-workstream push (K3/GLM) vs CJK recall collapse (DSF, evidence: Chinese queries tokenize to zero terms; user IS CJK-primary) — CJK promoted to Batch 1, cross-workstream deferred (DSF: by design, pull exists).
+- DESIGN LOCK (user-confirmed, privacy default full): A = shared slashContextBlock into system prompt for /panel + /vision (layers in buildPrompt order, receipts exact-injection hashes, skills/memoryMap/resume excluded, prior slash agent answers excluded from tail); B = prefs replay_total_kb/replay_turn_kb (defaults 8/4, clamp [4,64]/[1,16], fail closed) + actionable omission marker naming dropped seq window + `odo journal range A B` + dropped_seqs receipt; C = CJK overlapping-bigram tokenizer (latin byte-identical; shared by recall + matchSkills); D = total_prompt_bytes on all user_message receipts.
+- Implementation: K3 `4cf1a11` (+1054/−55, 7 files, 12 tests). Tri-model blind review **3/3 ACCEPT** (zero P0/P1; 9 P2s consolidated).
+- P2 polish `43ea5ac` (+152/−19): rune-safe replay truncation (2/3 finding — CJK made byte-cut first-class), single scope + events resolution per slash call, slash tail per-turn cap clamp to slashConvCap, TestVisionContextScopeProjectOnly.
+- Gates: go build/vet/gofmt clean; full `go test ./... -count=1` green twice (orchestrator-verified, ipc 166-170s).
+- Outstanding: slash dropped-seq symmetric journaling; vision image bytes in receipt; recallQuery seed byte-cut (feeds tokenizer only); 3 pre-existing gofmt-dirty test files; auto-distill GUI-lifecycle fallback (needs user decision); working-state Now card (Batch 2 candidate, shape locked: derived, rule-based, no storage); distill prompt has no memory layers (GLM finding, observe).
+
+HEAD: 43ea5ac (pushed, daemon binaries rebuilt)
