@@ -18,7 +18,7 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-M0–M11 complete. 170 commits, ~29K lines (15.0K Go + 13.7K TS/CSS/Rust).
+M0–M15 complete. 208 commits, ~44K lines (≈29.6K Go incl. tests + ≈14.0K TS/CSS/Rust).
 
 | Milestone | What it delivers | Tests |
 |---|---|---|
@@ -44,9 +44,15 @@ M0–M11 complete. 170 commits, ~29K lines (15.0K Go + 13.7K TS/CSS/Rust).
 | Diff Line Numbers | Hunk header parsing for old/new line numbers, split-view comment buttons, file:line comment refs | 43 E2E |
 | P2 A11y | aria-busy spinners, inline delete confirm (replaces native window.confirm) | 43 E2E |
 | Clipboard Paste Fix | save_attachment daemon command for clipboard image paste (webview → base64 → daemon → real path) | 43 E2E |
+| M12–M14 Memory + Context Polish | Verbatim replay w/ actionable fold chips, CJK recall, durable todo (journal-backed), cross-workstream matched recall, auto-distill chain, per-layer sha16 receipts + `total_prompt_bytes` | Go + 47 E2E |
+| M15 Outcome Loops | `odo skills audit` (receipt×outcome join, flag-only), `odo autonomy audit` (per-class streaks, rung-0 instrumentation, `auto_apply` pref parse), M11 comment truth, OMP memory probe (docs-only) | 15 Go + 47 E2E |
 
 ### Planned
 
+- **A1 earned-autonomy ratchet** — rung-0 instrumentation shipped (M15). Rung-1 (consensus-accepted diffs auto-landed on an `odo/auto-<ws>` branch, human merges in batches) is data-gated on real streak + override-rate numbers from `odo autonomy audit`
+- **Tool-bearing skills** — skill directories (`SKILL.md` + `references/` + `scripts/`) scanned and receipted by directory content hash; agent-authorable scripts stay behind the human apply gate (B-strategy-2)
+- **Design-MoA for nontrivial tasks** — 3 blind design proposals → consolidator → journaled DESIGN LOCK (human amend/veto) → single implementer → existing MoA review; mechanical fixes stay single-model (B-strategy-2)
+- **Auto-register semantics** — projects must not auto-register on connect (real pain observed: probe/scratch dirs got registered during a test run); explicit consent or git-root gate
 - **Cross-examiner** — one-shot mid-discussion second opinion at decision points (DEFER until a concrete decision-point pain is demonstrated; `/panel` already covers manual second opinions)
 - **Per-run diff lock** — move `ExtractDiff` out of `s.mu` to avoid blocking concurrent conversations during git subprocess calls (DEFER until accept latency is observed blocking another conversation)
 - **Split-view comments in split mode** — 💬 comment button exists in both inline and split views; if split-view commenting becomes a daily need, add comment affordance to split view (currently done)
@@ -60,6 +66,7 @@ M0–M11 complete. 170 commits, ~29K lines (15.0K Go + 13.7K TS/CSS/Rust).
 ### Features
 
 - **Conversation-centric**: every run journals typed events (`user_message`, `agent_text`, `agent_tool_call`, `agent_tool_result`, `agent_done`, `agent_error`, `review_action`, `memory_update`) to an append-only SQLite store
+- **Journal tooling** (read-only CLIs, no LLM): `odo journal` folded/range/tail/search replay; `odo recall audit` recall-miss telemetry; `odo skills audit` skill receipt×outcome join + flags; `odo autonomy audit` per-class accept streaks
 - **Live streaming**: OMP `--mode json` JSONL stream tailed with byte-offset cursor; preview bubble shows in-flight block with pulsing caret; adaptive poll (350ms running / 1500ms idle)
 - **Memory architecture**: 6-layer (journal → epoch notes → topic pages → memory.md → user.md → ledger.md), one-way promotion, contradiction detection + retraction
 - **Diff review**: unified + split view, Accept applies the diff to the project repo and commits, Reject discards the worktree
@@ -73,6 +80,25 @@ M0–M11 complete. 170 commits, ~29K lines (15.0K Go + 13.7K TS/CSS/Rust).
 - **Diff comments**: inline 💬 per code line, "Send comments" routes feedback to agent via `send_message`
 - **Theme**: dark/light, persisted to localStorage
 - **Keyboard shortcuts**: ⌘↵ send, ⌘B sidebar, ⌘F search, ⌘K palette, ⌘, settings, Esc stop/clear
+
+## The shape of Odo
+
+The **journal is the bedrock**: an append-only SQLite store where every typed
+event, every injected prompt layer (sha16 receipt + byte counts), and every
+verdict lives. Anything derived — memory, skills, autonomy — is rebuildable
+from it, and anything injected is attributable ("what exactly did run N see?").
+
+Three pillars compound on top of that single audit trail:
+
+| Pillar | Holds | Today |
+|---|---|---|
+| **Memory** | context — epoch notes, topics, memory.md/user.md, durable todo, replay | full lifecycle: auto-distill/fold/curate, CJK recall, receipted injection, miss telemetry (`odo recall audit`) |
+| **Skills** | procedure — how tasks get done | CRUD + keyword-matched injection + distillation gate + outcome telemetry (`odo skills audit`, flag-only) |
+| **Orchestrator** | verdicts → autonomy | journaled accept loop + MoA review; earned-autonomy instrumentation at rung 0 (`odo autonomy audit`) |
+
+The flywheel: receipts × outcomes → sharper injections → cleaner accepts →
+earned autonomy → more evidence. Models are external and swappable; the
+closed evidence loop is the moat.
 
 ## License
 
@@ -241,6 +267,10 @@ harvests behavioral signals from the journal instead. Rules live in
 with verbatim quotes the daemon verifies mechanically — no LLM in the
 metric path. Everything derived is rebuildable from the journal; nothing is
 silently truncated or deleted (overflow demotes to an append-only archive).
+Every sent prompt carries per-layer sha16 receipts plus `total_prompt_bytes`
+and `dropped_seqs`, with cap boundaries rendered as actionable markers
+(`odo journal range A B`) — the audit trail for "what did run N see?" is
+complete, and its omissions are themselves journaled.
 Promotion flows one way up: journal → epoch note → topic page → memory.md →
 user.md (a rule seen in 2+ projects earns global promotion).
 
