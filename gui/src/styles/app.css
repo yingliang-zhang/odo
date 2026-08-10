@@ -1505,6 +1505,129 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--warn, #d19a4a);
 }
 
+/* M12 (D-todo): the composer "Plan · N open" chip and its popover. The
+   chip wears the auto-distill hairline (same base class); the popover is
+   a small anchored list with done-checkbox, strike ✕, and a "+ add" row —
+   matching the slash menu's elevation. */
+.plan-chip-wrap {
+  position: relative;
+  align-self: flex-start;
+}
+
+.plan-chip.open {
+  border-color: var(--accent, var(--border));
+  color: var(--text);
+}
+
+.plan-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 16px;
+  z-index: 40;
+  min-width: 240px;
+  max-width: 360px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg-elevated, var(--bg-input));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 6px;
+}
+
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.plan-row:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+
+.plan-row.busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.plan-row .plan-check {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--accent, var(--text));
+  cursor: pointer;
+  padding: 0;
+}
+
+.plan-row .plan-check.checked {
+  background: var(--accent, var(--bg-input));
+  color: var(--bg-input, var(--text));
+}
+
+.plan-row .plan-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-row.stale .plan-text {
+  color: var(--text-dim);
+}
+
+.plan-row.struck .plan-text {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
+.plan-stale-mark {
+  color: var(--warn, #d19a4a);
+  font-size: 10px;
+}
+
+.plan-row .plan-strike {
+  flex: none;
+  margin-left: auto;
+}
+
+.plan-add {
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding: 6px 4px 2px;
+}
+
+.plan-add input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+.plan-add input:focus {
+  border-color: var(--accent, var(--border));
+}
+
 .attachment-chip {
   display: inline-flex;
   align-items: center;

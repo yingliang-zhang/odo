@@ -132,3 +132,14 @@ will have (topic page)?
 | Recall precision | pull-based first | index-first, then composed index+pull | K3's path: M5 index → M6 pull via plain CLI (coding agents already have shells) |
 | Ledger storage | SQL view over journal (no editable file) | `ledger.md` file, daemon-written | File form (browsable/greppable), but daemon-only writer + substring verification keeps GLM's un-editable-by-LLM property |
 | Embeddings | defer until pull fails | cut outright | Deferred-and-cut: documented as rejected; revisit trigger recorded above |
+
+## Amendments (2026-08-10, M12)
+
+Recorded from the M12 design lock (`docs/milestones/m12-memory.md`, D-todo;
+text per the kimi leg spec §D-todo.8, landed with the D-todo commit):
+
+> **Invariant 1 (amended):** Agents write to no memory layer, ever — with one scoped exception: an agent may emit a fenced `odo-todo` data block inside its normal `agent_text` output. The daemon parses the block mechanically (fixed JSON schema; no evaluation of content), applies it to that conversation's journaled todo snapshot, journals accepted and rejected ops with reasons, and remains the sole writer of every layer. The block cannot address memory.md, user.md, wiki notes, topic pages, index, skills, or pins; cap and reject rules are daemon-side constants; malformed blocks are journaled and ignored. All agent-originated todo content is a *record* (plan state), never a *rule* — the routing contract is unchanged.
+>
+> **Invariant 7 (amended):** Distill remains the only *LLM* write cadence. Todo merges are mechanical journal folds triggered by agent_text ingest — the same class of daemon bookkeeping as review_action/memory_update — not an extraction cadence.
+>
+> **Layers table (add row):** | todo (plan state) | journal `todo_merge` snapshots | conversation | agent-proposed ops + user + daemon (mechanical merge) | open items ≤1.5KB, before replay | 1.5KB |

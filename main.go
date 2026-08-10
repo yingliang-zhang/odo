@@ -49,6 +49,8 @@ func main() {
 			os.Exit(runLedgerCLI(args[1:]))
 		case "journal":
 			os.Exit(runJournalCLI(args[1:]))
+		case "todo":
+			os.Exit(runTodoCLI(args[1:]))
 		}
 	}
 

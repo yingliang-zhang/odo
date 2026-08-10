@@ -261,6 +261,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleReadPins(ctx, req)
 	case CmdAutoDistillCtl:
 		resp, err = s.handleAutoDistillCtl(ctx, req)
+	case CmdTodoUpdate:
+		resp, err = s.handleTodoUpdate(ctx, req)
 	case CmdListTopics:
 		resp, err = s.handleListTopics(ctx, req)
 	case CmdListSkills:
@@ -378,6 +380,22 @@ func (s *Server) generateAgentsMD() {
 	b.WriteString("lacks a detail, run `odo journal folded|range|tail` (read-only), or\n")
 	b.WriteString("`odo journal search <terms>` (keyword over every active workstream) to\n")
 	b.WriteString("locate the window first, before concluding it is lost.\n\n")
+	// M12 (D-todo): the agent-facing write contract for the durable plan
+	// layer — discovered here because AGENTS.md is the system-prompt bridge.
+	b.WriteString("## Plan todos (odo-todo)\n\n")
+	b.WriteString("Maintain a durable plan for the user by emitting a fenced block inside\n")
+	b.WriteString("your normal reply — the daemon parses it mechanically and journals the\n")
+	b.WriteString("merge; your message text itself is never modified:\n\n")
+	b.WriteString("```odo-todo\n")
+	b.WriteString("[{\"op\":\"add\",\"text\":\"verify accept loop e2e\"},{\"op\":\"done\",\"id\":\"t7\"},{\"op\":\"strike\",\"id\":\"t4\"},{\"op\":\"reword\",\"id\":\"t3\",\"text\":\"…\"}]\n")
+	b.WriteString("```\n\n")
+	b.WriteString("Ops: `add` (new open item — single line, ≤240 bytes), `done` and `strike`\n")
+	b.WriteString("(close an open item; strike = retract with record, never deletion),\n")
+	b.WriteString("`reword` (fix an open item's text). Item ids are daemon-assigned (`t1`,\n")
+	b.WriteString("`t2`, …): added items get their ids from the `## Current plan` section of\n")
+	b.WriteString("your NEXT prompt, and only journaled ids are valid — never invent one.\n")
+	b.WriteString("Open items survive epoch folds; done/struck items stay visible for the\n")
+	b.WriteString("rest of the current epoch. Read-only view of the plan: `odo todo`.\n\n")
 	// Append project memory if it exists.
 	if data, err := os.ReadFile(filepath.Join(s.projectRoot, ".odo", "memory.md")); err == nil {
 		b.WriteString("## Memory\n\n")
@@ -660,6 +678,7 @@ type memoryLayers struct {
 	wiki          string             // recalled epoch notes block
 	memoryMap     string             // R2: pull-based read-back hints (wiki/ + ledger absolute paths)
 	resume        string             // R4: cold-start open-loops handoff (injected only when the replay window is empty)
+	todo          string             // M12 (D-todo): durable plan block (journaled todo state, durable across folds)
 	replay        string             // R1: current-epoch journal replay block
 	replayFirst   int                // R1 receipt: first replayed journal seq
 	replayLast    int                // R1 receipt: last replayed journal seq
@@ -738,6 +757,13 @@ func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversatio
 			ml.receipt[notePath+"#open-loops"] = sha16([]byte(card))
 		}
 	}
+	// M12 (D-todo): the durable plan block renders between the resume card
+	// and the replay. Empty state renders neither block nor receipt entry
+	// (zero-noise default); its sha rides the synthetic journal#todo key.
+	if block := renderTodoBlock(TodoStateFromEvents(events)); block != "" {
+		ml.todo = block
+		ml.receipt["journal#todo"] = sha16([]byte(block))
+	}
 	return ml
 }
 
@@ -781,9 +807,9 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 // order (inv 6 extended, M5): user (global, durable user principles),
 // project (.odo/memory.md behavior rules), pins (.odo/pins.md, verbatim),
 // skills, index (wiki/index.md, always-injected), then recalled wiki notes,
-// the R2 read-back map, the R4 resume card (cold start only), the R1
-// journal replay, attachment hints, and the user's text last
-// (cache-friendly stable prefix).
+// the R2 read-back map, the R4 resume card (cold start only), the M12
+// durable plan block, the R1 journal replay, attachment hints, and the
+// user's text last (cache-friendly stable prefix).
 func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	var b strings.Builder
 	if ml.user != "" {
@@ -822,6 +848,13 @@ func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	}
 	if ml.resume != "" {
 		b.WriteString(ml.resume)
+		b.WriteString("\n\n---\n\n")
+	}
+	if ml.todo != "" {
+		// M12 (D-todo): plan state sits after the resume card and before
+		// the replay — replay is the newest/churniest layer and stays last
+		// (inv 6 cache-friendliness).
+		b.WriteString(ml.todo)
 		b.WriteString("\n\n---\n\n")
 	}
 	if ml.replay != "" {
@@ -1113,10 +1146,17 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		evs = evs[:n-1]
 	}
 	for _, ev := range evs {
-		if _, err := s.store.AppendEvent(ctx, meta.conversationID, ev.Type, mustJSON(ev.Payload)); err != nil {
+		appended, err := s.store.AppendEvent(ctx, meta.conversationID, ev.Type, mustJSON(ev.Payload))
+		if err != nil {
 			return err
 		}
 		meta.consumed++ // advance per successfully journaled event
+		// M12 (D-todo): agent_text ingest is the todo write path — the
+		// daemon scans the journaled text for odo-todo blocks and merges
+		// them mechanically (the event itself is never modified).
+		if appended.Type == store.EventAgentText {
+			s.mergeAgentTodo(ctx, meta.conversationID, appended)
+		}
 	}
 	if len(evs) == 0 {
 		return nil // still running
@@ -1906,7 +1946,14 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	}
 	winStats := measureWindow(window)
 
-	note, err := s.runDistillAgent(ctx, window)
+	// M12 (D-todo): surviving open plan items ride the distill prompt as
+	// labeled authoritative state → the note's Open loops are seeded from
+	// truth (the distiller can't drop a loop it was explicitly handed).
+	prompt := distillPrompt(window)
+	if seed := distillTodoSeed(events); seed != "" {
+		prompt += "\n\n" + seed
+	}
+	note, err := s.runDistillAgent(ctx, prompt)
 	if err != nil {
 		return Response{}, fmt.Errorf("distill: %w", err)
 	}
@@ -2607,14 +2654,17 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 	return Response{Applied: true}, nil
 }
 
-// runDistillAgent runs the summary prompt through the orchestrator adapter
-// as a one-shot run and returns the wiki note body.
-func (s *Server) runDistillAgent(ctx context.Context, events []store.Event) (string, error) {
+// runDistillAgent runs the assembled distill prompt through the
+// orchestrator adapter as a one-shot run and returns the wiki note body.
+// The CALLER assembles the prompt (distillPrompt over the window, plus the
+// M12 todo seed) because seeding needs the full event history while the
+// window does not.
+func (s *Server) runDistillAgent(ctx context.Context, prompt string) (string, error) {
 	ad := s.distillAdapter
 	if ad == nil {
 		ad = s.adapters[""] // fallback to default if distill adapter not configured
 	}
-	return runOneShot(ctx, ad, distillPrompt(events), distillTimeout)
+	return runOneShot(ctx, ad, prompt, distillTimeout)
 }
 
 // runOneShot runs prompt through ad in a throwaway directory, blocking until

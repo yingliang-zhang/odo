@@ -6,18 +6,26 @@ import (
 )
 
 // M12 D-budget bound test: per injection path, the registry's Σ defaults
-// must stay under the 48 KB soft bound and the Σ clamp-maxes under the
-// 128 KB hard bound (ADR-0003's additive prompt budget, with the slash
-// path as the send path's alternative — they never co-inject, so summing
-// both paths into one Σ would charge bytes no prompt carries).
+// must stay under the soft bound and the Σ clamp-maxes under the 128 KB
+// hard bound (ADR-0003's additive prompt budget, with the slash path as
+// the send path's alternative — they never co-inject, so summing both
+// paths into one Σ would charge bytes no prompt carries).
 //
 // Why both sums: a defaults-only test would bless 47 KB today while a
 // single prefs edit (replay_total_kb: 64 + replay_turn_kb: 16) ships
 // ~119 KB — the hard bound is what makes a prefs-clamped blowup a test
 // failure instead of a prod surprise.
+//
+// Soft bound: 48 KB when the registry landed (M12 D-budget), re-based to
+// 50 KB with the M12 D-todo layer (+1.5 KB/send, landed in the same
+// milestone): the bound tracks the current effective send stack by
+// definition, and the registry Σ bills replay_turn nested inside
+// replay_total (the pessimistic convention below) — 47 KB + 1.5 KB =
+// 48.5 KB against ~44.5 KB physically injected. The 128 KB hard bound —
+// the actual model-context guard — is unchanged.
 func TestPromptBudgetSumsWithinBounds(t *testing.T) {
 	const (
-		softBound = 48 * 1024
+		softBound = 50 * 1024 // re-based for the D-todo row (see header)
 		hardBound = 128 * 1024
 	)
 	for _, path := range []string{budgetPathSend, budgetPathSlash} {

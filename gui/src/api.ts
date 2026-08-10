@@ -31,6 +31,8 @@ import type {
   ApplyMemoryResponse,
   AutoDistillCtlResponse,
   BootstrapResponse,
+  TodoUpdateAction,
+  TodoUpdateResponse,
   CancelResponse,
   ContradictionsResponse,
   CreateWorkstreamResponse,
@@ -242,6 +244,23 @@ export function pendingCounts(projectRoot: string): Promise<PendingCountsRespons
 // touched (a send cancels those).
 export function autoDistillCtl(conversationId: number, action: "disarm", projectRoot?: string): Promise<AutoDistillCtlResponse> {
   return invoke<AutoDistillCtlResponse>("auto_distill_ctl", { conversationId, action, projectRoot: projectRoot ?? null });
+}
+
+// M12 (D-todo): one user op from the composer "Plan" popover. The daemon
+// journals the merge with origin:"user"; semantic rejects (unknown id, cap)
+// land inside the journaled event as ops_rejected, not as an IPC error.
+export function todoUpdate(
+  conversationId: number,
+  action: TodoUpdateAction,
+  opts?: { todoId?: string; text?: string; projectRoot?: string },
+): Promise<TodoUpdateResponse> {
+  return invoke<TodoUpdateResponse>("todo_update", {
+    conversationId,
+    action,
+    todoId: opts?.todoId ?? null,
+    text: opts?.text ?? null,
+    projectRoot: opts?.projectRoot ?? null,
+  });
 }
 
 // M4 learning: read the three canonical memory files (project memory.md,

@@ -166,6 +166,12 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
     case "auto_distill_ctl": {
       return { ok: true, disarmed: true };
     }
+    // M12 (D-todo): fixture events carry no todo_merge rows, so the Plan
+    // chip is hidden in dev mode; the mock still answers the verb so a
+    // manual call doesn't warn "unknown command".
+    case "todo_update": {
+      return { ok: true, event: fx.ev("review_action", { action: "todo_merge", origin: "user", ops_applied: 0, ops_rejected: [], snapshot: [], snapshot_sha: "" }, args?.conversationId ?? 1) };
+    }
 
     // ---------- Search ----------
     case "search_events": {

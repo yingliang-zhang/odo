@@ -429,6 +429,7 @@ export default function App() {
   }, [applyBootstrap]);
 
   // Poll the daemon for new journal events after the last seen seq.
+  const pollNowRef = useRef<() => void>(() => {});
   useEffect(() => {
     if (!booted) return;
     let inFlight = false;
@@ -493,6 +494,9 @@ export default function App() {
         inFlight = false;
       }
     };
+    // M12 (D-todo): the Plan popover triggers an immediate re-poll after
+    // its journaled op instead of waiting ~1.5 s for the next tick.
+    pollNowRef.current = () => void tick();
     // M7: 350 ms while the agent runs (block-level preview latency), 1.5 s
     // idle. The interval resets when agentRunning flips.
     const timer = setInterval(
@@ -1274,6 +1278,11 @@ export default function App() {
           distillInFlight={conversation != null && distillingConvs.includes(conversation.id)}
           onDisarmAutoDistill={handleDisarmAutoDistill}
           distillLocked={distillBusy}
+          // M12 (D-todo): the Plan chip reads the journaled events and its
+          // ops re-poll promptly through the normal path.
+          projectRoot={project?.root_path ?? null}
+          onTodoChanged={() => pollNowRef.current()}
+          onTodoError={(m) => setError(m)}
         />
       </main>
       <ContextPanel

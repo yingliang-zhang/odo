@@ -11,7 +11,8 @@ package ipc
 // slash path are alternative pipelines (a slash prompt never carries the
 // send path's replay/recall stack), so a single additive Σ across both
 // paths would charge bytes no prompt ever carries. Per path:
-//   Σ defaults   ≤  48 KB (soft bound — today's effective send stack)
+//   Σ defaults   ≤  50 KB (soft bound — today's effective send stack;
+//   48 KB at D-budget landing, re-based for the D-todo row's 1.5 KB)
 //   Σ clamp-max  ≤ 128 KB (hard bound — the worst a prefs edit can ship)
 // The replay rows are summed pessimistically: replay_turn nests inside
 // replay_total, but both count toward the Σ so a raise of either cap is
@@ -51,6 +52,9 @@ var PromptBudgets = []PromptBudget{
 	{"recall_notes", "recallMemoryCap", "recall", []string{budgetPathSend}, recallMemoryCap, recallMemoryCap},
 	{"memory_map", "memoryMapAllowance", "memory_map", []string{budgetPathSend}, memoryMapAllowance, memoryMapAllowance},
 	{"resume_card", "resumeCardCap", "resume", []string{budgetPathSend}, resumeCardCap, resumeCardCap},
+	// M12 (D-todo): the durable plan block — 1.5KB, not prefs-clamped
+	// (default == clamp-max); injection sits between resume card and replay.
+	{"todo", "todoBlockCap", "todo", []string{budgetPathSend}, todoBlockCap, todoBlockCap},
 	{"replay_total", "replayTotalCapDefault/replayTotalKBMax", "replay", []string{budgetPathSend}, replayTotalCapDefault, replayTotalKBMax * 1024},
 	{"replay_turn", "replayTurnCapDefault/replayTurnKBMax", "replay", []string{budgetPathSend}, replayTurnCapDefault, replayTurnKBMax * 1024},
 	{"slash_recall", "slashRecallCap", "recall", []string{budgetPathSlash}, slashRecallCap, slashRecallCap},

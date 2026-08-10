@@ -58,6 +58,10 @@ const (
 	// auto-distill for one conversation — the composer countdown chip's
 	// Cancel. The disarm is journaled.
 	CmdAutoDistillCtl = "auto_distill_ctl"
+	// M12 (D-todo): todo_update applies one user op (add/done/strike/
+	// reopen/reword) from the composer "Plan" popover; the merge journals
+	// with origin:"user" exactly like an agent-emitted odo-todo block.
+	CmdTodoUpdate = "todo_update"
 )
 
 // Request is one command line on the socket.
@@ -80,8 +84,12 @@ type Request struct {
 	// A1: save_attachment writes a base64-encoded file to .odo/attachments/.
 	Data     string         `json:"data,omitempty"`     // save_attachment: base64-encoded file content
 	Accepted []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
-	// M12: auto_distill_ctl's verb (only "disarm" today).
+	// M12: auto_distill_ctl's verb (only "disarm" today); todo_update's op
+	// name (add/done/strike/reopen/reword).
 	Action string `json:"action,omitempty"`
+	// M12 (D-todo): todo_update's item id (daemon-assigned t<N>) for
+	// done/strike/reopen/reword.
+	TodoID string `json:"todo_id,omitempty"`
 }
 
 // AutoDistillInfo is one scheduled (or blocked) auto-distill for the

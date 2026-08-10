@@ -110,6 +110,21 @@ export const events: OdoEvent[] = [
   ev("user_message", { text: "Looks good — now add the CSS for `.md-table`" }),
   ev("agent_text", { text: "Adding table styles to app.css — borders, padding, header background." }),
   ev("agent_done", { summary: "Added .md-table CSS with th/td borders, padding, and header styling" }),
+  // M12 (D-todo): the composer "Plan · N open" chip reads this journaled
+  // merge (snapshot = open + not-yet-swept items; no fold markers here, so
+  // nothing sweeps or stales).
+  ev("review_action", {
+    action: "todo_merge",
+    origin: "agent",
+    ops_applied: 3,
+    ops_rejected: [],
+    snapshot: [
+      { id: "t1", text: "Verify table rendering edge cases", status: "open", origin_seq: 3, updated_seq: 3 },
+      { id: "t2", text: "Add keyboard navigation to the plan popover", status: "open", origin_seq: 3, updated_seq: 3 },
+      { id: "t3", text: "Wire the todo_update IPC through the bridge", status: "done", origin_seq: 3, updated_seq: 5 },
+    ],
+    snapshot_sha: "deadbeefcafe0123",
+  }),
 
   // ---------- Events (conversation 2) — everything folded ----------
   // Legacy marker (no first_seq/last_seq): the UI derives the window from

@@ -14,7 +14,9 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
 import type { AutoDistillCountdown, OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
+import PlanChip from "./PlanChip";
 import { saveAttachment } from "../api";
+import { deriveTodoState } from "../todo";
 import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown } from "lucide-react";
 import ToolTicker from "./ToolTicker";
 
@@ -67,6 +69,12 @@ interface Props {
   // Composer lock during a MANUAL distill only: an auto distill is
   // send-cancelled (cancel-before-note) and never blocks typing.
   distillLocked?: boolean;
+  // M12 (D-todo): the composer "Plan" chip — read from the journaled
+  // events, written via todo_update. projectRoot routes the IPC in the
+  // multi-project case; onTodoChanged re-polls promptly after an op.
+  projectRoot?: string | null;
+  onTodoChanged?: () => void;
+  onTodoError?: (message: string) => void;
 }
 
 // AutoDistillChip discloses the daemon's auto-distill state above the
@@ -308,7 +316,13 @@ export default function ChatSurface({
   distillInFlight = false,
   onDisarmAutoDistill,
   distillLocked = false,
+  projectRoot = null,
+  onTodoChanged,
+  onTodoError,
 }: Props) {
+  // M12 (D-todo): the plan layer's read side — derived from the journaled
+  // event history already in memory (bootstrap replay + poll appends).
+  const todoItems = useMemo(() => deriveTodoState(events), [events]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -904,6 +918,14 @@ export default function ChatSurface({
           blocked={autoDistillBlocked}
           inFlight={distillInFlight}
           onDisarm={onDisarmAutoDistill}
+        />
+        <PlanChip
+          conversationId={conversationId}
+          projectRoot={projectRoot}
+          items={todoItems}
+          onChanged={() => onTodoChanged?.()}
+          onError={(m) => onTodoError?.(m)}
+          disabled={sendDisabled || distillLocked}
         />
         {attachments.length > 0 && (
           <div className="attachment-chips">

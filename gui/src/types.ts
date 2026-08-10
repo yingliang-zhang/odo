@@ -118,6 +118,15 @@ export interface EventPayload {
   // topic pages were rewritten and how many epoch notes were read.
   topics?: number;
   notes_read?: number;
+  // M12 (D-todo): review_action when action == "todo_merge" — the full
+  // post-merge live snapshot (open + not-yet-swept items), its origin, and
+  // op bookkeeping. Derived stale/swept flags are recomputed by consumers
+  // from the fold markers, never journaled.
+  origin?: string;
+  ops_applied?: number;
+  ops_rejected?: { op?: string; id?: string; reason: string }[];
+  snapshot?: { id: string; text: string; status: string; origin_seq: number; updated_seq: number }[];
+  snapshot_sha?: string;
   // M7: streaming-preview payloads. partial marks the transient preview
   // (never journaled); intent/call_id come from tool_execution_start.
   partial?: boolean;
@@ -521,4 +530,32 @@ export interface ReadSkillResponse {
 export interface UpdateSkillResponse {
   ok: boolean;
   error?: string;
+}
+
+// ---------- M12 (D-todo): durable plan layer ----------
+
+// One journaled todo item as it appears in a todo_merge snapshot, plus the
+// read-time flags the daemon derives from fold markers (swept/stale are
+// never journaled — the GUI recomputes them with the same arithmetic).
+export interface TodoViewItem {
+  id: string;                     // daemon-assigned t<N>
+  text: string;
+  status: "open" | "done" | "struck";
+  origin_seq: number;
+  updated_seq: number;
+  stale: boolean;                 // open, untouched through ≥3 folds (~ marker)
+  swept: boolean;                 // done/struck with a fold boundary past updated_seq
+}
+
+// The op set the GUI may emit via todo_update (reopen is user-only — an
+// agent's fenced block never carries it).
+export type TodoUpdateAction = "add" | "done" | "strike" | "reopen" | "reword";
+
+// Daemon `todo_update`: ok with the journaled todo_merge event; semantic
+// rejects (unknown id, open cap, …) arrive INSIDE that event's payload as
+// ops_rejected, not as an IPC error.
+export interface TodoUpdateResponse {
+  ok: boolean;
+  error?: string;
+  event?: OdoEvent;
 }

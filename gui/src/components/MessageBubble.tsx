@@ -189,6 +189,12 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
       break;
 
     case "review_action":
+      // M12 (D-todo): plan merges are journaled bookkeeping, not chat —
+      // the composer "Plan" chip is their surface; a per-merge badge would
+      // spam one bubble per agent plan update.
+      if (p.action === "todo_merge") {
+        return null;
+      }
       // The memory distiller journals its epoch bump as a review_action with
       // action "distill" and no diff (ADR-0002); render it as a memory event.
       if (p.action === "distill") {

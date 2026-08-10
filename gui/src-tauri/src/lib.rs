@@ -502,6 +502,28 @@ async fn pin(
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M12 (D-todo): one user op from the composer "Plan" popover. The daemon
+// journals the merge with origin:"user"; semantic rejects land inside the
+// journaled event, not as an IPC error.
+#[tauri::command]
+async fn todo_update(
+    conversation_id: i64,
+    action: String,
+    todo_id: Option<String>,
+    text: Option<String>,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let mut req = json!({"cmd": "todo_update", "conversation_id": conversation_id, "action": action});
+    if let Some(id) = todo_id {
+        req["todo_id"] = json!(id);
+    }
+    if let Some(text) = text {
+        req["text"] = json!(text);
+    }
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M5 curation: read .odo/pins.md through the daemon (same resolve-root guard
 // and memory_content field as read_memory; "" when the file is absent).
 #[tauri::command]
@@ -911,6 +933,7 @@ pub fn run() {
             delete_workstream,
             distill,
             auto_distill_ctl,
+            todo_update,
             review_diff,
             get_settings,
             update_settings,
