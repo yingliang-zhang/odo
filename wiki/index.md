@@ -10,3 +10,4 @@
 - Journal Database Reset → topics/journal-reset.md
 - Bulk Sed Worktree Incident and Distilled Skills → topics/bulk-sed-incident.md
 - Outstanding Work and Anomalies → topics/outstanding-work.md
+- Auto-Land Pipeline (M16) → topics/auto-land-pipeline.md
