@@ -6,19 +6,25 @@ import type { ProjectEntry, Workstream } from "../types";
 
 // Phase 3.1: Status dot priority reducer (inspired by Hermes session-row-state.ts).
 // One mutually-exclusive state per workstream row, resolved from boolean signals.
-type DotState = "running" | "pending" | "idle";
-function dotState(running: boolean, pending: number): DotState {
-  if (running) return "running";
+// "running" splits by visibility: foreground (the workstream in view, blue)
+// vs background (a run anywhere else, purple) — a run the user cannot see
+// must still surface, differently.
+type DotState = "running" | "background" | "pending" | "idle";
+function dotState(fg: boolean, bg: boolean, pending: number): DotState {
+  if (fg) return "running";
+  if (bg) return "background";
   if (pending > 0) return "pending";
   return "idle";
 }
 const dotClass: Record<DotState, string> = {
   running: "dot-accent pulse",
+  background: "dot-bg pulse",
   pending: "dot-amber",
   idle: "dot-idle",
 };
 const dotLabel: Record<DotState, string> = {
   running: "Running",
+  background: "Running in background",
   pending: "Pending review",
   idle: "Idle",
 };
@@ -212,9 +218,13 @@ export default function Sidebar({
   // Render a single workstream row (shared between active and remote projects)
   const renderWorkstream = (w: Workstream, isActiveProject: boolean, projectRoot: string) => {
     const active = w.id === workstream?.id && isActiveProject;
-    const running = runningWorkstreams.includes(w.id) || (active && agentRunning);
+    // Remote-project rows have no per-workstream run data (cross-project
+    // polls are project aggregates) — they stay idle rather than borrowing
+    // the active project's run list (ws ids collide across projects).
+    const daemonRunning = isActiveProject && runningWorkstreams.includes(w.id);
+    const fg = active && (agentRunning || daemonRunning);
     const pending = isActiveProject ? (pendingCounts[w.id] ?? 0) : 0;
-    const ds = dotState(running, pending);
+    const ds = dotState(fg, daemonRunning && !active, pending);
     return (
       <li
         key={w.id}
@@ -317,10 +327,19 @@ export default function Sidebar({
   const renderProject = (p: ProjectEntry) => {
     const isActive = p.root === activeProjectRoot;
     const isExpanded = !collapsedProjects.has(p.root);
-    const status = isActive
-      ? { pending: Object.values(pendingCounts).reduce((a, b) => a + b, 0), running: agentRunning || runningWorkstreams.length > 0 }
-      : crossProjectStatus[p.root] ?? { pending: 0, running: false };
-    const ds = dotState(status.running, status.pending);
+    // Project aggregate: foreground only when the viewed workstream runs;
+    // a run in any other workstream (or anywhere in a remote project) reads
+    // as background.
+    const fg = isActive
+      ? agentRunning || (workstream != null && runningWorkstreams.includes(workstream.id))
+      : false;
+    const bg = isActive
+      ? runningWorkstreams.some((id) => id !== workstream?.id)
+      : (crossProjectStatus[p.root]?.running ?? false);
+    const pending = isActive
+      ? Object.values(pendingCounts).reduce((a, b) => a + b, 0)
+      : (crossProjectStatus[p.root]?.pending ?? 0);
+    const ds = dotState(fg, bg, pending);
     const wsList = isActive ? workstreams : (remoteWorkstreams[p.root] ?? []);
 
     return (
@@ -355,7 +374,7 @@ export default function Sidebar({
           <span className={clsx("ws-dot", dotClass[ds])} aria-hidden="true" />
           <span className="sr-only">{dotLabel[ds]}</span>
           <span className="proj-name" title={p.root}>{p.name}</span>
-          {status.pending > 0 && <span className="ws-pending-pill">{status.pending}</span>}
+          {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
         </button>
         {isExpanded && (
           <ul className="ws-list">

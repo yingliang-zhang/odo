@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Sparkles, Wand2, MapPin, FileText, Settings, Square, ChevronLeft, Columns, Search, X, WifiOff } from "lucide-react";
 import {
   acceptDiff,
@@ -325,6 +325,17 @@ export default function App() {
       // Stale badges are fine; never disturb the poll loop.
     }
   }, []);
+
+  // Background runs: daemon-reported running workstreams minus the one in
+  // view. Invisible from the chat surface (panel sessions, other ws) — the
+  // StatusBar chip is their only surface.
+  const backgroundRuns = useMemo(
+    () =>
+      runningWorkstreams
+        .filter((id) => id !== workstream?.id)
+        .map((id) => ({ id, name: workstreams.find((w) => w.id === id)?.name ?? `ws ${id}` })),
+    [runningWorkstreams, workstream?.id, workstreams],
+  );
 
   // Wiki note + topic counts for the sidebar. Failures degrade to
   // "unknown" (the lines are omitted); they never surface in the error
@@ -1365,7 +1376,8 @@ export default function App() {
         epoch={conversation?.epoch ?? 1}
         projectRoot={project?.root_path ?? null}
         agentRunning={agentRunning}
-        runningCount={agentRunning ? 1 : 0}
+        backgroundRuns={backgroundRuns}
+        onJumpWorkstream={(id) => void handleSwitchWorkstream(id)}
         pendingDiffs={diffs.length}
         wikiNoteCount={wikiNoteCount}
         pendingMemoryProposals={pendingMemoryProposals}

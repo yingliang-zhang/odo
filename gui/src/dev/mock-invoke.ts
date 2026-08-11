@@ -250,4 +250,17 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
   }
 }
 
+// E2E hook: in plain-browser dev mode the fixtures module IS the daemon's
+// state — expose it so Playwright can simulate mid-session daemon changes
+// (e.g. a background run appearing in pending_counts). Never set inside the
+// real Tauri webview.
+declare global {
+  interface Window {
+    __odoFixtures?: typeof fx;
+  }
+}
+if (typeof window !== "undefined" && !isTauri()) {
+  window.__odoFixtures = fx;
+}
+
 export { isTauri };

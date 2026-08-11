@@ -13,6 +13,9 @@
   --text-dim: #7d8593;
   --accent-user: #0A84FF;
   --accent-agent: #1e2228;
+  /* Background-run dot/chip. --accent-agent is a dark text color in this
+     theme, so the dot needs its own purple that reads on dark surfaces. */
+  --bg-run: #a78bfa;
   --ok: #3fa35f;
   --err: #c34a4a;
   --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -115,6 +118,7 @@
   --text-dim: #666;
   --accent-user: #007AFF;
   --accent-agent: #7c3aed;
+  --bg-run: #7c3aed;
   --err: #dc2626;
   --ok: #16a34a;
   --link: #2563eb;
@@ -1106,6 +1110,10 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .ws-dot.dot-accent {
   background: var(--accent-user);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-user) 22%, transparent);
+}
+.ws-dot.dot-bg {
+  background: var(--bg-run);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg-run) 22%, transparent);
 }
 .ws-dot.dot-amber {
   background: var(--warn);
