@@ -17,7 +17,7 @@ import (
 const (
 	EventUserMessage     = "user_message"
 	EventAgentText       = "agent_text"
-	EventAgentThinking  = "agent_thinking"
+	EventAgentThinking   = "agent_thinking"
 	EventAgentToolCall   = "agent_tool_call"
 	EventAgentToolResult = "agent_tool_result"
 	EventAgentDone       = "agent_done"

@@ -374,10 +374,34 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 	}
 }
 
+// VisionImage is one pre-read image for QueryWithImages. The CALLER reads
+// the bytes (the daemon handler journals the byte receipt before the
+// gateway call, ADR-0003 exact-injection); reading here too would double
+// the IO and let the receipt and the wire disagree.
+type VisionImage struct {
+	Path      string // audit/display only — never re-read
+	MediaType string // ImageMediaType(path)
+	Data      []byte
+}
+
+// ImageMediaType maps an image path's extension to the Anthropic media
+// type; anything unrecognized stays PNG (the attachment store's format).
+func ImageMediaType(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	}
+	return "image/png"
+}
+
 // QueryWithImages sends a request with both text and image content blocks.
-// imagePaths are file paths to images that will be base64-encoded and sent
+// images arrive pre-read (see VisionImage) and are base64-encoded and sent
 // as Anthropic image content blocks before the text prompt.
-func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt string, imagePaths []string) (string, error) {
+func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt string, images []VisionImage) (string, error) {
 	if c.APIKey == "" {
 		return "", fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
 	}
@@ -386,27 +410,13 @@ func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt stri
 	}
 	// Build content blocks: images first, then text.
 	var contentBlocks []map[string]interface{}
-	for _, imgPath := range imagePaths {
-		data, err := os.ReadFile(imgPath)
-		if err != nil {
-			return "", fmt.Errorf("moa: read image %s: %w", imgPath, err)
-		}
-		mediaType := "image/png"
-		ext := strings.ToLower(filepath.Ext(imgPath))
-		switch ext {
-		case ".jpg", ".jpeg":
-			mediaType = "image/jpeg"
-		case ".webp":
-			mediaType = "image/webp"
-		case ".gif":
-			mediaType = "image/gif"
-		}
+	for _, img := range images {
 		contentBlocks = append(contentBlocks, map[string]interface{}{
 			"type": "image",
 			"source": map[string]interface{}{
 				"type":       "base64",
-				"media_type": mediaType,
-				"data":       base64.StdEncoding.EncodeToString(data),
+				"media_type": img.MediaType,
+				"data":       base64.StdEncoding.EncodeToString(img.Data),
 			},
 		})
 	}

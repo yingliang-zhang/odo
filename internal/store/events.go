@@ -78,10 +78,10 @@ func (s *Store) ListEvents(ctx context.Context, conversationID int64, afterSeq i
 // SearchResult is one event match from SearchEvents, carrying the event
 // plus its workstream/conversation context for display.
 type SearchResult struct {
-	Event          Event   `json:"event"`
-	WorkstreamID   int64   `json:"workstream_id"`
-	WorkstreamName string  `json:"workstream_name"`
-	ConversationID int64   `json:"conversation_id"`
+	Event          Event  `json:"event"`
+	WorkstreamID   int64  `json:"workstream_id"`
+	WorkstreamName string `json:"workstream_name"`
+	ConversationID int64  `json:"conversation_id"`
 }
 
 // SearchEvents searches event payloads across all active workstreams in a

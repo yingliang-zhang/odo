@@ -423,5 +423,4 @@ func TestCapRejectsSecondSend(t *testing.T) {
 		t.Fatalf("expected cap error, got: %s", r2.Error)
 	}
 
-
 }

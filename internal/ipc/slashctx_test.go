@@ -7,7 +7,9 @@ package ipc
 // total_prompt_bytes).
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,16 +29,26 @@ type capturedMoaRequest struct {
 	Model  string `json:"model"`
 }
 
+// moaImageBlock is one image content block as it went on the wire, decoded
+// back to its raw byte length so tests can prove the gateway received
+// exactly the journaled image_bytes.
+type moaImageBlock struct {
+	Bytes     int
+	MediaType string
+}
+
 // moaRecorder collects gateway requests across the fan-out goroutines.
 type moaRecorder struct {
 	mu       sync.Mutex
 	requests []capturedMoaRequest
+	images   [][]moaImageBlock // parallel to requests; nil for text-only calls
 }
 
-func (r *moaRecorder) add(req capturedMoaRequest) {
+func (r *moaRecorder) add(req capturedMoaRequest, images []moaImageBlock) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.requests = append(r.requests, req)
+	r.images = append(r.images, images)
 }
 
 func (r *moaRecorder) all() []capturedMoaRequest {
@@ -44,6 +56,49 @@ func (r *moaRecorder) all() []capturedMoaRequest {
 	defer r.mu.Unlock()
 	out := make([]capturedMoaRequest, len(r.requests))
 	copy(out, r.requests)
+	return out
+}
+
+func (r *moaRecorder) allImages() [][]moaImageBlock {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]moaImageBlock, len(r.images))
+	copy(out, r.images)
+	return out
+}
+
+// probeImages decodes any image content blocks in the gateway request body
+// to their media type + RAW byte length (undoing the base64). Text-only
+// requests probe to nil: their content is a bare string, so the lenient
+// unmarshal simply yields no blocks.
+func probeImages(body []byte) []moaImageBlock {
+	var req struct {
+		Messages []struct {
+			Content []struct {
+				Type   string `json:"type"`
+				Source struct {
+					MediaType string `json:"media_type"`
+					Data      string `json:"data"`
+				} `json:"source"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil
+	}
+	var out []moaImageBlock
+	for _, m := range req.Messages {
+		for _, b := range m.Content {
+			if b.Type != "image" {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(b.Source.Data)
+			if err != nil {
+				continue
+			}
+			out = append(out, moaImageBlock{Bytes: len(raw), MediaType: b.Source.MediaType})
+		}
+	}
 	return out
 }
 
@@ -56,7 +111,7 @@ func recordingMoaServer(t *testing.T, text string, rec *moaRecorder) *httptest.S
 		body, _ := io.ReadAll(r.Body)
 		var req capturedMoaRequest
 		_ = json.Unmarshal(body, &req)
-		rec.add(req)
+		rec.add(req, probeImages(body))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"content":     []map[string]string{{"type": "text", "text": text}},
@@ -548,7 +603,7 @@ func TestSlashTailClampsTurnCap(t *testing.T) {
 	events := []store.Event{
 		chatEvent(1, store.EventUserMessage, strings.Repeat("x", 3*slashConvCap)),
 	}
-	block := slashConversation(events, slashModePanel)
+	block, _, _, _ := slashConversation(events, slashModePanel)
 	if !strings.Contains(block, "[truncated at 4KB]") {
 		t.Errorf("slash tail must truncate the newest turn at the 4KB block cap, got:\n%.200s", block)
 	}
@@ -557,5 +612,235 @@ func TestSlashTailClampsTurnCap(t *testing.T) {
 	// per-turn prefs cap.
 	if len(block) > slashConvCap+256 {
 		t.Errorf("slash tail = %d bytes, want ≤ %d (cap + one turn's overhead)", len(block), slashConvCap+256)
+	}
+}
+
+// TestSlashDroppedSeqsReceipt pins the slash/send symmetry: when the slash
+// conversation tail overflows slashConvCap, the journaled slash
+// user_message carries the SAME replay receipt the send path writes
+// (covered window + boundary + bytes + the omitted [first,last] seq
+// window), and the journaled window matches the omission marker inside
+// the block the models actually saw (journal ↔ injection coherence).
+func TestSlashDroppedSeqsReceipt(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	writePrefs(t, home, "review: pm1@test\n")
+	rec := &moaRecorder{}
+	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "panel-answer", rec).URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Overflow the 4KB tail: six ~1.5KB user turns (plus stub replies)
+	// force the newest-first accumulation to drop the older ones.
+	for i := range 6 {
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: fmt.Sprintf("filler-%d %s", i, strings.Repeat("x", 1500))})
+		rig.pollUntilDone(t, convID)
+	}
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel dropcheck"})
+	var p struct {
+		Replay *struct {
+			AfterSeq    int   `json:"after_seq"`
+			FirstSeq    int   `json:"first_seq"`
+			LastSeq     int   `json:"last_seq"`
+			Bytes       int   `json:"bytes"`
+			DroppedSeqs []int `json:"dropped_seqs"`
+		} `json:"replay"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if p.Replay == nil {
+		t.Fatal("slash user_message missing the replay receipt (want symmetry with the send path)")
+	}
+	if len(p.Replay.DroppedSeqs) != 2 {
+		t.Fatalf("dropped_seqs = %v, want [first last] (tail overflowed)", p.Replay.DroppedSeqs)
+	}
+	if !(p.Replay.DroppedSeqs[0] <= p.Replay.DroppedSeqs[1] && p.Replay.DroppedSeqs[1] < p.Replay.FirstSeq) {
+		t.Errorf("window order broken: dropped=%v included=%d–%d", p.Replay.DroppedSeqs, p.Replay.FirstSeq, p.Replay.LastSeq)
+	}
+	if p.Replay.Bytes <= 0 {
+		t.Errorf("replay.bytes = %d, want > 0", p.Replay.Bytes)
+	}
+	// Journal ↔ injection coherence: the block the models actually saw
+	// names the same omitted window.
+	marker := fmt.Sprintf("seq %d–%d) omitted", p.Replay.DroppedSeqs[0], p.Replay.DroppedSeqs[1])
+	for _, r := range rec.all() {
+		if !strings.Contains(r.System, marker) {
+			t.Errorf("panel block missing omission marker %q", marker)
+		}
+	}
+}
+
+// TestVisionTailDropReceipt: vision's fixed last-visionConvTurns slice
+// omits older turns WITHOUT a block marker (no cap overflow — the header
+// omission text is the byte cap's), so the journaled replay receipt is the
+// only record of the omission. Assert its [first,last] names exactly the
+// dropped turns' seqs.
+func TestVisionTailDropReceipt(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	rec := &moaRecorder{}
+	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "vision-answer", rec).URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	for _, msg := range []string{"vd-one", "vd-two", "vd-three"} {
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: msg})
+		rig.pollUntilDone(t, convID)
+	}
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/vision vd-describe"})
+	var p struct {
+		Replay *struct {
+			DroppedSeqs []int `json:"dropped_seqs"`
+		} `json:"replay"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if p.Replay == nil {
+		t.Fatal("/vision user_message missing the replay receipt")
+	}
+	// Ground truth from the journal: three exchanges = six replayable
+	// turns; vision keeps the last visionConvTurns, so the dropped window
+	// runs from the first turn to the turn just before the kept ones. The
+	// assembly saw the events strictly BEFORE the /vision user_message
+	// (the handler journals it after assembling), so cut the tail there.
+	evs := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	var turnSeqs []int
+	for _, ev := range evs {
+		if sent.Event != nil && ev.Seq >= sent.Event.Seq {
+			break
+		}
+		if ev.Type == store.EventUserMessage || ev.Type == store.EventAgentText {
+			turnSeqs = append(turnSeqs, ev.Seq)
+		}
+	}
+	if len(turnSeqs) < 6 {
+		t.Fatalf("expected ≥6 replayable turns before /vision, got %v", turnSeqs)
+	}
+	want := []int{turnSeqs[0], turnSeqs[len(turnSeqs)-visionConvTurns-1]}
+	if len(p.Replay.DroppedSeqs) != 2 || p.Replay.DroppedSeqs[0] != want[0] || p.Replay.DroppedSeqs[1] != want[1] {
+		t.Errorf("vision dropped_seqs = %v, want %v", p.Replay.DroppedSeqs, want)
+	}
+}
+
+// TestVisionImageBytesReceipt pins the exact-injection receipt for /vision
+// attachments: the journaled user_message lists the attachment paths (like
+// the send path) plus image_bytes, and the bytes on the WIRE (base64
+// blocks the mock gateway received) decode back to exactly that total.
+func TestVisionImageBytesReceipt(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	rec := &moaRecorder{}
+	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "vision-answer", rec).URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	dir := t.TempDir()
+	imgA := filepath.Join(dir, "shotA.png")
+	imgB := filepath.Join(dir, "photoB.jpg")
+	if err := os.WriteFile(imgA, make([]byte, 763), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imgB, make([]byte, 1026), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/vision what is this", Attachments: []string{imgA, imgB}})
+	var p struct {
+		Attachments []string `json:"attachments"`
+		ImageBytes  int      `json:"image_bytes"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if len(p.Attachments) != 2 || p.Attachments[0] != imgA || p.Attachments[1] != imgB {
+		t.Errorf("attachments = %v, want [%s %s]", p.Attachments, imgA, imgB)
+	}
+	if want := 763 + 1026; p.ImageBytes != want {
+		t.Errorf("image_bytes = %d, want %d (raw bytes read)", p.ImageBytes, want)
+	}
+	// Wire end: one gateway call, two image blocks decoding back to the
+	// same byte counts with the extension-derived media types.
+	gotReqs, gotImgs := rec.all(), rec.allImages()
+	if len(gotReqs) != 1 || len(gotImgs) != 1 {
+		t.Fatalf("gateway calls = %d, want 1", len(gotReqs))
+	}
+	blocks := gotImgs[0]
+	if len(blocks) != 2 || blocks[0] != (moaImageBlock{763, "image/png"}) || blocks[1] != (moaImageBlock{1026, "image/jpeg"}) {
+		t.Errorf("wire image blocks = %+v, want [{763 image/png} {1026 image/jpeg}]", blocks)
+	}
+}
+
+// TestVisionImageReadErrorNoByteReceipt: a missing attachment still
+// journals the user_message (with the paths, for the audit trail) but no
+// image_bytes — a receipt must never claim bytes that were not read
+// (ADR-0003 inv 5) — and the gateway is never called.
+func TestVisionImageReadErrorNoByteReceipt(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	rec := &moaRecorder{}
+	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "vision-answer", rec).URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	missing := filepath.Join(t.TempDir(), "gone.png")
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/vision broken", Attachments: []string{missing}})
+	var p struct {
+		Attachments []string `json:"attachments"`
+		ImageBytes  *int     `json:"image_bytes"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if len(p.Attachments) != 1 || p.Attachments[0] != missing {
+		t.Errorf("attachments = %v, want [%s]", p.Attachments, missing)
+	}
+	if p.ImageBytes != nil {
+		t.Errorf("image_bytes = %d, want absent (image read failed)", *p.ImageBytes)
+	}
+	if got := len(rec.all()); got != 0 {
+		t.Errorf("gateway calls = %d, want 0 (read failed before the API call)", got)
+	}
+	evs := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	last := evs[len(evs)-2] // agent_text before agent_done
+	var a struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(last.Payload, &a); err != nil {
+		t.Fatalf("agent_text payload: %v", err)
+	}
+	if !strings.Contains(a.Text, "vision error") || !strings.Contains(a.Text, "gone.png") {
+		t.Errorf("vision error text = %q, want the read failure naming the path", a.Text)
 	}
 }

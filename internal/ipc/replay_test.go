@@ -461,3 +461,23 @@ func TestFormatReplayTurnRuneSafe(t *testing.T) {
 		t.Error("block-level truncation marker missing")
 	}
 }
+
+// TestRecallQuerySeedRuneSafe pins the same rune-safe cut for recall seeds:
+// the seed feeds tokenizeQuery (CJK bigrams over range-by-rune), where an
+// invalid tail would silently cost the last bigram(s) — on the CJK-primary
+// query path that is real term loss, not a cosmetic glitch. The query
+// stays valid UTF-8 and the per-turn cap still binds.
+func TestRecallQuerySeedRuneSafe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no prefs.md: resolveReplayCaps → defaults
+	// 回复 (6 bytes / 2 runes) repeated past the cap: a raw byte cut can
+	// land mid-rune — same shape as TestFormatReplayTurnRuneSafe.
+	monster := strings.Repeat("回复", replayTurnCapDefault)
+	events := []store.Event{chatEvent(1, store.EventAgentText, monster)}
+	q := recallQuery("继续", events)
+	if !utf8.ValidString(q) {
+		t.Errorf("recall query is invalid UTF-8 (mid-rune seed cut): %q…", q[:min(60, len(q))])
+	}
+	if len(q) > len("继续")+2+replayTurnCapDefault {
+		t.Errorf("recall query = %d bytes, want ≤ %d (message + separator + seed cap)", len(q), len("继续")+2+replayTurnCapDefault)
+	}
+}

@@ -120,7 +120,7 @@ func TestMatchSkills_KeywordMatch(t *testing.T) {
 
 func TestMatchSkills_ScoringOrder(t *testing.T) {
 	entries := []skillEntry{
-		{info: SkillInfo{Name: "low-match", Keywords: []string{"test"}}},        // score 2 (keyword)
+		{info: SkillInfo{Name: "low-match", Keywords: []string{"test"}}},         // score 2 (keyword)
 		{info: SkillInfo{Name: "high-match", Keywords: []string{"test", "tdd"}}}, // score 4 (2 keywords)
 	}
 	matched := matchSkills("tdd test", entries)

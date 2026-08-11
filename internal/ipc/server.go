@@ -1630,15 +1630,17 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		"\n\nYou have read-only tools over the user's files: read_file, grep, glob. " +
 		exec.describeScope() +
 		" Use them to ground your answer in the actual files whenever the question touches code or documents — do not ask the user to paste content. Every read is journaled."
-	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, recallQuery(text, events), events, scope, slashModePanel)
+	block, receipt, conv := s.slashContextBlock(ctx, w.Name, c.ID, recallQuery(text, events), events, scope, slashModePanel)
 	if block != "" {
 		system += "\n\n---\n\n" + block
 	}
 
 	// Journal the user message with the injection receipt, the effective
-	// context scope, and the assembled prompt size (item D).
+	// context scope, the assembled prompt size (item D), and the
+	// conversation tail's replay receipt (dropped_seqs on omission —
+	// symmetric with the send path).
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(
-		slashUserMessagePayload("/panel", text, receipt, scope, len(system)+len(text))))
+		slashUserMessagePayload("/panel", text, receipt, scope, len(system)+len(text), conv)))
 	if err != nil {
 		return Response{}, err
 	}
@@ -1797,24 +1799,52 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	}
 	scope := resolvePanelContextScope()
 	system := "You are a vision-capable coding assistant. Analyze the image or screenshot described in the prompt. Identify visual issues, layout problems, or design suggestions."
-	block, receipt := s.slashContextBlock(ctx, w.Name, c.ID, text, events, scope, slashModeVision)
+	block, receipt, conv := s.slashContextBlock(ctx, w.Name, c.ID, text, events, scope, slashModeVision)
 	if block != "" {
 		system += "\n\n---\n\n" + block
 	}
 
+	// Pre-read the images BEFORE journaling, so the user_message receipt
+	// covers exactly the bytes the gateway request will carry (ADR-0003):
+	// the attachment paths are journaled either way, and image_bytes only
+	// when every file read succeeded. A read failure keeps the old error
+	// text and skips the gateway call — the user_message is still journaled.
+	images := make([]moa.VisionImage, 0, len(attachments))
+	imageBytes := 0
+	var imageErr error
+	for _, p := range attachments {
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			imageErr = fmt.Errorf("moa: read image %s: %w", p, rerr)
+			break
+		}
+		images = append(images, moa.VisionImage{Path: p, MediaType: moa.ImageMediaType(p), Data: data})
+		imageBytes += len(data)
+	}
+
 	// Journal the user message with the injection receipt, the effective
-	// context scope, and the assembled prompt size (item D).
-	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(
-		slashUserMessagePayload("/vision", text, receipt, scope, len(system)+len(text))))
+	// context scope, the assembled prompt size (item D), and the
+	// conversation tail's replay receipt (dropped_seqs on omission).
+	msgPayload := slashUserMessagePayload("/vision", text, receipt, scope, len(system)+len(text), conv)
+	if len(attachments) > 0 {
+		msgPayload["attachments"] = attachments
+		if imageErr == nil {
+			msgPayload["image_bytes"] = imageBytes
+		}
+	}
+	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
 	}
 
 	client := moa.NewClientFromEnv("", "")
 	var resp string
-	if len(attachments) > 0 {
-		resp, err = client.QueryWithImages(ctx, visionModel, system, text, attachments)
-	} else {
+	switch {
+	case imageErr != nil:
+		err = imageErr
+	case len(images) > 0:
+		resp, err = client.QueryWithImages(ctx, visionModel, system, text, images)
+	default:
 		resp, err = client.Query(ctx, visionModel, system, text)
 	}
 

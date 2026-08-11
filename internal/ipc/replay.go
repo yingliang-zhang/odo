@@ -236,7 +236,11 @@ func recallQuery(text string, events []store.Event) string {
 	for _, t := range turns {
 		seed := t.text
 		if len(seed) > turnCap {
-			seed = seed[:turnCap]
+			// Rune-safe like formatReplayTurn: a raw byte cut can split a
+			// CJK rune mid-sequence, and the invalid tail then silently
+			// costs the last bigram(s) in tokenizeQuery's range-over-runes
+			// (replacer eats them) on the CJK-primary query path.
+			seed = runeSafeCut(seed, turnCap)
 		}
 		b.WriteString("\n\n")
 		b.WriteString(seed)

@@ -44,6 +44,14 @@ const CURATE_READ_TIMEOUT: Duration = Duration::from_secs(660);
 /// expected multi-model latency without hanging the UI forever.
 const REVIEW_READ_TIMEOUT: Duration = Duration::from_secs(330);
 
+/// /panel and /vision fan out to N models with up to 16 tool rounds each —
+/// the slowest observed real /panel took 393s (3 models + FS tools), past
+/// REVIEW_READ_TIMEOUT. The duplicate-dispatch vector is gone (read-stage
+/// failures no longer retry), so the timeout only bounds UI patience: a
+/// slower panel surfaces an invoke error while the daemon still journals
+/// the answer for the next poll. 700s ≈ worst observed × 1.8.
+const SLASH_READ_TIMEOUT: Duration = Duration::from_secs(700);
+
 /// How long to wait for a freshly spawned daemon to answer its socket.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -97,28 +105,66 @@ fn daemon_binary(project_root: &str) -> PathBuf {
     local
 }
 
+/// A failed round trip, tagged by side-effect safety for the recovery
+/// retry in send_to_daemon. Only failures BEFORE the daemon could hold a
+/// complete request — connect refused (daemon down / stale socket) or a
+/// broken write (partial line + EOF on its read side — never parsed) — may
+/// be retried. Once the daemon accepted the request, a read timeout means
+/// "still working", and retrying re-executes a non-idempotent command:
+/// send_message journals a second user_message and (for /panel) doubles
+/// the API spend — observed 2026-08-11 as a duplicated /panel answer when
+/// a 393s run exceeded the 330s bridge timeout and the retry fired at
+/// exactly timeout time.
+struct RoundTripError {
+    retryable: bool,
+    message: String,
+}
+
+impl RoundTripError {
+    fn retryable(message: String) -> Self {
+        Self {
+            retryable: true,
+            message,
+        }
+    }
+    fn terminal(message: String) -> Self {
+        Self {
+            retryable: false,
+            message,
+        }
+    }
+}
+
 /// Single request → single response on a fresh connection. The daemon serves
 /// each connection on its own goroutine (M11 P0), so concurrent calls no
 /// longer queue behind one another; every call connects, exchanges, and drops.
-fn round_trip(project_root: &str, req: &Value, read_timeout: Duration) -> Result<Value, String> {
+fn round_trip(
+    project_root: &str,
+    req: &Value,
+    read_timeout: Duration,
+) -> Result<Value, RoundTripError> {
     let socket = socket_path(project_root);
-    let mut stream = UnixStream::connect(&socket).map_err(|e| format!("connect {}: {e}", socket.display()))?;
+    let mut stream = UnixStream::connect(&socket)
+        .map_err(|e| RoundTripError::retryable(format!("connect {}: {e}", socket.display())))?;
     let _ = stream.set_read_timeout(Some(read_timeout));
 
     stream
         .write_all(req.to_string().as_bytes())
         .and_then(|()| stream.write_all(b"\n"))
-        .map_err(|e| format!("write {}: {e}", socket.display()))?;
+        .map_err(|e| RoundTripError::retryable(format!("write {}: {e}", socket.display())))?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let n = reader
         .read_line(&mut line)
-        .map_err(|e| format!("read {}: {e}", socket.display()))?;
+        .map_err(|e| RoundTripError::terminal(format!("read {}: {e}", socket.display())))?;
     if n == 0 {
-        return Err("daemon closed the connection without responding".into());
+        return Err(RoundTripError::terminal(
+            "daemon closed the connection without responding".into(),
+        ));
     }
-    serde_json::from_str(&line).map_err(|e| format!("invalid daemon response: {e}: {line}"))
+    serde_json::from_str(&line)
+        .map_err(|e| RoundTripError::terminal(format!("invalid daemon response: {e}: {line}")))
 }
 
 /// Liveness probe: connect and run a real `bootstrap`. A leftover socket file
@@ -132,7 +178,11 @@ fn daemon_alive(project_root: &str) -> bool {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let ping = json!({"cmd": "bootstrap", "project_root": project_root}).to_string();
-    if stream.write_all(ping.as_bytes()).and_then(|()| stream.write_all(b"\n")).is_err() {
+    if stream
+        .write_all(ping.as_bytes())
+        .and_then(|()| stream.write_all(b"\n"))
+        .is_err()
+    {
         return false;
     }
     let mut line = String::new();
@@ -148,7 +198,12 @@ fn daemon_alive(project_root: &str) -> bool {
 /// GUI-launched app on macOS inherits a minimal PATH, so common install
 /// locations are tried after the shell's.
 fn go_tool() -> Option<PathBuf> {
-    for cmd in ["go", "/usr/local/go/bin/go", "/opt/homebrew/bin/go", "/usr/local/bin/go"] {
+    for cmd in [
+        "go",
+        "/usr/local/go/bin/go",
+        "/opt/homebrew/bin/go",
+        "/usr/local/bin/go",
+    ] {
         let ok = Command::new(cmd)
             .arg("version")
             .stdin(Stdio::null())
@@ -198,7 +253,8 @@ fn ensure_daemon_running(project_root: &str) -> Result<(), String> {
     // Daemon logs land in <project>/.odo/daemon.log so startup failures are
     // diagnosable without a console attached to the app.
     let state_dir = Path::new(project_root).join(".odo");
-    std::fs::create_dir_all(&state_dir).map_err(|e| format!("create {}: {e}", state_dir.display()))?;
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|e| format!("create {}: {e}", state_dir.display()))?;
     let log_path = state_dir.join("daemon.log");
     let log = OpenOptions::new()
         .create(true)
@@ -233,29 +289,46 @@ fn ensure_daemon_running(project_root: &str) -> Result<(), String> {
     ))
 }
 
-/// Round trip with one recovery retry: the first failure usually means the
-/// daemon died (or was never started), so ensure it's up and try once more.
-fn send_to_daemon(project_root: &str, req: &Value, read_timeout: Duration) -> Result<Value, String> {
+/// Round trip with one recovery retry — only when the request never
+/// reached the daemon (connect/write failure: it died or was never
+/// started, so ensure it's up and try once). Read-stage failures are
+/// returned as-is: the daemon may still be executing, and re-dispatching
+/// non-idempotent commands duplicates their side effects.
+fn send_to_daemon(
+    project_root: &str,
+    req: &Value,
+    read_timeout: Duration,
+) -> Result<Value, String> {
     match round_trip(project_root, req, read_timeout) {
         Ok(resp) => Ok(resp),
         Err(first) => {
-            if let Err(e) = ensure_daemon_running(project_root) {
-                return Err(format!("{first} (daemon restart failed: {e})"));
+            if !first.retryable {
+                return Err(first.message);
             }
-            round_trip(project_root, req, read_timeout)
+            if let Err(e) = ensure_daemon_running(project_root) {
+                return Err(format!("{} (daemon restart failed: {e})", first.message));
+            }
+            round_trip(project_root, req, read_timeout).map_err(|e| e.message)
         }
     }
 }
 
 /// Execute a command off the async runtime's workers: socket IO is blocking.
-async fn run_command(project_root: String, req: Value, read_timeout: Duration) -> Result<Value, String> {
+async fn run_command(
+    project_root: String,
+    req: Value,
+    read_timeout: Duration,
+) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || send_to_daemon(&project_root, &req, read_timeout))
         .await
         .map_err(|e| format!("command task failed: {e}"))?
 }
 
 #[tauri::command]
-async fn bootstrap(project_root: Option<String>, workstream_id: Option<i64>) -> Result<Value, String> {
+async fn bootstrap(
+    project_root: Option<String>,
+    workstream_id: Option<i64>,
+) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     let mut req = json!({"cmd": "bootstrap", "project_root": root});
     // M1: when set, bootstrap targets that workstream's latest conversation
@@ -291,11 +364,10 @@ async fn send_message(
             req["adapter"] = json!(adapter);
         }
     }
-    // /panel and /vision fan out to N models via HTTP (up to 300s each);
-    // use the review timeout (330s) to avoid the 120s bridge timeout
-    // triggering a duplicate dispatch.
+    // /panel and /vision fan out to N models with FS-tool rounds; the
+    // generic 120s timeout provably cut real panels mid-run.
     let timeout = if text.starts_with("/panel") || text.starts_with("/vision") {
-        REVIEW_READ_TIMEOUT
+        SLASH_READ_TIMEOUT
     } else {
         READ_TIMEOUT
     };
@@ -327,16 +399,24 @@ async fn list_workstreams(project_root: Option<String>) -> Result<Value, String>
 }
 
 #[tauri::command]
-async fn rename_workstream(project_root: Option<String>, workstream_id: i64, name: String) -> Result<Value, String> {
+async fn rename_workstream(
+    project_root: Option<String>,
+    workstream_id: i64,
+    name: String,
+) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     let req = json!({"cmd": "rename_workstream", "project_root": root, "workstream_id": workstream_id, "name": name});
     run_command(root, req, READ_TIMEOUT).await
 }
 
 #[tauri::command]
-async fn delete_workstream(project_root: Option<String>, workstream_id: i64) -> Result<Value, String> {
+async fn delete_workstream(
+    project_root: Option<String>,
+    workstream_id: i64,
+) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    let req = json!({"cmd": "delete_workstream", "project_root": root, "workstream_id": workstream_id});
+    let req =
+        json!({"cmd": "delete_workstream", "project_root": root, "workstream_id": workstream_id});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -361,7 +441,8 @@ async fn poll_events(
     project_root: Option<String>,
 ) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    let req = json!({"cmd": "poll_events", "conversation_id": conversation_id, "after_seq": after_seq});
+    let req =
+        json!({"cmd": "poll_events", "conversation_id": conversation_id, "after_seq": after_seq});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -500,7 +581,8 @@ async fn auto_distill_ctl(
     project_root: Option<String>,
 ) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    let req = json!({"cmd": "auto_distill_ctl", "conversation_id": conversation_id, "action": action});
+    let req =
+        json!({"cmd": "auto_distill_ctl", "conversation_id": conversation_id, "action": action});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -529,7 +611,8 @@ async fn todo_update(
     project_root: Option<String>,
 ) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    let mut req = json!({"cmd": "todo_update", "conversation_id": conversation_id, "action": action});
+    let mut req =
+        json!({"cmd": "todo_update", "conversation_id": conversation_id, "action": action});
     if let Some(id) = todo_id {
         req["todo_id"] = json!(id);
     }
@@ -692,7 +775,9 @@ async fn list_projects() -> Result<Value, String> {
 #[tauri::command]
 async fn add_project(app: tauri::AppHandle) -> Result<Option<Value>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let folder = app.dialog().file()
+    let folder = app
+        .dialog()
+        .file()
         .set_title("Select a repository folder")
         .blocking_pick_folder();
     match folder {
@@ -708,9 +793,9 @@ async fn add_project(app: tauri::AppHandle) -> Result<Option<Value>, String> {
             ensure_daemon_running(&root)?;
             // Re-read the registry to get the full entry (with name + added).
             let projects = list_projects().await?;
-            let entry = projects.as_array().and_then(|rows| {
-                rows.iter().find(|r| r.get("root") == Some(&json!(root)))
-            });
+            let entry = projects
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r.get("root") == Some(&json!(root))));
             match entry {
                 Some(e) => Ok(Some(e.clone())),
                 None => Err(format!(
@@ -732,7 +817,9 @@ mod tests {
     ///   ODO_OMP_WRAPPER=/path/to/stub.sh ./odo -project /tmp/odo-smoke
     /// then `ODO_SMOKE_ROOT=/tmp/odo-smoke cargo test`. Skipped otherwise.
     fn smoke_root() -> Option<String> {
-        std::env::var("ODO_SMOKE_ROOT").ok().filter(|r| daemon_alive(r))
+        std::env::var("ODO_SMOKE_ROOT")
+            .ok()
+            .filter(|r| daemon_alive(r))
     }
 
     #[test]
@@ -742,7 +829,12 @@ mod tests {
             return;
         };
 
-        let boot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root}), READ_TIMEOUT).unwrap();
+        let boot = send_to_daemon(
+            &root,
+            &json!({"cmd": "bootstrap", "project_root": root}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(boot["ok"], true);
         let cid = boot["conversation"]["id"].as_i64().unwrap();
 
@@ -773,7 +865,10 @@ mod tests {
                 Some(false) => {
                     let done = poll["events"]
                         .as_array()
-                        .map(|es| es.iter().any(|e| e["type"] == "agent_done" || e["type"] == "review_action"))
+                        .map(|es| {
+                            es.iter()
+                                .any(|e| e["type"] == "agent_done" || e["type"] == "review_action")
+                        })
                         .unwrap_or(false);
                     if done || poll["diff"]["status"] == "pending" {
                         if poll["diff"]["status"] == "pending" {
@@ -788,15 +883,33 @@ mod tests {
         }
         assert!(diff_id > 0, "stub run should produce a pending diff");
 
-        let accepted = send_to_daemon(&root, &json!({"cmd": "accept_diff", "diff_id": diff_id}), READ_TIMEOUT).unwrap();
-        assert_eq!(accepted, json!({"ok": true, "diff_id": diff_id, "applied": true}));
+        let accepted = send_to_daemon(
+            &root,
+            &json!({"cmd": "accept_diff", "diff_id": diff_id}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(
+            accepted,
+            json!({"ok": true, "diff_id": diff_id, "applied": true})
+        );
 
         // Review is single-shot: a second accept must fail.
-        let again = send_to_daemon(&root, &json!({"cmd": "accept_diff", "diff_id": diff_id}), READ_TIMEOUT).unwrap();
+        let again = send_to_daemon(
+            &root,
+            &json!({"cmd": "accept_diff", "diff_id": diff_id}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(again["ok"], false);
 
         // Session restore: bootstrap replays the journal including the review.
-        let reboot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root}), READ_TIMEOUT).unwrap();
+        let reboot = send_to_daemon(
+            &root,
+            &json!({"cmd": "bootstrap", "project_root": root}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
         let reviews = reboot["events"]
             .as_array()
             .unwrap()
@@ -817,13 +930,27 @@ mod tests {
             return;
         };
 
-        let boot = send_to_daemon(&root, &json!({"cmd": "bootstrap", "project_root": root}), READ_TIMEOUT).unwrap();
+        let boot = send_to_daemon(
+            &root,
+            &json!({"cmd": "bootstrap", "project_root": root}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(boot["ok"], true);
         let main_ws = boot["workstream"]["id"].as_i64().unwrap();
 
-        let listed = send_to_daemon(&root, &json!({"cmd": "list_workstreams", "project_root": root}), READ_TIMEOUT).unwrap();
+        let listed = send_to_daemon(
+            &root,
+            &json!({"cmd": "list_workstreams", "project_root": root}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(listed["ok"], true);
-        assert!(listed["workstreams"].as_array().unwrap().iter().any(|w| w["id"].as_i64() == Some(main_ws)));
+        assert!(listed["workstreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"].as_i64() == Some(main_ws)));
 
         let created = send_to_daemon(
             &root,
@@ -893,7 +1020,12 @@ mod tests {
         // A second (non-steer) send while the agent ran must have been
         // impossible; only the steering path got queued. The stub always
         // finishes, so distill is allowed now.
-        let distilled = send_to_daemon(&root, &json!({"cmd": "distill", "conversation_id": cid}), DISTILL_READ_TIMEOUT).unwrap();
+        let distilled = send_to_daemon(
+            &root,
+            &json!({"cmd": "distill", "conversation_id": cid}),
+            DISTILL_READ_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(distilled["ok"], true);
         assert_eq!(distilled["epoch"], 2);
         let wiki = distilled["wiki_path"].as_str().unwrap();
@@ -916,7 +1048,12 @@ mod tests {
             eprintln!("skipping: ODO_SMOKE_ROOT daemon not available");
             return;
         };
-        let resp = send_to_daemon(&root, &json!({"cmd": "reject_diff", "diff_id": 999999}), READ_TIMEOUT).unwrap();
+        let resp = send_to_daemon(
+            &root,
+            &json!({"cmd": "reject_diff", "diff_id": 999999}),
+            READ_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(resp["ok"], false);
         assert!(resp["error"].as_str().unwrap().contains("999999"));
     }

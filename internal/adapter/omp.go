@@ -45,10 +45,10 @@ const (
 
 // OMP is the M0 Adapter backed by the Hermes OMP wrapper script.
 type OMP struct {
-	wrapperPath      string
-	stateDir         string // <project>/.odo; prompt/session/output files live here
-	timeout          string
-	prefsKey         string // prefs.md key to read model from ("coding" or "orchestrator")
+	wrapperPath string
+	stateDir    string // <project>/.odo; prompt/session/output files live here
+	timeout     string
+	prefsKey    string // prefs.md key to read model from ("coding" or "orchestrator")
 
 	mu           sync.Mutex // guards runs + configLogged; run results sync via done channel
 	runs         map[string]*ompRun
@@ -222,7 +222,6 @@ func NewOMPForKey(stateDir, key string) *OMP {
 	o.prefsKey = key
 	return o
 }
-
 
 // resolveModelConfig resolves the wrapper's --hermes-model / --hermes-provider
 // args. The prefs.md key (e.g. "coding" or "orchestrator") determines which

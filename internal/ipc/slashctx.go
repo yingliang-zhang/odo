@@ -69,7 +69,7 @@ func resolvePanelContextScope() string {
 // context scope and fetches the events ONCE (it needs both for the
 // journal receipt and, on the panel path, the recall query), so one slash
 // call costs one prefs read and one events read like the send path.
-func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID int64, query string, events []store.Event, scope string, mode slashContextMode) (block string, receipt map[string]string) {
+func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID int64, query string, events []store.Event, scope string, mode slashContextMode) (block string, receipt map[string]string, conv *slashConvReceipt) {
 	receipt = map[string]string{}
 	var sections []string
 	section := func(header, body string) {
@@ -115,10 +115,32 @@ func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID in
 			sections = append(sections, block) // carries its own "##" header
 		}
 	}
-	if conv := slashConversation(events, mode); conv != "" {
-		sections = append(sections, conv) // carries its own header + receipt range
+	if block, first, last, dropped := slashConversation(events, mode); block != "" {
+		sections = append(sections, block) // carries its own header + receipt range
+		conv = &slashConvReceipt{
+			after:   foldBoundary(events),
+			first:   first,
+			last:    last,
+			bytes:   len(block),
+			dropped: dropped,
+		}
 	}
-	return strings.Join(sections, "\n\n---\n\n"), receipt
+	return strings.Join(sections, "\n\n---\n\n"), receipt, conv
+}
+
+// slashConvReceipt mirrors the send path's replay receipt for the slash
+// conversation tail (server.go's msgPayload["replay"]): the covered seq
+// window, the boundary it follows, the block's byte size, and — when the
+// block omits older turns — the omitted [first,last] seq window. The
+// omission marker already renders INSIDE the block; this is the journaled
+// half of the same receipt, so "not visible" shows up in the user_message
+// payload exactly like a capped main replay does.
+type slashConvReceipt struct {
+	after   int   // fold boundary the window starts after
+	first   int   // first included seq
+	last    int   // last included seq
+	bytes   int   // rendered block size
+	dropped []int // [first,last] omitted seq window (nil without drops)
 }
 
 // slashConversation renders the "## Conversation so far" section from the
@@ -127,17 +149,33 @@ func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID in
 // the last visionConvTurns turns; panel takes the newest-first-capped
 // tail. The per-turn cap clamps to slashConvCap: replay_turn_kb above 4KB
 // would otherwise let the newest turn sail past the block cap through the
-// anti-starvation exception (the newest line is always kept).
-func slashConversation(events []store.Event, mode slashContextMode) string {
+// anti-starvation exception (the newest line is always kept). The returned
+// dropped window covers BOTH omission kinds — vision's fixed-turn slice
+// and the byte cap's newest-first overflow — as one [first,last] span.
+func slashConversation(events []store.Event, mode slashContextMode) (block string, first, last int, dropped []int) {
 	turns := collectSlashTurns(events, foldBoundary(events))
 	if mode == slashModeVision && len(turns) > visionConvTurns {
-		turns = turns[len(turns)-visionConvTurns:]
+		cut := len(turns) - visionConvTurns
+		dropped = []int{turns[0].seq, turns[cut-1].seq}
+		turns = turns[cut:]
 	}
 	if len(turns) == 0 {
-		return ""
+		return "", 0, 0, nil
 	}
-	conv, _, _ := renderSlashConversation(turns, slashConvCap, min(resolveReplayCaps().turn, slashConvCap))
-	return conv
+	var capDropped []int
+	block, first, last, capDropped = renderSlashConversation(turns, slashConvCap, min(resolveReplayCaps().turn, slashConvCap))
+	// The two drop kinds meet at the slice boundary: vision's slice dropped
+	// turns[0..cut), a cap overflow then drops older KEPT turns — the
+	// journaled window is the contiguous span from the oldest omitted turn
+	// to the newest omitted turn.
+	if len(capDropped) == 2 {
+		if len(dropped) == 2 {
+			dropped[1] = capDropped[1]
+		} else {
+			dropped = capDropped
+		}
+	}
+	return block, first, last, dropped
 }
 
 // collectSlashTurns is collectReplayTurns minus prior /panel and /vision
@@ -180,24 +218,26 @@ func collectSlashTurns(events []store.Event, boundary int) []replayTurn {
 
 // renderSlashConversation renders the slash-mode conversation tail with a
 // seq-range receipt header like the main replay (including the actionable
-// omission marker when the cap drops older turns).
-func renderSlashConversation(turns []replayTurn, totalCap, turnCap int) (block string, firstSeq, lastSeq int) {
+// omission marker when the cap drops older turns); the omitted window is
+// returned for the journaled receipt, not just the header text.
+func renderSlashConversation(turns []replayTurn, totalCap, turnCap int) (block string, firstSeq, lastSeq int, dropped []int) {
 	if len(turns) == 0 {
-		return "", 0, 0
+		return "", 0, 0, nil
 	}
-	block, firstSeq, lastSeq, _ = renderConvBlock(
+	return renderConvBlock(
 		"## Conversation so far (current epoch",
 		"These turns are replayed verbatim from the journal (no summarization).",
 		turns, totalCap, turnCap)
-	return block, firstSeq, lastSeq
 }
 
 // slashUserMessagePayload builds the journaled payload for a slash
 // user_message event: the "/cmd text" text (existing shape), the injection
 // receipt (same path→sha16 map the send path journals), the effective
-// context scope, and the assembled prompt size (item D). Optional fields
-// only (ADR-0002 preserved).
-func slashUserMessagePayload(cmd, text string, receipt map[string]string, scope string, totalBytes int) map[string]interface{} {
+// context scope, the assembled prompt size (item D), and — when the
+// conversation tail rendered — the same replay sub-receipt the send path
+// writes (covered window + boundary + bytes + dropped_seqs on omission).
+// Optional fields only (ADR-0002 preserved).
+func slashUserMessagePayload(cmd, text string, receipt map[string]string, scope string, totalBytes int, conv *slashConvReceipt) map[string]interface{} {
 	p := map[string]interface{}{
 		"text":               cmd + " " + text,
 		"context_scope":      scope,
@@ -205,6 +245,18 @@ func slashUserMessagePayload(cmd, text string, receipt map[string]string, scope 
 	}
 	if len(receipt) > 0 {
 		p["receipt"] = receipt
+	}
+	if conv != nil {
+		rp := map[string]interface{}{
+			"after_seq": conv.after,
+			"first_seq": conv.first,
+			"last_seq":  conv.last,
+			"bytes":     conv.bytes,
+		}
+		if len(conv.dropped) == 2 {
+			rp["dropped_seqs"] = conv.dropped
+		}
+		p["replay"] = rp
 	}
 	return p
 }
