@@ -414,7 +414,9 @@ func (e *fsToolExecutor) grep(ctx context.Context, raw json.RawMessage) (string,
 			}
 			if re.MatchString(line) {
 				if len(line) > fsGrepLineCap {
-					line = line[:fsGrepLineCap] + "…"
+					// Rune-safe cut (same fix as recallQuery's seed): a raw
+					// byte cut can split a CJK rune and emit invalid UTF-8.
+					line = runeSafeCut(line, fsGrepLineCap) + "…"
 				}
 				rows = append(rows, fmt.Sprintf("%s:%d: %s", e.display(path), lineNo, line))
 			}

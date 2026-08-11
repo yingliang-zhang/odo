@@ -767,3 +767,15 @@ HEAD: 505bc25 (6 commits unpushed)
 - First real recall telemetry: 13.6% miss rate on the last-40 window, main-epoch-6/5 dominate matches — pending ~2 weeks of dogfooding before the D-semantic FTS5/bge-m3 spike reads this pool.
 
 HEAD: c0e1325 (2 commits unpushed)
+
+## Slash receipt parity + bridge duplicate root fix (2026-08-11)
+
+- Session-restore note: the prior session was killed mid-gate with its edits unwritten (worktree was clean at `ddb0f86`); all work below re-landed from the journaled evidence chain and passed gates.
+- **Bridge duplicate /panel ROOT FIX** (`gui/src-tauri/src/lib.rs`): `send_to_daemon` retried on ANY round-trip error; a /panel running past `REVIEW_READ_TIMEOUT` (330s) was blindly re-sent while still executing → second full fan-out, second journaled user_message + answers (the "glm-5.2 twice" symptom; second user_message's created_at = first +330s exactly). Now retry fires ONLY when the request provably never reached the daemon (connect/write stage failure) — read-stage failures (timeout/closed/undecodable) surface the error instead of duplicating a non-idempotent command. Pure-rust unit test `retry_only_before_dispatch`; cargo test green.
+- Slash dropped-seq symmetric journaling (A1): `slashContextBlock`→`slashUserMessagePayload` now thread the conversation tail's receipt → slash user_message payloads carry `replay{after_seq/first_seq/last_seq/bytes/dropped_seqs}` in the send path's exact shape; the omission marker the model saw names the journaled window (pinned by Test{Panel,Vision}DroppedSeqsReceipt).
+- Vision image bytes in receipt (A2): moa gains `Image`+`ReadImage` (pre-read API; media type from extension, PNG default); `QueryWithImages` takes pre-read images. `handleVisionQuery` pre-reads BEFORE journaling (missing file fails the command with nothing journaled) and records `attachments` + decoded `image_bytes`. TestVisionImagesReceiptAndBlocks pins gateway blocks (base64==file bytes) + receipt + no-journal-on-missing.
+- recallQuery seed rune-safe (A2b): `seed[:turnCap]` → `runeSafeCut` (CJK byte-cut leaked invalid UTF-8 into the recall term set; TestRecallQuerySeedRuneSafe). Same-class audit found one more site: fs grep line cap (`fstools.go`) — same fix (no direct fstools test scaffold exists; semantics identical to the pinned recallQuery case).
+- gofmt hygiene (A3): 6 dirty files cleaned (adapter/omp.go, git/git_test.go, ipc/concurrent_test.go, ipc/skills_test.go, store/events.go, store/store.go) — diffs verified alignment-only before `-w`; tree now `gofmt -l` clean.
+- Gates: go build+vet clean; full `go test ./...` green (ipc 217.8s); cargo test green. Daemon+bundle binaries NOT yet rebuilt — bridge fix needs an app rebuild to take effect live.
+
+HEAD: worktree 6a7abd3c (pending accept)
