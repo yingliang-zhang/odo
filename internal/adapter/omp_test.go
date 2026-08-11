@@ -3,6 +3,7 @@ package adapter
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +100,50 @@ func TestParseToolCallsFallback(t *testing.T) {
 	if got := parseToolCalls("  ⇐ orphan result"); got != nil {
 		t.Errorf("expected nil for orphan result, got %#v", got)
 	}
+}
+
+// TestCompactionOverlayArgs pins the per-model policy delivery: known models
+// get a fixed-token overlay mirroring the Hermes profile ratios, unknown
+// models stay on the global omp config untouched.
+func TestCompactionOverlayArgs(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("known model writes overlay and appends --config", func(t *testing.T) {
+		args := compactionOverlayArgs("t9s/kimi-k3", dir, []string{"-x"})
+		if len(args) != 2 || !strings.HasPrefix(args[1], "--config=") {
+			t.Fatalf("args = %v, want --config appended", args)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "odo-compaction.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "compaction:\n  thresholdTokens: 315000\n  thresholdPercent: -1\n"
+		if string(data) != want {
+			t.Errorf("overlay = %q, want %q", data, want)
+		}
+	})
+
+	t.Run("deepseek gets its own ratio", func(t *testing.T) {
+		args := compactionOverlayArgs("t9s/deepseek-v4-flash", dir, nil)
+		if len(args) != 1 {
+			t.Fatalf("args = %v", args)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "odo-compaction.yml"))
+		if !strings.Contains(string(data), "thresholdTokens: 600000") {
+			t.Errorf("overlay = %q, want 600000 (0.60 × 1M)", data)
+		}
+	})
+
+	t.Run("unknown model gets no overlay", func(t *testing.T) {
+		empty := t.TempDir()
+		args := compactionOverlayArgs("acme/pi-9", empty, []string{"-x"})
+		if len(args) != 1 {
+			t.Errorf("args = %v, want unchanged", args)
+		}
+		if _, err := os.Stat(filepath.Join(empty, "odo-compaction.yml")); !os.IsNotExist(err) {
+			t.Error("unknown model must not write an overlay")
+		}
+	})
 }
 
 func TestResolveModelConfig(t *testing.T) {

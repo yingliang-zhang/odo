@@ -19,11 +19,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/yingliang-zhang/odo/internal/modelspec"
 )
 
 // Default endpoints and protocol constants.
@@ -32,11 +35,22 @@ const (
 	defaultKeyEnv  = "SUDO_CODING_KEY"
 	defaultModel   = "t9s/glm-5.2"
 	apiVersion     = "2023-06-01"
-	// 4096 truncated thinking models (kimi-k3, deepseek-v4-flash): their
-	// reasoning trace burns the same output budget, so /panel replies came
-	// back with stop_reason=max_tokens. 16384 leaves room for reasoning +
-	// answer across the sudo gateway's upstreams.
-	defaultMaxTok = 16384
+
+	// Output-budget policy. The initial budget comes from the per-model
+	// modelspec table; on stop_reason=max_tokens the request is re-issued
+	// whole at double the budget, bounded by the per-model hard cap and
+	// maxEscalations. Re-paying the small /panel input is cheaper and more
+	// reliable than continuation-style appends: truncated thinking blocks
+	// can't be replayed byte-complete (kimi signatures are placeholder
+	// values) and upstream behavior on half-written turns diverges.
+	maxEscalations = 3
+
+	// Per-request deadline = baseRequestTimeout + budget/genTokPerSecFloor.
+	// The old fixed 300s client timeout would cut off exactly what the
+	// escalation policy enables: 64K output tokens at the gateway's measured
+	// pace (deepseek-v4-flash ≥170 tok/s on 2026-08-09) needs ~6.5 minutes.
+	baseRequestTimeout = 300 * time.Second
+	genTokPerSecFloor  = 120 // conservative floor under the ≥170 tok/s measured on the slowest model
 
 	// defaultToolRounds bounds QueryWithTools' execute-and-continue loop.
 	// 8 cut glm-5.2 off mid-chain (observed: a legitimate glob→grep→read
@@ -66,9 +80,10 @@ func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
-		HTTP: &http.Client{
-			Timeout: 300 * time.Second,
-		},
+		// No client-wide Timeout: post() derives a per-request deadline from
+		// the output budget (a fixed 300s cap would cut off the very
+		// large-budget requests the escalation policy creates).
+		HTTP: &http.Client{},
 	}
 }
 
@@ -192,9 +207,21 @@ func (r *messageResponse) toolUses() []contentBlock {
 	return out
 }
 
+// requestTimeout derives one request's deadline from its output budget:
+// the base latency the gateway needs even for tiny answers, plus generation
+// time at a conservative tok/s floor (the measured slowest model ran ≥170
+// tok/s while burning 21K output tokens). Callers' ctx deadlines still win
+// when earlier — WithTimeout never widens a parent deadline.
+func requestTimeout(maxTok int) time.Duration {
+	return baseRequestTimeout + time.Duration(maxTok/genTokPerSecFloor)*time.Second
+}
+
 // post sends one request body and returns the parsed response. The shared
-// transport for Query, QueryWithImages, and the tool loop.
-func (c *Client) post(ctx context.Context, reqBody interface{}) (*messageResponse, error) {
+// transport for Query, QueryWithImages, and the tool loop. maxTok is the
+// request's max_tokens and sets the per-request deadline.
+func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*messageResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(maxTok))
+	defer cancel()
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("moa: marshal request: %w", err)
@@ -244,45 +271,151 @@ func (c *Client) post(ctx context.Context, reqBody interface{}) (*messageRespons
 	return &msg, nil
 }
 
-// validate guards the response's visible output: a max_tokens stop is an
-// error, never a partial answer or a truncated tool input.
-func (r *messageResponse) validate() error {
-	if r.StopReason == "max_tokens" {
-		return fmt.Errorf("moa: response truncated (stop_reason=max_tokens, %d output tokens used)", r.Usage.OutputTokens)
+// stopClass buckets a stop_reason into the caller's handling path.
+type stopClass int
+
+const (
+	stopOK        stopClass = iota // end_turn / tool_use / stop_sequence — answer is complete
+	stopTruncated                  // max_tokens — the budget policy decides (escalate, partial, or error)
+	stopTerminal                   // refusal / context overflow — surface as an error
+)
+
+// classifyStop whitelists the stop reasons the gateway is known to emit
+// (2026-08-09 sweep: {end_turn, tool_use, max_tokens}) and fails LOUD on
+// anything else — a silent fallthrough is a failure class no alert can see.
+// pause_turn and unknown reasons are treated as end_turn (the text arrives
+// whole; odo has no continuation channel to resume a paused turn), but both
+// are logged.
+func (r *messageResponse) classifyStop() stopClass {
+	switch r.StopReason {
+	case "", "end_turn", "tool_use", "stop_sequence":
+		return stopOK
+	case "max_tokens":
+		return stopTruncated
+	case "refusal", "model_context_window_exceeded":
+		return stopTerminal
+	case "pause_turn":
+		log.Printf("moa: stop_reason=pause_turn treated as end_turn (no continuation channel)")
+		return stopOK
+	default:
+		log.Printf("moa: unknown stop_reason %q treated as end_turn", r.StopReason)
+		return stopOK
 	}
-	return nil
 }
 
-// Query sends a single text completion request to the Anthropic Messages API
-// and returns the concatenated text from all text-type content blocks.
-// If system is non-empty it becomes the top-level system prompt
-// (Anthropic-native, not in-band).
-func (c *Client) Query(ctx context.Context, model, system, prompt string) (string, error) {
+// Escalation records one output-budget bump: the request truncated at From,
+// consumed OutputTokens there, and was re-issued at To. Journaled with the
+// result so the budget policy is a falsifiable ledger, not a silent retry.
+type Escalation struct {
+	From         int `json:"from"`
+	To           int `json:"to"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// Result is one completion's visible outcome plus its budget ledger.
+type Result struct {
+	Text string `json:"text"`
+	// Truncated marks a partial answer: the model hit its hard output cap
+	// (Budget, after every escalation) with stop_reason=max_tokens. A
+	// /panel or /vision answer is display content with no downstream
+	// consumer, so the partial ships flagged instead of erroring out.
+	Truncated bool `json:"truncated,omitempty"`
+	// Budget is the final request's max_tokens (the cap when Truncated).
+	Budget       int          `json:"budget,omitempty"`
+	OutputTokens int          `json:"output_tokens,omitempty"`
+	Escalations  []Escalation `json:"escalations,omitempty"`
+}
+
+// outputBudget tracks one logical completion's max_tokens across retries:
+// it doubles on truncation up to the per-model hard cap, never exceeding
+// maxEscalations bumps, and logs every step (daemon.log is the audit sink).
+type outputBudget struct {
+	now, cap int
+	esc      []Escalation
+}
+
+// escalate doubles the budget after a max_tokens stop. Returns false at the
+// hard cap or the bump limit — the caller then decides: partial+flagged for
+// display paths, error for the tool loop.
+func (b *outputBudget) escalate(model string, outTok int) bool {
+	if b.now >= b.cap || len(b.esc) >= maxEscalations {
+		return false
+	}
+	next := b.now * 2
+	if next > b.cap {
+		next = b.cap
+	}
+	b.esc = append(b.esc, Escalation{From: b.now, To: next, OutputTokens: outTok})
+	log.Printf("moa: %s truncated at %d output tokens; escalating max_tokens %d → %d", model, outTok, b.now, next)
+	b.now = next
+	return true
+}
+
+// oneShot runs one logical completion (Query / QueryWithImages): issue the
+// request at the model's initial budget, escalate-and-re-issue on max_tokens,
+// return the partial flagged once the hard cap is exhausted. mkBody builds
+// the request body for a given budget; callers keep body shape private.
+func (c *Client) oneShot(ctx context.Context, model string, mkBody func(model string, maxTok int) interface{}) (Result, error) {
 	if c.APIKey == "" {
-		return "", fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
+		return Result{}, fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
 	}
 	if model == "" {
 		model = defaultModel
 	}
-	msg, err := c.post(ctx, messageRequest{
-		Model:     model,
-		MaxTokens: defaultMaxTok,
-		System:    system,
-		Messages: []messageEntry{
-			{Role: "user", Content: prompt},
-		},
+	spec := modelspec.Lookup(model)
+	bud := outputBudget{now: spec.MaxTokens, cap: spec.MaxOutput}
+	for {
+		msg, err := c.post(ctx, mkBody(model, bud.now), bud.now)
+		if err != nil {
+			return Result{}, err
+		}
+		res := Result{
+			Text:         msg.text(),
+			Budget:       bud.now,
+			OutputTokens: msg.Usage.OutputTokens,
+			Escalations:  bud.esc,
+		}
+		switch msg.classifyStop() {
+		case stopTruncated:
+			if bud.escalate(model, msg.Usage.OutputTokens) {
+				continue // re-issue the whole turn at the bigger budget
+			}
+			// Hard cap exhausted: ship the partial if it carries visible
+			// text; a thinking-model response can also be 100% reasoning
+			// trace with zero text, which displays as nothing — error.
+			if res.Text == "" {
+				return Result{}, fmt.Errorf("moa: %s truncated with no visible text (stop_reason=max_tokens at the %d-token cap after %d escalations)", model, bud.now, len(bud.esc))
+			}
+			res.Truncated = true
+			log.Printf("moa: %s truncated at the %d-token cap after %d escalation(s); returning partial", model, bud.now, len(bud.esc))
+			return res, nil
+		case stopTerminal:
+			return Result{}, fmt.Errorf("moa: %s refused or overflowed (stop_reason=%s, %d output tokens)", model, msg.StopReason, msg.Usage.OutputTokens)
+		default:
+			if res.Text == "" {
+				return Result{}, fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
+			}
+			return res, nil
+		}
+	}
+}
+
+// Query sends a single text completion request to the Anthropic Messages API.
+// If system is non-empty it becomes the top-level system prompt
+// (Anthropic-native, not in-band). Truncation policy: escalate max_tokens ×2
+// up to the model's hard cap; a still-truncated answer returns the partial
+// text with Result.Truncated set instead of an error.
+func (c *Client) Query(ctx context.Context, model, system, prompt string) (Result, error) {
+	return c.oneShot(ctx, model, func(model string, maxTok int) interface{} {
+		return messageRequest{
+			Model:     model,
+			MaxTokens: maxTok,
+			System:    system,
+			Messages: []messageEntry{
+				{Role: "user", Content: prompt},
+			},
+		}
 	})
-	if err != nil {
-		return "", err
-	}
-	if err := msg.validate(); err != nil {
-		return "", err
-	}
-	text := msg.text()
-	if text == "" {
-		return "", fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
-	}
-	return text, nil
 }
 
 // QueryWithTools runs the read-only tool loop (E1): the request advertises
@@ -293,13 +426,21 @@ func (c *Client) Query(ctx context.Context, model, system, prompt string) (strin
 //
 // With no tools (or a nil executor) the call degrades to Query — a model or
 // gateway without tool support simply answers in one round as before.
-func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt string, tools []Tool, exec ToolExecutor, maxRounds int) (string, []ToolAudit, error) {
+// Truncation policy differs from the one-shot paths on purpose and splits by
+// block type at the hard cap: a max_tokens tool_use carries a half-written
+// JSON input, so the truncated attempt is discarded and re-issued WHOLE at
+// double the budget (never executed, and an error if the cap is exhausted —
+// placeholder-style continuation would ask the model to finish a broken turn
+// from half a tool_use). A max_tokens final answer (no tool_use blocks) is
+// display content like the one-shot paths: at the cap the partial ships
+// flagged instead of erroring out after minutes of tool rounds.
+func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt string, tools []Tool, exec ToolExecutor, maxRounds int) (Result, []ToolAudit, error) {
 	if len(tools) == 0 || exec == nil {
-		text, err := c.Query(ctx, model, system, prompt)
-		return text, nil, err
+		res, err := c.Query(ctx, model, system, prompt)
+		return res, nil, err
 	}
 	if c.APIKey == "" {
-		return "", nil, fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
+		return Result{}, nil, fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
 	}
 	if model == "" {
 		model = defaultModel
@@ -311,34 +452,56 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 		maxRounds = maxToolRounds
 	}
 
+	spec := modelspec.Lookup(model)
+	bud := outputBudget{now: spec.MaxTokens, cap: spec.MaxOutput}
+	result := func(text string) Result {
+		return Result{Text: text, Budget: bud.now, Escalations: bud.esc}
+	}
 	messages := []messageEntry{{Role: "user", Content: prompt}}
 	var audits []ToolAudit
 	for round := 1; ; round++ {
 		msg, err := c.post(ctx, messageRequest{
 			Model:     model,
-			MaxTokens: defaultMaxTok,
+			MaxTokens: bud.now,
 			System:    system,
 			Messages:  messages,
 			Tools:     tools,
-		})
+		}, bud.now)
 		if err != nil {
-			return "", audits, err
+			return Result{}, audits, err
 		}
-		// Never act on a truncated turn: a max_tokens tool_use carries a
-		// half-written JSON input, so executing it is unsafe.
-		if err := msg.validate(); err != nil {
-			return "", audits, err
+		switch msg.classifyStop() {
+		case stopTruncated:
+			if bud.escalate(model, msg.Usage.OutputTokens) {
+				round-- // the discarded attempt consumed no round
+				continue
+			}
+			if len(msg.toolUses()) > 0 {
+				return Result{}, audits, fmt.Errorf("moa: %s tool loop truncated at the %d-token cap after %d escalation(s) (not executing a half-written tool_use)", model, bud.now, len(bud.esc))
+			}
+			res := result(msg.text())
+			if res.Text == "" {
+				return Result{}, audits, fmt.Errorf("moa: %s truncated with no visible text (stop_reason=max_tokens at the %d-token cap after %d escalations)", model, bud.now, len(bud.esc))
+			}
+			res.Truncated = true
+			res.OutputTokens = msg.Usage.OutputTokens
+			log.Printf("moa: %s tool-loop final answer truncated at the %d-token cap; returning flagged partial", model, bud.now)
+			return res, audits, nil
+		case stopTerminal:
+			return Result{}, audits, fmt.Errorf("moa: %s refused or overflowed (stop_reason=%s, %d output tokens)", model, msg.StopReason, msg.Usage.OutputTokens)
 		}
 		uses := msg.toolUses()
 		if len(uses) == 0 {
 			text := msg.text()
 			if text == "" {
-				return "", audits, fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
+				return Result{}, audits, fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
 			}
-			return text, audits, nil
+			res := result(text)
+			res.OutputTokens = msg.Usage.OutputTokens
+			return res, audits, nil
 		}
 		if round >= maxRounds {
-			return "", audits, fmt.Errorf("moa: tool loop exceeded %d rounds (model kept requesting tools)", maxRounds)
+			return Result{}, audits, fmt.Errorf("moa: tool loop exceeded %d rounds (model kept requesting tools)", maxRounds)
 		}
 
 		// Echo the assistant turn verbatim (rawContent), then answer each call
@@ -401,14 +564,9 @@ func ImageMediaType(path string) string {
 // QueryWithImages sends a request with both text and image content blocks.
 // images arrive pre-read (see VisionImage) and are base64-encoded and sent
 // as Anthropic image content blocks before the text prompt.
-func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt string, images []VisionImage) (string, error) {
-	if c.APIKey == "" {
-		return "", fmt.Errorf("moa: API key is empty (check env var %s)", defaultKeyEnv)
-	}
-	if model == "" {
-		model = defaultModel
-	}
-	// Build content blocks: images first, then text.
+func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt string, images []VisionImage) (Result, error) {
+	// Build content blocks: images first, then text. Same truncation policy
+	// as Query (escalate, then flagged partial).
 	var contentBlocks []map[string]interface{}
 	for _, img := range images {
 		contentBlocks = append(contentBlocks, map[string]interface{}{
@@ -424,26 +582,17 @@ func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt stri
 		"type": "text",
 		"text": prompt,
 	})
-	reqBody := map[string]interface{}{
-		"model":      model,
-		"max_tokens": defaultMaxTok,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": contentBlocks},
-		},
-	}
-	if system != "" {
-		reqBody["system"] = system
-	}
-	msg, err := c.post(ctx, reqBody)
-	if err != nil {
-		return "", err
-	}
-	if err := msg.validate(); err != nil {
-		return "", err
-	}
-	text := msg.text()
-	if text == "" {
-		return "", fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
-	}
-	return text, nil
+	return c.oneShot(ctx, model, func(model string, maxTok int) interface{} {
+		reqBody := map[string]interface{}{
+			"model":      model,
+			"max_tokens": maxTok,
+			"messages": []map[string]interface{}{
+				{"role": "user", "content": contentBlocks},
+			},
+		}
+		if system != "" {
+			reqBody["system"] = system
+		}
+		return reqBody
+	})
 }

@@ -1536,11 +1536,19 @@ func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt stri
 	label := m.model + "@" + m.provider
 	client := moa.NewClientFromEnv("", "")
 	system := "You are a code reviewer. Review the following diff and provide your verdict."
-	text, err := client.Query(ctx, m.model, system, prompt)
+	res, err := client.Query(ctx, m.model, system, prompt)
 	if err != nil {
 		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error()}
 	}
-	return parseVerdict(label, text)
+	if res.Truncated {
+		// A partial review fails safe: an unread verdict tail parses as
+		// needs_fixes; flag the truncation so the comments don't read as a
+		// complete review that concluded nothing.
+		rr := parseVerdict(label, res.Text)
+		rr.Comments = "[review truncated at the model's hard output cap] " + rr.Comments
+		return rr
+	}
+	return parseVerdict(label, res.Text)
 }
 
 // parseReviewModels parses the comma-separated `review:` prefs value into
@@ -1656,7 +1664,11 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 				results[i] = PanelResult{Model: label, Error: err.Error(), ToolCalls: calls}
 				return
 			}
-			results[i] = PanelResult{Model: label, Text: resp, ToolCalls: calls}
+			results[i] = PanelResult{
+				Model: label, Text: resp.Text, ToolCalls: calls,
+				Truncated: resp.Truncated, Budget: resp.Budget,
+				OutputTokens: resp.OutputTokens, Escalations: resp.Escalations,
+			}
 		}()
 	}
 	wg.Wait()
@@ -1688,6 +1700,21 @@ type PanelResult struct {
 	Text      string          `json:"text"`
 	Error     string          `json:"error,omitempty"`
 	ToolCalls []moa.ToolAudit `json:"tool_calls,omitempty"`
+	// Output-budget ledger (journaling: falsifiable, per the epoch-fold
+	// ledger principle). Truncated=true means Text is a flagged partial at
+	// the model's hard output cap, not an error; Budget is that final
+	// max_tokens and Escalations the bumps taken to reach it.
+	Truncated    bool             `json:"truncated,omitempty"`
+	Budget       int              `json:"budget,omitempty"`
+	OutputTokens int              `json:"output_tokens,omitempty"`
+	Escalations  []moa.Escalation `json:"escalations,omitempty"`
+}
+
+// truncationMarker renders the visible badge appended to a flagged partial
+// answer (panel and vision paths): a half answer with a stated reason beats
+// a black-screen error for display-only content.
+func truncationMarker(budget, escalations int) string {
+	return fmt.Sprintf("\n\n*[output truncated at the %d-token cap after %d budget escalation(s)]*", budget, escalations)
 }
 
 // formatPanelResults renders the N model responses as readable text for the
@@ -1707,6 +1734,9 @@ func formatPanelResults(results []PanelResult) string {
 			b.WriteString(")")
 		} else {
 			b.WriteString(r.Text)
+			if r.Truncated {
+				b.WriteString(truncationMarker(r.Budget, len(r.Escalations)))
+			}
 		}
 		if len(r.ToolCalls) > 0 {
 			b.WriteString("\n\n— tools: ")
@@ -1838,27 +1868,35 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	}
 
 	client := moa.NewClientFromEnv("", "")
-	var resp string
+	var res moa.Result
 	switch {
 	case imageErr != nil:
 		err = imageErr
 	case len(images) > 0:
-		resp, err = client.QueryWithImages(ctx, visionModel, system, text, images)
+		res, err = client.QueryWithImages(ctx, visionModel, system, text, images)
 	default:
-		resp, err = client.Query(ctx, visionModel, system, text)
+		res, err = client.Query(ctx, visionModel, system, text)
 	}
 
 	var resultText string
 	if err != nil {
 		resultText = "(vision error: " + err.Error() + ")"
 	} else {
-		resultText = "## " + visionModel + "\n\n" + resp
+		resultText = "## " + visionModel + "\n\n" + res.Text
+		if res.Truncated {
+			resultText += truncationMarker(res.Budget, len(res.Escalations))
+		}
 	}
 
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentText, mustJSON(map[string]interface{}{
+	agentPayload := map[string]interface{}{
 		"text":   resultText,
 		"vision": true,
-	})); err != nil {
+	}
+	if err == nil && res.Truncated {
+		agentPayload["truncated"] = true
+		agentPayload["output_tokens"] = res.OutputTokens
+	}
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentText, mustJSON(agentPayload)); err != nil {
 		return Response{}, err
 	}
 	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentDone, mustJSON(map[string]interface{}{

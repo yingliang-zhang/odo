@@ -1293,7 +1293,7 @@ func TestGetSettings(t *testing.T) {
 		CodingProvider:         "sudo",
 		OrchestratorModel:      "t9s/kimi-k3",
 		OrchestratorProvider:   "sudo",
-		OMPTimeout:             "600",
+		OMPTimeout:             "1800",
 		ReviewModels:           "",
 		AutoDistill:            "on_idle",
 		AutoDistillIdleSeconds: "120",
@@ -1855,6 +1855,80 @@ func moaMockServer(t *testing.T, text string) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// TestPanelTruncationFlagged: a model that stays at stop_reason=max_tokens
+// past its hard cap ships the partial answer FLAGGED — payload marker in the
+// rendered text plus the structured budget ledger — never an error row.
+func TestPanelTruncationFlagged(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": "partial panel answer"}},
+			"stop_reason": "max_tokens",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// pm1 is an unknown model: fallback spec 16384 → escalates once → 32768 cap.
+	writePrefs(t, home, "review: pm1@test\n")
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel analyze this"})
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	var found bool
+	for _, ev := range events {
+		if ev.Type != store.EventAgentText {
+			continue
+		}
+		var p struct {
+			Text   string `json:"text"`
+			Panel  bool   `json:"panel"`
+			Models []struct {
+				Text        string `json:"text"`
+				Truncated   bool   `json:"truncated"`
+				Budget      int    `json:"budget"`
+				Escalations []struct {
+					From int `json:"from"`
+					To   int `json:"to"`
+				} `json:"escalations"`
+			} `json:"models"`
+		}
+		if json.Unmarshal(ev.Payload, &p) != nil || !p.Panel {
+			continue
+		}
+		found = true
+		if len(p.Models) != 1 {
+			t.Fatalf("models = %d, want 1", len(p.Models))
+		}
+		m := p.Models[0]
+		if m.Text != "partial panel answer" {
+			t.Errorf("text = %q, want the partial answer shipped", m.Text)
+		}
+		if !m.Truncated || m.Budget != 32768 {
+			t.Errorf("flag = (%v, %d), want (true, 32768)", m.Truncated, m.Budget)
+		}
+		if len(m.Escalations) != 1 || m.Escalations[0].From != 16384 || m.Escalations[0].To != 32768 {
+			t.Errorf("escalations = %+v, want 16384→32768", m.Escalations)
+		}
+		if !strings.Contains(p.Text, "[output truncated at the 32768-token cap after 1 budget escalation(s)]") {
+			t.Errorf("rendered marker missing from text: %q", p.Text)
+		}
+	}
+	if !found {
+		t.Fatal("no journaled panel agent_text found")
+	}
 }
 
 // TestPanelRouting verifies /panel routing: prefix match routes to

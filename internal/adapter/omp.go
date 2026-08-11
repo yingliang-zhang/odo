@@ -31,11 +31,18 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/yingliang-zhang/odo/internal/modelspec"
 	"github.com/yingliang-zhang/odo/internal/worktree"
 )
 
 const (
-	defaultTimeoutSeconds = "600"
+	// Whole-run wall-clock deadline for one OMP agent run (prefs.md
+	// omp_timeout still overrides). 600s was sized before thinking models:
+	// task-tier normal runs kimi/glm at thinking=max where a single gateway
+	// round measured up to 125s, so a 16-round tool run needs ~33min worst
+	// case — 600s structurally mid-kills deep-thinking runs. 1800s covers
+	// the worst case; omp's own idle watchdog still kills true hangs.
+	defaultTimeoutSeconds = "1800"
 	maxStderrTail         = 4096
 
 	// Fallback model config when ~/.odo/prefs.md is missing or unparseable.
@@ -287,6 +294,7 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 		// parsing, so text-producing stubs are unaffected.
 		"--mode", "json",
 	}
+	args = compactionOverlayArgs(model, sessionDir, args)
 	cmd := exec.Command(a.wrapperPath, args...)
 	cmd.Dir = workdir
 	cmd.Env = enrichedEnv()
@@ -317,6 +325,31 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 		close(r.done)
 	}()
 	return runID, nil
+}
+
+// compactionOverlayArgs appends a per-model compaction overlay to the wrapper
+// args. The policy (compact ratio × context window) is written as a
+// fixed-token --config overlay; the Hermes wrapper forwards unknown args
+// straight to omp (same mechanism as the profile's SAFE_COMPACTION_OVERLAY).
+// Fixed tokens, never thresholdPercent: percent mode recomputes off the
+// models.yml contextWindow (auto fallback compacts at 85% → 765K on a 1M
+// model, far past the profile's ~315K working set). Unknown models get no
+// overlay at all — they keep the global omp config, since a fabricated
+// threshold off an unverified window is worse than none. An overlay write
+// failure likewise falls back to the global config (fail-open: a chat run
+// must never die over a policy hint).
+func compactionOverlayArgs(model, sessionDir string, args []string) []string {
+	threshold, ok := modelspec.CompactThresholdTokens(model)
+	if !ok {
+		return args
+	}
+	overlay := filepath.Join(sessionDir, "odo-compaction.yml")
+	content := fmt.Sprintf("compaction:\n  thresholdTokens: %d\n  thresholdPercent: -1\n", threshold)
+	if err := os.WriteFile(overlay, []byte(content), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "odo: compaction overlay for %s: %v (falling back to global omp config)\n", model, err)
+		return args
+	}
+	return append(args, "--config="+overlay)
 }
 
 // Send implements Adapter. Since M1 it appends the steering message to
