@@ -64,7 +64,9 @@ reversible via git.
 
 1. Rebuild + restart the daemon (the live binary predates this code until then).
 2. `prefs.md`: `auto_apply: main` (default `off` = fully manual, unchanged).
-3. Repo-root `.odo-verify` (executable; this repo's runs build + vet + test).
+3. Repo-root `.odo-verify` — a text config, not a script: the first non-comment
+   non-empty line is the shell command (`#` lines are comments; no chmod involved).
+   This repo's runs `go build ./... && go vet ./... && go test ./...`.
 
 ## Tests
 
@@ -81,6 +83,46 @@ reversible via git.
 - `TestMaybeAutoLandPrefOffSilent` — pref-off produces zero journal rows.
 - `TestPanelLive` — env-gated (`ODO_PANEL_LIVE=1`) terminal harness mirroring
   handlePanelQuery's fanout; never runs in the default suite.
+
+## Panel review (2026-08-11, HEAD `50e3e32`): unanimous NEEDS_FIXES
+
+Grounded tri-model adversarial review of the shipped gate stack (`TestPanelLive`
+harness, inlined gate code + a 7-read batched wiring audit; all three models
+completed, none truncated). Verdict 3/3 NEEDS_FIXES — architecture endorsed
+("the spine is genuinely right"), concrete fixable holes. Landed in this fix round:
+
+1. **Truncated/early-ACCEPT unanimity bypass** (all three models): `parseVerdict`
+   now honors only the FINAL verdict-token line (`server.go`), and a truncated
+   review is forced `needs_fixes` regardless of what the partial text parses to
+   (`reviewVerdict`). Shared by `review_diff` and auto-land — the manual panel
+   inherits the hardening. The auto-land prompt fences the diff body as data.
+2. **Verify executes unreviewed agent code with the daemon's env** (kimi P0):
+   `runVerify` now runs with `verifyEnviron`, an allowlisted child env
+   (PATH/HOME/TMPDIR + GO*/GIT_*/CGO_* passthrough; SUDO_*/AWS_*/keys stay with
+   the daemon).
+3. **Verify attested a tree nobody lands** (kimi P0, deepseek P1): new
+   `base_stale` gate — main checkout HEAD must still equal the diff's base_sha,
+   checked cheaply before any verify/panel spend. Stale = blocked; humans rebase.
+4. **Comment-out evasion of the weakened-tests gate** (kimi P1):
+   `TestAssertionDelta` skips comment lines on both sides — `-assert.X` /
+   `+// assert.X` now nets a removal, blocking.
+5. Doc/test reconciliation: `.odo-verify` described as the text config it is;
+   new pins `TestParseVerdict`, `TestReviewVerdictTruncation`,
+   `TestVerifyEnviron`, the `base_stale` blocked-path, and three comment-evasion
+   cases in `TestTestAssertionDelta`.
+
+Deferred, with the panel's own framing (design-level, not this round):
+
+- Process-group sweep on verify timeout (orphaned grandchildren of `go test`
+  survive the direct kill; journaled/fail-closed, needs a unix build-tag split).
+- Minimum panel-size policy: N=1 makes "unanimous" trivial (a prefs validation
+  or doc-level decision — the owner picks the `review:` line).
+- Merge-preview verify (kimi's option b: throwaway HEAD+diff worktree) as a
+  throughput upgrade over `base_stale`'s block-and-wait.
+- Repeated-block visibility: `base_stale`/`verify_failed` storms are journaled
+  but have no GUI surface.
+- Stubbed-reviewer integration test of the full land path and a
+  `ComputeAutonomy` tally pin over `auto_panel` rows (unit pins shipped here).
 
 ## Non-goals
 

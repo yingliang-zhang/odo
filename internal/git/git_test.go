@@ -287,8 +287,10 @@ func TestDiffPaths(t *testing.T) {
 
 // TestTestAssertionDelta pins the weakened-tests gate's counting contract:
 // assertion tokens are counted per side ONLY inside *_test.go blocks
-// (global across files, so a move nets zero), with /dev/null sides arming
-// independently. The auto-land gate blocks when removed > added.
+// (global across files, so a move nets zero), comment lines never count
+// on either side (commenting out an assertion nets a removal), and
+// /dev/null sides arm independently. The auto-land gate blocks when
+// removed > added.
 func TestTestAssertionDelta(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -359,6 +361,33 @@ func TestTestAssertionDelta(t *testing.T) {
 				"+\tassert.True(t, ok)\n",
 			wantAdd:    1,
 			wantRemove: 1,
+		},
+		{
+			// M16 panel evasion: `+// assert.X` used to count as added and
+			// netted zero against the removed live assertion.
+			name: "commenting out an assertion nets a removal",
+			patch: "diff --git a/x_test.go b/x_test.go\n" +
+				"--- a/x_test.go\n+++ b/x_test.go\n@@ -1 +1 @@\n" +
+				"-\tassert.Equal(t, 3, got)\n" +
+				"+\t// assert.Equal(t, 3, got)\n",
+			wantAdd:    0,
+			wantRemove: 1,
+		},
+		{
+			name: "added comment mentioning tokens does not count",
+			patch: "diff --git a/x_test.go b/x_test.go\n" +
+				"--- a/x_test.go\n+++ b/x_test.go\n@@ -1 +1,2 @@\n" +
+				" func TestX(t *testing.T) {}\n" +
+				"+\t// TODO: add require.NoError and t.Fatal coverage\n",
+			wantAdd: 0,
+		},
+		{
+			name: "removed comment mentioning tokens was never proof",
+			patch: "diff --git a/x_test.go b/x_test.go\n" +
+				"--- a/x_test.go\n+++ b/x_test.go\n@@ -1,2 +1 @@\n" +
+				"-\t// stale: assert.True used to live here\n" +
+				" func TestX(t *testing.T) {}\n",
+			wantRemove: 0,
 		},
 	}
 	for _, tc := range cases {

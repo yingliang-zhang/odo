@@ -1279,6 +1279,57 @@ func TestConsensusVerdict(t *testing.T) {
 	}
 }
 
+// TestParseVerdict pins the verdict-line contract: the LAST verdict-token
+// line wins (mid-analysis lookalikes and stray early tokens must not
+// override the concluding verdict), comments are everything after it, and
+// unparseable output degrades to needs_fixes. The early-ACCEPT case is the
+// M16 panel regression: under first-match it read "accept".
+func TestParseVerdict(t *testing.T) {
+	tests := []struct {
+		name         string
+		text         string
+		wantVerdict  string
+		wantComments string
+	}{
+		{"verdict last with analysis before", "Analysis line one.\nAnalysis line two.\nACCEPT", "accept", ""},
+		{"verdict first then comments", "NEEDS_FIXES\nbecause reasons", "needs_fixes", "because reasons"},
+		{"early ACCEPT then concluding needs_fixes", "ACCEPT\n...wait, one problem:\nit drops a caller.\nNEEDS_FIXES\nfix the caller", "needs_fixes", "fix the caller"},
+		{"early reject token then concluding accept", "REJECT tentative\nreconsidering...\nACCEPT\nship it", "accept", "ship it"},
+		{"prefix form ACCEPT with trailing words", "looks fine\nACCEPT with minor nits", "accept", ""},
+		{"prose mention does not match", "I cannot ACCEPT this patch", "needs_fixes", "I cannot ACCEPT this patch"},
+		{"case-insensitive token", "accept", "accept", ""},
+		{"no verdict line degrades", "just some analysis\nnothing conclusive", "needs_fixes", "just some analysis\nnothing conclusive"},
+		{"empty", "", "needs_fixes", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseVerdict("m", tt.text)
+			if got.Verdict != tt.wantVerdict {
+				t.Errorf("verdict = %q, want %q", got.Verdict, tt.wantVerdict)
+			}
+			if got.Comments != tt.wantComments {
+				t.Errorf("comments = %q, want %q", got.Comments, tt.wantComments)
+			}
+		})
+	}
+}
+
+// TestReviewVerdictTruncation pins the fail-closed truncation contract
+// (M16 panel: a cut-off stream cannot prove the model's final position —
+// even a cleanly parsing partial verdict counts as needs_fixes).
+func TestReviewVerdictTruncation(t *testing.T) {
+	rr := reviewVerdict("m", "So far so good.\nACCEPT", true)
+	if rr.Verdict != "needs_fixes" {
+		t.Errorf("truncated verdict = %q, want forced needs_fixes", rr.Verdict)
+	}
+	if rr.Comments == "" || !strings.Contains(rr.Comments, "truncated") {
+		t.Errorf("truncated comments must carry the marker, got %q", rr.Comments)
+	}
+	if rr := reviewVerdict("m", "looks fine\nACCEPT", false); rr.Verdict != "accept" {
+		t.Errorf("untruncated verdict = %q, want accept", rr.Verdict)
+	}
+}
+
 // TestGetSettings covers get_settings: absent prefs yield the compiled-in
 // defaults; a full prefs.md overrides every field.
 func TestGetSettings(t *testing.T) {

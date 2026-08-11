@@ -300,10 +300,12 @@ var testAssertionTokens = []string{"assert.", "require.", "t.Error", "t.Fatal", 
 
 // TestAssertionDelta counts assertion tokens on added vs removed content
 // lines across the *_test.go files of the patch at pathOnDisk (global
-// across files, so moving a test between files nets zero). A diff whose
-// removed count exceeds its added count shrinks proof coverage — the
-// auto-land gate blocks "agent weakens its own tests" (the silent-
-// disaster mode the panel's reviewers independently converged on).
+// across files, so moving a test between files nets zero). Comment lines
+// (commentMarkers) are skipped on both sides — a commented-out assertion
+// changed the proof, not just the text. A diff whose removed count
+// exceeds its added count shrinks proof coverage — the auto-land gate
+// blocks "agent weakens its own tests" (the silent-disaster mode the
+// panel's reviewers independently converged on).
 // Each hunk side arms independently: a deletion (b-side /dev/null) still
 // counts its removed assertions, a pure addition only its added ones.
 func TestAssertionDelta(pathOnDisk string) (added, removed int, err error) {
@@ -326,10 +328,20 @@ func TestAssertionDelta(pathOnDisk string) (added, removed int, err error) {
 			p := unquoteDiffPath(strings.TrimPrefix(line, "+++ "), "b/")
 			bTest = p != "" && strings.HasSuffix(p, "_test.go")
 		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") && bTest:
+			// Comment lines don't execute: `+// assert.X` must not count as
+			// added proof, or commenting an assertion out nets zero and the
+			// weakened-tests gate waves a dead check through (M16 panel).
+			if hasAnyPrefix(strings.TrimSpace(line[1:]), commentMarkers) {
+				continue
+			}
 			for _, tok := range testAssertionTokens {
 				added += strings.Count(line, tok)
 			}
 		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") && aTest:
+			// Mirror: removing a comment line never counted as lost proof.
+			if hasAnyPrefix(strings.TrimSpace(line[1:]), commentMarkers) {
+				continue
+			}
 			for _, tok := range testAssertionTokens {
 				removed += strings.Count(line, tok)
 			}

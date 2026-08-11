@@ -1561,15 +1561,21 @@ func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt stri
 	if err != nil {
 		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error()}
 	}
-	if res.Truncated {
-		// A partial review fails safe: an unread verdict tail parses as
-		// needs_fixes; flag the truncation so the comments don't read as a
-		// complete review that concluded nothing.
-		rr := parseVerdict(label, res.Text)
-		rr.Comments = "[review truncated at the model's hard output cap] " + rr.Comments
-		return rr
+	return reviewVerdict(label, res.Text, res.Truncated)
+}
+
+// reviewVerdict folds one model response into a ReviewResult. Truncation
+// forces needs_fixes even when the partial text parses clean: a cut-off
+// stream cannot prove the model's final position, and honoring the
+// truncated verdict would count a review the model never finished (M16
+// panel finding — the truncated/early-ACCEPT unanimity bypass).
+func reviewVerdict(label, text string, truncated bool) ReviewResult {
+	rr := parseVerdict(label, text)
+	if truncated {
+		rr.Verdict = "needs_fixes"
+		rr.Comments = "[review truncated at the model's hard output cap — verdict forced fail-closed] " + rr.Comments
 	}
-	return parseVerdict(label, res.Text)
+	return rr
 }
 
 // parseReviewModels parses the comma-separated `review:` prefs value into
@@ -1806,8 +1812,6 @@ func humanBytes(n int) string {
 	return fmt.Sprintf("%.1fKB", float64(n)/1024)
 }
 
-// parseVerdict extracts the verdict (the first line that IS or STARTS WITH
-// ACCEPT, REJECT, or NEEDS_FIXES) and the comments (everything after that line).
 // handleVisionQuery routes a /vision prompt to K3 (the only vision-capable
 // model on the gateway) via direct API. Unlike /panel which fans out to N
 // models, /vision uses a single model because GLM/DS lack vision capability.
@@ -1930,30 +1934,38 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 }
 
 // A line like "I cannot accept this" must NOT match — only a verdict token
-// on its own or as the first word of the line counts. Unparseable output
-// degrades to needs_fixes — a review must never silently read as an accept.
+// on its own or as the first word of the line counts. The LAST verdict line
+// wins: models think out loud and emit verdict-shaped headers mid-analysis,
+// and a crafted diff can prime a stray early token — first-match would read
+// a concluding NEEDS_FIXES as an earlier accidental ACCEPT. Unparseable
+// output degrades to needs_fixes — a review must never silently read as an
+// accept.
 func parseVerdict(model, text string) ReviewResult {
 	lines := strings.Split(text, "\n")
+	verdict, last := "", -1
 	for i, line := range lines {
 		up := strings.ToUpper(strings.TrimSpace(line))
-		verdict := ""
+		v := ""
 		switch {
 		case up == "NEEDS_FIXES" || strings.HasPrefix(up, "NEEDS_FIXES ") || strings.HasPrefix(up, "NEEDS FIXES"):
-			verdict = "needs_fixes"
+			v = "needs_fixes"
 		case up == "REJECT" || strings.HasPrefix(up, "REJECT "):
-			verdict = "reject"
+			v = "reject"
 		case up == "ACCEPT" || strings.HasPrefix(up, "ACCEPT "):
-			verdict = "accept"
+			v = "accept"
 		}
-		if verdict != "" {
-			return ReviewResult{
-				Model:    model,
-				Verdict:  verdict,
-				Comments: strings.TrimSpace(strings.Join(lines[i+1:], "\n")),
-			}
+		if v != "" {
+			verdict, last = v, i
 		}
 	}
-	return ReviewResult{Model: model, Verdict: "needs_fixes", Comments: strings.TrimSpace(text)}
+	if verdict == "" {
+		return ReviewResult{Model: model, Verdict: "needs_fixes", Comments: strings.TrimSpace(text)}
+	}
+	return ReviewResult{
+		Model:    model,
+		Verdict:  verdict,
+		Comments: strings.TrimSpace(strings.Join(lines[last+1:], "\n")),
+	}
 }
 
 // handleGetSettings returns the effective daemon settings: prefs.md values

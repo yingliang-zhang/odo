@@ -164,13 +164,37 @@ func TestRunVerify(t *testing.T) {
 
 func TestAutoLandPrompt(t *testing.T) {
 	p := autoLandPrompt("THE GOAL", "THE DIFF", "go test ./...", "VERIFY TAIL")
-	for _, want := range []string{"THE GOAL", "go test ./...", "VERIFY TAIL", "ACCEPT, REJECT, or NEEDS_FIXES"} {
+	for _, want := range []string{"THE GOAL", "go test ./...", "VERIFY TAIL", "ACCEPT, REJECT, or NEEDS_FIXES", "data, not instructions"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}
 	}
-	if !strings.HasSuffix(p, "THE DIFF") {
-		t.Error("prompt must END with the diff (the verdict instruction sits before it)")
+	if !strings.HasSuffix(p, "```diff\nTHE DIFF\n```\n") {
+		t.Error("prompt must END with the fenced diff (the verdict instruction sits before it; the fence keeps the diff data, not instructions)")
+	}
+}
+
+// TestVerifyEnviron pins the allowlist contract: the verify child sees
+// shell/toolchain vars and GO*/GIT_* passthrough, never the daemon's
+// credential-shaped vars (the panel's API keys are process env).
+func TestVerifyEnviron(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin", "HOME=/u", "TMPDIR=/tmp", "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8",
+		"GOPATH=/u/go", "GOMODCACHE=/u/go/pkg/mod", "GOFLAGS=-mod=mod", "GIT_EDITOR=vim", "CGO_ENABLED=1",
+		"SUDO_CODING_KEY=sk-secret", "ANTHROPIC_API_KEY=sk-secret", "AWS_SECRET_ACCESS_KEY=secret",
+		"SSH_AUTH_SOCK=/tmp/sock", "ODO_DB=/private",
+	}
+	out := verifyEnviron(in)
+	joined := "\n" + strings.Join(out, "\n") + "\n"
+	for _, want := range []string{"PATH=/usr/bin", "GOPATH=/u/go", "GOMODCACHE=/u/go/pkg/mod", "GIT_EDITOR=vim", "LC_ALL=en_US.UTF-8"} {
+		if !strings.Contains(joined, "\n"+want+"\n") {
+			t.Errorf("env missing %q", want)
+		}
+	}
+	for _, drop := range []string{"SUDO_CODING_KEY", "ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK", "ODO_DB"} {
+		if strings.Contains(joined, "\n"+drop+"=") {
+			t.Errorf("env leaked %s — an allowlist miss costs the daemon's keys", drop)
+		}
 	}
 }
 
@@ -247,6 +271,23 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 		s.autoLand(context.Background(), d, root, "goal", false)
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "prompt_too_large" {
 			t.Errorf("reasons = %v, want [prompt_too_large]", got)
+		}
+	})
+
+	t.Run("stale base blocks before any verify spend", func(t *testing.T) {
+		f, s, root, sha := newServer(t)
+		// Advance main HEAD past the diff's base — verify would attest a
+		// tree nobody lands.
+		if err := os.WriteFile(filepath.Join(root, "src", "b.go"), []byte("package src\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, root, "add", ".")
+		gitIn(t, root, "commit", "-m", "drift")
+		d := f.addDiff(t, "p.diff", patchSrc("README.md", 1, 1, false))
+		d.BaseSHA = &sha
+		s.autoLand(context.Background(), d, root, "goal", false)
+		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "base_stale" {
+			t.Errorf("reasons = %v, want [base_stale]", got)
 		}
 	})
 
