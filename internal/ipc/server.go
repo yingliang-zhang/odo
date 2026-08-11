@@ -48,6 +48,12 @@ type runMeta struct {
 	// completion, drainRun triggers a continuation run with these as the
 	// prompt (verbatim, never LLM-summarized — Hermes verify-handoff rule).
 	queuedSteers []string
+	// M16: the verbatim trigger text of this run (the send's text, or the
+	// queued steers for a continuation) — the SAME string journaled as the
+	// user_message payload. Copied, not re-read: the auto-land review
+	// prompt grounds the panel in the user's words, never the agent's
+	// self-report.
+	goal string
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -73,6 +79,15 @@ type Server struct {
 	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
 	curating   bool               // a curate pass is in flight (M11 P0)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
+
+	// M16 (O-1 v2): auto-land. autoLandMu serializes ONE pipeline at a
+	// time (the final accept's apply/add/commit must not interleave, and
+	// verify/panel spend shouldn't pile up across conversations). NOT s.mu —
+	// the pipeline holds it for minutes and takes s.mu briefly in
+	// handleDiffAction (nesting order: autoLandMu → mu, never reversed).
+	// autoLandDone is the tests-only completion signal (nil in production).
+	autoLandMu   sync.Mutex
+	autoLandDone chan struct{}
 
 	// M12 (D-auto): daemon-side auto-distill state. All guarded by mu.
 	// distillKind replaces the bare distilling bit where the kind matters:
@@ -224,9 +239,9 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	case CmdPollEvents:
 		resp, err = s.handlePollEvents(ctx, req)
 	case CmdAcceptDiff:
-		resp, err = s.handleDiffAction(ctx, req.DiffID, "accept")
+		resp, err = s.handleDiffAction(ctx, req.DiffID, "accept", "")
 	case CmdRejectDiff:
-		resp, err = s.handleDiffAction(ctx, req.DiffID, "reject")
+		resp, err = s.handleDiffAction(ctx, req.DiffID, "reject", "")
 	case CmdReviewDiff:
 		resp, err = s.handleReviewDiff(ctx, req)
 	case CmdAutonomyStatus:
@@ -666,6 +681,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		conversationID: c.ID,
 		workstreamID:   c.WorkstreamID,
 		worktreePath:   wtPath,
+		goal:           req.Text,
 	}
 	s.runs[runID] = meta
 	s.byConv[c.ID] = runID
@@ -1131,6 +1147,7 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 		conversationID: conversationID,
 		workstreamID:   workstreamID,
 		worktreePath:   wtPath,
+		goal:           prompt, // the joined queued steers, verbatim
 	}
 	s.byConv[conversationID] = runID
 }
@@ -1247,10 +1264,11 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		}
 		return nil
 	}
-	if _, err := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA); err != nil {
-		log.Printf("ipc: drainRun: InsertDiff failed: %v", err)
+	newDiff, derr := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA)
+	if derr != nil {
+		log.Printf("ipc: drainRun: InsertDiff failed: %v", derr)
 		s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError, mustJSON(map[string]interface{}{
-			"error": "diff save failed: " + err.Error(),
+			"error": "diff save failed: " + derr.Error(),
 		}))
 		meta.finished = true
 		// M12: the run ended — the window grew, so evaluate auto-distill too.
@@ -1258,6 +1276,11 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		return nil
 	}
 	meta.finished = true // mark finished only after the diff row exists
+
+	// M16 (O-1 v2): the pending diff spawns the auto-land pipeline
+	// (pref-gated inside; goroutine, no locks held — the continuation
+	// trigger's shape). meta's fields are copied as arguments.
+	go s.maybeAutoLand(newDiff, meta.worktreePath, meta.goal, meta.errored)
 
 	// A2-lite: if steering messages were queued during this run, auto-start
 	// a continuation run with the queued texts as the prompt. This replaces
@@ -1275,7 +1298,10 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 // handleDiffAction implements accept_diff and reject_diff. Accept applies the
 // diff to the user's working tree with git apply (the visible loop closes
 // here). Both journal a review_action and retire the run's worktree.
-func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action string) (Response, error) {
+// actor is "" for the human click path; the auto-land pipeline passes
+// autoActor so the journaled resolution carries its provenance (and stays
+// out of the human streaks — ComputeAutonomy).
+func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, actor string) (Response, error) {
 	if diffID == 0 {
 		return Response{}, fmt.Errorf("%s_diff: diff_id is required", action)
 	}
@@ -1344,10 +1370,14 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action stri
 	if err := s.store.UpdateDiffStatus(ctx, diffID, status); err != nil {
 		return Response{}, err
 	}
-	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	payload := map[string]interface{}{
 		"action":  action,
 		"diff_id": d.ID,
-	})); err != nil {
+	}
+	if actor != "" {
+		payload["actor"] = actor
+	}
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); err != nil {
 		return Response{}, err
 	}
 
@@ -1475,16 +1505,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 		return Response{}, errors.New("No review models configured.")
 	}
 
-	reviews := make([]ReviewResult, len(models))
-	var wg sync.WaitGroup
-	for i, m := range models {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			reviews[i] = s.reviewWithModel(ctx, m, reviewPrompt(string(content)))
-		}()
-	}
-	wg.Wait()
+	reviews := s.reviewFanout(ctx, models, reviewPrompt(string(content)))
 
 	cv := consensusVerdict(reviews)
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
@@ -1498,29 +1519,29 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 	return Response{Reviews: reviews, Consensus: cv}, nil
 }
 
-// consensusVerdict computes a deterministic 2/3 tally over review results.
-// Returns "accept" if ≥2/3 of verdicts are "accept", "reject" if any
-// verdict is "reject", otherwise "needs_fixes". This mirrors Hermes's
-// consolidator gate rule without a 4th model call.
+// consensusVerdict computes a deterministic tally over review results.
+// Returns "accept" only when EVERY reviewer accepts — a single
+// needs_fixes (explicit dissent, a parse failure, or a degraded
+// truncated/errored review) blocks the accept. Returns "reject" if any
+// verdict is "reject", otherwise "needs_fixes". This replaces the former
+// 2/3 threshold, which was fail-open at N=3: 2 ACCEPT + 1 NEEDS_FIXES
+// read as "accept", letting a dissented diff present (and later land)
+// as panel-approved. One tally now serves both the review badge and the
+// auto-land gate. Still no 4th model call (Hermes consolidator rule).
 func consensusVerdict(reviews []ReviewResult) string {
 	if len(reviews) == 0 {
 		return "needs_fixes"
 	}
 	accepts := 0
-	rejects := 0
 	for _, r := range reviews {
 		switch r.Verdict {
 		case "accept":
 			accepts++
 		case "reject":
-			rejects++
+			return "reject" // any reject dominates
 		}
 	}
-	threshold := (len(reviews)*2 + 2) / 3 // ceil(2N/3)
-	if rejects > 0 {
-		return "reject"
-	}
-	if accepts >= threshold {
+	if accepts == len(reviews) {
 		return "accept"
 	}
 	return "needs_fixes"
@@ -2517,16 +2538,22 @@ func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response,
 	return Response{SearchResults: results}, nil
 }
 
-// rejectProtectedPaths errs when any patch path lives under a protected
-// prefix (ADR-0003 invariant 1: agents never write memory). Protected:
-// .odo/ (memory.md, memory-archive.md, pins.md, ledger.md, journal.sqlite,
+// isProtectedPath reports whether p lives under a protected prefix
+// (ADR-0003 invariant 1: agents never write memory). Protected: .odo/
+// (memory.md, memory-archive.md, pins.md, ledger.md, journal.sqlite,
 // worktrees) and wiki/ (epoch notes, topics, index.md — derived artifacts
-// owned by the daemon, not the agent). Callers pass both patch sides
-// (git.PatchPaths): deleting or renaming memory content is a memory write
-// too, so the pre-image side is guarded as well as the post-image side.
+// owned by the daemon, not the agent).
+func isProtectedPath(p string) bool {
+	return strings.HasPrefix(p, ".odo/") || strings.HasPrefix(p, "wiki/")
+}
+
+// rejectProtectedPaths errs when any patch path is protected. Callers pass
+// both patch sides (git.PatchPaths): deleting or renaming memory content
+// is a memory write too, so the pre-image side is guarded as well as the
+// post-image side.
 func rejectProtectedPaths(paths []string) error {
 	for _, f := range paths {
-		if strings.HasPrefix(f, ".odo/") || strings.HasPrefix(f, "wiki/") {
+		if isProtectedPath(f) {
 			return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
 		}
 	}

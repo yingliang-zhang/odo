@@ -2,11 +2,13 @@ package ipc
 
 // M15 B-strategy-1 (O-1, RUNG-0 ONLY): autonomy streak observability.
 // This file INSTRUMENTS the human review loop so a later milestone can
-// have the data to decide whether any auto-apply rung is justified. It
-// changes no behavior: nothing here applies, skips, or re-orders a
-// review; the journals it reads are the same review_action events and
-// diffs rows the human loop already produces. The auto_apply pref is
-// parsed (settings.go) and displayed, never consumed.
+// have the data to decide whether any auto-apply rung is justified. The
+// journals it reads are the review_action events and diffs rows the
+// review loop produces. M16 (O-1 v2): the auto_apply pref IS now
+// consumed — "main" activates the auto-land pipeline (autoland.go) —
+// but streaks count HUMAN resolutions only: review_action rows carrying
+// actor:auto_panel are tallied separately (AutoAccepted) and never feed
+// the rung ratchet, or it would grade itself.
 //
 // Diff classes (deterministic, from the journaled patch file):
 //
@@ -86,9 +88,10 @@ type AutonomyReport struct {
 	Journal              string                `json:"journal"`
 	WorkstreamsScanned   int                   `json:"workstreams_scanned"`
 	ConversationsScanned int                   `json:"conversations_scanned"`
-	Resolutions          int                   `json:"resolutions"`      // human accept/reject events
+	Resolutions          int                   `json:"resolutions"`      // human accept/reject events (auto-land excluded)
+	AutoAccepted         int                   `json:"auto_accepted"`    // M16: diffs landed by the auto-land pipeline (never streak-feeding)
 	UnreadableDiffs      int                   `json:"unreadable_diffs"` // patch file missing/parse error: unclassified + no revert evidence
-	AutoApply            string                `json:"auto_apply"`       // prefs value, PARSED ONLY (rung 0)
+	AutoApply            string                `json:"auto_apply"`       // prefs value ("main" = M16 auto-land consumed)
 	CurrentRung          int                   `json:"current_rung"`     // always 0 today
 	RungThresholds       map[string]int        `json:"rung_thresholds"`
 	RevertCheck          string                `json:"revert_check"` // how streaks treat reverts
@@ -263,7 +266,7 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 		ProjectRoot: project.RootPath,
 		Journal:     filepath.Join(project.RootPath, ".odo", "journal.sqlite"),
 		AutoApply:   adapter.ReadSettings().AutoApply,
-		CurrentRung: 0, // rung-0 instrumentation: no auto-apply exists
+		CurrentRung: 0, // rungs stay streak-derived; auto_apply==main consumes the pref without a rung elevation (M16)
 		RungThresholds: map[string]int{
 			"rung_1": autonomyRung1Streak,
 			"rung_2": autonomyRung2Streak,
@@ -304,11 +307,20 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 			var p struct {
 				Action string `json:"action"`
 				DiffID int64  `json:"diff_id"`
+				Actor  string `json:"actor"`
 			}
 			if json.Unmarshal(ev.Payload, &p) != nil {
 				continue
 			}
 			if p.Action != "accept" && p.Action != "reject" {
+				continue
+			}
+			// M16: pipeline-landed diffs are tallied, never streaked —
+			// the ratchet must not drink its own bathwater.
+			if p.Actor == autoActor {
+				if p.Action == "accept" {
+					report.AutoAccepted++
+				}
 				continue
 			}
 			d, ok := byID[p.DiffID]

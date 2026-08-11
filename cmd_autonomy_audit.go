@@ -28,8 +28,8 @@ const autonomyAuditUsage = `usage: odo autonomy audit [--json]
 // renderAutonomyHuman prints the compact report (stdout).
 func renderAutonomyHuman(r ipc.AutonomyReport) {
 	fmt.Printf("odo autonomy audit — %s\n", r.ProjectRoot)
-	fmt.Printf("journal: %s · %d workstream(s) · %d conversation(s) scanned · %d resolutions\n",
-		r.Journal, r.WorkstreamsScanned, r.ConversationsScanned, r.Resolutions)
+	fmt.Printf("journal: %s · %d workstream(s) · %d conversation(s) scanned · %d resolutions (+%d auto-landed)\n",
+		r.Journal, r.WorkstreamsScanned, r.ConversationsScanned, r.Resolutions, r.AutoAccepted)
 	fmt.Printf("auto-apply: %s · current rung: %d (rung-1 at %d clean accepts, rung-2 at %d)\n",
 		r.AutoApply, r.CurrentRung, r.RungThresholds["rung_1"], r.RungThresholds["rung_2"])
 	if r.Resolutions == 0 {

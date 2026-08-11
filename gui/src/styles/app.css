@@ -2621,7 +2621,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   padding: 4px 0;
 }
 
-/* A4-lite: consensus badge — deterministic 2/3 tally */
+/* A4-lite: consensus badge — deterministic unanimous tally */
 .review-consensus {
   display: flex;
   align-items: center;

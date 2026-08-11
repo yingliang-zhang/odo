@@ -646,7 +646,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
                 {consensus.replace("_", " ")}
               </span>
               <span className="review-consensus-label">
-                {reviews.length} reviewer{reviews.length > 1 ? "s" : ""} · 2/3 gate
+                {reviews.length} reviewer{reviews.length > 1 ? "s" : ""} · unanimous gate
               </span>
             </div>
           )}

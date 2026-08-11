@@ -181,7 +181,7 @@ type Response struct {
 	WikiPath    string              `json:"wiki_path,omitempty"`
 	Epoch       int                 `json:"epoch,omitempty"`
 	Reviews     []ReviewResult      `json:"reviews,omitempty"`
-	Consensus   string              `json:"consensus,omitempty"` // A4-lite: deterministic 2/3 tally
+	Consensus   string              `json:"consensus,omitempty"` // A4-lite+v2: deterministic tally — accept requires unanimity
 	Settings    *Settings           `json:"settings,omitempty"`
 	WikiNotes   []WikiNoteInfo      `json:"wiki_notes,omitempty"`
 	WikiContent string              `json:"wiki_content,omitempty"`

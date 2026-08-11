@@ -293,6 +293,51 @@ type PatchStat struct {
 // change composed solely of these lines as C1 regardless of file type).
 var commentMarkers = []string{"//", "#", "/*", "*", "<!--", "-->"}
 
+// testAssertionTokens are the Go test-assertion markers the auto-land
+// weakened-tests gate counts in *_test.go hunks. t.Error covers Errorf,
+// t.Fatal covers Fatalf; assert./require. cover the testify family.
+var testAssertionTokens = []string{"assert.", "require.", "t.Error", "t.Fatal", "t.Fail"}
+
+// TestAssertionDelta counts assertion tokens on added vs removed content
+// lines across the *_test.go files of the patch at pathOnDisk (global
+// across files, so moving a test between files nets zero). A diff whose
+// removed count exceeds its added count shrinks proof coverage — the
+// auto-land gate blocks "agent weakens its own tests" (the silent-
+// disaster mode the panel's reviewers independently converged on).
+// Each hunk side arms independently: a deletion (b-side /dev/null) still
+// counts its removed assertions, a pure addition only its added ones.
+func TestAssertionDelta(pathOnDisk string) (added, removed int, err error) {
+	data, err := os.ReadFile(pathOnDisk)
+	if err != nil {
+		return 0, 0, err
+	}
+	var aTest, bTest bool // current file block's a/b sides are *_test.go
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			aTest, bTest = false, false
+		case strings.HasPrefix(line, "--- "):
+			p := unquoteDiffPath(strings.TrimPrefix(line, "--- "), "a/")
+			aTest = strings.HasSuffix(p, "_test.go")
+			if !strings.HasPrefix(line, "--- /dev/null") {
+				bTest = aTest // default until +++ overrides (handles missing +++)
+			}
+		case strings.HasPrefix(line, "+++ "):
+			p := unquoteDiffPath(strings.TrimPrefix(line, "+++ "), "b/")
+			bTest = p != "" && strings.HasSuffix(p, "_test.go")
+		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") && bTest:
+			for _, tok := range testAssertionTokens {
+				added += strings.Count(line, tok)
+			}
+		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") && aTest:
+			for _, tok := range testAssertionTokens {
+				removed += strings.Count(line, tok)
+			}
+		}
+	}
+	return added, removed, nil
+}
+
 // PatchStats parses the unified diff at pathOnDisk into per-file and total
 // line stats. Paths follow the same a/b-side and C-quoting rules as
 // DiffPaths. A file with zero content lines (mode-only changes) reports

@@ -1242,7 +1242,9 @@ func TestReviewDiff(t *testing.T) {
 	}
 }
 
-// TestConsensusVerdict tests the deterministic 2/3 tally logic.
+// TestConsensusVerdict tests the deterministic unanimous tally: accept
+// requires every reviewer; any reject dominates; a lone needs_fixes is
+// dissent and must NOT read as accept (the former 2/3 tally failed open).
 func TestConsensusVerdict(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1253,7 +1255,8 @@ func TestConsensusVerdict(t *testing.T) {
 		{"single accept", []ReviewResult{{Verdict: "accept"}}, "accept"},
 		{"single reject", []ReviewResult{{Verdict: "reject"}}, "reject"},
 		{"single needs_fixes", []ReviewResult{{Verdict: "needs_fixes"}}, "needs_fixes"},
-		{"2/3 accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "needs_fixes"}}, "accept"},
+		// Fail-open regression: under the 2/3 tally this read "accept" at N=3.
+		{"2/3 accept + 1 needs_fixes is NOT accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "needs_fixes"}}, "needs_fixes"},
 		{"3/3 accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "accept"}}, "accept"},
 		{"1/3 reject dominates", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "reject"}}, "reject"},
 		{"2/3 reject", []ReviewResult{{Verdict: "reject"}, {Verdict: "reject"}, {Verdict: "accept"}}, "reject"},
@@ -1261,8 +1264,11 @@ func TestConsensusVerdict(t *testing.T) {
 		{"N=2 both accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}}, "accept"},
 		{"N=2 split", []ReviewResult{{Verdict: "accept"}, {Verdict: "needs_fixes"}}, "needs_fixes"},
 		{"N=2 one reject", []ReviewResult{{Verdict: "accept"}, {Verdict: "reject"}}, "reject"},
-		{"N=4 three accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "needs_fixes"}}, "accept"},
+		{"N=4 three accept one needs_fixes is NOT accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "needs_fixes"}}, "needs_fixes"},
 		{"N=4 two accept one reject", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "reject"}, {Verdict: "needs_fixes"}}, "reject"},
+		// A review call that errored degrades to needs_fixes (reviewWithModel):
+		// it must block accept just like a deliberate dissent.
+		{"degraded review blocks accept", []ReviewResult{{Verdict: "accept"}, {Verdict: "accept"}, {Verdict: "needs_fixes", Comments: "review failed: boom"}}, "needs_fixes"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

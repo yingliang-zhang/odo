@@ -29,9 +29,10 @@ type Settings struct {
 	// M11 P3: parallelism cap (default 4)
 	MaxConcurrentRuns string `json:"max_concurrent_runs"` // e.g. "4"
 	// M15 (O-1 rung-0): autonomy pref. off|branch|main|all, default off.
-	// PARSED AND DISPLAYED ONLY — no behavior consumes it yet; writing
-	// auto-apply behavior above rung 0 is out of scope for rung-0
-	// instrumentation.
+	// M16 (O-1 v2): "main" IS consumed — diffs of clean runs go through
+	// the auto-land pipeline (internal/ipc/autoland.go). "branch"/"all"
+	// stay parsed-and-displayed only. Fail-closed parse unchanged: a
+	// typo must never silently widen apply scope.
 	AutoApply string `json:"auto_apply"`
 }
 

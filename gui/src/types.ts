@@ -263,7 +263,7 @@ export interface ReviewDiffResponse {
   ok: boolean;
   error?: string;
   reviews?: ReviewResult[];
-  consensus?: string; // A4-lite: deterministic 2/3 verdict ("accept" | "reject" | "needs_fixes")
+  consensus?: string; // A4-lite+v2: deterministic verdict ("accept" | "reject" | "needs_fixes"); accept requires unanimity
 }
 
 // ---------- M15 (O-1 rung-0): autonomy streak snapshot ----------
