@@ -284,3 +284,96 @@ func TestDiffPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestTestAssertionDelta pins the weakened-tests gate's counting contract:
+// assertion tokens are counted per side ONLY inside *_test.go blocks
+// (global across files, so a move nets zero), with /dev/null sides arming
+// independently. The auto-land gate blocks when removed > added.
+func TestTestAssertionDelta(t *testing.T) {
+	cases := []struct {
+		name       string
+		patch      string
+		wantAdd    int
+		wantRemove int
+	}{
+		{
+			name: "modify test file counts both sides",
+			patch: "diff --git a/x_test.go b/x_test.go\n" +
+				"--- a/x_test.go\n+++ b/x_test.go\n@@ -1,2 +1,3 @@\n" +
+				" func TestX(t *testing.T) {\n" +
+				"-\tassert.Equal(t, 1, got)\n" +
+				"+\tassert.Equal(t, 2, got)\n" +
+				"+\trequire.NoError(t, err)\n",
+			wantAdd:    2, // assert.Equal + require.NoError
+			wantRemove: 1,
+		},
+		{
+			name: "assertion tokens in non-test files are ignored",
+			patch: "diff --git a/main.go b/main.go\n" +
+				"--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n" +
+				"-\tassert.Equal(t, 0, x)\n" +
+				"+\tassert.Equal(t, 1, x)\n",
+		},
+		{
+			name: "per-block reset: tokens after a test block in a main.go block are ignored",
+			patch: "diff --git a/x_test.go b/x_test.go\n" +
+				"--- a/x_test.go\n+++ b/x_test.go\n@@ -1 +1,2 @@\n" +
+				" func TestX(t *testing.T) {}\n" +
+				"+\tt.Error(\"one\")\n" +
+				"diff --git a/main.go b/main.go\n" +
+				"--- a/main.go\n+++ b/main.go\n@@ -1 +1,2 @@\n" +
+				" package main\n" +
+				"+\tt.Error(\"two\")\n+\trequire.True(t, true)\n",
+			wantAdd: 1, // only the _test.go line
+		},
+		{
+			name: "new test file counts added only",
+			patch: "diff --git a/new_test.go b/new_test.go\n" +
+				"new file mode 100644\n--- /dev/null\n+++ b/new_test.go\n@@ -0,0 +1,2 @@\n" +
+				"+\trequire.True(t, ok)\n" +
+				"+\tt.Fatal(\"boom\")\n",
+			wantAdd: 2, // require.True + t.Fatal
+		},
+		{
+			name: "deleted test file counts removed only",
+			patch: "diff --git a/old_test.go b/old_test.go\n" +
+				"deleted file mode 100644\n--- a/old_test.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n" +
+				"-\trequire.True(t, ok)\n" +
+				"-\tt.Errorf(\"boom\")\n",
+			wantRemove: 2, // t.Error matches t.Errorf
+		},
+		{
+			name: "multiple tokens on one line add up",
+			patch: "diff --git a/x_test.go b/x_test.go\n" +
+				"--- a/x_test.go\n+++ b/x_test.go\n@@ -1 +1 @@\n" +
+				"-\tt.Fail()\n" +
+				"+\tassert.NoError(t, require.True(t, ok))\n",
+			wantAdd:    2, // assert. + require. on the same line
+			wantRemove: 1,
+		},
+		{
+			name: "rename test file nets zero",
+			patch: "diff --git a/x_test.go b/y_test.go\n" +
+				"--- a/x_test.go\n+++ b/y_test.go\n@@ -1 +1 @@\n" +
+				"-\tassert.True(t, ok)\n" +
+				"+\tassert.True(t, ok)\n",
+			wantAdd:    1,
+			wantRemove: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "d.diff")
+			if err := os.WriteFile(path, []byte(tc.patch), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			added, removed, err := TestAssertionDelta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if added != tc.wantAdd || removed != tc.wantRemove {
+				t.Errorf("delta = +%d/-%d, want +%d/-%d", added, removed, tc.wantAdd, tc.wantRemove)
+			}
+		})
+	}
+}

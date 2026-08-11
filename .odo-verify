@@ -1,0 +1,6 @@
+# Odo auto-land verify gate (M16 / O-1 v2).
+# The daemon runs the FIRST non-comment line as a shell command at a run's
+# worktree root; a diff may land without a human only if it exits 0.
+# Diffs touching THIS file are blocked by the supply-chain gate (self-
+# modification always requires a human).
+go build ./... && go vet ./... && go test ./...
