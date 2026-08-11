@@ -46,10 +46,11 @@ M0–M15 complete. 208 commits, ~44K lines (≈29.6K Go incl. tests + ≈14.0K T
 | Clipboard Paste Fix | save_attachment daemon command for clipboard image paste (webview → base64 → daemon → real path) | 43 E2E |
 | M12–M14 Memory + Context Polish | Verbatim replay w/ actionable fold chips, CJK recall, durable todo (journal-backed), cross-workstream matched recall, auto-distill chain, per-layer sha16 receipts + `total_prompt_bytes` | Go + 47 E2E |
 | M15 Outcome Loops | `odo skills audit` (receipt×outcome join, flag-only), `odo autonomy audit` (per-class streaks, rung-0 instrumentation, `auto_apply` pref parse), M11 comment truth, OMP memory probe (docs-only) | 15 Go + 47 E2E |
+| M16 Auto-Land | Pref-gated (`auto_apply: main`) unanimous-panel landing: protected-path / supply-chain / new-topdir / test-weakening mechanical gates, mandatory `.odo-verify` re-run, 87K-token cost breaker, grounded adversarial prompt, `consensusVerdict` unanimity (fail-open fix), journaled `auto_land_blocked` + `actor:"auto_panel"` audit (streak-excluded) | 7 Go + skip-gated live harness |
 
 ### Planned
 
-- **A1 earned-autonomy ratchet** — rung-0 instrumentation shipped (M15). Rung-1 (consensus-accepted diffs auto-landed on an `odo/auto-<ws>` branch, human merges in batches) is data-gated on real streak + override-rate numbers from `odo autonomy audit`
+- **A1 earned-autonomy ratchet** — rung-0 instrumentation shipped (M15); main-path auto-land shipped pref-gated with unanimous-panel review (M16). Still open: branch-rung landing (`odo/auto-<ws>` batch flow), data-gated on real streak + override-rate numbers from `odo autonomy audit`
 - **Tool-bearing skills** — skill directories (`SKILL.md` + `references/` + `scripts/`) scanned and receipted by directory content hash; agent-authorable scripts stay behind the human apply gate (B-strategy-2)
 - **Design-MoA for nontrivial tasks** — 3 blind design proposals → consolidator → journaled DESIGN LOCK (human amend/veto) → single implementer → existing MoA review; mechanical fixes stay single-model (B-strategy-2)
 - **Auto-register semantics** — projects must not auto-register on connect (real pain observed: probe/scratch dirs got registered during a test run); explicit consent or git-root gate

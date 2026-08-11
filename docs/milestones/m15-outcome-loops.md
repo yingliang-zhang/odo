@@ -63,6 +63,11 @@ applies, skips, or re-orders a review; the `auto_apply` pref is parsed and displ
 consumed. Rung-0 exists so a later milestone has evidence before any rung-1 behavior is
 designed.
 
+> M16 supersedes the "never consumed" clause for exactly one value: `auto_apply: main`
+> now gates the daemon-side unanimous-panel auto-land (m16-auto-land.md). `branch`/`all`
+> remain unconsumed; the streak computation is untouched (M16 lands journal with
+> `actor:"auto_panel"` and are excluded from rungs, never counted toward them).
+
 Diff classes (deterministic, from the journaled patch file, strict order C0→C1→C2→C3→""):
 
 | Class | Definition |

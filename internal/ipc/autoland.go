@@ -41,9 +41,10 @@ package ipc
 //	                                      panel ran (panel_disagreed)
 //
 // auto_apply values "branch"/"all" stay unconsumed (rung-0 contract:
-// only "main" has pipeline semantics). ADR-0003 amendment M16: the
-// auto-accept deferral lifts for DIFF LANDING ONLY — skill proposals
-// keep auto_accept deferred, and every land remains reversible (git).
+// only "main" has pipeline semantics). M16 amends the M15 O-1
+// no-auto-apply deferral for DIFF LANDING ONLY (m16-auto-land.md +
+// README row/A1): skill proposals keep auto_accept deferred, and every
+// land remains reversible (git).
 import (
 	"context"
 	"fmt"
