@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yingliang-zhang/odo/internal/ipc"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
@@ -51,12 +52,23 @@ import (
 //     labels — infrastructure noise is not skill signal; their terminals
 //     close the window whether or not a diff was journaled, so a failed
 //     run's receipts cannot bleed into the next outcome.
+//   - M17 F5 actor filter: review_action rows journaled with
+//     actor:"auto_panel" (ipc.AutoActor — the auto-land pipeline) are NOT
+//     human outcomes. They still close windows, and they get their own
+//     auto_accept/auto_reject labels reported as the separate `auto`
+//     count line, but every per-skill row AND the skill-free baseline
+//     excludes them (live proof pre-fix: seq 6668
+//     accept{actor:"auto_panel",diff_id:17} inflated accepts/baseline).
+//     Auto-land's moa_review rows keep the M15 weak-signal semantics
+//     (a tri-model consensus IS the weak signal), keyed off human
+//     override only.
 //
 // Reported per skill (grouped by receipt path, carrying the block hash of
 // the newest attributing window — the "last cohort"): injections (=
 // resolved outcomes with the skill in play), accepts, rejects, weak
 // rejects, accept/reject rates, the skill-free baseline rates, and a
-// deterministic flag. A skill is flagged only when ALL of: injections >=
+// deterministic flag; auto-land resolutions report as the separate
+// `auto` count line (F5). A skill is flagged only when ALL of: injections >=
 // 10, human rejects >= 3, rejects span >= 3 distinct conversations, and
 // reject-rate >= 2x the baseline reject-rate. Weak rejects weight 0.5 in
 // the rates, and the rate comparison runs cross-multiplied in integers —
@@ -114,10 +126,13 @@ type terminalInfo struct {
 }
 
 // reviewScan is one parsed review_action relevant to outcomes: human
-// accept/reject, or a moa_review with its consensus.
+// accept/reject, or a moa_review with its consensus. actor carries the
+// journaled provenance ("" = human click, ipc.AutoActor = the auto-land
+// pipeline — M17 F5).
 type reviewScan struct {
 	seq       int
 	action    string // "accept" | "reject" | "moa_review"
+	actor     string
 	diffID    int64
 	consensus string // moa_review only
 }
@@ -173,6 +188,7 @@ func scanConversation(events []store.Event) convScan {
 		case store.EventReviewAction:
 			var p struct {
 				Action    string `json:"action"`
+				Actor     string `json:"actor"`
 				DiffID    int64  `json:"diff_id"`
 				Consensus string `json:"consensus_verdict"`
 			}
@@ -181,9 +197,9 @@ func scanConversation(events []store.Event) convScan {
 			}
 			switch p.Action {
 			case "accept", "reject":
-				cs.reviews = append(cs.reviews, reviewScan{seq: ev.Seq, action: p.Action, diffID: p.DiffID})
+				cs.reviews = append(cs.reviews, reviewScan{seq: ev.Seq, action: p.Action, actor: p.Actor, diffID: p.DiffID})
 			case "moa_review":
-				cs.reviews = append(cs.reviews, reviewScan{seq: ev.Seq, action: p.Action, diffID: p.DiffID, consensus: p.Consensus})
+				cs.reviews = append(cs.reviews, reviewScan{seq: ev.Seq, action: p.Action, actor: p.Actor, diffID: p.DiffID, consensus: p.Consensus})
 			}
 		}
 	}
@@ -240,9 +256,12 @@ func convOutcomes(cs convScan, diffs []store.Diff, convID int64) []skillOutcome 
 
 	// Latest human action per diff (a diff resolves at most once, but keep
 	// the max-seq rule so pre-M15 double-review journals still parse).
+	// M17 F5: actor:"auto_panel" rows are NEVER the human action — the
+	// auto-land pipeline must not override moa weak outcomes nor masquerade
+	// as human accept/reject (live proof: seq 6668 inflated the accepts).
 	humanSeq := map[int64]int{}
 	for _, r := range cs.reviews {
-		if r.action == "accept" || r.action == "reject" {
+		if (r.action == "accept" || r.action == "reject") && r.actor != ipc.AutoActor {
 			if r.seq > humanSeq[r.diffID] {
 				humanSeq[r.diffID] = r.seq
 			}
@@ -306,6 +325,13 @@ func convOutcomes(cs convScan, diffs []store.Diff, convID int64) []skillOutcome 
 		switch {
 		case r.action == "accept" || r.action == "reject":
 			kind = r.action
+			if r.actor == ipc.AutoActor {
+				// M17 F5: auto-land resolutions get their OWN labels —
+				// excluded from per-skill rows AND the skill-free baseline,
+				// counted as the separate `auto` line. They still carry the
+				// in-play skills so the count is attributable.
+				kind = "auto_" + r.action
+			}
 		case weak[r.seq]:
 			kind = "weak_reject"
 		default:
@@ -386,6 +412,8 @@ type skillsAuditReport struct {
 	Rejects              int                `json:"rejects"`
 	WeakRejects          int                `json:"weak_rejects"`
 	SkillFreeOutcomes    int                `json:"skill_free_outcomes"`
+	AutoAccepts          int                `json:"auto_accepts"` // M17 F5: auto-land resolutions, excluded from labels/baseline
+	AutoRejects          int                `json:"auto_rejects"`
 	Skills               []skillAuditRow    `json:"skills"`
 	Baseline             skillAuditBaseline `json:"baseline"`
 	FlagThresholds       map[string]int     `json:"flag_thresholds"`
@@ -405,6 +433,9 @@ func aggregateSkills(outcomes []skillOutcome) (rows []skillAuditRow, base skillA
 	bySkill := map[string]*acc{}
 	var bInj, bAcc, bRej, bWeak int
 	for _, o := range outcomes {
+		if strings.HasPrefix(o.kind, "auto_") {
+			continue // M17 F5: auto-land resolutions feed only the `auto` line
+		}
 		if len(o.skills) == 0 {
 			bInj++
 			switch o.kind {
@@ -532,6 +563,10 @@ func collectSkillsAudit(ctx context.Context, jp journalProj) (skillsAuditReport,
 			report.Rejects++
 		case "weak_reject":
 			report.WeakRejects++
+		case "auto_accept":
+			report.AutoAccepts++
+		case "auto_reject":
+			report.AutoRejects++
 		}
 	}
 	rows, base := aggregateSkills(outcomes)
@@ -553,6 +588,10 @@ func renderSkillsAuditHuman(r skillsAuditReport) {
 	}
 	fmt.Printf("resolved outcomes: %d (accepts %d · rejects %d · weak rejects %d · skill-free %d)\n",
 		total, r.Accepts, r.Rejects, r.WeakRejects, r.SkillFreeOutcomes)
+	if auto := r.AutoAccepts + r.AutoRejects; auto > 0 {
+		fmt.Printf("auto outcomes: %d (auto-land actor %q: accepts %d · rejects %d — excluded from labels and baseline)\n",
+			auto, ipc.AutoActor, r.AutoAccepts, r.AutoRejects)
+	}
 	fmt.Printf("baseline (skill-free outcomes): accept-rate %.1f%% · reject-rate %.1f%% (n=%d)\n",
 		r.Baseline.AcceptRate*100, r.Baseline.RejectRate*100, r.Baseline.Outcomes)
 	if len(r.Skills) == 0 {

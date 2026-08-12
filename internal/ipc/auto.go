@@ -15,10 +15,16 @@ package ipc
 //   skipped            — evaluation or disarm (detail reason):
 //                        disabled | below_min_events | below_min_bytes |
 //                        hourly_cap | daily_cap | backoff | backoff_suspended |
-//                        window_exceeds_prompt_budget | run_active |
-//                        distill_active | slash_active | disarmed_by_send |
-//                        disarmed_by_user | superseded_by_manual |
-//                        superseded_by_urgent | superseded_by_activity
+//                        run_active | distill_active | slash_active |
+//                        disarmed_by_send | disarmed_by_user |
+//                        superseded_by_manual | superseded_by_urgent |
+//                        superseded_by_activity
+//
+// M17 F1 retired window_exceeds_prompt_budget: the render filter
+// (distillRender) keeps real windows under the cap by construction, and an
+// over-cap window now folds its renderable tail with the SAME omission
+// declaration the manual path always used — no more hard-skip that never
+// re-armed (the 0-fired/25-skips production stall).
 //   cancelled_by_send  — a send/steer/slash cancelled an in-flight AUTO
 //                        distill at the pre-note checkpoint (cancel-before-
 //                        note); post-checkpoint the fold is committed and
@@ -173,31 +179,27 @@ func (s *Server) resolvedIdle(p autoPrefs) time.Duration {
 	return p.idle
 }
 
-// windowStats measures one un-folded epoch window. eligibleBytes excludes
-// /panel and /vision agent_text events (payload-flagged advisory answers):
-// a 30KB panel reply must not trigger a fold by itself (M12 eligibility).
+// windowStats measures one un-folded epoch window. eligibleBytes is the
+// POST-FILTER rendered size (M17 F1): /panel and /vision advisory
+// agent_text excluded, thinking/tool-result payloads tombstoned,
+// review_action/memory_update one-lined — the bytes the distiller is
+// actually sent, so a 30KB panel reply or a 200KB thinking dump never
+// triggers (or blocks) a fold by itself.
 type windowStats struct {
 	events        int
 	eligibleBytes int
 }
 
-// measureWindow sizes the window with capEvents' render formula
-// (len(type)+len(payload)+64) so eligibility, urgency, and coverage
-// honesty all speak the same byte unit.
+// measureWindow sizes the window with distillRenderSize — the same
+// accounting capEvents and the distiller's render use, so eligibility,
+// urgency, and coverage honesty all speak the exact byte unit of what's
+// sent (M17 F1: previously it measured the RAW payload the prompt never
+// rendered, so windows crossed the 256 KiB cap inside one run).
 func measureWindow(window []store.Event) windowStats {
 	var st windowStats
 	for _, ev := range window {
 		st.events++
-		if ev.Type == store.EventAgentText {
-			var p struct {
-				Panel  bool `json:"panel"`
-				Vision bool `json:"vision"`
-			}
-			if jsonUnmarshalOK(ev.Payload, &p) && (p.Panel || p.Vision) {
-				continue
-			}
-		}
-		st.eligibleBytes += len(ev.Type) + len(ev.Payload) + 64
+		st.eligibleBytes += distillRenderSize(ev)
 	}
 	return st
 }
@@ -281,9 +283,9 @@ func (s *Server) releaseSlashSlot(ctx context.Context, convID int64) {
 // and an eligible window arms one idle timer. An already-armed timer
 // short-circuits re-arming but NOT re-measurement: a window that crossed
 // the urgent threshold since the arm supersedes its idle timer (T3's
-// "fire without idle" has no expiry — the upgrade also keeps the
-// window_exceeds_prompt_budget corner reachable instead of waiting out a
-// doomed idle). Concurrency coexistence (live run, in-flight distill,
+// "fire without idle" has no expiry — an over-cap window folds with a
+// declared omission now instead of blocking, M17 F1). Concurrency
+// coexistence (live run, in-flight distill,
 // live slash) short-circuits silently — those states re-visit this
 // function on their own completion. Caller holds s.mu.
 func (s *Server) maybeAutoAfterActivityLocked(ctx context.Context, convID int64) {
@@ -322,19 +324,6 @@ func (s *Server) maybeAutoAfterActivityLocked(ctx context.Context, convID int64)
 			"trigger=%s window_events=%d window_bytes=%d reason=superseded_by_urgent",
 			entry.trigger, stats.events, stats.eligibleBytes))
 	}
-
-	// Coverage honesty: an auto fold whose prompt would silently drop
-	// oldest events never fires — skip + journal + surface the block via
-	// pending_counts (a manual distill remains the honest way out; T3
-	// urgency makes reaching this a corner case by construction).
-	if _, omitted := capEvents(window, distillPromptBytesCap); omitted > 0 {
-		s.autoBlocked[convID] = "window_exceeds_prompt_budget"
-		s.journalAuto(ctx, convID, "skipped", fmt.Sprintf(
-			"trigger=%s window_events=%d window_bytes=%d reason=window_exceeds_prompt_budget",
-			distillTriggerIdle, stats.events, stats.eligibleBytes))
-		return
-	}
-	delete(s.autoBlocked, convID)
 
 	if stats.events < prefs.minEvents {
 		s.journalAuto(ctx, convID, "skipped", fmt.Sprintf(
@@ -442,13 +431,6 @@ func (s *Server) runAutoDistill(convID int64, trigger string) {
 		skip("below_min_bytes")
 		return
 	}
-	if _, omitted := capEvents(window, distillPromptBytesCap); omitted > 0 {
-		s.mu.Lock()
-		s.autoBlocked[convID] = "window_exceeds_prompt_budget"
-		s.mu.Unlock()
-		skip("window_exceeds_prompt_budget")
-		return
-	}
 
 	// Failure backoff: consecutive failed rows since the newest
 	// user-visible reset (user message or successful distill marker).
@@ -505,7 +487,6 @@ func (s *Server) runAutoDistill(convID int64, trigger string) {
 		skip("slash_active")
 		return
 	}
-	delete(s.autoBlocked, convID)
 	s.distilling[convID] = struct{}{}
 	s.distillKind[convID] = trigger
 	distillCtx, cancel := context.WithCancel(ctx)
@@ -642,9 +623,7 @@ func (s *Server) StartupAutoScan(ctx context.Context) error {
 			case stats.eligibleBytes < prefs.minBytes:
 				reason = "below_min_bytes"
 			default:
-				if _, omitted := capEvents(window, distillPromptBytesCap); omitted > 0 {
-					reason = "window_exceeds_prompt_budget"
-				} else if last := parseEventTime(events[len(events)-1].CreatedAt); time.Since(last) < idle {
+				if last := parseEventTime(events[len(events)-1].CreatedAt); time.Since(last) < idle {
 					reason = "window_fresh" // recent activity — the idle path owns it
 				}
 			}
@@ -703,8 +682,25 @@ func (s *Server) migrateAutoCuratePref(ctx context.Context, convs []store.Conver
 // older than auto_curate_max_age_days. NEVER chained (no auto after every
 // distill regardless of state) — the thresholds are the trigger. Runs
 // detached: distill/startup callers are never blocked on a curate.
+//
+// M17 F4:
+//   - Never-curated age leg: with lastAt == nil the age source is the
+//     OLDEST UNRETRACTED epoch note's mtime — epoch notes are the curation
+//     input (source of truth; topic pages are derived artifacts), so
+//     their age measures curation staleness, and a never-curated project
+//     (the M12 unreachable-by-construction case) can fire.
+//   - Failure backoff: the newest curator failure (memory_update
+//     {layer:"curator", cause:"failed"|"gate_failed"}, any trigger —
+//     failure modes are input-state facts) suppresses auto retries for
+//     autoCurateFailureBackoff; the suppression is DERIVED (journal rows,
+//     like the auto-distill ladder) and a newer passing curate resets it.
+//     The blocked evaluation journals skipped{reason:"backoff"} with the
+//     journaled next-eligible-at — evaluations that would not fire anyway
+//     stay silent.
 func (s *Server) maybeAutoCurate(projectID, convID int64) {
+	s.curateWG.Add(1)
 	go func() {
+		defer s.curateWG.Done()
 		ctx := context.Background()
 		prefs := s.resolveAutoPrefs()
 		if !prefs.enabled {
@@ -725,25 +721,63 @@ func (s *Server) maybeAutoCurate(projectID, convID int64) {
 			maxAge = s.autoCurateAge // test seam (no journal backdating)
 		}
 		trigger := ""
-		if since >= prefs.curateMinNotes {
+		switch {
+		case since >= prefs.curateMinNotes:
 			trigger = "auto_notes"
-		} else if lastAt != nil && time.Since(parseEventTime(*lastAt)) >= maxAge {
-			// The age trigger needs a curate to be old — a never-curated
-			// project would otherwise fire after its very first note.
-			trigger = "auto_age"
+		case lastAt != nil:
+			if time.Since(parseEventTime(*lastAt)) >= maxAge {
+				trigger = "auto_age"
+			}
+		default:
+			// Never curated: age the oldest unretracted note (retracted
+			// ones are dead knowledge — they must not drag the clock).
+			retracted := s.retractedNotes(ctx, convID)
+			if oldest, ok := oldestUnretractedNoteMtime(s.projectRoot, retracted); ok &&
+				time.Since(oldest) >= maxAge {
+				trigger = "auto_age"
+			}
 		}
 		if trigger == "" {
 			return
 		}
-		s.runAutoCurate(ctx, convID, trigger, since)
+		// Failure backoff: a curate failure newer than the newest pass
+		// gates auto retries until failedAt + autoCurateFailureBackoff.
+		if failAt, err := s.store.LatestCurateFailureAt(ctx, projectID); err != nil {
+			log.Printf("auto-curate: failure state: %v", err)
+		} else if failAt != nil && (lastAt == nil || *failAt > *lastAt) {
+			if next := parseEventTime(*failAt).Add(autoCurateFailureBackoff); time.Now().Before(next) {
+				s.journalCurateSkip(ctx, convID, trigger, since, next)
+				return
+			}
+		}
+		s.runAutoCurate(ctx, projectID, convID, trigger, since)
 	}()
+}
+
+// autoCurateFailureBackoff is the flat wait after a failed curate before
+// auto-curate may retry — the M17 minimal mirroring of the auto-distill
+// ladder (one step, derived from the journal, success resets).
+const autoCurateFailureBackoff = 24 * time.Hour
+
+// journalCurateSkip journals one memory_update{layer:"curator",
+// cause:"skipped"} for a backoff-gated evaluation: the trigger it blocked
+// and the next-eligible-at timestamp, so "why no curate?" has a durable
+// journal answer.
+func (s *Server) journalCurateSkip(ctx context.Context, convID int64, trigger string, notesSince int, nextEligibleAt time.Time) {
+	if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+		"layer":  "curator",
+		"cause":  "skipped",
+		"detail": fmt.Sprintf("trigger=%s notes_since=%d reason=backoff next_eligible_at=%s", trigger, notesSince, nextEligibleAt.UTC().Format(time.RFC3339)),
+	})); err != nil {
+		log.Printf("auto-curate: journal skip: %v", err)
+	}
 }
 
 // runAutoCurate takes the project-wide curate slot and drives the shared
 // curate pipeline with its trigger provenance. curateCore journals
 // failures itself (including citation-gate failures); this wrapper only
 // logs. Notes-since-last is re-measured inside curateCore for the marker.
-func (s *Server) runAutoCurate(ctx context.Context, convID int64, trigger string, notesSince int) {
+func (s *Server) runAutoCurate(ctx context.Context, projectID, convID int64, trigger string, notesSince int) {
 	s.mu.Lock()
 	if s.curating {
 		s.mu.Unlock()
@@ -756,7 +790,7 @@ func (s *Server) runAutoCurate(ctx context.Context, convID int64, trigger string
 		s.curating = false
 		s.mu.Unlock()
 	}()
-	if err := s.curateCore(ctx, convID, trigger, notesSince); err != nil {
+	if err := s.curateCore(ctx, projectID, convID, trigger, notesSince); err != nil {
 		log.Printf("auto-curate (%s): %v", trigger, err)
 	}
 }

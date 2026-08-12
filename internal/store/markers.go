@@ -120,3 +120,55 @@ func (s *Store) AutoCurateState(ctx context.Context, projectID int64) (distillsS
 	}
 	return distillsSince, lastCurateAt, nil
 }
+
+// LatestCurateFailureAt returns the created_at of the newest curator
+// FAILURE row (memory_update{layer:"curator", cause:"failed" |
+// "gate_failed"}) project-wide — nil when no failure is journaled. M17
+// F4: the auto-curate failure backoff derives from it plus
+// AutoCurateState's last-passing-curate timestamp (a success newer than
+// the newest failure resets the backoff).
+func (s *Store) LatestCurateFailureAt(ctx context.Context, projectID int64) (*string, error) {
+	var last sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(e.created_at) FROM events e
+		 JOIN conversations c ON e.conversation_id = c.id
+		 JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE w.project_id = ?
+		   AND e.type = 'memory_update'
+		   AND e.payload_json LIKE '%"layer":"curator"%'
+		   AND (e.payload_json LIKE '%"cause":"failed"%'
+		        OR e.payload_json LIKE '%"cause":"gate_failed"%')`, projectID).Scan(&last)
+	if err != nil {
+		return nil, fmt.Errorf("store: latest curate failure for project %d: %w", projectID, err)
+	}
+	if !last.Valid {
+		return nil, nil
+	}
+	v := last.String
+	return &v, nil
+}
+
+// DistillMarkerExistsForEpoch reports whether ANY workstream of the
+// project journaled a distill marker for epoch N — the journal half of
+// the curator's ghost-citation check (M17 F4): a citation naming an epoch
+// with no note file AND no marker never existed (ghost → the line is
+// stripped); a marker with no note file is a real dangling reference
+// (the file vanished after the fold — the citation gate still aborts).
+// The match keys on the marker's note_path suffix ("…-epoch-N.md\""), so
+// numeric prefixes never collide ("epoch-2" vs "epoch-21").
+func (s *Store) DistillMarkerExistsForEpoch(ctx context.Context, projectID int64, epoch int) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM events e
+		 JOIN conversations c ON e.conversation_id = c.id
+		 JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE w.project_id = ?
+		   AND e.type = 'review_action'
+		   AND e.payload_json LIKE '%"action":"distill"%'
+		   AND e.payload_json LIKE ?`, projectID,
+		fmt.Sprintf(`%%-epoch-%d.md"%%`, epoch)).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("store: distill marker for epoch %d, project %d: %w", epoch, projectID, err)
+	}
+	return n > 0, nil
+}

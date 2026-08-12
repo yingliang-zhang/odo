@@ -264,10 +264,10 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 
 // retractedNotes reads the conversation's memory_update{layer:"note"} events
 // and returns the set of `<ws>-epoch-<N>` note names currently retracted.
-// The detail format is `<oldNote> contradicted by <newNote>: <snippet>` — the
-// first token is the retracted note name. Events apply in journal order: a
-// retract adds, an unretract removes (forward-compatible; M6 never emits
-// unretract, so a retraction stands for the milestone).
+// The detail format is `<oldNote> contradicted by <newNote>: <snippet>` (or
+// the unretract emitter's `<name> unretracted by user …`, M17 F3) — the
+// first token is the note name. Events apply in journal order: a retract
+// adds, an unretract removes.
 func (s *Server) retractedNotes(ctx context.Context, conversationID int64) map[string]bool {
 	return retractedNoteSet(ctx, s.store, conversationID)
 }
@@ -277,11 +277,21 @@ func (s *Server) retractedNotes(ctx context.Context, conversationID int64) map[s
 // retraction set of a candidate's OWN workstream conversation, which the
 // Server method — bound to the current conversation — cannot reach.
 func retractedNoteSet(ctx context.Context, st *store.Store, conversationID int64) map[string]bool {
-	out := map[string]bool{}
 	events, err := st.ListEvents(ctx, conversationID, 0)
 	if err != nil {
-		return out
+		return map[string]bool{}
 	}
+	return RetractionSetFromEvents(events)
+}
+
+// RetractionSetFromEvents derives the retracted-note name set from a
+// conversation's events — the events-only spelling of retractedNoteSet,
+// exported for the `odo unretract` CLI's idempotence check (same
+// derivation the recall path gates on, like cmd_todo reusing
+// TodoStateFromEvents). The detail format is `<oldNote> ...` — the first
+// token is the note name; a retract adds, an unretract removes.
+func RetractionSetFromEvents(events []store.Event) map[string]bool {
+	out := map[string]bool{}
 	for _, ev := range events {
 		if ev.Type != store.EventMemoryUpdate {
 			continue

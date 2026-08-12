@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -766,53 +767,94 @@ func TestSlashGateDistillRefusesDuringSlash(t *testing.T) {
 	}
 }
 
-// TestAutoCoverageHonesty: an auto fold whose prompt would drop oldest
-// events never fires — skipped + journaled + surfaced via pending_counts
-// until an honest (manual) fold clears the block.
-func TestAutoCoverageHonesty(t *testing.T) {
+// TestAutoOverCapFoldDeclaresOmission (M17 F1): an over-cap window no
+// longer hard-skips with window_exceeds_prompt_budget (the pre-M17
+// 0-fired/25-skips stall) — the fold fires on the renderable tail,
+// distillPrompt declares the omission with the manual path's construction,
+// and the scheduler re-arms for the next window.
+func TestAutoOverCapFoldDeclaresOmission(t *testing.T) {
+	// Unit: an over-cap window keeps the newest events whose RENDERED size
+	// fits and prepends the prompt-level omission declaration (the same
+	// "[odo: … seq A–B, omitted …]" construction the manual path used).
+	var events []store.Event
+	for i := 1; i <= 7; i++ {
+		payload, _ := json.Marshal(map[string]interface{}{"text": strings.Repeat("x", 40000)})
+		events = append(events, store.Event{Seq: i, Type: store.EventUserMessage, Payload: payload})
+	}
+	prompt := distillPrompt(events)
+	if !strings.Contains(prompt, "[odo: 1 older event(s), seq 1–1, omitted") {
+		t.Errorf("over-cap prompt lacks the omission declaration:\n%.200s", prompt)
+	}
+	if !strings.Contains(prompt, "seq 2") {
+		t.Error("renderable tail (seq 2+) missing from the over-cap prompt")
+	}
+
+	// Daemon: 7×40KB ≈ 280KB raw ≈ over-cap post-filter (plain
+	// user_message renders in full). Urgency must ARM and FIRE — never a
+	// window_exceeds_prompt_budget skip.
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
-	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Honest fold\n")
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Distilled\n\nOver-cap fold.\n")
 	rig := startRig(t, root)
 	defer rig.stop(t)
 	enableAuto(rig, 0, -1, 0)
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
 
-	// 7×40KB ≈ 280KB > the 256KB prompt budget: capEvents would omit —
-	// urgency must not fire, the skip must journal, the badge must show.
 	journalWindow(t, rig, convID, 7, 40000)
 	rig.server.mu.Lock()
 	rig.server.maybeAutoAfterActivityLocked(context.Background(), convID)
 	rig.server.mu.Unlock()
 
-	if pendingEntry(rig.server, convID) != nil {
-		t.Error("armed a fold whose prompt would omit events")
+	entry := pendingEntry(rig.server, convID)
+	if entry == nil {
+		t.Fatal("over-cap window did not arm (pre-M17 this hard-blocked)")
 	}
-	rows := autoRows(t, rig, convID, "skipped")
-	if len(rows) != 1 || !strings.Contains(rows[0]["detail"].(string), "window_exceeds_prompt_budget") {
-		t.Fatalf("skips = %v, want window_exceeds_prompt_budget", rows)
-	}
-	pc := rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
-	foundBlock := false
-	for _, a := range pc.AutoDistill {
-		if a.ConversationID == convID && a.BlockedReason == "window_exceeds_prompt_budget" {
-			foundBlock = true
-		}
-	}
-	if !foundBlock {
-		t.Errorf("pending_counts auto_distill = %+v, want the coverage block surfaced", pc.AutoDistill)
+	if entry.trigger != distillTriggerUrgent {
+		t.Errorf("pending trigger = %q, want urgent (>128KB post-filter bytes)", entry.trigger)
 	}
 
-	// The manual distill is the honest way out (its prompt declares the
-	// omission); a successful fold clears the badge.
-	rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
-	pc = rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
-	for _, a := range pc.AutoDistill {
-		if a.ConversationID == convID && a.BlockedReason != "" {
-			t.Errorf("block survived a successful manual fold: %+v", a)
+	waitForCond(t, 15*time.Second, "urgent fold of the over-cap window", func() bool {
+		for _, m := range payloadsByAction(t, allEvents(t, rig, convID), "distill") {
+			if m["trigger"] == distillTriggerUrgent {
+				return true
+			}
 		}
+		return false
+	})
+	for _, row := range autoRows(t, rig, convID, "skipped") {
+		if strings.Contains(row["detail"].(string), "window_exceeds_prompt_budget") {
+			t.Errorf("overage still journals the retired skip: %v", row["detail"])
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "wiki", "main-epoch-1.md")); err != nil {
+		t.Errorf("over-cap fold wrote no note: %v", err)
+	}
+
+	// Wait for the fold to FULLY exit: the marker is journaled inside
+	// distillCore while runAutoDistill's deferred cleanup (clearing
+	// distilling/distillKind) runs shortly after — evaluating in that
+	// window returns early on "a fold is imminent" and the test's re-arm
+	// assertion flakes ~50%. Production semantics are identical: the arm
+	// happens on the next activity AFTER the fold exits.
+	waitForCond(t, 15*time.Second, "over-cap fold fully exited", func() bool {
+		rig.server.mu.Lock()
+		defer rig.server.mu.Unlock()
+		_, folding := rig.server.distillKind[convID]
+		return !folding
+	})
+
+	// Re-arm: the fold retired the window; fresh eligible activity arms
+	// the next idle schedule instead of staying stuck on a block.
+	journalWindow(t, rig, convID, 6, 3000)
+	rig.server.mu.Lock()
+	rig.server.maybeAutoAfterActivityLocked(context.Background(), convID)
+	rig.server.mu.Unlock()
+	if entry := pendingEntry(rig.server, convID); entry == nil {
+		t.Error("no re-arm for the window after the over-cap fold (stuck)")
+	} else if entry.trigger != distillTriggerIdle {
+		t.Errorf("re-arm trigger = %q, want idle", entry.trigger)
 	}
 }
 
@@ -986,21 +1028,53 @@ func TestAutoCurateAgeTrigger(t *testing.T) {
 		return false
 	})
 
-	// A never-curated project with <4 notes must NOT treat age as a
-	// trigger (no marker exists to be old).
+	// M17 F4 contract: a NEVER-CURATED project may now age-trigger — the
+	// age source is the oldest unretracted epoch note's mtime. A project
+	// whose notes are FRESH (mtime < threshold) must NOT fire; a project
+	// with a note older than the threshold MUST fire. Both are
+	// deterministic (the evaluation returns before any arm when the age
+	// leg is unmet), so neither leg leans on a timing window.
 	root2 := initRepo(t)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
 	rig2 := startRig(t, root2)
 	defer rig2.stop(t)
-	enableAuto(rig2, 0, -1, -time.Nanosecond)
+	enableAuto(rig2, 0, -1, 7*24*time.Hour) // real threshold: fresh notes are not stale
 	boot2 := rig2.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root2})
 	conv2 := boot2.Conversation.ID
 	writeNote(t, root2, "main-epoch-1", "# Epoch 1\n\nOnly note.\n")
 	rig2.server.maybeAutoCurate(projectIDOf(t, rig2, conv2), conv2)
-	time.Sleep(300 * time.Millisecond)
+	// Deterministic: maybeAutoCurate Add()s before spawning and the
+	// evaluation returns synchronously inside the detached goroutine —
+	// after the drain, any fire that could have happened already
+	// journaled its marker. No sleep window.
+	rig2.server.curateWG.Wait()
 	for _, m := range payloadsByAction(t, allEvents(t, rig2, conv2), "curate") {
-		t.Errorf("never-curated project fired a(curate) at 1 note: %v", m)
+		t.Errorf("never-curated project with a FRESH note fired curate: %v", m)
 	}
+
+	// Positive leg: same shape, but the note's mtime is backdated past the
+	// threshold — the never-curated age leg MUST fire.
+	root3 := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	rig3 := startRig(t, root3)
+	defer rig3.stop(t)
+	enableAuto(rig3, 0, -1, 7*24*time.Hour)
+	boot3 := rig3.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root3})
+	conv3 := boot3.Conversation.ID
+	writeNote(t, root3, "main-epoch-1", "# Epoch 1\n\nOld note.\n")
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root3, "wiki", "main-epoch-1.md"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	rig3.server.maybeAutoCurate(projectIDOf(t, rig3, conv3), conv3)
+	waitForCond(t, 10*time.Second, "never-curated auto_age curate marker", func() bool {
+		for _, m := range payloadsByAction(t, allEvents(t, rig3, conv3), "curate") {
+			if m["trigger"] == "auto_age" {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // TestAutoCurateDeadCitationGate: a citation naming no on-disk note (or an
@@ -1061,26 +1135,42 @@ func TestAutoCurateDeadCitationGate(t *testing.T) {
 
 // TestCheckTopicCitations (unit): the citation-liveness pre-check —
 // qualified exists → kept; bare unambiguous → repaired; bare ambiguous →
-// dead; qualified missing → dead; non-epoch parens are not citations.
+// dead; qualified missing with a journaled marker (the epoch existed, the
+// file vanished) → dead; ghost citation (epoch never existed: no file, no
+// marker) → the line is STRIPPED, not dead; non-epoch parens are not
+// citations.
 func TestCheckTopicCitations(t *testing.T) {
 	root := t.TempDir()
 	writeNote(t, root, "main-epoch-1", "x\n")
 	writeNote(t, root, "main-epoch-2", "x\n")
 	writeNote(t, root, "feature-epoch-1", "x\n")
 
+	// Epoch 9 journaled a distill marker but its file is gone (real
+	// dangling); every other epoch has no marker → ghosts.
+	markerForEpoch := func(epoch int) bool { return epoch == 9 }
+
 	topics := []topic{
 		{Title: "T", Slug: "t", Bullets: []string{
 			"- qualified and live (main-epoch-2)",
 			"- bare and unambiguous (epoch-2)",
 			"- bare and ambiguous (epoch-1)",
-			"- qualified but missing (ui-epoch-9)",
+			"- qualified but missing, marker journaled (ui-epoch-9)",
+			"- ghost claim citing an epoch that never was (ghostly-epoch-41)",
+			"- bare ghost (epoch-42)",
+			// DSF P0-fix: a LIVE citation plus a ghost on the same line —
+			// the line stays (its fact is provenanced), only the phantom
+			// token is scrubbed; whole-line stripping would destroy it.
+			"- provenanced fact (main-epoch-2) plus stale ghost (ghostly-epoch-43)",
 			"- prose parens (see README) stay",
 			"- no parens at all",
 		}},
 	}
-	repaired, dead := checkTopicCitations(root, topics)
-	if len(repaired) != 1 || len(repaired[0].Bullets) != 6 {
-		t.Fatalf("repaired = %+v, want the topic with 6 bullets", repaired)
+	repaired, dead, stripped := checkTopicCitations(root, topics, markerForEpoch)
+	if len(repaired) != 1 || len(repaired[0].Bullets) != 7 {
+		t.Fatalf("repaired = %+v, want the topic with 7 bullets (ghost-token-only lines stripped)", repaired)
+	}
+	if got := repaired[0].Bullets[4]; got != "- provenanced fact (main-epoch-2) plus stale ghost" {
+		t.Errorf("live+ghost bullet = %q, want kept with only the ghost token scrubbed", got)
 	}
 	if !strings.HasSuffix(repaired[0].Bullets[1], "(main-epoch-2)") {
 		t.Errorf("bare unambiguous bullet repaired to %q, want (main-epoch-2)", repaired[0].Bullets[1])
@@ -1089,14 +1179,55 @@ func TestCheckTopicCitations(t *testing.T) {
 		t.Errorf("qualified live bullet changed: %q", repaired[0].Bullets[0])
 	}
 	if len(dead) != 2 {
-		t.Fatalf("dead = %v, want the ambiguous + missing citations", dead)
+		t.Fatalf("dead = %v, want the ambiguous + real dangling citations", dead)
 	}
 	gotTokens := dead[0].token + "|" + dead[1].token
 	if gotTokens != "(epoch-1)|(ui-epoch-9)" {
 		t.Errorf("dead tokens = %q, want (epoch-1)|(ui-epoch-9)", gotTokens)
 	}
-	if !strings.Contains(repaired[0].Bullets[4], "(see README)") {
-		t.Errorf("prose parens mangled: %q", repaired[0].Bullets[4])
+	if len(stripped) != 3 {
+		t.Fatalf("stripped = %v, want all three ghost tokens", stripped)
+	}
+	if s := stripped[0].token + "|" + stripped[1].token + "|" + stripped[2].token; s != "(ghostly-epoch-41)|(epoch-42)|(ghostly-epoch-43)" {
+		t.Errorf("stripped tokens = %q, want (ghostly-epoch-41)|(epoch-42)|(ghostly-epoch-43)", s)
+	}
+	for _, b := range repaired[0].Bullets {
+		if strings.Contains(b, "epoch-41") || strings.Contains(b, "epoch-42") || strings.Contains(b, "epoch-43") {
+			t.Errorf("ghost citation survived the strip: %q", b)
+		}
+	}
+	if !strings.Contains(repaired[0].Bullets[5], "(see README)") {
+		t.Errorf("prose parens mangled: %q", repaired[0].Bullets[5])
+	}
+	if repaired[0].Bullets[6] != "- no parens at all" {
+		t.Errorf("paren-free bullet changed: %q", repaired[0].Bullets[6])
+	}
+}
+
+// TestCheckTopicCitationsAllGhostEmptiesTopic: a topic whose every bullet
+// cited ghost epochs is pure confabulation — the page is dropped from the
+// generation, never written as an empty shell.
+func TestCheckTopicCitationsAllGhostEmptiesTopic(t *testing.T) {
+	root := t.TempDir()
+	writeNote(t, root, "main-epoch-1", "x\n")
+	noMarkers := func(int) bool { return false }
+
+	topics := []topic{
+		{Title: "Ghost", Slug: "ghost", Bullets: []string{
+			"- confabulated claim (ui-epoch-7)",
+			"- another (epoch-9)",
+		}},
+		{Title: "Live", Slug: "live", Bullets: []string{"- real (main-epoch-1)"}},
+	}
+	repaired, dead, stripped := checkTopicCitations(root, topics, noMarkers)
+	if len(dead) != 0 {
+		t.Errorf("dead = %v, want none (all ghosts)", dead)
+	}
+	if len(stripped) != 2 {
+		t.Errorf("stripped = %v, want both ghost tokens", stripped)
+	}
+	if len(repaired) != 1 || repaired[0].Slug != "live" {
+		t.Errorf("repaired = %+v, want only the live topic", repaired)
 	}
 }
 

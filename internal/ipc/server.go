@@ -88,6 +88,7 @@ type Server struct {
 	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
 	curating   bool               // a curate pass is in flight (M11 P0)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
+	curateWG   sync.WaitGroup     // detached auto-curates (M17: drained at Wait/teardown)
 
 	// acceptMu serializes the accept critical section (Q6 #6, previously
 	// unadjudicated): two concurrent accepts — human + auto-land, or two
@@ -115,7 +116,6 @@ type Server struct {
 	autoPending  map[int64]*autoPendingEntry // conversationID -> scheduled (not yet fired) auto-distill
 	autoInFlight map[int64]*autoInFlight     // conversationID -> firing/fired auto-distill cancel handle
 	slashing     map[int64]int               // conversationID -> live /panel+//vision queries (fold-integrity gate)
-	autoBlocked  map[int64]string            // conversationID -> coverage-honesty skip reason surfaced via pending_counts
 
 	// Test seams (zero in production): autoIdle overrides the prefs-resolved
 	// idle (bypasses the 15s daemon floor); autoJitter caps the T2 startup
@@ -152,7 +152,6 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		autoPending:  make(map[int64]*autoPendingEntry),
 		autoInFlight: make(map[int64]*autoInFlight),
 		slashing:     make(map[int64]int),
-		autoBlocked:  make(map[int64]string),
 		autoJitter:   autoStartupJitterMax,
 	}
 	s.adapters[""] = ad
@@ -205,11 +204,13 @@ func (s *Server) Serve(listener net.Listener) error {
 }
 
 // Wait blocks until every accepted connection's handler goroutine has
-// returned. Call after Serve returns (the listener is closed) to drain
+// returned — and every detached auto-curate (M17) has journaled its
+// outcome. Call after Serve returns (the listener is closed) to drain
 // in-flight requests — e.g. a distill still inside its 10-minute agent run —
 // before shutdown cleanup kills agents and closes the journal.
 func (s *Server) Wait() {
 	s.wg.Wait()
+	s.curateWG.Wait()
 }
 
 // handleConn processes requests on a connection until EOF. Requests and
@@ -1497,9 +1498,9 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 				log.Printf("accept_diff: mark diff %d conflict: %v", diffID, uerr)
 			}
 			payload := map[string]interface{}{
-				"action":  "conflict",
-				"diff_id": d.ID,
-				"error":   applyErr.Error(),
+				"action":      "conflict",
+				"diff_id":     d.ID,
+				"error":       applyErr.Error(),
 				"rolled_back": rbErr == nil && baseHEAD != nil,
 			}
 			if actor != "" {
@@ -2419,8 +2420,10 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		"note_sha":       sha16([]byte(note)),
 		// M12: provenance for spend-per-trigger-class queries. window_events
 		// counts every journaled event in the folded window; window_bytes is
-		// the eligibility-measured render size (/panel and /vision agent_text
-		// bytes excluded — advisory answers must not inflate fold cadence).
+		// the measured POST-FILTER render size (M17 F1: thinking/tool-result
+		// tombstones and action/cause one-liners; /panel and /vision
+		// advisory agent_text excluded — what the distiller was sent,
+		// nothing more).
 		"trigger":       trigger,
 		"window_events": winStats.events,
 		"window_bytes":  winStats.eligibleBytes,
@@ -2434,12 +2437,9 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// not newEpoch (the counter after increment).
 	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
 
-	// M12: the fold retired the window — clear any coverage-honesty block
-	// the badge was surfacing, then evaluate the conditional auto-curate
-	// (never chained: it fires only when the notes/age thresholds say so).
-	s.mu.Lock()
-	delete(s.autoBlocked, c.ID)
-	s.mu.Unlock()
+	// M12: the fold retired the window. Evaluate the conditional
+	// auto-curate (never chained: it fires only when the notes/age
+	// thresholds say so).
 	s.maybeAutoCurate(w.ProjectID, c.ID)
 	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: len(batchProposals)}, nil
 }
@@ -2618,15 +2618,12 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 			running = append(running, meta.workstreamID)
 		}
 	}
-	// M12 (D-auto): scheduled auto-distills (composer countdown chip),
-	// coverage-honesty blocks, and in-flight distills ride the same badge
-	// poll — the GUI never owns a trigger, it only discloses daemon state.
+	// M12 (D-auto): scheduled auto-distills (composer countdown chip) and
+	// in-flight distills ride the same badge poll — the GUI never owns a
+	// trigger, it only discloses daemon state.
 	var auto []AutoDistillInfo
 	for convID, entry := range s.autoPending {
 		auto = append(auto, AutoDistillInfo{ConversationID: convID, EtaUnix: entry.fireAt.Unix(), Trigger: entry.trigger})
-	}
-	for convID, reason := range s.autoBlocked {
-		auto = append(auto, AutoDistillInfo{ConversationID: convID, BlockedReason: reason})
 	}
 	var distillingConvs []int64
 	for convID := range s.distilling {
@@ -3171,10 +3168,10 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 
 // distillPrompt renders journaled events into the summary prompt: the M1
 // spec's instruction line, the Open loops mandate (R4 — the next epoch's
-// cold-start resume card is rendered from this section), then each event as
-// raw payload JSON. Windows larger than distillPromptBytesCap keep the
-// newest events; the omission is declared in the prompt so the note never
-// silently claims coverage it didn't see.
+// cold-start resume card is rendered from this section), then each event
+// through distillRender's fold filter (M17 F1). Windows larger than
+// distillPromptBytesCap keep the newest events; the omission is declared in
+// the prompt so the note never silently claims coverage it didn't see.
 func distillPrompt(events []store.Event) string {
 	var b strings.Builder
 	b.WriteString("Summarize the key decisions, code changes, and open questions from this conversation. Format as markdown.\n\n")
@@ -3185,9 +3182,116 @@ func distillPrompt(events []store.Event) string {
 		events = tail
 	}
 	for _, ev := range events {
-		fmt.Fprintf(&b, "### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
+		b.WriteString(distillRender(ev))
 	}
 	return b.String()
+}
+
+// distillRender renders one journaled event for the fold prompt. "" means
+// excluded: /panel and /vision advisory agent_text never folds — the same
+// eligibility exclusion measureWindow counted, now made concrete in the
+// render so eligibility and render agree byte-for-byte (M17 F1).
+//
+// The filter is why auto-distill windows stopped outgrowing the 256 KiB
+// cap inside one run: agent_thinking, agent_tool_call, and
+// agent_tool_result payloads are multi-KB by construction but carry no
+// fold signal (thinking is the agent's scratch; tool args/results are the
+// transcript noise around the user's actual asks — full file contents
+// ride write/edit args, omp.go), so they render as one-line tombstones;
+// review_action and memory_update bookkeeping renders as
+// action/verdict/layer/cause one-liners. user_message and plain
+// agent_text stay verbatim — they are what the note must summarize.
+func distillRender(ev store.Event) string {
+	switch ev.Type {
+	case store.EventAgentThinking:
+		return fmt.Sprintf("### agent_thinking (seq %d) [thinking omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
+	case store.EventAgentToolResult:
+		var p struct {
+			Tool string `json:"tool"`
+		}
+		if jsonUnmarshalOK(ev.Payload, &p) && p.Tool != "" {
+			return fmt.Sprintf("### agent_tool_result (seq %d) [result omitted — %d bytes; tool: %s]\n\n", ev.Seq, len(ev.Payload), p.Tool)
+		}
+		return fmt.Sprintf("### agent_tool_result (seq %d) [result omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
+	case store.EventAgentToolCall:
+		// M17 F1: write/edit tool calls journal the FULL args (the file
+		// content/patch, omp.go) — verbatim they re-create the P0-1
+		// over-cap shape in miniature AND capEvents' newest-first fold
+		// would evict user messages to keep file contents. Tombstone the
+		// args, keep the tool name (which side of the codebase the run
+		// touched IS fold signal).
+		var p struct {
+			Tool string `json:"tool"`
+		}
+		if jsonUnmarshalOK(ev.Payload, &p) && p.Tool != "" {
+			return fmt.Sprintf("### agent_tool_call (seq %d) [args omitted — %d bytes; tool: %s]\n\n", ev.Seq, len(ev.Payload), p.Tool)
+		}
+		return fmt.Sprintf("### agent_tool_call (seq %d) [args omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
+	case store.EventReviewAction:
+		var p struct {
+			Action  string `json:"action"`
+			Verdict string `json:"consensus_verdict"`
+		}
+		if jsonUnmarshalOK(ev.Payload, &p) && p.Action != "" {
+			if p.Verdict != "" {
+				return fmt.Sprintf("### review_action (seq %d) {\"action\":%q,\"verdict\":%q}\n\n", ev.Seq, p.Action, p.Verdict)
+			}
+			return fmt.Sprintf("### review_action (seq %d) {\"action\":%q}\n\n", ev.Seq, p.Action)
+		}
+		return fmt.Sprintf("### review_action (seq %d) [payload omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
+	case store.EventMemoryUpdate:
+		var p struct {
+			Layer string `json:"layer"`
+			Cause string `json:"cause"`
+		}
+		if jsonUnmarshalOK(ev.Payload, &p) {
+			return fmt.Sprintf("### memory_update (seq %d) {\"layer\":%q,\"cause\":%q}\n\n", ev.Seq, p.Layer, p.Cause)
+		}
+		return fmt.Sprintf("### memory_update (seq %d) [payload omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
+	case store.EventAgentText:
+		if isAdvisoryAgentText(ev) {
+			return ""
+		}
+		return fmt.Sprintf("### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
+	default:
+		return fmt.Sprintf("### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
+	}
+}
+
+// isAdvisoryAgentText reports whether ev is a /panel or /vision advisory
+// answer (payload-flagged, never a run answer): excluded from the fold
+// render and from eligibility bytes.
+func isAdvisoryAgentText(ev store.Event) bool {
+	if ev.Type != store.EventAgentText {
+		return false
+	}
+	var p struct {
+		Panel  bool `json:"panel"`
+		Vision bool `json:"vision"`
+	}
+	return jsonUnmarshalOK(ev.Payload, &p) && (p.Panel || p.Vision)
+}
+
+// distillRenderSize sizes ev's fold-prompt render. Eligibility
+// (measureWindow) and coverage honesty (capEvents) share this accounting so
+// "window bytes" is always the size of what the distiller is actually sent.
+// Full renders keep the len(type)+len(payload)+64 estimate — never
+// materializing a multi-KB payload just to count it; the one-liner kinds
+// are small enough to render and measure exactly.
+func distillRenderSize(ev store.Event) int {
+	switch ev.Type {
+	case store.EventAgentThinking, store.EventAgentToolResult,
+		store.EventAgentToolCall, store.EventReviewAction,
+		store.EventMemoryUpdate:
+		return len(distillRender(ev))
+	case store.EventAgentText:
+		if isAdvisoryAgentText(ev) {
+			return 0
+		}
+		return len(ev.Type) + len(ev.Payload) + 64 // header + separators, over-estimated
+	default:
+		return len(ev.Type) + len(ev.Payload) + 64 // header + separators, over-estimated
+	}
 }
 
 // distillPromptBytesCap bounds the rendered event section (~256 KiB ≈
@@ -3197,15 +3301,14 @@ func distillPrompt(events []store.Event) string {
 // epoch backstop.
 const distillPromptBytesCap = 256 * 1024
 
-// capEvents keeps the newest events whose rendered size fits budget; the
-// per-event render ("### TYPE (seq N)\nPAYLOAD\n\n") is fixed-format, so
-// sizing never materializes the strings. The newest event is kept even
-// when it alone exceeds the budget.
+// capEvents keeps the newest events whose RENDERED size (distillRenderSize
+// — post-filter bytes, advisory answers excluded) fits budget. The newest
+// event is kept even when it alone exceeds the budget.
 func capEvents(events []store.Event, budget int) (tail []store.Event, omitted int) {
 	size := 0
 	start := 0
 	for i := len(events) - 1; i >= 0; i-- {
-		n := len(events[i].Type) + len(events[i].Payload) + 64 // header + separators, over-estimated
+		n := distillRenderSize(events[i])
 		if size > 0 && size+n > budget {
 			start = i + 1
 			break

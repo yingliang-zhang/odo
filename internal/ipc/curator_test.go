@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -823,5 +824,84 @@ func TestCurateEmptyTopicsGuard(t *testing.T) {
 	}
 	if failed[0]["layer"] != "curator" || failed[0]["detail"] != "empty topics" {
 		t.Errorf("failed memory_update = %v, want layer curator + detail \"empty topics\"", failed[0])
+	}
+}
+
+// TestCurateSkipsRetractedNotes (M17 F4, P0 review K3): a retracted note
+// never reaches the curator prompt (it is out of recall; a curate built
+// on it would revive retracted claims) and the marker's notes_read proves
+// it was never shown; the all-retracted project errors out instead of
+// curating nothing.
+func TestCurateSkipsRetractedNotes(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	setOneShotEnv(t, "ODO_CURATOR_OUTPUT", curatorStubJSON)
+	promptCopy := filepath.Join(t.TempDir(), "curator-prompt.txt")
+	t.Setenv("ODO_CURATE_PROMPT_COPY", promptCopy)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	// Focused curator contract: one topic citing only main-epoch-2 — the
+	// shared curatorStubJSON cites (feature-epoch-1), absent here, and the
+	// citation gate would abort the pass this test needs to observe.
+	contractPath := filepath.Join(t.TempDir(), "curator-out.json")
+	if err := os.WriteFile(contractPath, []byte(`{"topics":[{"title":"Sessions","slug":"sessions","bullets":["- sessions replaced auth (main-epoch-2)"]}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ODO_CURATOR_OUTPUT", contractPath)
+
+	writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nRETRACTED_FACT_TOKEN auth.\n")
+	writeNote(t, root, "main-epoch-2", "# Epoch 2\n\nKEPT_FACT_TOKEN sessions.\n")
+	// Journal the epoch-1 retraction directly (the recall/curate
+	// derivation reads these rows).
+	if _, err := rig.store.AppendEvent(context.Background(), convID, "memory_update",
+		mustJSON(map[string]interface{}{
+			"layer": "note", "cause": "retract",
+			"detail": "main-epoch-1 contradicted by main-epoch-2: auth replaced",
+		})); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp := rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID}); resp.Error != "" {
+		t.Fatalf("curate: %s", resp.Error)
+	}
+	raw, err := os.ReadFile(promptCopy)
+	if err != nil {
+		t.Fatalf("prompt copy: %v", err)
+	}
+	prompt := string(raw)
+	if strings.Contains(prompt, "RETRACTED_FACT_TOKEN") {
+		t.Error("curator prompt carried the retracted note's content")
+	}
+	if !strings.Contains(prompt, "KEPT_FACT_TOKEN") {
+		t.Error("curator prompt missing the unretracted note's content")
+	}
+	var marker map[string]interface{}
+	for _, m := range payloadsByAction(t, allEvents(t, rig, convID), "curate") {
+		marker = m
+	}
+	if nr, ok := marker["notes_read"].([]interface{}); !ok || len(nr) != 1 {
+		t.Errorf("marker notes_read = %v, want the single unretracted note", marker["notes_read"])
+	}
+
+	// All retracted: the curate refuses with an explicit error.
+	root2 := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	rig2 := startRig(t, root2)
+	defer rig2.stop(t)
+	conv2 := rig2.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root2}).Conversation.ID
+	writeNote(t, root2, "main-epoch-1", "# Epoch 1\n\nOnly note.\n")
+	if _, err := rig2.store.AppendEvent(context.Background(), conv2, "memory_update",
+		mustJSON(map[string]interface{}{
+			"layer": "note", "cause": "retract",
+			"detail": "main-epoch-1 contradicted by main-epoch-2: gone",
+		})); err != nil {
+		t.Fatal(err)
+	}
+	resp := rig2.callExpectErr(t, Request{Cmd: CmdCurate, ProjectRoot: root2, ConversationID: conv2})
+	if !strings.Contains(resp.Error, "every epoch note stands retracted") {
+		t.Errorf("all-retracted curate error = %q, want the unretract hint", resp.Error)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yingliang-zhang/odo/internal/ipc"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
@@ -85,6 +86,8 @@ func seedAuditConv(t *testing.T, st *store.Store, projectID int64, wsName string
 			payload = `{"panel":true}`
 		case "accept", "reject":
 			payload = fmt.Sprintf(`{"action":%q,"diff_id":%d}`, step.kind, lastDiff.ID)
+		case "autoaccept":
+			payload = fmt.Sprintf(`{"action":"accept","diff_id":%d,"actor":%q}`, lastDiff.ID, ipc.AutoActor)
 		case "moarej":
 			payload = fmt.Sprintf(`{"action":"moa_review","diff_id":%d,"consensus_verdict":"reject","reviews":[]}`, lastDiff.ID)
 		default:
@@ -94,7 +97,7 @@ func seedAuditConv(t *testing.T, st *store.Store, projectID int64, wsName string
 			"msg": store.EventUserMessage, "done": store.EventAgentDone,
 			"err": store.EventAgentError, "paneldone": store.EventAgentDone,
 			"accept": store.EventReviewAction, "reject": store.EventReviewAction,
-			"moarej": store.EventReviewAction,
+			"moarej": store.EventReviewAction, "autoaccept": store.EventReviewAction,
 		}[step.kind]
 		ev, err := st.AppendEvent(ctx, c.ID, typ, payload)
 		if err != nil {
@@ -479,6 +482,48 @@ func TestSkillsAuditFlagThresholds(t *testing.T) {
 			t.Errorf("%s: flagged = %v, want %v (row %+v, baseline %+v)",
 				tc.name, rows[0].Flagged, tc.wantFlag, rows[0], base)
 		}
+	}
+}
+
+// TestSkillsAuditAutoActorExcluded (M17 F5): auto-land resolutions
+// (actor:auto_panel) are excluded from per-skill rows AND from the
+// skill-free baseline — mirroring ComputeAutonomy's streak exclusion —
+// while still reported as the separate AutoAccepts line. A flagged-skill
+// denominator must never be inflated by the system's own approvals
+// (live proof: journal seq 6668 accept{diff_id:17,actor:auto_panel}).
+func TestSkillsAuditAutoActorExcluded(t *testing.T) {
+	x := map[string]string{".odo/skills/x.md": "hash-x"}
+	report := runAuditJSON(t, map[string][]auditStep{
+		"main": {
+			// Skill X in play, resolved by the AUTO pipeline: invisible
+			// to both the skill row and the baseline.
+			{sec: 1, kind: "msg", text: "x task", receipt: x},
+			{sec: 2, kind: "done"},
+			{sec: 3, kind: "diff"},
+			{sec: 4, kind: "autoaccept"},
+			// Skill X in play, HUMAN accept: the only counted outcome.
+			{sec: 5, kind: "msg", text: "x task 2", receipt: x},
+			{sec: 6, kind: "done"},
+			{sec: 7, kind: "diff"},
+			{sec: 8, kind: "accept"},
+			// Skill-free, resolved by the AUTO pipeline: excluded from
+			// the skill-free baseline.
+			{sec: 9, kind: "msg", text: "plain"},
+			{sec: 10, kind: "done"},
+			{sec: 11, kind: "diff"},
+			{sec: 12, kind: "autoaccept"},
+		},
+	})
+	row := skillRowByPath(report, "skills/x.md")
+	if row == nil || row.Injections != 1 || row.Accepts != 1 || row.WeakRejects != 0 || row.Rejects != 0 {
+		t.Errorf("row(skills/x.md) = %+v, want 1 human accept only (auto excluded)", row)
+	}
+	if report.AutoAccepts != 2 || report.Accepts != 1 {
+		t.Errorf("report totals accepts=%d auto_accepted=%d, want 1/2",
+			report.Accepts, report.AutoAccepts)
+	}
+	if report.Baseline.Outcomes != 0 || report.Baseline.AcceptRate != 0 {
+		t.Errorf("baseline = %+v, want empty (auto accept must not count as skill-free outcome)", report.Baseline)
 	}
 }
 

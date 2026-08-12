@@ -293,28 +293,29 @@ func m6DistillFlow(t *testing.T, note1, note2 string) (*testRig, int64, []store.
 }
 
 // TestContradictionPassFlagsConflict (spec test 6): the new note carries
-// the signal token "switched" and shares the salient token "jwt" with the
-// old note → one contradiction; distill journals the retraction event and
-// the old note file is NOT mutated.
+// the signal token "switched" and shares ≥2 NON-SIGNAL salient tokens
+// ("jwt", "tokens") with the old note (M17 F2 raised the retract leg
+// from ≥1 — the fixtures share two tokens) → one contradiction; distill
+// journals the retraction event and the old note file is NOT mutated.
 func TestContradictionPassFlagsConflict(t *testing.T) {
 	// Unit level: the heuristic itself.
-	old := []epochNote{{name: "main-epoch-1", content: "Authentication uses JWT.\n"}}
-	found := detectContradictions("Auth switched from JWT to session cookies.", old)
+	old := []epochNote{{name: "main-epoch-1", content: "Authentication uses JWT tokens.\n"}}
+	found := detectContradictions("Auth switched from JWT tokens to session cookies.", old)
 	if len(found) != 1 {
 		t.Fatalf("detectContradictions = %+v, want exactly one", found)
 	}
 	if found[0].oldNote != "main-epoch-1" {
 		t.Errorf("oldNote = %q, want main-epoch-1", found[0].oldNote)
 	}
-	if found[0].snippet != "Auth switched from JWT to session cookies." {
+	if found[0].snippet != "Auth switched from JWT tokens to session cookies." {
 		t.Errorf("snippet = %q, want the new sentence", found[0].snippet)
 	}
 
 	// End to end: distill #2 journals memory_update{layer:"note",
 	// cause:"retract"} naming main-epoch-1.
 	rig, _, events := m6DistillFlow(t,
-		"# Epoch 1\n\nAuthentication uses JWT.\n",
-		"# Epoch 2\n\nAuth switched from JWT to session cookies.\n")
+		"# Epoch 1\n\nAuthentication uses JWT tokens.\n",
+		"# Epoch 2\n\nAuth switched from JWT tokens to session cookies.\n")
 	retracts := memoryUpdatesByCause(t, events, "retract")
 	if len(retracts) != 1 {
 		t.Fatalf("retract events = %d, want 1", len(retracts))
@@ -340,7 +341,7 @@ func TestContradictionPassFlagsConflict(t *testing.T) {
 	// Inv 2: epoch 1's file still holds the original record — the
 	// retraction is a journal event, never a file mutation.
 	got := readFileStr(t, filepath.Join(rig.root, "wiki", "main-epoch-1.md"))
-	if !strings.Contains(got, "Authentication uses JWT.") || strings.Contains(got, "switched") {
+	if !strings.Contains(got, "Authentication uses JWT tokens.") || strings.Contains(got, "switched") {
 		t.Errorf("epoch-1 file no longer the original record: %q", got)
 	}
 }
@@ -359,6 +360,38 @@ func TestContradictionPassNoFalsePositive(t *testing.T) {
 		"# Epoch 2\n\nAdded a JWT refresh endpoint.\n")
 	if n := len(memoryUpdatesByCause(t, events, "retract")); n != 0 {
 		t.Errorf("retract events = %d, want 0 (no false positive)", n)
+	}
+}
+
+// TestContradictionGuardM17Production (M17 F2): the exact production false
+// positive must NOT retract, and a true numeric contradiction must STILL
+// retract. Production (journal seqs 5144–5149): a post-reset epoch 1's
+// scope disclaimer carried the negation token "not" and shared one salient
+// token at a time with six valid notes — the pre-M17 ≥1-overlap rule
+// retracted all six. The guard (signals gate the candidate, never join the
+// overlap; ≥2 non-signal salient overlaps to retract) kills it.
+func TestContradictionGuardM17Production(t *testing.T) {
+	old := []epochNote{
+		{name: "main-epoch-2", content: "The auto-distill window measures eligible bytes with the render formula.\n"},
+		{name: "main-epoch-3", content: "Ledger rows persist the distill duration metric.\n"},
+		{name: "main-epoch-4", content: "Recall injects the wiki index top on every send.\n"},
+	}
+	// The scope disclaimer: "is not covered" carries the signal "not"
+	// (candidate gate passes → pre-M17 it was lethal boilerplate) but
+	// shares at most one non-signal token with each older note.
+	const scopeDisclaimer = "seq 1–4907 was omitted from this window: the folded transcript is not covered by this note.\n"
+	if found := detectContradictions(scopeDisclaimer, old); len(found) != 0 {
+		t.Fatalf("scope disclaimer flagged %+v, want none (the M17 false positive)", found)
+	}
+
+	// True contradiction: same metric (the distill prompt cap), two
+	// different values across notes → ≥2 shared salient tokens → STILL
+	// retracts.
+	metricOld := []epochNote{{name: "main-epoch-2", content: "The distill prompt cap is 64 KiB for the fold window.\n"}}
+	found := detectContradictions(
+		"The distill prompt cap is no longer 64 KiB for the fold window — it is 256 KiB.\n", metricOld)
+	if len(found) != 1 || found[0].oldNote != "main-epoch-2" {
+		t.Fatalf("true contradiction = %+v, want exactly main-epoch-2 retracted", found)
 	}
 }
 
@@ -710,16 +743,16 @@ func TestContradictionPassDoesNotReJournalRetracted(t *testing.T) {
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
-	writeEpochNote(t, root, "main-epoch-1", "Authentication uses JWT.\n")
+	writeEpochNote(t, root, "main-epoch-1", "Auth uses JWT tokens.\n")
 	writeEpochNote(t, root, "main-epoch-2", "Build system notes for the project.\n")
 
 	// In-pass dedup: two sentences flag the same old note → one journal entry.
-	const flagTwice = "Auth switched from JWT to session cookies.\nAuth switched from JWT to session cookies.\n"
+	const flagTwice = "Auth switched from JWT tokens to session cookies.\nAuth switched from JWT tokens to session cookies.\n"
 	if n := rig.server.runContradictionPass(ctx, convID, "main-epoch-3", flagTwice, 3); n != 1 {
 		t.Fatalf("first pass = %d, want 1 (duplicate sentences journal once)", n)
 	}
 	// Cross-pass dedup: epoch 1 is now retracted; a re-flag must not duplicate.
-	const flag = "Auth switched from JWT to session cookies.\n"
+	const flag = "Auth switched from JWT tokens to session cookies.\n"
 	if n := rig.server.runContradictionPass(ctx, convID, "main-epoch-4", flag, 4); n != 0 {
 		t.Fatalf("second pass = %d, want 0 (epoch 1 already retracted)", n)
 	}

@@ -163,6 +163,10 @@ func (r *testRig) stop(t *testing.T) {
 		delete(r.server.autoPending, id)
 	}
 	r.server.mu.Unlock()
+	// M17: drain detached auto-curates before closing the store — F3's
+	// fail-open evaluation goroutine would otherwise journal into a
+	// closed journal (or hold journal files open past TempDir cleanup).
+	r.server.curateWG.Wait()
 	r.adapter.CloseAll()
 	r.listen.Close()
 	if err := r.store.Close(); err != nil {

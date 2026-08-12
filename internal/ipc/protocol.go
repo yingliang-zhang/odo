@@ -97,15 +97,14 @@ type Request struct {
 	TodoID string `json:"todo_id,omitempty"`
 }
 
-// AutoDistillInfo is one scheduled (or blocked) auto-distill for the
-// pending_counts response: the countdown chip renders EtaUnix against the
-// client clock; a BlockedReason entry is a coverage-honesty skip surfaced
-// for manual action (its EtaUnix is 0).
+// AutoDistillInfo is one scheduled auto-distill for the pending_counts
+// response: the countdown chip renders EtaUnix against the client clock.
+// (Pre-M17 this also carried coverage-honesty blocks; over-cap windows now
+// fold with a declared omission instead of blocking — F1.)
 type AutoDistillInfo struct {
 	ConversationID int64  `json:"conversation_id"`
 	EtaUnix        int64  `json:"eta_unix"`
 	Trigger        string `json:"trigger"`
-	BlockedReason  string `json:"blocked_reason,omitempty"`
 }
 
 // MemoryAccept references one proposal out of a pending memory_propose batch:

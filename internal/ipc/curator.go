@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -115,6 +116,40 @@ func allEpochNotes(projectRoot string) ([]epochNote, error) {
 	return notes, nil
 }
 
+// oldestUnretractedNoteMtime returns the oldest mtime across
+// wiki/*-epoch-*.md files NOT in retracted — the M17 F4 age source for a
+// never-curated project's auto_age leg. Epoch notes are the curation
+// input (the source of truth; topic pages are derived artifacts that the
+// curator regenerates), so NOTE age — not page age — measures curation
+// staleness. Retracted notes are dead knowledge: they must not drag the
+// clock. ok=false when no unretracted note exists.
+func oldestUnretractedNoteMtime(projectRoot string, retracted map[string]bool) (time.Time, bool) {
+	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", "*-epoch-*.md"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var oldest time.Time
+	found := false
+	for _, m := range matches {
+		if _, ok := wikiNoteEpoch(m); !ok {
+			continue // defensive: same name rule as allEpochNotes
+		}
+		name := strings.TrimSuffix(filepath.Base(m), ".md")
+		if retracted[name] {
+			continue
+		}
+		fi, err := os.Stat(m)
+		if err != nil {
+			continue // vanished between glob and stat
+		}
+		if !found || fi.ModTime().Before(oldest) {
+			oldest = fi.ModTime()
+			found = true
+		}
+	}
+	return oldest, found
+}
+
 // curatorPrompt renders the curator one-shot prompt: the instruction plus
 // every epoch note under a `--- <name> (workstream: <ws>, epoch: <N>) ---`
 // header, newest-first. M12: citations are workstream-qualified
@@ -216,49 +251,137 @@ type deadCitation struct {
 	token string // the citation text as emitted, e.g. "(ui-epoch-9)" or "(epoch-3)"
 }
 
+// citationEpochRe extracts the epoch number of a citation's note name
+// ("ui-epoch-9" → 9) or the bare legacy form ("epoch-9" → 9) for the
+// ghost check — a ghost is form-agnostic (the confabulated epoch number
+// never existed either way).
+var citationEpochRe = regexp.MustCompile(`^(?:[A-Za-z0-9][A-Za-z0-9._-]*-)?epoch-(\d+)$`)
+
+// isGhostCitation reports whether a citation — already known to name no
+// on-disk note — is a GHOST: the epoch number never existed anywhere (no
+// note file of that epoch in ANY workstream, and markerForEpoch says no
+// distill marker for it in the journal). Ghosts are repairable by
+// stripping: the claim cited nothing that ever was. A real dangling
+// reference (the epoch number DID exist — another workstream's note file,
+// or a marker whose note file vanished) stays a gate failure:
+// confabulated repair would attach the claim to the wrong source.
+// markerForEpoch == nil means the journal was not consulted — nothing is
+// provably a ghost, so the conservative old behavior (abort) stands.
+func isGhostCitation(projectRoot string, markerForEpoch func(epoch int) bool, token string) bool {
+	m := citationEpochRe.FindStringSubmatch(strings.TrimSuffix(strings.TrimPrefix(token, "("), ")"))
+	if m == nil || markerForEpoch == nil {
+		return false
+	}
+	if matches, _ := filepath.Glob(filepath.Join(projectRoot, "wiki", "*-epoch-"+m[1]+".md")); len(matches) > 0 {
+		return false // the epoch number exists on disk elsewhere: real dangling
+	}
+	epoch, err := strconv.Atoi(m[1])
+	if err != nil {
+		return false
+	}
+	return !markerForEpoch(epoch)
+}
+
 // checkTopicCitations enforces citation liveness BEFORE any topic page is
 // rewritten: qualified citations must name an on-disk wiki note; bare
 // "(epoch-N)" citations are repaired in place when exactly one note of
 // that epoch exists project-wide and fail the gate when none or several
 // do (a collision can never resolve silently to the wrong workstream).
-// Returns the repaired topics plus every dead citation found.
-func checkTopicCitations(projectRoot string, topics []topic) (repaired []topic, dead []deadCitation) {
+// M17 F4: a line whose only dead citations are ghosts (epochs that never
+// existed) is STRIPPED instead of aborting the curate — the stripped
+// tokens come back separately for journaling. Returns the repaired topics
+// (ghost-stripped, possibly with fewer bullets), every real dead
+// citation, and every ghost token stripped.
+func checkTopicCitations(projectRoot string, topics []topic, markerForEpoch func(epoch int) bool) (repaired []topic, dead, stripped []deadCitation) {
 	repaired = make([]topic, 0, len(topics))
 	for _, t := range topics {
-		t.Bullets = repairBullets(projectRoot, t.Slug, t.Bullets, &dead)
-		repaired = append(repaired, t)
+		t.Bullets = repairBullets(projectRoot, t.Slug, t.Bullets, markerForEpoch, &dead, &stripped)
+		if len(t.Bullets) > 0 {
+			// A topic whose every bullet cited ghosts is pure
+			// confabulation — drop the page, never write an empty shell.
+			repaired = append(repaired, t)
+		}
 	}
-	return repaired, dead
+	return repaired, dead, stripped
 }
 
 // repairBullets rewrites one topic's bullet list, qualifying bare
-// citations and collecting tokens that name no on-disk note.
-func repairBullets(projectRoot, slug string, bullets []string, dead *[]deadCitation) []string {
-	out := make([]string, len(bullets))
-	for i, bullet := range bullets {
-		out[i] = wsEpochCiteRe.ReplaceAllStringFunc(bullet, func(tok string) string {
-			name := strings.TrimSuffix(strings.TrimPrefix(tok, "("), ")")
-			if noteExists(projectRoot, name) {
-				return tok
-			}
-			*dead = append(*dead, deadCitation{slug: slug, token: tok})
-			return tok
-		})
-		out[i] = bareEpochCiteRe.ReplaceAllStringFunc(out[i], func(tok string) string {
-			m := bareEpochCiteRe.FindStringSubmatch(tok)
-			matches, _ := filepath.Glob(filepath.Join(projectRoot, "wiki", "*-epoch-"+m[1]+".md"))
-			switch len(matches) {
-			case 0:
-				*dead = append(*dead, deadCitation{slug: slug, token: tok})
-			case 1:
-				return "(" + strings.TrimSuffix(filepath.Base(matches[0]), ".md") + ")" // repair: qualify
-			default:
-				*dead = append(*dead, deadCitation{slug: slug, token: tok})
-			}
-			return tok
-		})
+// citations, stripping ghost-cited lines, and collecting real dead
+// citations plus the stripped ghost tokens (for the curate marker).
+// A line mixes outcomes conservatively: any real dead citation on it
+// keeps the line (the gate aborts the whole curate on it anyway);
+// ghost-only lines are dropped whole.
+func repairBullets(projectRoot, slug string, bullets []string, markerForEpoch func(epoch int) bool, dead, stripped *[]deadCitation) []string {
+	var out []string
+	for _, bullet := range bullets {
+		line, strip := repairCitations(projectRoot, slug, bullet, markerForEpoch, dead, stripped)
+		if strip {
+			continue // ghost-cited line: dropped through the repair machinery
+		}
+		out = append(out, line)
 	}
 	return out
+}
+
+// repairCitations rewrites the citations of ONE bullet and classifies its
+// fate: strip=false returns the (possibly repaired) bullet; strip=true
+// means every problem on the line is a ghost and the caller drops the
+// line, with its ghost tokens recorded in stripped. Real dead citations
+// are appended to dead regardless of the fate — stripping never rescues
+// a real dangling reference.
+func repairCitations(projectRoot, slug, bullet string, markerForEpoch func(epoch int) bool, dead, stripped *[]deadCitation) (line string, strip bool) {
+	var lineDead, lineGhosts []deadCitation
+	var lineLive int
+	out := wsEpochCiteRe.ReplaceAllStringFunc(bullet, func(tok string) string {
+		name := strings.TrimSuffix(strings.TrimPrefix(tok, "("), ")")
+		if noteExists(projectRoot, name) {
+			lineLive++
+			return tok
+		}
+		if isGhostCitation(projectRoot, markerForEpoch, tok) {
+			lineGhosts = append(lineGhosts, deadCitation{slug: slug, token: tok})
+			return tok
+		}
+		lineDead = append(lineDead, deadCitation{slug: slug, token: tok})
+		return tok
+	})
+	out = bareEpochCiteRe.ReplaceAllStringFunc(out, func(tok string) string {
+		m := bareEpochCiteRe.FindStringSubmatch(tok)
+		matches, _ := filepath.Glob(filepath.Join(projectRoot, "wiki", "*-epoch-"+m[1]+".md"))
+		switch len(matches) {
+		case 0:
+			if isGhostCitation(projectRoot, markerForEpoch, tok) {
+				lineGhosts = append(lineGhosts, deadCitation{slug: slug, token: tok})
+			} else {
+				lineDead = append(lineDead, deadCitation{slug: slug, token: tok})
+			}
+		case 1:
+			lineLive++
+			return "(" + strings.TrimSuffix(filepath.Base(matches[0]), ".md") + ")" // repair: qualify
+		default:
+			lineDead = append(lineDead, deadCitation{slug: slug, token: tok})
+		}
+		return tok
+	})
+	*dead = append(*dead, lineDead...)
+	if len(lineGhosts) == 0 || len(lineDead) > 0 {
+		return out, false
+	}
+	// Every problem is a ghost (an epoch that never existed).
+	*stripped = append(*stripped, lineGhosts...)
+	if lineLive == 0 {
+		// No live citation anchors the line: its prose is unprovenanced
+		// confabulation by construction — strip the whole line.
+		return "", true
+	}
+	// A live citation anchors the line's fact: the content stays, only the
+	// phantom tokens are scrubbed in-line — whole-line stripping destroyed
+	// live facts that merely shared a line with a ghost (P0 review DSF).
+	cleaned := bullet
+	for _, g := range lineGhosts {
+		cleaned = strings.Replace(cleaned, g.token, "", 1)
+	}
+	return strings.TrimSpace(cleaned), false
 }
 
 // noteExists reports whether wiki/<name>.md is a readable note file —
@@ -382,7 +505,7 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 	if n, _, err := s.store.AutoCurateState(ctx, p.ID); err == nil {
 		notesSince = n
 	}
-	if err := s.curateCore(ctx, c.ID, distillTriggerManual, notesSince); err != nil {
+	if err := s.curateCore(ctx, p.ID, c.ID, distillTriggerManual, notesSince); err != nil {
 		return Response{}, err
 	}
 	// MemoryProposals stays 0: the field names PENDING learner proposals and
@@ -396,13 +519,29 @@ func (s *Server) handleCurate(ctx context.Context, req Request) (Response, error
 // auto trigger's own evidence). Failures journal
 // memory_update{layer:curator, cause:failed|gate_failed} and return the
 // error — the manual caller relays it to the GUI, the auto caller logs it.
-func (s *Server) curateCore(ctx context.Context, convID int64, trigger string, notesSince int) error {
+//
+// M17 F4: retracted notes never feed the curator (they are out of recall
+// already; a curate built on them would revive retracted claims — the
+// retraction set is conversation-scoped, so the ACTIVE conversation's set
+// filters the project-wide enumeration).
+func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigger string, notesSince int) error {
 	notes, err := allEpochNotes(s.projectRoot)
 	if err != nil {
 		return fmt.Errorf("curate: %w", err)
 	}
 	if len(notes) == 0 {
 		return fmt.Errorf("curate: no epoch notes to curate — distill first")
+	}
+	retracted := s.retractedNotes(ctx, convID)
+	unretracted := make([]epochNote, 0, len(notes))
+	for _, n := range notes {
+		if !retracted[n.name] {
+			unretracted = append(unretracted, n)
+		}
+	}
+	notes = unretracted
+	if len(notes) == 0 {
+		return fmt.Errorf("curate: every epoch note stands retracted — unretract a false positive or distill fresh notes first")
 	}
 	// notesRead is the marker's input provenance: every note the curator
 	// was shown, with its content hash (the pass is falsifiable against
@@ -450,23 +589,51 @@ func (s *Server) curateCore(ctx context.Context, convID int64, trigger string, n
 
 	// M12 citation-liveness gate: every parsed citation must resolve to an
 	// on-disk note BEFORE any topic page is rewritten (bare "(epoch-N)"
-	// forms are repaired when unambiguous). A dead citation skips the WHOLE
-	// curate: the old generation survives on disk, the gate_failed marker +
-	// memory_update journal what refused to land.
-	topics, dead := checkTopicCitations(s.projectRoot, topics)
+	// forms are repaired when unambiguous). A REAL dead citation (the epoch
+	// existed — mis-scope or vanished file) skips the WHOLE curate: the old
+	// generation survives on disk, the gate_failed marker + memory_update
+	// journal what refused to land. M17 F4: a bullet whose only dead
+	// citations are GHOSTS (an epoch number that never existed — no note
+	// file of it in any workstream, no distill marker in the journal) is
+	// stripped through the same repair machinery instead of aborting the
+	// curate; stripped tokens land on the pass marker for audit.
+	markerForEpoch := func(epoch int) bool {
+		ok, err := s.store.DistillMarkerExistsForEpoch(ctx, projectID, epoch)
+		if err != nil {
+			// Unknown journal state must never strip: treat the epoch as
+			// real (the abort branch — fail toward human attention).
+			log.Printf("curate: epoch marker check: %v", err)
+			return true
+		}
+		return ok
+	}
+	topics, dead, stripped := checkTopicCitations(s.projectRoot, topics, markerForEpoch)
+	if len(topics) == 0 {
+		return fail(fmt.Errorf("curate: every topic cited only ghost epochs — nothing to write"), "empty topics")
+	}
 	if len(dead) > 0 {
 		tokens := make([]string, 0, len(dead))
 		for _, d := range dead {
 			tokens = append(tokens, fmt.Sprintf("%s (topic %s)", d.token, d.slug))
 		}
+		// Audit trail on the abort path too: the ghosts that WOULD have
+		// been stripped (and the surviving lines they were scrubbed from)
+		// vanish from the record if only the pass marker reports them
+		// (P0 review GLM). Nothing was written, but the next curate
+		// reprocesses the same ghosts — the journal should show them now.
+		ghosts := make([]string, 0, len(stripped))
+		for _, g := range stripped {
+			ghosts = append(ghosts, fmt.Sprintf("%s (topic %s)", g.token, g.slug))
+		}
 		if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
-			"action":           "curate",
-			"topics":           0,
-			"notes_read":       notesRead,
-			"trigger":          trigger,
-			"notes_since_last": notesSince,
-			"gate":             "failed",
-			"dead_citations":   tokens,
+			"action":             "curate",
+			"topics":             0,
+			"notes_read":         notesRead,
+			"trigger":            trigger,
+			"notes_since_last":   notesSince,
+			"gate":               "failed",
+			"dead_citations":     tokens,
+			"stripped_citations": ghosts,
 		})); err != nil {
 			return err
 		}
@@ -489,14 +656,26 @@ func (s *Server) curateCore(ctx context.Context, convID int64, trigger string, n
 		return fail(fmt.Errorf("curate: %w", err), "write error: "+err.Error())
 	}
 
-	if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	marker := map[string]interface{}{
 		"action":           "curate",
 		"topics":           len(topics),
 		"notes_read":       notesRead, // M12: input provenance [{name,sha16}]
 		"trigger":          trigger,
 		"notes_since_last": notesSince,
 		"gate":             "pass",
-	})); err != nil {
+	}
+	detail := fmt.Sprintf("rewrote %d topics + index", len(topics))
+	if len(stripped) > 0 {
+		tokens := make([]string, 0, len(stripped))
+		for _, d := range stripped {
+			tokens = append(tokens, fmt.Sprintf("%s (topic %s)", d.token, d.slug))
+		}
+		// M17 F4: ghost-cited lines were stripped instead of aborting —
+		// the audit trail names exactly what was dropped.
+		marker["stripped_citations"] = tokens
+		detail += fmt.Sprintf(" (stripped %d ghost-cited line(s): %s)", len(stripped), strings.Join(tokens, ", "))
+	}
+	if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(marker)); err != nil {
 		return err
 	}
 	if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
@@ -504,7 +683,7 @@ func (s *Server) curateCore(ctx context.Context, convID int64, trigger string, n
 		"cause":      "curate",
 		"before_sha": sha16([]byte(oldIndex)),
 		"after_sha":  sha16([]byte(indexContent)),
-		"detail":     fmt.Sprintf("rewrote %d topics + index", len(topics)),
+		"detail":     detail,
 	})); err != nil {
 		return err
 	}

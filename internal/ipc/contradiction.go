@@ -28,12 +28,33 @@ const (
 	// contradictionSnippetCap bounds the contradicting sentence quoted in
 	// the journaled retraction detail.
 	contradictionSnippetCap = 120
+
+	// contradictionOverlapMin is the count of shared NON-SIGNAL salient
+	// tokens a candidate sentence must have with an old-note sentence to
+	// flag a contradiction. 1 was the M6 barn door — any single shared
+	// keyword ("journal", "window") plus a negation token retracted; 2
+	// requires topical coincidence before a note is declared dead.
+	contradictionOverlapMin = 2
 )
 
 // contradictionSignals is a change/negation token set. A new-note sentence
-// containing one of these as a token AND sharing ≥1 salient token with an
-// older note's sentence flags a contradiction. ("not" is a stop-word for
-// keyword recall but a signal here — the two paths never mix token sets.)
+// containing one of these as a token AND sharing ≥2 NON-SIGNAL salient
+// tokens with an older note's sentence flags a contradiction. ("not" is a
+// stop-word for keyword recall but a signal here — the two paths never mix
+// token sets.)
+//
+// M17 F2: signal tokens are a candidate GATE ONLY — they never join the
+// salient-overlap set. Production false positive (journal seqs 5144–5149):
+// a post-reset note's scope disclaimer ("seq 1–4907 was omitted … is not
+// covered") candidated on the signal "not" and the pre-M17 ≥1-overlap barn
+// door then matched ANY older sentence sharing a single content-free
+// salient token (e.g. "no"-shaped negation prose — "no" is a signal, not a
+// stopword — or one generic keyword). Six valid notes retracted on six
+// single-token coincidences. ("not" itself is in recall's stopWords, so it
+// never joined EITHER salient set — its only role was gating candidacy;
+// m6_test.go states the mechanism accurately.) query-time stopWords stays
+// untouched: negations remain salient for recall scoring, just never for
+// retraction overlap.
 var contradictionSignals = map[string]bool{
 	"not": true, "no": true, "longer": true, "switched": true,
 	"replaced": true, "removed": true, "instead": true, "changed": true,
@@ -100,9 +121,9 @@ type contradiction struct {
 // detectContradictions compares the just-written note against older epoch
 // notes (newest-first, capped at contradictionScanCap). A new-note sentence
 // is a candidate when it carries a contradiction-signal token; it flags an
-// old note when it shares ≥1 salient token with any sentence of that note.
-// One contradiction per (old note, new sentence) pair; the first matching
-// old sentence wins (keeps reports bounded). May return nil.
+// old note when it shares ≥2 NON-SIGNAL salient tokens with any sentence of
+// that note. One contradiction per (old note, new sentence) pair; the first
+// matching old sentence wins (keeps reports bounded). May return nil.
 func detectContradictions(newNote string, oldNotes []epochNote) []contradiction {
 	var out []contradiction
 	for _, sent := range splitSentences(newNote) {
@@ -117,9 +138,12 @@ func detectContradictions(newNote string, oldNotes []epochNote) []contradiction 
 		if !signaled {
 			continue // affirmative additions never flag
 		}
+		// Salient-overlap set: non-stopword AND non-signal. Signals gate the
+		// candidate; letting them also overlap made any negated boilerplate
+		// ("is not covered") retract any sentence carrying a negation.
 		salient := map[string]bool{}
 		for _, tok := range toks {
-			if !stopWords[tok] {
+			if !stopWords[tok] && !contradictionSignals[tok] {
 				salient[tok] = true
 			}
 		}
@@ -135,14 +159,13 @@ func detectContradictions(newNote string, oldNotes []epochNote) []contradiction 
 				break
 			}
 			for _, oldSent := range splitSentences(on.content) {
-				shared := false
+				overlap := 0
 				for tok := range salientTokens(oldSent) {
-					if salient[tok] {
-						shared = true
-						break
+					if salient[tok] && !contradictionSignals[tok] {
+						overlap++
 					}
 				}
-				if shared {
+				if overlap >= contradictionOverlapMin {
 					out = append(out, contradiction{oldNote: on.name, snippet: snippet})
 					break // first matching old sentence wins
 				}

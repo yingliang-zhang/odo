@@ -529,6 +529,85 @@ func TestDistillPromptOmission(t *testing.T) {
 	}
 }
 
+// TestDistillRenderFilter pins the M17 F1 fold filter: thinking/tool-result
+// payloads tombstone to one line (tool name kept when parseable),
+// review_action/memory_update bookkeeping renders action/verdict/layer/cause
+// only, advisory agent_text renders NOTHING, user_message and plain
+// agent_text stay verbatim — and eligibility/coverage accounting
+// (measureWindow/capEvents via distillRenderSize) matches the render
+// byte-for-byte.
+func TestDistillRenderFilter(t *testing.T) {
+	thinking := `{"text":"` + strings.Repeat("T", 5000) + `"}`
+	toolRes := `{"tool":"bash","result":"` + strings.Repeat("R", 8000) + `"}`
+	toolCall := `{"tool":"write","args":{"path":"main.go","content":"` + strings.Repeat("C", 12000) + `"}}`
+	events := []store.Event{
+		{Seq: 1, Type: "user_message", Payload: json.RawMessage(`{"text":"ship the fix"}`)},
+		{Seq: 2, Type: "agent_thinking", Payload: json.RawMessage(thinking)},
+		{Seq: 3, Type: "agent_tool_result", Payload: json.RawMessage(toolRes)},
+		{Seq: 10, Type: "agent_tool_call", Payload: json.RawMessage(toolCall)},
+		{Seq: 4, Type: "agent_tool_result", Payload: json.RawMessage(`garbage`)},
+		{Seq: 5, Type: "review_action", Payload: json.RawMessage(`{"action":"distill","epoch":3,"duration_ms":1234,"note_sha":"deadbeef"}`)},
+		{Seq: 6, Type: "review_action", Payload: json.RawMessage(`{"action":"moa_review","consensus_verdict":"reject","reviews":[{"model":"m1","verdict":"reject","body":"very long review text"}]}`)},
+		{Seq: 7, Type: "memory_update", Payload: json.RawMessage(`{"layer":"note","cause":"retract","detail":"main-epoch-2 contradicted by main-epoch-3: …","before_sha":"aa","after_sha":"aa"}`)},
+		{Seq: 8, Type: "agent_text", Payload: json.RawMessage(`{"text":"panel answered at length","panel":true}`)},
+		{Seq: 9, Type: "agent_text", Payload: json.RawMessage(`{"text":"the user-facing summary"}`)},
+	}
+
+	p := distillPrompt(events)
+	for _, want := range []string{
+		`### user_message (seq 1)` + "\n" + `{"text":"ship the fix"}`,
+		fmt.Sprintf(`### agent_thinking (seq 2) [thinking omitted — %d bytes]`, len(thinking)),
+		fmt.Sprintf(`### agent_tool_result (seq 3) [result omitted — %d bytes; tool: bash]`, len(toolRes)),
+		fmt.Sprintf(`### agent_tool_call (seq 10) [args omitted — %d bytes; tool: write]`, len(toolCall)),
+		`### agent_tool_result (seq 4) [result omitted — 7 bytes]`, // unparseable: no tool name
+		`### review_action (seq 5) {"action":"distill"}`,
+		`### review_action (seq 6) {"action":"moa_review","verdict":"reject"}`,
+		`### memory_update (seq 7) {"layer":"note","cause":"retract"}`,
+		`### agent_text (seq 9)` + "\n" + `{"text":"the user-facing summary"}`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("filtered prompt missing %q:\n%.600s", want, p)
+		}
+	}
+	// The raw payloads must NOT survive the filter; the advisory answer
+	// (seq 8) must not appear AT ALL (excluded, mirroring eligibility).
+	for _, banned := range []string{"TTTT", "RRRR", "CCCC", `"path":"main.go"`, "very long review text", "deadbeef", "panel answered at length"} {
+		if strings.Contains(p, banned) {
+			t.Errorf("filtered prompt still carries %q", banned)
+		}
+	}
+
+	// Accounting matches the render: measureWindow/capEvents (via
+	// distillRenderSize) see exactly the bytes distillPrompt emits —
+	// multi-KB thinking/results no longer blow the budget.
+	stats := measureWindow(events)
+	if stats.events != len(events) {
+		t.Errorf("measureWindow events = %d, want %d", stats.events, len(events))
+	}
+	wantBytes := 0
+	for _, ev := range events {
+		wantBytes += distillRenderSize(ev)
+	}
+	if stats.eligibleBytes != wantBytes {
+		t.Errorf("measureWindow eligibleBytes = %d, want %d (sum of distillRenderSize)", stats.eligibleBytes, wantBytes)
+	}
+	if _, omitted := capEvents(events, distillPromptBytesCap); omitted != 0 {
+		t.Errorf("capEvents omitted %d of a window whose filtered render is tiny — want 0", omitted)
+	}
+	// A window that is 10 MB of raw thinking fits the cap post-filter and
+	// never tripped the old hard-skip again.
+	big := []store.Event{
+		{Seq: 1, Type: "agent_thinking", Payload: json.RawMessage(`{"text":"` + strings.Repeat("T", 10<<20) + `"}`)},
+		{Seq: 2, Type: "user_message", Payload: json.RawMessage(`{"text":"hi"}`)},
+	}
+	if _, omitted := capEvents(big, distillPromptBytesCap); omitted != 0 {
+		t.Errorf("capEvents(10MB thinking) omitted %d, want 0", omitted)
+	}
+	if stats := measureWindow(big); stats.eligibleBytes >= distillPromptBytesCap {
+		t.Errorf("measureWindow(10MB thinking) = %d bytes, want ≪ 256 KiB post-filter", stats.eligibleBytes)
+	}
+}
+
 // TestDistillEmptyWindow pins the nothing-new guard: an immediate second
 // distill (nothing journaled since marker #1) fails with a clear error
 // instead of re-running the agent over an empty transcript and writing a

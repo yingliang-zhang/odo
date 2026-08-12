@@ -78,6 +78,11 @@ const (
 	// produces. ComputeAutonomy excludes it from human streaks.
 	autoActor = "auto_panel"
 
+	// AutoActor is autoActor exported for cross-package consumers that
+	// must split human from pipeline outcomes (cmd_skills_audit.go's M17
+	// F5 actor filter) without reaching into ipc internals.
+	AutoActor = autoActor
+
 	// Cost breaker, replacing every line-count gate: the assembled review
 	// prompt must stay under ~25% of the smallest panel context (350K).
 	// ~4 chars per token on code+prose.
