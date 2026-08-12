@@ -96,6 +96,20 @@ type AutonomyReport struct {
 	RungThresholds       map[string]int        `json:"rung_thresholds"`
 	RevertCheck          string                `json:"revert_check"` // how streaks treat reverts
 	Classes              []AutonomyClassReport `json:"classes"`
+	Settle               SettleTallies         `json:"settle"` // M18 ladder facts (audit header line)
+}
+
+// SettleTallies (M18 batch B) are the settle-ladder facts scanned from the
+// same journal surfaces the ladder derives its state from — one compact
+// audit header line, never per-row noise. Pure observability: the
+// classification above never reads them (the regression test pins that
+// these rows can't move a single class or streak).
+type SettleTallies struct {
+	ReviseRounds     int `json:"revise_rounds"`      // auto_revise_round rows (spawned repair rounds)
+	Suspensions      int `json:"suspensions"`        // memory_update{cause:ladder_suspended}
+	Resumes          int `json:"resumes"`            // memory_update{cause:ladder_resumed} (human accepts only)
+	ReviseNoProgress int `json:"revise_no_progress"` // blocked{revise_no_progress} hard stops
+	VisualGateBlocks int `json:"visual_gate_blocks"` // blocked{human_gate_visual} (visual class → human)
 }
 
 // classDescription labels the class rows (also the CLI's legend).
@@ -301,6 +315,26 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 			byID[d.ID] = d
 		}
 		for _, ev := range events {
+			// M18 batch B: settle-ladder tallies ride the same scan. They
+			// fold ONLY into report.Settle — classification paths below
+			// never see them (the blocked/round/ledger rows aren't
+			// accept/reject resolutions by construction; the batch-B
+			// regression test pins that).
+			if ev.Type == store.EventMemoryUpdate {
+				var m struct {
+					Layer string `json:"layer"`
+					Cause string `json:"cause"`
+				}
+				if json.Unmarshal(ev.Payload, &m) == nil && m.Layer == "auto_land" {
+					switch m.Cause {
+					case "ladder_suspended":
+						report.Settle.Suspensions++
+					case "ladder_resumed":
+						report.Settle.Resumes++
+					}
+				}
+				continue
+			}
 			if ev.Type != store.EventReviewAction {
 				continue
 			}
@@ -308,9 +342,21 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 				Action string `json:"action"`
 				DiffID int64  `json:"diff_id"`
 				Actor  string `json:"actor"`
+				Reason string `json:"reason"`
 			}
 			if json.Unmarshal(ev.Payload, &p) != nil {
 				continue
+			}
+			switch p.Action {
+			case "auto_revise_round":
+				report.Settle.ReviseRounds++
+			case "auto_land_blocked":
+				switch p.Reason {
+				case "revise_no_progress":
+					report.Settle.ReviseNoProgress++
+				case "human_gate_visual":
+					report.Settle.VisualGateBlocks++
+				}
 			}
 			if p.Action != "accept" && p.Action != "reject" {
 				continue

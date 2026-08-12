@@ -1646,6 +1646,14 @@ type reviewModel struct {
 // new send in the same conversation (it serializes only on the single
 // sqlite connection inside the store).
 // Results are journaled as a review_action event with action "moa_review".
+//
+// M18 batch B: the prompt is the SAME builder the auto-land gate uses
+// (review.go — the manual panel stops losing information the auto path
+// had): the original goal from the journal verbatim, the mechanical
+// facts block, and the adversarial instruction. Verify honestly reads
+// "not run" — the manual path has no worktree-verified receipt; a
+// tainted producing run's run_verdict tallies ride the facts when the
+// ledger has them.
 func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, error) {
 	if req.DiffID == 0 {
 		return Response{}, fmt.Errorf("review_diff: diff_id is required")
@@ -1663,7 +1671,15 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 		return Response{}, errors.New("No review models configured.")
 	}
 
-	reviews := s.reviewFanout(ctx, models, reviewPrompt(string(content)))
+	prompt := buildReviewPrompt(reviewPromptInput{
+		mode:       reviewPromptAdvisory,
+		goal:       s.originGoal(ctx, d.ConversationID),
+		diffPath:   d.PathOnDisk,
+		diffText:   string(content),
+		verifyNote: "not run — manual review_diff has no verify gate; the auto-land pipeline is the verified path",
+		runFacts:   s.latestRunVerdictFacts(ctx, d.ConversationID),
+	})
+	reviews := s.reviewFanout(ctx, models, prompt)
 
 	cv := consensusVerdict(reviews)
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
@@ -1707,13 +1723,24 @@ func consensusVerdict(reviews []ReviewResult) string {
 
 // reviewWithModel runs a review prompt through one model via the direct
 // HTTP API client (moa.Query) and parses the verdict. The prompt is
-// pre-built by the caller (handleReviewDiff wraps with reviewPrompt;
-// gateSkillProposals wraps with skillReviewPrompt). A failed run
-// degrades to needs_fixes with the error as comments: a review that
-// never happened must not read as an accept.
+// pre-built by the caller (handleReviewDiff and the auto-land gate both
+// build with buildReviewPrompt; gateSkillProposals wraps with
+// skillReviewPrompt). A failed run degrades to needs_fixes with the
+// error as comments: a review that never happened must not read as an
+// accept.
+//
+// M18 batch B additions (journal surfaces only — the verdict contract is
+// byte-identical): every leg carries base_url, the scrubbed endpoint it
+// truly hit (provider honesty: prefs' model@provider is a label, the one
+// moa gateway is the route); and a non-accept leg carries thinking_md,
+// the leg's reasoning text capped at 4KB — the gateway's real thinking
+// blocks when present, else the leg's full response text (the documented
+// approximation for models with no separate reasoning channel). ACCEPT
+// legs journal no thinking (noise discipline).
 func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt string) ReviewResult {
 	label := m.model + "@" + m.provider
 	client := moa.NewClientFromEnv("", "")
+	baseURL := scrubBaseURL(client.BaseURL)
 	system := "You are a code reviewer. Review the following diff and provide your verdict."
 	res, err := client.Query(ctx, m.model, system, prompt)
 	if err != nil {
@@ -1722,10 +1749,23 @@ func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt stri
 		// degrade: a review that never happened must not read as an
 		// accept) but carries Infra so the settlement ladder fails the
 		// whole round closed as panel_infra instead of feeding an error
-		// string to the repair prompt.
-		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error(), Infra: true}
+		// string to the repair prompt. base_url still records where the
+		// leg TRIED to go.
+		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error(), Infra: true, BaseURL: baseURL}
 	}
-	return reviewVerdict(label, res.Text, res.Truncated)
+	rr := reviewVerdict(label, res.Text, res.Truncated)
+	rr.BaseURL = baseURL
+	if rr.Verdict != "accept" {
+		if res.Thinking != "" {
+			rr.ThinkingMD = capDetail(res.Thinking)
+		} else {
+			// No reasoning channel exposed by the client for this model —
+			// journal the full response text (approximation, locked in the
+			// m18 doc) so the non-accept reasoning is never lost.
+			rr.ThinkingMD = capDetail(res.Text)
+		}
+	}
+	return rr
 }
 
 // reviewVerdict folds one model response into a ReviewResult. Truncation
@@ -1758,12 +1798,6 @@ func parseReviewModels(raw string) []reviewModel {
 		out = append(out, reviewModel{model: model, provider: provider})
 	}
 	return out
-}
-
-// reviewPrompt wraps the diff content with the MoA review instruction.
-func reviewPrompt(diffContent string) string {
-	return "Review the following diff. Provide your verdict and comments.\n\n" +
-		"Verdict must be one of: ACCEPT, REJECT, NEEDS_FIXES\n\n" + diffContent
 }
 
 // handlePanelQuery routes a /panel prompt to N MoA models via the direct API

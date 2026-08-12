@@ -1205,10 +1205,15 @@ func TestReviewDiff(t *testing.T) {
 	if len(rev.Reviews) != 2 {
 		t.Fatalf("reviews = %d, want 2", len(rev.Reviews))
 	}
-	if want := (ReviewResult{Model: "rm1@test", Verdict: "accept", Comments: "Ship it."}); rev.Reviews[0] != want {
+	// M18 batch B pins: every leg journals the scrubbed endpoint it truly
+	// hit (base_url — the httptest stub has no userinfo, so it rides
+	// verbatim); a non-accept leg journals thinking_md (this stub emits no
+	// thinking blocks, so the approximation = the leg's full response
+	// text); ACCEPT legs stay unjournaled.
+	if want := (ReviewResult{Model: "rm1@test", Verdict: "accept", Comments: "Ship it.", BaseURL: moaSrv.URL}); rev.Reviews[0] != want {
 		t.Errorf("review[0] = %+v, want %+v", rev.Reviews[0], want)
 	}
-	if want := (ReviewResult{Model: "rm2@test", Verdict: "reject", Comments: "Needs tests."}); rev.Reviews[1] != want {
+	if want := (ReviewResult{Model: "rm2@test", Verdict: "reject", Comments: "Needs tests.", ThinkingMD: "REJECT\n\nNeeds tests.", BaseURL: moaSrv.URL}); rev.Reviews[1] != want {
 		t.Errorf("review[1] = %+v, want %+v", rev.Reviews[1], want)
 	}
 

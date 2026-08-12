@@ -32,6 +32,10 @@ func renderAutonomyHuman(r ipc.AutonomyReport) {
 		r.Journal, r.WorkstreamsScanned, r.ConversationsScanned, r.Resolutions, r.AutoAccepted)
 	fmt.Printf("auto-apply: %s · current rung: %d (rung-1 at %d clean accepts, rung-2 at %d)\n",
 		r.AutoApply, r.CurrentRung, r.RungThresholds["rung_1"], r.RungThresholds["rung_2"])
+	// M18 batch B: the settle ladder's journal facts, one compact header
+	// line (no per-row noise — the rows themselves stay in the journal).
+	fmt.Printf("settle ladder: %d revise round(s) · %d suspension(s) · %d resume(s) · %d no-progress · %d visual-gate block(s)\n",
+		r.Settle.ReviseRounds, r.Settle.Suspensions, r.Settle.Resumes, r.Settle.ReviseNoProgress, r.Settle.VisualGateBlocks)
 	if r.Resolutions == 0 {
 		fmt.Println("no data: 0 resolved diffs found — nothing to audit yet")
 		return

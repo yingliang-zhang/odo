@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -350,5 +351,60 @@ func TestAutonomyStatusHandler(t *testing.T) {
 	}
 	if c1 := classRow(t, *resp.Autonomy, "C1"); c1.Streak != 1 {
 		t.Errorf("C1 = %+v, want streak 1", c1)
+	}
+}
+
+// TestComputeAutonomyBatchBRowsRegression (M18 batch B boundary): the
+// batch-B journal rows — human_gate_visual / verify_no_evidence blocked
+// rows, panel legs carrying thinking_md/base_url — must NOT move
+// ComputeAutonomy's classification (M16's invariant; the M18 pin covers
+// the ladder rows, this one the batch-B additions). The Settle tallies
+// DO count the visual blocks (that is B6's job).
+func TestComputeAutonomyBatchBRowsRegression(t *testing.T) {
+	f := newAutonomyFixture(t)
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+
+	d1 := f.addDiff(t, "d1.diff", patchDoc("README.md", 3))
+	d2 := f.addDiff(t, "d2.diff", patchDoc("guide.md", 4))
+	f.resolve(t, d1, "accept", "2026-08-10 10:00:00")
+	f.resolve(t, d2, "reject", "2026-08-10 11:00:00")
+
+	before, err := ComputeAutonomy(ctx, f.st, f.p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	add := func(payload map[string]interface{}) {
+		t.Helper()
+		if _, err := f.st.AppendEvent(ctx, f.c.ID, store.EventReviewAction, mustJSON(payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The batch-B blocked rows with the panel riding as advisory evidence,
+	// carrying the new per-leg fields (thinking_md, base_url, infra).
+	legs := []map[string]interface{}{
+		{"model": "rm1@test", "verdict": "accept", "comments": "fine", "base_url": "https://gw.example/anthropic"},
+		{"model": "rm2@test", "verdict": "needs_fixes", "comments": "polish", "thinking_md": "checked the layout math", "base_url": "https://gw.example/anthropic"},
+	}
+	add(map[string]interface{}{
+		"action": "auto_land_blocked", "actor": autoActor, "reason": "human_gate_visual",
+		"diff_id": d2.ID, "reviews": legs, "consensus_verdict": "accept",
+	})
+	add(map[string]interface{}{
+		"action": "auto_land_blocked", "actor": autoActor, "reason": "verify_no_evidence", "diff_id": d2.ID,
+	})
+
+	after, err := ComputeAutonomy(ctx, f.st, f.p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tallies := after.Settle
+	before.Settle, after.Settle = SettleTallies{}, SettleTallies{}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("ComputeAutonomy moved under batch-B rows:\n before=%+v\n after=%+v", before, after)
+	}
+	if want := (SettleTallies{VisualGateBlocks: 1}); tallies != want {
+		t.Errorf("Settle tallies = %+v, want %+v (only the visual block is tallied; verify_no_evidence is a gate fact, not a ladder fact)", tallies, want)
 	}
 }

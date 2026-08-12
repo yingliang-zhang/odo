@@ -144,6 +144,19 @@ type ReviewResult struct {
 	// Infra to fail the round closed as panel_infra instead of mistaking
 	// an error string for dissent.
 	Infra bool `json:"infra,omitempty"`
+	// ThinkingMD (M18 batch B) journals the leg's reasoning text, capped
+	// at 4KB, ONLY for non-accept verdicts (accept legs stay unjournaled —
+	// journal noise discipline). Real data: the moa client's thinking
+	// blocks when present, otherwise the leg's full response text (the
+	// documented approximation — the direct API exposes no separate
+	// reasoning channel for those models).
+	ThinkingMD string `json:"thinking_md,omitempty"`
+	// BaseURL (M18 batch B, provider honesty) records the endpoint the
+	// leg actually hit, userinfo-scrubbed. Prefs declare model@provider
+	// labels, but the direct-API path routes every leg through the one
+	// moa gateway — the journal must say where the leg truly went, not
+	// what the label implies.
+	BaseURL string `json:"base_url,omitempty"`
 }
 
 // DiffInfo carries a diff record plus its file content to the client.

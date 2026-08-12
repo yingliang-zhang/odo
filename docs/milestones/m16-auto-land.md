@@ -26,25 +26,72 @@ stays, and three findings sharper than the brief:
 
 ## The gate stack (`internal/ipc/autoland.go`, in order)
 
+The full predicate list as extended by M18 and batch B (the two batch-B
+additions marked NEW; evaluation order = numbering):
+
 1. **Pref** — `adapter.ReadSettings().AutoApply != "main"` returns *silently*
    (feature-off deserves no journal noise).
 2. **Run posture** — the producing run must have finished cleanly (`agent_error`
    blocks).
-3. **Mechanical gates** (deterministic, zero panel spend): protected paths
+3. **Run verdict** — the mechanical run post-mortem (`false_stop`/`no_text`,
+   runverdict.go) blocks any diff a tainted run produced.
+4. **Mechanical gates** (deterministic, zero panel spend): protected paths
    (`.odo/`, `wiki/`), supply-chain files, new top-level directory (vs the diff's
    base tree), net `_test.go` assertion loss. Size gates are GONE.
-4. **Verify gate** — the repo-root `.odo-verify` command re-runs at the run's
-   worktree root. Missing/unreadable/failing = blocked, always (fail-closed).
-5. **Cost breaker** — assembled prompt estimate (chars/4) > 87K tokens
+5. **Base freshness** — main checkout HEAD must still equal the diff's
+   `base_sha` (`base_stale` blocks; verify would attest a tree nobody lands).
+6. **Verify gate** — the repo-root `.odo-verify` command re-runs at the run's
+   worktree root under an allowlisted child env. Missing/unreadable/failing =
+   blocked, always (fail-closed).
+7. **Verify evidence** (NEW, batch B) — an exit-0 verify whose output tail
+   carries ZERO test evidence (no whole-word `PASS`/`PASSED` token, no go
+   package `ok` line, no NON-ZERO N-passed count — the conservative whitelist
+   `verifyHasPassEvidence` in review.go) blocks `verify_no_evidence`: a
+   wrong-path or test-less verify proved nothing. Fail-closed by design: a
+   test-less `.odo-verify` blocks by DEFAULT — P0-review caveat: the
+   whitelist is a heuristic, not proof; a verify that merely echoes a pass
+   token (or non-go runners like bare `mvn test` with no matching line)
+   is the caller's own contract. Migration for existing build-only
+   verifies: add one test invocation (or rename the file so the gate
+   reads as missing-unreadable, which blocks too — either way the human
+   decides). Interaction with gate 12: a visual diff whose verify is
+   test-less blocks HERE with no panel advisory riding along (panel runs
+   later in the stack); fail-closed either way.
+8. **Cost breaker** — assembled prompt estimate (chars/4) > 87K tokens
    (~25% of the smallest panel context) = blocked. This is the ceiling that replaced
    every line-count gate.
-6. **Panel** — prefs.md `review:` models fan out on a GROUNDED prompt: the journaled
-   trigger text (never the agent's self-report), the verify output tail, and an
-   adversarial instruction (three concrete failure scenarios first, verdict last).
-7. **Unanimity** — `consensusVerdict == "accept"` requires EVERY reviewer to accept.
-8. **Land** — handleDiffAction's original path (protected-path guard, unmerged-index
-   refusal, 3-way apply, path-scoped staged commit, worktree retire) plus
-   `actor:"auto_panel"` on the journaled review_action.
+9. **Panel** — prefs.md `review:` models fan out on the SHARED grounded prompt
+   (`buildReviewPrompt` in review.go — NEW, batch B: ONE builder serves both
+   manual `review_diff` and this gate, so the manual path stops losing
+   information): the original goal verbatim (never the agent's self-report),
+   a mechanical facts block (file list with +- counts, protected-path hits,
+   verify outcome, run_verdict tallies where available), the verify output
+   tail, and an adversarial instruction (three concrete failure scenarios
+   first, verdict last). Non-accept legs journal `thinking_md` (≤4KB); every
+   leg journals `base_url` (scrubbed) — batch B. Truncated reviews count as
+   needs_fixes.
+10. **Panel-infra** — any leg failed on transport/auth/timeout blocks
+    `panel_infra` (M18: infra is not a verdict; fail closed, never a ladder
+    tick).
+11. **Unanimity** — `consensusVerdict == "accept"` requires EVERY reviewer to
+    accept.
+12. **Visual class** (NEW, batch B) — any diff path under `gui/src/`, parsed
+    from the diff TEXT, blocks `human_gate_visual` regardless of panel
+    outcome: NEVER auto-lands; the completed panel rides the blocked row as
+    advisory evidence; the diff stays pending for human visual acceptance
+    (the parked-queue precedent: evidence journaled, pipeline continues, the
+    human is the async inspector). Positioned after the infra gate and before
+    the settlement read, so the ladder never burns a revise round on a diff
+    that cannot land.
+13. **Settlement** (M18) — the four-outcome fold: unanimous accept proceeds to
+    land; unanimous reject blocks `panel_unanimous_reject` + transcript
+    advisory; any reject blocks `panel_mixed`; zero rejects + ≥1 needs_fixes
+    enters the auto-revise ladder (round cap, no-progress stop, suspension —
+    docs/milestones/m18-settlement-ladder.md).
+
+**Land** — handleDiffAction's original path (protected-path guard, unmerged-index
+refusal, 3-way apply, path-scoped staged commit, worktree retire) plus
+`actor:"auto_panel"` on the journaled review_action.
 
 ## Journal contract (append-only audit)
 
@@ -52,10 +99,16 @@ stays, and three findings sharper than the brief:
 - `accept{actor:"auto_panel"}` — auto-landed; `ComputeAutonomy` counts these
   separately, never toward rungs (an auto-land must not inflate the streaks that
   would earn future autonomy)
-- `auto_land_blocked{reason, detail, [reviews]}` — any gate/panel stop, with the
-  panel verdicts attached when the panel ran. M18 retired the lump
+- `auto_land_blocked{reason, detail, patch_sha16, [reviews]}` — any gate/panel
+  stop, with the panel verdicts attached when the panel ran. M18 retired the lump
   `panel_disagreed` reason into the settlement classes — see
-  docs/milestones/m18-settlement-ladder.md.
+  docs/milestones/m18-settlement-ladder.md. Batch B adds reasons
+  `verify_no_evidence` (gate 7) and `human_gate_visual` (gate 12).
+- Review legs (`reviews[]` in both row kinds) gain, batch B: `base_url` on every
+  leg — the scrubbed endpoint it truly hit — and `thinking_md` (≤4KB) on
+  non-accept legs only (real gateway thinking blocks when present, else the
+  leg's full response text; the approximation is documented in m18 batch B).
+  Verdict parsing is byte-identical.
 
 `auto_apply` values `branch`/`all` stay unconsumed (accepting them still fails closed
 in settings; nothing reads them). Skill proposals keep auto_accept deferred — the M15
@@ -78,8 +131,9 @@ reversible via git.
   patch-parser rules as `PatchStats`.
 - `TestAutoLandCheck` — each mechanical gate named as the blocking reason.
 - `TestVerifyCommand` (missing file is fail-closed) / `TestRunVerify`.
-- `TestAutoLandPrompt` — grounded prompt carries goal, verify command+tail,
-  adversarial instruction.
+- `TestBuildReviewPrompt` (batch B; supersedes `TestAutoLandPrompt`) — the
+  shared grounded prompt carries goal, verify command+tail, adversarial
+  instruction, and the facts block, in both gate and advisory (manual) modes.
 - `TestAutoLandBlockedPaths` — every blocked exit journals the right reason;
   panel-needing cases isolate HOME (no `review:` line = blocked, never landed).
 - `TestMaybeAutoLandPrefOffSilent` — pref-off produces zero journal rows.

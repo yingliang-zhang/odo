@@ -177,7 +177,9 @@ func pollDone(t *testing.T, rig *testRig, convID int64) Response {
 func settleRigRepo(t *testing.T) string {
 	t.Helper()
 	root := initRepo(t)
-	if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("exit 0\n"), 0o644); err != nil {
+	// echo PASS: the B4 verify-evidence gate (M18 batch B) requires test
+	// evidence in the tail — a bare "exit 0" now blocks verify_no_evidence.
+	if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("echo PASS\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
@@ -335,7 +337,8 @@ func TestSettleUnanimousRejectBlocks(t *testing.T) {
 
 	f := newAutonomyFixture(t)
 	root, sha := autolandRepo(t)
-	if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("exit 0\n"), 0o644); err != nil {
+	// echo PASS: B4 verify-evidence gate (bare exit 0 blocks before the panel).
+	if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("echo PASS\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{store: f.st, projectRoot: root}
@@ -382,7 +385,8 @@ func TestSettleRepairPromptTooLarge(t *testing.T) {
 	newBlockedServer := func(t *testing.T, patch string) (autonomyFixture, *Server, store.Diff, string) {
 		f := newAutonomyFixture(t)
 		root, sha := autolandRepo(t)
-		if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("exit 0\n"), 0o644); err != nil {
+		// echo PASS: B4 verify-evidence gate (bare exit 0 blocks before the panel).
+		if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("echo PASS\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		d := f.addDiff(t, "p.diff", patch)
@@ -865,8 +869,18 @@ func TestComputeAutonomySettleRowsRegression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Contract deliberately changed (M18 batch B, B6): the report now
+	// carries the Settle facts block and the ladder rows interleaved here
+	// DO move it — that is its job. The comparison zeroes it first (the
+	// regression is about classification); the tallies are pinned right
+	// below.
+	tallies := after.Settle
+	before.Settle, after.Settle = SettleTallies{}, SettleTallies{}
 	if !reflect.DeepEqual(before, after) {
 		t.Errorf("ComputeAutonomy moved under ladder rows:\n before=%+v\n after=%+v", before, after)
+	}
+	if want := (SettleTallies{ReviseRounds: 1, Suspensions: 1, Resumes: 1, ReviseNoProgress: 1}); tallies != want {
+		t.Errorf("Settle tallies = %+v, want %+v", tallies, want)
 	}
 
 	// The auto accept row stays out of streaks (M16 invariant the ladder

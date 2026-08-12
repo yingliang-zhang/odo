@@ -202,23 +202,96 @@ infra detection), `TestParseLedgerRound`, and the locked constants
   contracts re-run green (`TestReviewDiff`, `TestConsensusVerdict`,
   `TestDistillRenderFilter`, `TestAutoEligibility`,
   `TestMaybeAutoLandPrefOffSilent`, `TestVerdictBlocksUnit`).
-- Full suite at freeze: `go test -count=1 ./...` — all packages PASS
-  (`internal/ipc` 267.976s, 2026-08-12); `hermes verify --json` — build
-  exit 0 (1.9s), test exit 0 (269.3s).
+- Full suite at freeze (ladder): `go test -count=1 ./...` — all packages
+  PASS (`internal/ipc` 267.976s, 2026-08-12); `hermes verify --json` —
+  build exit 0 (1.9s), test exit 0 (269.3s).
+- Full suite at freeze (batch B): `go test -count=1 ./...` — all packages
+  PASS (`internal/ipc` 267.497s, 2026-08-12); `hermes verify --json` —
+  build exit 0 (1.1s), test exit 0 (266.6s).
 
-## Not in this batch (deliberately — batch B)
+## Batch B (delivered, 2026-08-12, journal + daemon only)
 
-- **Review-prompt unification** (manual `review_diff` still sends the
-  weak 3-line prompt instead of the grounded auto path's).
-- **Thinking journal** for non-accept verdicts.
-- **Provider honesty** (the `model@provider` label still implies routing
-  that never happens; the `infra` marker only separates error from
-  verdict).
-- **Verify-zero-pass gate** (a verify tail showing no test line).
-- **Visual-class gate** (screenshot proof for GUI diffs).
-- GUI surfaces for the ladder (review-queue display of round rows,
-  suspension badges, resume affordance) — this leg is journal + daemon
-  only.
+All six batch-B items shipped in this commit. Journal-first, no new event
+types, every new field optional (ADR-0002 forward-compat: older readers
+ignore them); every new obstruction leaves the diff pending (fail
+closed); `ComputeAutonomy` classification unmoved (pinned by
+`TestComputeAutonomyBatchBRowsRegression`).
+
+1. **Review-prompt unification + facts block (B1).** Manual
+   `review_diff` and the auto-land gate now share ONE builder,
+   `buildReviewPrompt` (`internal/ipc/review.go`), replacing the weak
+   3-line manual prompt and `autoLandPrompt`. Both paths produce: the
+   original goal verbatim (manual: derived from the journal via
+   `originGoal`), a mechanical **facts block** (file list with +- line
+   counts, protected-path hits, verify outcome line, producing-run
+   `run_verdict` tallies where a ledger row exists), the verify receipt
+   when the gate ran it, and the adversarial instruction. The verdict
+   contract is byte-identical (final-line token, truncation →
+   needs_fixes, diff fenced as data). The manual path's facts block
+   honestly reads verify "not run" (it has no worktree-verified receipt).
+2. **Thinking journal for non-accept verdicts (B2).** A panel leg whose
+   final verdict is needs_fixes or reject carries `thinking_md`
+   (≤4KB per model) inside its `ReviewResult`, journaled inside
+   `moa_review` and `auto_land_blocked` payloads. Source: the moa
+   client's real thinking blocks (`moa.Result.Thinking`, thinking-type
+   content blocks) when the gateway emits them; **approximation**: when
+   a leg returns no thinking blocks, `thinking_md` holds the leg's FULL
+   response text (cap 4KB) — the direct-API client exposes no separate
+   reasoning channel for those models. ACCEPT legs never journal
+   thinking (noise discipline). A leg's `thinking_md` is omitted for
+   infra failures (no response bytes exist).
+3. **Provider honesty (B3).** Every journal leg carries `base_url` — the
+   endpoint it truly hit (the moa client config: prefs → `MOA_BASE_URL`
+   → built-in default), scrubbed defensively — userinfo PLUS query
+   string and fragment (a credential embedded in `?key=…` must not leak
+   into the journal either; P0 review DSF)
+   (`//journal records where the leg truly went, not what the
+   model@provider label implies`; routing unchanged on purpose). On
+   infra legs `base_url` records where the leg tried to go.
+4. **Verify-evidence gate (B4).** An exit-0 verify whose output tail
+   shows ZERO pass evidence blocks `verify_no_evidence` before any panel
+   spend — a wrong-path/test-less verify gave false release confidence
+   (m16 gate 7). Conservative whitelist heuristic
+   (`verifyHasPassEvidence`, review.go): evidence is a whole-word
+   `PASS`/`PASSED` token line, a go package `ok` line, or a NON-ZERO
+   N-passed count line (`3 passed`, `Tests: 12 passed`, `5/5 passed`;
+   `0 passed` is not evidence). Everything else = zero evidence. The
+   bias is deliberately fail-closed: a test-less `.odo-verify` blocks by
+   default. Heuristic caveats (P0 review): a verify that merely echoes a
+   pass token still reads as evidence (the panel remains the backstop);
+   non-go toolchains that print none of the whitelisted shapes (e.g.
+   bare `mvn test`) over-block — documented as a known limitation;
+   migration = add a test line printing pass evidence.
+   Interaction with B5: a visual-class diff whose verify is test-less
+   blocks at gate 7 with NO panel advisory riding (panel runs later);
+   the blocked-row promise to carry the panel is conditional on the
+   verify-evidence gate passing.
+5. **Visual-class gate (B5, m16 gate 12).** A diff touching any path
+   under `gui/src/` (string prefix over the paths parsed from the diff
+   TEXT — the artifact under review — never journal metadata) never
+   auto-lands regardless of panel outcome: blocked
+   `auto_land_blocked{reason:"human_gate_visual"}` with the completed
+   panel (`reviews` + `consensus_verdict`) riding the row as advisory
+   evidence; the diff stays pending for human visual acceptance (the
+   parked-queue precedent: evidence journaled, pipeline continues, the
+   human is the async inspector). Wired in `autoLand` after the
+   panel-infra gate and before the settlement read — the ladder never
+   burns a revise round on a diff that cannot land.
+6. **Autonomy audit header (B6).** `odo autonomy audit` gains one
+   compact line —
+   `settle ladder: N revise round(s) · N suspension(s) · N resume(s) ·
+   N no-progress · N visual-gate block(s)` — from
+   `AutonomyReport.Settle{revise_rounds, suspensions, resumes,
+   revise_no_progress, visual_gate_blocks}` (JSON consumers included),
+   folded in `ComputeAutonomy` from the same journal surfaces
+   (auto_revise_round rows, ladder suspension/resume ledger rows,
+   revise_no_progress and human_gate_visual blocked rows) scanSettle
+   derives its state from. `verify_no_evidence` is a gate fact, not a
+   ladder fact — not tallied.
+
+Still out (unchanged): GUI surfaces for the ladder (review-queue display
+of round rows, suspension badges, resume affordance) — this batch is
+journal + daemon only.
 
 ## Known approximations
 
@@ -234,7 +307,8 @@ counter; deferred to the fold-whitelist batch. Skills audit
 (telemetry-only): a synthesized repair prompt sends count toward the
 conversation's baseline attribution (no skill receipt, so no skill is
 in play), and the `odo:true` advisory rows act as errored terminals;
-mechanical and defensible, revisited in batch B.
+mechanical and defensible — batch B shipped without touching these (not
+in its six locked items); still deferred.
 
 Test seam: `ODO_OMP_WRAPPER` is read ONCE at adapter construction —
 tests that vary the wrapper (no-progress fixture) must parameterize

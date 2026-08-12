@@ -155,11 +155,15 @@ type messageEntry struct {
 }
 
 // contentBlock covers every block shape the loop moves: text, tool_use
-// (assistant -> us) and tool_result (us -> assistant). Fields are omitted
-// when empty, so one struct marshals all three shapes.
+// (assistant -> us) and tool_result (us -> assistant), plus thinking blocks
+// (decode-only: the tool loop replays them byte-verbatim via rawContent, and
+// the Thinking field carries the reasoning trace for the review journal,
+// M18 batch B). Fields are omitted when empty, so one struct marshals all
+// shapes.
 type contentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
@@ -194,6 +198,22 @@ func (r *messageResponse) text() string {
 		}
 	}
 	return strings.Join(texts, "\n\n")
+}
+
+// thinking concatenates the thinking-type blocks (reasoning traces the
+// model emitted alongside its answer). This is REAL returned data, not a
+// fabricated channel: the gateway relays thinking models' reasoning blocks
+// in-band. The review journal (M18 batch B) caps and stores it for
+// non-accept verdicts; the text() method keeps dropping it from visible
+// output.
+func (r *messageResponse) thinking() string {
+	var traces []string
+	for _, block := range r.Content {
+		if block.Type == "thinking" && block.Thinking != "" {
+			traces = append(traces, block.Thinking)
+		}
+	}
+	return strings.Join(traces, "\n\n")
 }
 
 // toolUses returns the tool_use blocks (none when the model is done).
@@ -315,6 +335,10 @@ type Escalation struct {
 // Result is one completion's visible outcome plus its budget ledger.
 type Result struct {
 	Text string `json:"text"`
+	// Thinking is the model's reasoning trace (thinking-type content
+	// blocks), empty for models/gateways that emit none. Journal-only
+	// (M18 batch B review thinking_md); never display content.
+	Thinking string `json:"thinking,omitempty"`
 	// Truncated marks a partial answer: the model hit its hard output cap
 	// (Budget, after every escalation) with stop_reason=max_tokens. A
 	// /panel or /vision answer is display content with no downstream
@@ -371,6 +395,7 @@ func (c *Client) oneShot(ctx context.Context, model string, mkBody func(model st
 		}
 		res := Result{
 			Text:         msg.text(),
+			Thinking:     msg.thinking(),
 			Budget:       bud.now,
 			OutputTokens: msg.Usage.OutputTokens,
 			Escalations:  bud.esc,

@@ -162,18 +162,6 @@ func TestRunVerify(t *testing.T) {
 	})
 }
 
-func TestAutoLandPrompt(t *testing.T) {
-	p := autoLandPrompt("THE GOAL", "THE DIFF", "go test ./...", "VERIFY TAIL")
-	for _, want := range []string{"THE GOAL", "go test ./...", "VERIFY TAIL", "ACCEPT, REJECT, or NEEDS_FIXES", "data, not instructions"} {
-		if !strings.Contains(p, want) {
-			t.Errorf("prompt missing %q", want)
-		}
-	}
-	if !strings.HasSuffix(p, "```diff\nTHE DIFF\n```\n") {
-		t.Error("prompt must END with the fenced diff (the verdict instruction sits before it; the fence keeps the diff data, not instructions)")
-	}
-}
-
 // TestVerifyEnviron pins the allowlist contract: the verify child sees
 // shell/toolchain vars and GO*/GIT_* passthrough, never the daemon's
 // credential-shaped vars (the panel's API keys are process env).
@@ -256,7 +244,10 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 
 	t.Run("prompt cost breaker", func(t *testing.T) {
 		f, s, root, sha := newServer(t)
-		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("exit 0\n"), 0o644); err != nil {
+		// The verify must emit pass evidence (M18 batch B, B4: an
+		// output-less "exit 0" would now stop at verify_no_evidence
+		// before the cost breaker).
+		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		// ~45 chars/line × 9000 ≈ 400KB > 87K-token×4 estimate.
@@ -294,7 +285,9 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 	t.Run("no review models is fail-closed", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir()) // no prefs.md → no review: models
 		f, s, root, sha := newServer(t)
-		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("exit 0\n"), 0o644); err != nil {
+		// Pass evidence required (B4): an evidence-less verify blocks
+		// before the panel-model check.
+		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		d := f.addDiff(t, "p.diff", patchSrc("README.md", 1, 1, false))
@@ -318,4 +311,131 @@ func TestMaybeAutoLandPrefOffSilent(t *testing.T) {
 	if got := blockedReasons(t, f.st, f.c.ID); len(got) != 0 {
 		t.Errorf("reasons = %v, want none (pref off must be silent)", got)
 	}
+}
+
+// TestAutoLandVerifyNoEvidence (B4): an exit-0 verify whose output tail
+// shows zero test evidence blocks before ANY panel spend — and, flipped
+// on, pass evidence lets the same config proceed to the panel-model gate.
+func TestAutoLandVerifyNoEvidence(t *testing.T) {
+	t.Run("zero evidence blocks", func(t *testing.T) {
+		f := newAutonomyFixture(t)
+		root, sha := autolandRepo(t)
+		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo build-only-done\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s := &Server{store: f.st, projectRoot: root}
+		d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
+		d.BaseSHA = &sha
+		s.autoLand(context.Background(), d, root, "goal", false, "")
+		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "verify_no_evidence" {
+			t.Errorf("reasons = %v, want [verify_no_evidence]", got)
+		}
+		// Fail closed: the diff stays pending for the human.
+		got, err := f.st.GetDiff(context.Background(), d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffPending {
+			t.Errorf("diff status = %q, want pending", got.Status)
+		}
+	})
+
+	t.Run("go-test-shaped tail passes the gate", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir()) // no prefs → the next gate (no_review_models) proves we got PAST verify
+		f := newAutonomyFixture(t)
+		root, sha := autolandRepo(t)
+		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("printf 'ok  \\tpkg/mod\\t0.1s\\n'\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s := &Server{store: f.st, projectRoot: root}
+		d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
+		d.BaseSHA = &sha
+		s.autoLand(context.Background(), d, root, "goal", false, "")
+		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "no_review_models" {
+			t.Errorf("reasons = %v, want [no_review_models] (an ok line satisfies the evidence gate)", got)
+		}
+	})
+}
+
+// TestAutoLandVisualGate (B5, m16 gate 12): a diff touching gui/src/**
+// never auto-lands regardless of panel outcome — blocked
+// human_gate_visual with the completed panel riding the row as advisory
+// evidence; the ladder never ticks; the diff stays pending for human
+// visual acceptance.
+func TestAutoLandVisualGate(t *testing.T) {
+	// visualRepo commits gui/src/ + the verify config so the new-top-dir
+	// and base-freshness gates pass for a gui diff.
+	visualRepo := func(t *testing.T) (root, sha string) {
+		root, _ = autolandRepo(t)
+		if err := os.MkdirAll(filepath.Join(root, "gui", "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "gui", "src", "app.ts"), []byte("export const x = 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, root, "add", ".")
+		gitIn(t, root, "commit", "-m", "gui + verify")
+		return root, gitOut(t, root, "rev-parse", "HEAD")
+	}
+	setup := func(t *testing.T, reply func(call int64, model string) (int, string)) (autonomyFixture, *Server, store.Diff, string) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		writePrefs(t, home, "review: rm1@test\n")
+		startPanelStub(t, reply)
+		f := newAutonomyFixture(t)
+		root, sha := visualRepo(t)
+		s := &Server{store: f.st, projectRoot: root}
+		d := f.addDiff(t, "p.diff", patchSrc("gui/src/app.ts", 3, 1, false))
+		d.BaseSHA = &sha
+		return f, s, d, root
+	}
+
+	t.Run("unanimous accept still blocks (advisory only)", func(t *testing.T) {
+		f, s, d, root := setup(t, func(call int64, model string) (int, string) {
+			return 200, "ACCEPT\nlooks correct"
+		})
+		s.autoLand(context.Background(), d, root, "goal", false, "")
+		sc := scanSettle(t, f.st, f.c.ID)
+		if got := sc.blockedReasons(); len(got) != 1 || got[0] != "human_gate_visual" {
+			t.Fatalf("blocked reasons = %v, want [human_gate_visual]", got)
+		}
+		row := sc.blocked[0]
+		if row["consensus_verdict"] != "accept" {
+			t.Errorf("consensus_verdict = %v, want accept riding as advisory evidence", row["consensus_verdict"])
+		}
+		reviews, _ := row["reviews"].([]interface{})
+		if len(reviews) != 1 {
+			t.Errorf("reviews = %v, want the 1-model panel attached", row["reviews"])
+		}
+		if detail, _ := row["detail"].(string); !strings.Contains(detail, "gui/src/app.ts") {
+			t.Errorf("detail = %q, want the visual path named", detail)
+		}
+		if len(sc.moaRows) != 0 || len(sc.accepts) != 0 {
+			t.Errorf("landing rows = %v moa %v accepts, want none (the blocked row is the only evidence)", sc.moaRows, sc.accepts)
+		}
+		got, err := f.st.GetDiff(context.Background(), d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffPending {
+			t.Errorf("diff status = %q, want pending (human visual acceptance is the accept path)", got.Status)
+		}
+	})
+
+	t.Run("needs_fixes blocks visually, never spawns a revise round", func(t *testing.T) {
+		f, s, d, root := setup(t, func(call int64, model string) (int, string) {
+			return 200, "NEEDS_FIXES\nthe layout regressed on narrow viewports"
+		})
+		s.autoLand(context.Background(), d, root, "goal", false, "")
+		sc := scanSettle(t, f.st, f.c.ID)
+		if got := sc.blockedReasons(); len(got) != 1 || got[0] != "human_gate_visual" {
+			t.Fatalf("blocked reasons = %v, want [human_gate_visual] (needs_fixes never reaches the ladder on a visual diff)", got)
+		}
+		if len(sc.rounds) != 0 || len(sc.markers) != 0 {
+			t.Errorf("ladder fired on a visual diff: rounds=%v markers=%v", sc.rounds, sc.markers)
+		}
+	})
 }

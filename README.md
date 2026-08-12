@@ -46,7 +46,7 @@ M0–M15 complete. 208 commits, ~44K lines (≈29.6K Go incl. tests + ≈14.0K T
 | Clipboard Paste Fix | save_attachment daemon command for clipboard image paste (webview → base64 → daemon → real path) | 43 E2E |
 | M12–M14 Memory + Context Polish | Verbatim replay w/ actionable fold chips, CJK recall, durable todo (journal-backed), cross-workstream matched recall, auto-distill chain, per-layer sha16 receipts + `total_prompt_bytes` | Go + 47 E2E |
 | M15 Outcome Loops | `odo skills audit` (receipt×outcome join, flag-only), `odo autonomy audit` (per-class streaks, rung-0 instrumentation, `auto_apply` pref parse), M11 comment truth, OMP memory probe (docs-only) | 15 Go + 47 E2E |
-| M16 Auto-Land | Pref-gated (`auto_apply: main`) unanimous-panel landing: protected-path / supply-chain / new-topdir / test-weakening mechanical gates, mandatory `.odo-verify` re-run, 87K-token cost breaker, grounded adversarial prompt, `consensusVerdict` unanimity (fail-open fix), journaled `auto_land_blocked` + `actor:"auto_panel"` audit (streak-excluded) | 7 Go + skip-gated live harness |
+| M16 Auto-Land | Pref-gated (`auto_apply: main`) unanimous-panel landing: protected-path / supply-chain / new-topdir / test-weakening mechanical gates, mandatory `.odo-verify` re-run, 87K-token cost breaker, one shared adversarial prompt for manual+auto review (batch B), `consensusVerdict` unanimity (fail-open fix), journaled `auto_land_blocked` + `actor:"auto_panel"` audit (streak-excluded). Batch B: verify-evidence + visual-class gates, per-leg `base_url`/`thinking_md` journal honesty, autonomy audit settle header | 7 Go + skip-gated live harness |
 
 ### Planned
 

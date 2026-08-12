@@ -254,6 +254,14 @@ func PatchPaths(pathOnDisk string) ([]string, error) {
 	return unionPaths(aPaths, bPaths), nil
 }
 
+// PatchPathsText is PatchPaths for diff text already in memory (the M18
+// batch-B visual gate derives paths from the diff bytes under review, not
+// from journal metadata).
+func PatchPathsText(diffText string) []string {
+	aPaths, bPaths := diffPathsText(diffText)
+	return unionPaths(aPaths, bPaths)
+}
+
 // unionPaths concatenates a- and b-side patch paths deduplicated, keeping
 // file order. Pre-images come first so a rename's deletion stages alongside
 // its addition.
@@ -288,8 +296,14 @@ func DiffPaths(pathOnDisk string) (aPaths, bPaths []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	aPaths, bPaths = diffPathsText(string(data))
+	return aPaths, bPaths, nil
+}
+
+// diffPathsText is the DiffPaths core over in-memory diff text.
+func diffPathsText(text string) (aPaths, bPaths []string) {
 	pendingA, pendingB := "", "" // diff --git sides, used when no ---/+++ appears
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range strings.Split(text, "\n") {
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
 			if pendingA != "" {
@@ -321,7 +335,7 @@ func DiffPaths(pathOnDisk string) (aPaths, bPaths []string, err error) {
 	if pendingB != "" {
 		bPaths = append(bPaths, pendingB)
 	}
-	return aPaths, bPaths, nil
+	return aPaths, bPaths
 }
 
 // unquoteDiffPath normalizes one path field of a diff header: drops an
