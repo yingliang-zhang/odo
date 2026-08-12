@@ -1298,11 +1298,16 @@ func TestParseVerdict(t *testing.T) {
 		wantVerdict  string
 		wantComments string
 	}{
-		{"verdict last with analysis before", "Analysis line one.\nAnalysis line two.\nACCEPT", "accept", ""},
+		{"verdict last with analysis before", "Analysis line one.\nAnalysis line two.\nACCEPT", "accept", "Analysis line one.\nAnalysis line two."},
 		{"verdict first then comments", "NEEDS_FIXES\nbecause reasons", "needs_fixes", "because reasons"},
 		{"early ACCEPT then concluding needs_fixes", "ACCEPT\n...wait, one problem:\nit drops a caller.\nNEEDS_FIXES\nfix the caller", "needs_fixes", "fix the caller"},
 		{"early reject token then concluding accept", "REJECT tentative\nreconsidering...\nACCEPT\nship it", "accept", "ship it"},
-		{"prefix form ACCEPT with trailing words", "looks fine\nACCEPT with minor nits", "accept", ""},
+		{"prefix form ACCEPT with trailing words", "looks fine\nACCEPT with minor nits", "accept", "looks fine"},
+		// The prompt shape (think first, verdict on the FINAL line) — the
+		// #16 auto_land_blocked row recorded three empty comments because
+		// post-verdict text was empty for every vote. The fallback must
+		// capture each vote's analysis as its justification.
+		{"dissent keeps its reasons (M16 panel row)", "1. The retry path could double-apply the patch.\n2. Test does not cover the conflict branch.\n3. The lock order comment may be stale.\nREJECT", "reject", "1. The retry path could double-apply the patch.\n2. Test does not cover the conflict branch.\n3. The lock order comment may be stale."},
 		{"prose mention does not match", "I cannot ACCEPT this patch", "needs_fixes", "I cannot ACCEPT this patch"},
 		{"case-insensitive token", "accept", "accept", ""},
 		{"no verdict line degrades", "just some analysis\nnothing conclusive", "needs_fixes", "just some analysis\nnothing conclusive"},

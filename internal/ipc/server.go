@@ -2076,9 +2076,11 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 // on its own or as the first word of the line counts. The LAST verdict line
 // wins: models think out loud and emit verdict-shaped headers mid-analysis,
 // and a crafted diff can prime a stray early token — first-match would read
-// a concluding NEEDS_FIXES as an earlier accidental ACCEPT. Unparseable
-// output degrades to needs_fixes — a review must never silently read as an
-// accept.
+// a concluding NEEDS_FIXES as an earlier accidental ACCEPT. Comments are the
+// text after that line; when it is empty (the prompted shape is analysis
+// first, verdict last), they fall back to the pre-verdict analysis so a
+// recorded vote keeps its justification. Unparseable output degrades to
+// needs_fixes — a review must never silently read as an accept.
 func parseVerdict(model, text string) ReviewResult {
 	lines := strings.Split(text, "\n")
 	verdict, last := "", -1
@@ -2100,10 +2102,19 @@ func parseVerdict(model, text string) ReviewResult {
 	if verdict == "" {
 		return ReviewResult{Model: model, Verdict: "needs_fixes", Comments: strings.TrimSpace(text)}
 	}
+	comments := strings.TrimSpace(strings.Join(lines[last+1:], "\n"))
+	if comments == "" {
+		// Compliant panels put the verdict on the FINAL line (both prompts
+		// demand think-first, verdict-last), so "text after it" is empty for
+		// every vote and the justification is silently dropped — the M16
+		// panel_disagreed row carried three empty comments. Fall back to the
+		// pre-verdict analysis so the recorded vote carries its reasons.
+		comments = capDetail(strings.TrimSpace(strings.Join(lines[:last], "\n")))
+	}
 	return ReviewResult{
 		Model:    model,
 		Verdict:  verdict,
-		Comments: strings.TrimSpace(strings.Join(lines[last+1:], "\n")),
+		Comments: comments,
 	}
 }
 
