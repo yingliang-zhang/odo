@@ -27,8 +27,10 @@ func TestOpenMigrates(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("schema_version = %d, want 1", version)
+	// Fresh journals are created at v2 directly (schemaV1 DDL is the
+	// current shape; migrateV2 only upgrades pre-v2 journals).
+	if version != 2 {
+		t.Fatalf("schema_version = %d, want 2", version)
 	}
 
 	for _, table := range []string{"projects", "workstreams", "conversations", "events", "diffs"} {
@@ -54,6 +56,95 @@ func TestOpenMigrates(t *testing.T) {
 	if err == nil {
 		t.Error("AppendEvent with bogus conversation_id: want foreign-key error, got nil")
 	}
+}
+
+// TestMigrateV1ToV2 covers the upgrade every pre-v2 (live) journal takes on
+// first boot under this code: workstreams loses branch + worktree_path,
+// diffs gains worktree_path (NULL on existing rows — the sweeper treats
+// NULL as long-retired, I10), and the whole journal's rows survive.
+func TestMigrateV1ToV2(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "journal.sqlite")
+
+	// Hand-build a v1-shape journal (the pre-redesign DDL) with one row in
+	// every table that migrateV2 rewrites.
+	raw, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	v1 := []string{
+		`CREATE TABLE schema_version (version INTEGER NOT NULL)`,
+		`INSERT INTO schema_version (version) VALUES (1)`,
+		`CREATE TABLE projects (id INTEGER PRIMARY KEY, root_path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO projects (id, root_path, name) VALUES (1, '/p', 'p')`,
+		`CREATE TABLE workstreams (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), name TEXT NOT NULL, branch TEXT, worktree_path TEXT, status TEXT NOT NULL DEFAULT 'active', created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO workstreams (id, project_id, name, branch, worktree_path) VALUES (1, 1, 'main', 'odo/main', '/p/.odo/worktrees/old')`,
+		`CREATE TABLE conversations (id INTEGER PRIMARY KEY, workstream_id INTEGER NOT NULL REFERENCES workstreams(id), epoch INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'active', base_commit_sha TEXT, created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO conversations (id, workstream_id) VALUES (1, 1)`,
+		`CREATE TABLE events (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversations(id), seq INTEGER NOT NULL, type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT (datetime('now')), UNIQUE(conversation_id, seq))`,
+		`INSERT INTO events (conversation_id, seq, type, payload_json) VALUES (1, 1, 'user_message', '{"text":"x"}')`,
+		`CREATE TABLE diffs (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversations(id), path_on_disk TEXT NOT NULL, base_sha TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO diffs (id, conversation_id, path_on_disk, base_sha) VALUES (1, 1, '/p/.odo/diffs/1.diff', 'abc')`,
+	}
+	for _, q := range v1 {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("v1 fixture: %s: %v", q, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open over v1 journal: %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatalf("schema_version: %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("schema_version = %d, want 2 after upgrade", version)
+	}
+
+	// Rows survive the upgrade with the new binding NULL on pre-v2 diffs.
+	d, err := s.GetDiff(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetDiff: %v", err)
+	}
+	if d.WorktreePath != nil {
+		t.Errorf("pre-v2 diff worktree_path = %v, want NULL (long-retired)", *d.WorktreePath)
+	}
+	if d.BaseSHA == nil || *d.BaseSHA != "abc" {
+		t.Errorf("pre-v2 diff base_sha = %v, want abc", d.BaseSHA)
+	}
+	w, err := s.GetWorkstream(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetWorkstream: %v", err)
+	}
+	if w.Name != "main" {
+		t.Errorf("workstream name = %q, want main", w.Name)
+	}
+
+	// The dropped columns are really gone; the added column is writable.
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO workstreams (project_id, name, branch) VALUES (1, 'x', 'odo/x')`); err == nil {
+		t.Error("INSERT with dropped branch column: want unknown-column error, got nil")
+	}
+	if _, err := s.InsertDiff(ctx, 1, "/p/.odo/diffs/2.diff", "def", "/p/.odo/worktrees/run-2"); err != nil {
+		t.Errorf("InsertDiff with worktree binding after upgrade: %v", err)
+	}
+
+	// The upgrade is idempotent: reopen is a no-op.
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	s2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen after upgrade: %v", err)
+	}
+	defer s2.Close()
 }
 
 // TestReopenIdempotent covers restart restore at the store level: reopening
@@ -286,7 +377,7 @@ func TestDiffLifecycle(t *testing.T) {
 	w, _ := s.CreateOrGetWorkstream(ctx, p.ID, "main")
 	c, _ := s.CreateConversation(ctx, w.ID, "base0")
 
-	d, err := s.InsertDiff(ctx, c.ID, "/repo/d/.odo/diffs/1.diff", "base0")
+	d, err := s.InsertDiff(ctx, c.ID, "/repo/d/.odo/diffs/1.diff", "base0", "/repo/d/.odo/worktrees/run-1")
 	if err != nil {
 		t.Fatalf("InsertDiff: %v", err)
 	}
@@ -295,6 +386,17 @@ func TestDiffLifecycle(t *testing.T) {
 	}
 	if d.BaseSHA == nil || *d.BaseSHA != "base0" {
 		t.Errorf("base_sha = %v, want base0", d.BaseSHA)
+	}
+	if d.WorktreePath == nil || *d.WorktreePath != "/repo/d/.odo/worktrees/run-1" {
+		t.Errorf("worktree_path = %v, want the run's worktree", d.WorktreePath)
+	}
+	// WorktreeRefs: the pending binding shows in both folds.
+	referenced, pending, err := s.WorktreeRefs(ctx)
+	if err != nil {
+		t.Fatalf("WorktreeRefs: %v", err)
+	}
+	if !referenced["/repo/d/.odo/worktrees/run-1"] || !pending["/repo/d/.odo/worktrees/run-1"] {
+		t.Errorf("refs = %v/%v, want the run-1 binding in both folds", referenced, pending)
 	}
 
 	got, err := s.GetDiff(ctx, d.ID)
@@ -338,10 +440,6 @@ func TestListWorkstreams(t *testing.T) {
 	w1, err := s.CreateOrGetWorkstream(ctx, p.ID, "main")
 	if err != nil {
 		t.Fatalf("create main: %v", err)
-	}
-	// New workstreams get their name as the git branch.
-	if w1.Branch == nil || *w1.Branch != "main" {
-		t.Errorf("branch = %v, want \"main\"", w1.Branch)
 	}
 	w2, _ := s.CreateOrGetWorkstream(ctx, p.ID, "feature-x")
 	if _, err := s.CreateOrGetWorkstream(ctx, other.ID, "elsewhere"); err != nil {

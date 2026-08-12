@@ -70,6 +70,8 @@ interface Props {
   crossProjectStatus: Record<string, { pending: number; running: boolean }>;
   onSwitchProject: (root: string) => void;
   onAddProject: () => void;
+  // M11 F8: drop a stale registry row (never offered on the active project).
+  onRemoveProject: (root: string) => void;
   workstreams: Workstream[];
   workstream: Workstream | null;
   agentRunning: boolean;
@@ -95,6 +97,7 @@ export default function Sidebar({
   crossProjectStatus,
   onSwitchProject,
   onAddProject,
+  onRemoveProject,
   workstreams,
   workstream,
   agentRunning,
@@ -116,6 +119,10 @@ export default function Sidebar({
   const [renamingId, setRenamingId] = useState<number | null>(null);
   // P2: inline delete confirm — replaces native window.confirm
   const [deletingId, setDeletingId] = useState<number | null>(null);
+
+  // M11 F8: project-row removal arm state (two-step inline confirm, same
+  // pattern as workstream delete — no native dialogs).
+  const [removingRoot, setRemovingRoot] = useState<string | null>(null);
 
   // Phase 3.5: which projects are collapsed in the tree.
   // Active project is force-expanded; non-active projects follow saved state
@@ -344,6 +351,7 @@ export default function Sidebar({
 
     return (
       <li key={p.root} className="proj-group">
+        <div className="proj-row-head">
         <button
           type="button"
           className={clsx("proj-row", isActive && "proj-row-active")}
@@ -376,6 +384,63 @@ export default function Sidebar({
           <span className="proj-name" title={p.root}>{p.name}</span>
           {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
         </button>
+        {!isActive && (
+          removingRoot === p.root ? (
+            <span className="ws-delete-confirm">
+              <span className="ws-delete-confirm-text">Remove?</span>
+              <button
+                type="button"
+                className="ws-action-btn ws-action-delete"
+                title="Confirm removal"
+                aria-label={`Confirm remove ${p.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRemovingRoot(null);
+                  // Drop any persisted collapse state for the dead row too,
+                  // so a same-named project re-added later starts clean.
+                  setCollapsedProjects((prev) => {
+                    if (!prev.has(p.root)) return prev;
+                    const next = new Set(prev);
+                    next.delete(p.root);
+                    writeCollapsedSet(next);
+                    return next;
+                  });
+                  onRemoveProject(p.root);
+                }}
+              >
+                <Trash2 size={12} />
+              </button>
+              <button
+                type="button"
+                className="ws-action-btn"
+                title="Cancel"
+                aria-label="Cancel remove"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRemovingRoot(null);
+                }}
+              >
+                ✕
+              </button>
+            </span>
+          ) : (
+            <span className="ws-actions">
+              <button
+                type="button"
+                className="ws-action-btn"
+                title="Remove from project list (registry only; files untouched)"
+                aria-label={`Remove ${p.name} from list`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRemovingRoot(p.root);
+                }}
+              >
+                <Trash2 size={12} />
+              </button>
+            </span>
+          )
+        )}
+        </div>
         {isExpanded && (
           <ul className="ws-list">
             {isActive && creating && (

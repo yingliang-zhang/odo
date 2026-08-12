@@ -103,6 +103,12 @@ func main() {
 		log.Printf("auto-distill startup scan: %v", err)
 	}
 
+	// B-class lifecycle (I8/I10): converge .odo/worktrees to the journal's
+	// truth before serving — reclaim orphans (crashed runs, failed retires),
+	// keep pending-review and live bindings, retire legacy odo/* refs.
+	// Best-effort like the auto scan above; every decision is audit-logged.
+	srv.SweepOrphanWorktrees(context.Background())
+
 	socket := socketFlag
 	if socket == "" {
 		socket = filepath.Join(mgr.StateDir(), "odo.sock")

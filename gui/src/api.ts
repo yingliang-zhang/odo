@@ -89,6 +89,15 @@ export async function addProject(): Promise<ProjectEntry | null> {
   return entry ?? null;
 }
 
+// M11 F8: drop a project from the global registry (the phantom-project
+// escape hatch). Daemon-free like list_projects — it works even when the
+// entry's daemon is dead, which is exactly the state stale rows are in.
+// Returns the updated registry so callers can setState without a re-read.
+// Project files and any running daemon are untouched.
+export function removeProject(root: string): Promise<ProjectEntry[]> {
+  return invoke<ProjectEntry[]>("remove_project", { root });
+}
+
 export interface SendOptions {
   // steer: journal the message for the running agent (no new run started).
   steer?: boolean;

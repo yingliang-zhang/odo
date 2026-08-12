@@ -54,6 +54,27 @@ func registeredProjects() []RegistryRow {
 	return rows
 }
 
+// isOdoWorktreePath reports whether resolved lies inside an odo worktrees
+// dir (<project>/.odo/worktrees/<run>). Worktrees are per-run scratch
+// spaces, never standalone projects. The 2026-08-11 phantom-project
+// accident: a bare `odo conv list` from inside a worktree defaulted
+// -project to the worktree cwd, the row outlived the worktree, and the
+// GUI then polled the dead path + respawned a stale daemon in a loop.
+// The check is structural (path shape), so it holds independent of
+// registration order — even with an empty registry.
+func isOdoWorktreePath(resolved string) bool {
+	for dir := filepath.Clean(resolved); ; {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		if filepath.Base(parent) == "worktrees" && filepath.Base(filepath.Dir(parent)) == ".odo" {
+			return true
+		}
+		dir = parent
+	}
+}
+
 // ensureProjectRegistered appends root (EvalSymlinks-resolved) to the
 // registry when absent. Best-effort: errors are logged, never returned.
 func ensureProjectRegistered(root string) {
@@ -61,6 +82,10 @@ func ensureProjectRegistered(root string) {
 	if err != nil {
 		log.Printf("registry: resolve %s: %v (using unresolved path)", root, err)
 		resolved = root
+	}
+	if isOdoWorktreePath(resolved) {
+		log.Printf("registry: refusing to register worktree path %s", resolved)
+		return
 	}
 	path := registryPath()
 	if path == "" {

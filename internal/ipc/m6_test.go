@@ -533,7 +533,7 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 		if err := os.WriteFile(p, []byte(patch), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		d, err := rig.store.InsertDiff(ctx, convID, p, "base")
+		d, err := rig.store.InsertDiff(ctx, convID, p, "base", "")
 		if err != nil {
 			t.Fatalf("InsertDiff: %v", err)
 		}

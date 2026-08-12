@@ -1,13 +1,12 @@
 package git
 
-// M11c regression tests: CreateWorktreeOnBranch must handle a branch that is
-// already checked out by another live worktree (fan-out lanes, concurrent
-// conversations on one workstream) without letting git move the ref out from
-// under the existing worktree — by falling back to a DETACHED checkout at
-// the repo HEAD, never the stale ref. The "already used by worktree" error
-// string is the load-bearing fallback trigger, so it gets pinned here.
-// ApplyDiff/CommitPaths pin the path-scoped accept contract (P0: an accept
-// must never sweep unrelated main-checkout changes into its commit).
+// Detach-only regression tests (B-class workstream↔git design): EVERY run
+// worktree is a detached checkout at the repo HEAD, so N runs of one
+// workstream never collide on a branch ref (the M11c "already used by
+// worktree" failure class is gone by construction), and nothing but accepts
+// moves refs. ApplyDiff/CommitPaths pin the path-scoped accept contract
+// (P0: an accept must never sweep unrelated main-checkout changes into its
+// commit).
 
 import (
 	"os"
@@ -26,52 +25,37 @@ func runCommand(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(out)
 }
 
-func TestCreateWorktreeOnBranchFallback(t *testing.T) {
+func TestCreateWorktreeDetached(t *testing.T) {
 	repo := t.TempDir()
 	mustRun(t, repo, "init", "-b", "main")
 	mustRun(t, repo, "config", "user.email", "odo@test")
 	mustRun(t, repo, "config", "user.name", "odo")
 	writeAndCommit(t, repo, "base.txt", "base")
-
-	// Two worktrees on the SAME branch — the second must take the detached
-	// fallback (git refuses -B when the branch is already checked out).
-	w1 := filepath.Join(t.TempDir(), "w1")
-	if err := CreateWorktreeOnBranch(repo, w1, "odo/main"); err != nil {
-		t.Fatalf("first create on branch: %v", err)
-	}
-
-	// Advance the repo HEAD beyond the branch: odo/main now lags, and any
-	// fallback that checks the REF out in place would bake this stale base
-	// into the run (the P0 bug this test pins).
 	c1 := mustRun(t, repo, "rev-parse", "HEAD")
-	writeAndCommit(t, repo, "advanced.txt", "advanced")
-	c2 := mustRun(t, repo, "rev-parse", "HEAD")
-	if c1 == c2 {
-		t.Fatal("repo HEAD did not advance")
-	}
 
+	// N worktrees from one workstream's runs: no branch, no collision —
+	// the M11c "already used by worktree" class cannot occur.
+	w1 := filepath.Join(t.TempDir(), "w1")
+	if err := CreateWorktree(repo, w1); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
 	w2 := filepath.Join(t.TempDir(), "w2")
-	if err := CreateWorktreeOnBranch(repo, w2, "odo/main"); err != nil {
-		t.Fatalf("second create on branch (fallback): %v", err)
+	if err := CreateWorktree(repo, w2); err != nil {
+		t.Fatalf("second create: %v", err)
 	}
-
-	// The fallback worktree must be DETACHED AT THE REPO HEAD (fresh base) —
-	// not on the stale branch ref.
-	if got := mustRun(t, w2, "rev-parse", "HEAD"); got != c2 {
-		t.Errorf("fallback worktree HEAD = %s, want repo HEAD %s (detached-at-HEAD fallback)", got, c2)
+	for _, w := range []string{w1, w2} {
+		if got := mustRun(t, w, "rev-parse", "HEAD"); got != c1 {
+			t.Errorf("%s HEAD = %s, want base %s", w, got, c1)
+		}
+		if _, err := run(w, "symbolic-ref", "HEAD"); err == nil {
+			t.Errorf("%s is on a branch, want detached HEAD", w)
+		}
 	}
-	if _, err := run(w2, "symbolic-ref", "HEAD"); err == nil {
-		t.Error("fallback worktree is on a branch, want detached HEAD")
+	// Run worktrees create NO refs at all: refs/heads must still be just main.
+	if got := runCommand(t, repo, "for-each-ref", "--format=%(refname)", "refs/heads"); got != "refs/heads/main" {
+		t.Errorf("refs/heads = %q, want only refs/heads/main", got)
 	}
-	// The branch ref must not have moved: it stays where the live worktree
-	// holds it.
-	if ref := runCommand(t, repo, "rev-parse", "refs/heads/odo/main"); ref != c1 {
-		t.Errorf("odo/main = %s, want %s: fallback moved the ref", ref, c1)
-	}
-	if got := runCommand(t, w1, "symbolic-ref", "HEAD"); got != "refs/heads/odo/main" {
-		t.Errorf("w1 symbolic-ref = %q, want refs/heads/odo/main", got)
-	}
-	// Cleanup: removing both worktrees (--force tolerates the shared branch).
+	// Cleanup.
 	for _, w := range []string{w1, w2} {
 		if err := RemoveWorktree(repo, w); err != nil {
 			t.Errorf("remove %s: %v", w, err)

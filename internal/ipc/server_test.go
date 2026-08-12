@@ -359,8 +359,8 @@ exit 0
 
 // TestNoDiffRunRetiresWorktree pins the P1 leak fix: a run that leaves no
 // diff has nothing to review, so it is retired immediately — worktree
-// removed, workstream binding cleared, adapter run closed — instead of
-// leaking until a review action that can never come.
+// removed, in-memory run closed — instead of leaking until a review action
+// that can never come.
 func TestNoDiffRunRetiresWorktree(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, noopStubWrapper))
@@ -371,11 +371,16 @@ func TestNoDiffRunRetiresWorktree(t *testing.T) {
 	convID := boot.Conversation.ID
 
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "read only"})
-	bound := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	if bound.Workstream == nil || bound.Workstream.WorktreePath == nil {
-		t.Fatal("run did not bind a worktree")
+	// The live run's worktree is tracked in-memory (schema v2: no
+	// workstream-level binding column; the diff row would carry it).
+	runID := rig.server.byConv[convID]
+	if runID == "" {
+		t.Fatal("run did not register in byConv")
 	}
-	wtPath := *bound.Workstream.WorktreePath
+	wtPath := rig.server.runs[runID].worktreePath
+	if wtPath == "" {
+		t.Fatal("run meta has no worktree path")
+	}
 
 	done := rig.pollUntilDone(t, convID)
 	if got, want := fmt.Sprint(eventTypes(done.Events)), "[agent_text agent_done]"; got != want {
@@ -387,13 +392,9 @@ func TestNoDiffRunRetiresWorktree(t *testing.T) {
 	if len(done.Diffs) != 0 {
 		t.Errorf("no-diff run left pending diffs: %+v", done.Diffs)
 	}
-	// The worktree is gone and the binding cleared without a review action.
+	// The worktree is gone without a review action.
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Errorf("worktree %s still on disk after no-diff run", wtPath)
-	}
-	after := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	if after.Workstream != nil && after.Workstream.WorktreePath != nil {
-		t.Errorf("workstream still bound to %s after no-diff run", *after.Workstream.WorktreePath)
 	}
 	if n := len(rig.server.runs); n != 0 {
 		t.Errorf("server still tracks %d runs after no-diff completion", n)
@@ -432,11 +433,11 @@ func TestReviewDuringLiveRunKeepsLiveRun(t *testing.T) {
 	// pending — the review-during-run window. The slow stub keeps run 2 in
 	// flight while the review of run 1's diff lands.
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "run two"})
-	bound := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	if bound.Workstream == nil || bound.Workstream.WorktreePath == nil {
-		t.Fatal("run 2 did not bind a worktree")
+	runID2pre := rig.server.byConv[convID]
+	if runID2pre == "" || rig.server.runs[runID2pre] == nil {
+		t.Fatal("run 2 did not register in byConv")
 	}
-	liveWT := *bound.Workstream.WorktreePath
+	liveWT := rig.server.runs[runID2pre].worktreePath
 
 	acc := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done1.Diff.ID})
 	if !acc.Applied {
@@ -447,9 +448,8 @@ func TestReviewDuringLiveRunKeepsLiveRun(t *testing.T) {
 		t.Errorf("hello.txt = %q, want run one's accepted content", got)
 	}
 
-	// The live run survived the review: still bound and still tracked as
-	// unfinished. (Run 1's finished meta lingers in the map until its
-	// conversation binds the next review — pre-existing, in-memory only.)
+	// The live run survived the review: still tracked as unfinished, and
+	// ITS worktree (schema v2: per-run dirs) untouched.
 	runID2 := rig.server.byConv[convID]
 	if runID2 == "" {
 		t.Fatal("accept unbound the live run's conversation")
@@ -457,13 +457,8 @@ func TestReviewDuringLiveRunKeepsLiveRun(t *testing.T) {
 	if meta2 := rig.server.runs[runID2]; meta2 == nil || meta2.finished {
 		t.Errorf("live run after review = %+v, want tracked and unfinished", meta2)
 	}
-	// Its worktree is still on disk and the workstream stays bound to it.
 	if _, err := os.Stat(liveWT); err != nil {
 		t.Errorf("live run worktree removed by review: %v", err)
-	}
-	still := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	if still.Workstream == nil || still.Workstream.WorktreePath == nil || *still.Workstream.WorktreePath != liveWT {
-		t.Errorf("workstream binding after review = %+v, want worktree %s", still.Workstream, liveWT)
 	}
 
 	// Run 2 completes undisturbed (pollUntilDone asserts agent_running=true
@@ -525,11 +520,14 @@ func TestAcceptDoesNotSweepMainCheckout(t *testing.T) {
 	}
 }
 
-// TestWorkstreamBranchAccumulatesAccepts covers M11c: runs on a workstream
-// check out the odo/<name> branch (not a detached HEAD), and each accept
-// advances that branch to the new main HEAD so the next run's worktree
-// includes the previously accepted changes.
-func TestWorkstreamBranchAccumulatesAccepts(t *testing.T) {
+// TestRunWorktreesDetachedAndFresh covers the schema-v2 detach-only design
+// (B-class workstream↔git redesign): run worktrees are detached HEADs —
+// they never name an odo/<name> branch (a symbolic HEAD was decoration; the
+// odo/* refs were the "already used by worktree / cannot force update"
+// failure vector) — and every run starts fresh from the current main HEAD,
+// so it includes previously accepted changes. Two full loops must leave
+// zero refs under refs/heads/odo/.
+func TestRunWorktreesDetachedAndFresh(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 	rig := startRig(t, root)
@@ -538,51 +536,60 @@ func TestWorkstreamBranchAccumulatesAccepts(t *testing.T) {
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
 
-	// --- run 1: the worktree is on the workstream branch, not detached ---
-	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "branch run one"})
+	// --- run 1: detached worktree, no odo/* refs ---
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "detach run one"})
+	runID1 := rig.server.byConv[convID]
+	if runID1 == "" {
+		t.Fatal("run 1 did not register in byConv")
+	}
 	done1 := rig.pollUntilDone(t, convID)
 	if done1.Diff == nil {
 		t.Fatal("run 1: no diff")
 	}
-	bound1 := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	if bound1.Workstream == nil || bound1.Workstream.WorktreePath == nil {
-		t.Fatal("bootstrap: workstream has no bound worktree during run 1")
+	// Capture pre-accept: a review action retires the run and its worktree.
+	wt1 := rig.server.runs[runID1].worktreePath
+	if wt1 == "" {
+		t.Fatal("run 1 meta has no worktree path")
 	}
-	if got := gitOut(t, *bound1.Workstream.WorktreePath, "symbolic-ref", "HEAD"); got != "refs/heads/odo/main" {
-		t.Errorf("run 1 worktree HEAD = %q, want refs/heads/odo/main", got)
+	if got := gitOut(t, wt1, "branch", "--show-current"); got != "" {
+		t.Errorf("run 1 worktree branch = %q, want \"\" (detached HEAD)", got)
 	}
 
 	acc1 := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done1.Diff.ID})
 	if !acc1.Applied {
 		t.Fatal("accept_diff run 1: applied must be true")
 	}
-	// Accept advanced odo/main to the new main HEAD.
-	if branch, head := gitOut(t, root, "rev-parse", "odo/main"), gitOut(t, root, "rev-parse", "HEAD"); branch != head {
-		t.Errorf("after accept 1: odo/main = %s, HEAD = %s, want equal", branch, head)
+	if got := gitOut(t, root, "for-each-ref", "--format=%(refname:short)", "refs/heads/odo/"); got != "" {
+		t.Errorf("after accept 1: odo/* refs = %q, want none", got)
 	}
 
-	// --- run 2: the branch checkout includes run 1's accepted change ---
-	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "branch run two"})
+	// --- run 2: fresh from the new main HEAD (accept 1's hello.txt exists) ---
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "detach run two"})
+	runID2 := rig.server.byConv[convID]
+	if runID2 == "" {
+		t.Fatal("run 2 did not register in byConv")
+	}
 	done2 := rig.pollUntilDone(t, convID)
 	if done2.Diff == nil {
 		t.Fatal("run 2: no diff")
 	}
-	bound2 := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
-	if bound2.Workstream == nil || bound2.Workstream.WorktreePath == nil {
-		t.Fatal("bootstrap: workstream has no bound worktree during run 2")
+	wt2 := rig.server.runs[runID2].worktreePath
+	if wt2 == "" {
+		t.Fatal("run 2 meta has no worktree path")
 	}
-	// hello.txt was committed to main (and odo/main) by run 1's accept, so
-	// it exists in run 2's branch checkout.
-	if _, err := os.Stat(filepath.Join(*bound2.Workstream.WorktreePath, "hello.txt")); err != nil {
-		t.Errorf("run 2 worktree missing hello.txt from accept 1: %v", err)
+	if _, err := os.Stat(filepath.Join(wt2, "hello.txt")); err != nil {
+		t.Errorf("run 2 worktree missing hello.txt from accept 1 (not fresh from main HEAD): %v", err)
+	}
+	if got := gitOut(t, wt2, "branch", "--show-current"); got != "" {
+		t.Errorf("run 2 worktree branch = %q, want \"\" (detached HEAD)", got)
 	}
 
 	acc2 := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done2.Diff.ID})
 	if !acc2.Applied {
 		t.Fatal("accept_diff run 2: applied must be true")
 	}
-	if branch, head := gitOut(t, root, "rev-parse", "odo/main"), gitOut(t, root, "rev-parse", "HEAD"); branch != head {
-		t.Errorf("after accept 2: odo/main = %s, HEAD = %s, want equal", branch, head)
+	if got := gitOut(t, root, "for-each-ref", "--format=%(refname:short)", "refs/heads/odo/"); got != "" {
+		t.Errorf("after accept 2: odo/* refs = %q, want none", got)
 	}
 }
 
@@ -624,7 +631,8 @@ func TestCreateWorkstream(t *testing.T) {
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 
-	// list: only "main", with its name as git branch (M1 populates the column).
+	// list: only "main". Schema v2: workstreams own no git refs (N:0) —
+	// branch and worktree_path columns are gone; nothing to assert there.
 	list := rig.call(t, Request{Cmd: CmdListWorkstreams, ProjectRoot: root})
 	if len(list.Workstreams) != 1 {
 		t.Fatalf("list_workstreams = %d entries, want 1", len(list.Workstreams))
@@ -632,20 +640,15 @@ func TestCreateWorkstream(t *testing.T) {
 	if list.Workstreams[0].ID != boot.Workstream.ID || list.Workstreams[0].Name != "main" {
 		t.Errorf("list[0] = %+v", list.Workstreams[0])
 	}
-	if b := list.Workstreams[0].Branch; b == nil || *b != "main" {
-		t.Errorf("main branch = %v, want \"main\"", b)
-	}
 
-	// create: the name is sanitized to a git-safe branch; branch == name.
+	// create: the name is sanitized for display hygiene (sanitizeBranchName
+	// still serves names; it no longer creates any ref).
 	created := rig.call(t, Request{Cmd: CmdCreateWorkstream, ProjectRoot: root, Name: "Refactor / auth module!"})
 	if created.Workstream == nil {
 		t.Fatal("create_workstream: missing workstream")
 	}
 	if created.Workstream.Name != "Refactor-auth-module" {
 		t.Errorf("sanitized name = %q", created.Workstream.Name)
-	}
-	if b := created.Workstream.Branch; b == nil || *b != created.Workstream.Name {
-		t.Errorf("branch = %v, want name %q", b, created.Workstream.Name)
 	}
 
 	// create-or-get: the same input returns the same row.
@@ -910,6 +913,10 @@ func TestCancelRun(t *testing.T) {
 // journals a review_action (ADR-0002 event types stay fixed).
 func TestDistill(t *testing.T) {
 	root := initRepo(t)
+	// HOME isolation: maybeAutoLand (drainRun) reads ~/.odo/prefs.md on the
+	// real host; with auto_apply:main (M16-active dev machines) the run
+	// below auto-reviews and inserts a review_action before the distill's.
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 	rig := startRig(t, root)
 	defer rig.stop(t)

@@ -7,16 +7,19 @@ import (
 )
 
 // InsertDiff records a diff file extracted from a run's worktree.
-// baseSHA is the commit the diff was generated against ("" stores NULL).
-func (s *Store) InsertDiff(ctx context.Context, conversationID int64, pathOnDisk, baseSHA string) (Diff, error) {
+// baseSHA is the commit the diff was generated against ("" stores NULL);
+// worktreePath is the producing run's worktree ("" stores NULL) — the
+// per-run binding the sweeper and retire paths derive hold/reclaim
+// decisions from (schema v2, I8/I10).
+func (s *Store) InsertDiff(ctx context.Context, conversationID int64, pathOnDisk, baseSHA, worktreePath string) (Diff, error) {
 	d := Diff{
 		ConversationID: conversationID,
 		PathOnDisk:     pathOnDisk,
 		Status:         DiffPending,
 	}
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO diffs (conversation_id, path_on_disk, base_sha) VALUES (?, ?, ?)
-		 RETURNING id, created_at`, conversationID, pathOnDisk, nullString(baseSHA)).
+		`INSERT INTO diffs (conversation_id, path_on_disk, base_sha, worktree_path) VALUES (?, ?, ?, ?)
+		 RETURNING id, created_at`, conversationID, pathOnDisk, nullString(baseSHA), nullString(worktreePath)).
 		Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
 		return Diff{}, fmt.Errorf("store: insert diff: %w", err)
@@ -24,13 +27,16 @@ func (s *Store) InsertDiff(ctx context.Context, conversationID int64, pathOnDisk
 	if baseSHA != "" {
 		d.BaseSHA = &baseSHA
 	}
+	if worktreePath != "" {
+		d.WorktreePath = &worktreePath
+	}
 	return d, nil
 }
 
 // GetDiff fetches a diff by ID.
 func (s *Store) GetDiff(ctx context.Context, diffID int64) (Diff, error) {
 	d, err := s.scanDiff(s.db.QueryRowContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, status, created_at
 		 FROM diffs WHERE id = ?`, diffID))
 	if err != nil {
 		return Diff{}, fmt.Errorf("store: get diff %d: %w", diffID, err)
@@ -42,7 +48,7 @@ func (s *Store) GetDiff(ctx context.Context, diffID int64) (Diff, error) {
 // or sql.ErrNoRows when none exists.
 func (s *Store) LatestDiff(ctx context.Context, conversationID int64) (Diff, error) {
 	d, err := s.scanDiff(s.db.QueryRowContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, status, created_at
 		 FROM diffs
 		 WHERE conversation_id = ?
 		 ORDER BY id DESC LIMIT 1`, conversationID))
@@ -71,7 +77,7 @@ func (s *Store) UpdateDiffStatus(ctx context.Context, diffID int64, status strin
 // the run events that produced them.
 func (s *Store) ListDiffs(ctx context.Context, conversationID int64) ([]Diff, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, status, created_at
 		 FROM diffs WHERE conversation_id = ? ORDER BY id`, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list diffs: %w", err)
@@ -91,7 +97,7 @@ func (s *Store) ListDiffs(ctx context.Context, conversationID int64) ([]Diff, er
 // ListPendingDiffs returns all pending diffs for a conversation, ordered by id.
 func (s *Store) ListPendingDiffs(ctx context.Context, conversationID int64) ([]Diff, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, status, created_at
 		 FROM diffs WHERE conversation_id = ? AND status = ? ORDER BY id`,
 		conversationID, DiffPending)
 	if err != nil {
@@ -136,6 +142,33 @@ func (s *Store) PendingDiffCountsByWorkstream(ctx context.Context, projectID int
 
 func (s *Store) scanDiff(row interface{ Scan(...interface{}) error }) (Diff, error) {
 	var d Diff
-	err := row.Scan(&d.ID, &d.ConversationID, &d.PathOnDisk, &d.BaseSHA, &d.Status, &d.CreatedAt)
+	err := row.Scan(&d.ID, &d.ConversationID, &d.PathOnDisk, &d.BaseSHA, &d.WorktreePath, &d.Status, &d.CreatedAt)
 	return d, err
+}
+
+// WorktreeRefs folds every diffs.worktree_path binding into two sets:
+// `pending` (a live review holds the worktree — sweeper must keep it) and
+// `referenced` (any row at all mentions the dir). Unreferenced dirs are
+// orphans (crashed/killed runs, F1); referenced-but-concluded dirs are
+// leftovers of failed retire paths. Paths appear exactly as inserted
+// (absolute).
+func (s *Store) WorktreeRefs(ctx context.Context) (referenced, pending map[string]bool, err error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT worktree_path, status FROM diffs WHERE worktree_path IS NOT NULL`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: worktree refs: %w", err)
+	}
+	defer rows.Close()
+	referenced, pending = map[string]bool{}, map[string]bool{}
+	for rows.Next() {
+		var p, status string
+		if err := rows.Scan(&p, &status); err != nil {
+			return nil, nil, fmt.Errorf("store: worktree refs: scan: %w", err)
+		}
+		referenced[p] = true
+		if status == DiffPending {
+			pending[p] = true
+		}
+	}
+	return referenced, pending, rows.Err()
 }

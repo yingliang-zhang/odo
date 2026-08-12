@@ -1,6 +1,8 @@
 // Package worktree manages per-run git worktrees and diff files under
 // <project>/.odo/. Worktrees persist until the user accepts or rejects the
-// run's diff — they are NEVER deleted on process exit or daemon shutdown.
+// run's diff; ORPHANED worktrees (no pending diff row, no live run) are
+// reclaimed by the daemon's startup sweeper (I8 — disk converges to the
+// journal's truth; see internal/ipc/sweeper.go).
 package worktree
 
 import (
@@ -67,25 +69,18 @@ func (m *Manager) EnsureDirs() error {
 	return nil
 }
 
-// Create adds a worktree at HEAD for runID and returns its path. A ""
-// branch yields a detached checkout (pre-M11c behavior); a non-empty branch
-// checks out that branch, creating or resetting it to HEAD (see
-// git.CreateWorktreeOnBranch). The caller must tolerate this failing on
-// repositories with no commits.
-func (m *Manager) Create(runID string, branch string) (string, error) {
+// Create adds a DETACHED worktree at HEAD for runID and returns its path.
+// Detach-only (B-class design): workstreams never name branches, so there
+// is no checkout target besides the base commit. The caller must tolerate
+// this failing on repositories with no commits.
+func (m *Manager) Create(runID string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	path := m.WorktreePath(runID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("worktree: create worktrees dir: %w", err)
 	}
-	var err error
-	if branch == "" {
-		err = git.CreateWorktree(m.projectRoot, path)
-	} else {
-		err = git.CreateWorktreeOnBranch(m.projectRoot, path, branch)
-	}
-	if err != nil {
+	if err := git.CreateWorktree(m.projectRoot, path); err != nil {
 		return "", fmt.Errorf("worktree: create: %w", err)
 	}
 	return path, nil
@@ -112,13 +107,24 @@ func (m *Manager) ExtractDiff(worktreePath, runID string) (string, error) {
 	return path, nil
 }
 
-// Remove deletes the worktree at path (force; tolerates an already-missing
-// path). Called on accept/reject — never implicitly.
+// Remove deletes the worktree at path. Force semantics: a dirty worktree
+// index is normal (ExtractDiff stages everything). Convergence-first (I8):
+// when git can't remove it (metadata already pruned, dir half-deleted), the
+// directory is still erased — a lingering scratch dir is worse than a stale
+// .git/worktrees entry, and `git worktree prune` (sweeper) collects the
+// entry afterwards. Called on accept/reject and by the startup sweeper.
 func (m *Manager) Remove(worktreePath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := git.RemoveWorktree(m.projectRoot, worktreePath); err != nil {
-		return fmt.Errorf("worktree: remove: %w", err)
+	gitErr := git.RemoveWorktree(m.projectRoot, worktreePath)
+	if _, statErr := os.Stat(worktreePath); statErr != nil {
+		return gitErr // dir gone: report whatever git thought
+	}
+	if err := os.RemoveAll(worktreePath); err != nil {
+		if gitErr != nil {
+			return fmt.Errorf("worktree: remove: %v (fallback rm: %w)", gitErr, err)
+		}
+		return fmt.Errorf("worktree: remove fallback: %w", err)
 	}
 	return nil
 }

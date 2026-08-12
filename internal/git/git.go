@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -32,45 +33,46 @@ func run(dir string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-// CreateWorktree adds a detached worktree of repoPath at HEAD.
+// CreateWorktree adds a detached worktree of repoPath at HEAD. Detach-only
+// (B-class design): run worktrees never name a branch — accepted diffs land
+// on the main working tree, so a symbolic HEAD was pure decoration, and
+// force-updating it after accepts was the "already used by worktree /
+// cannot force update" failure vector (F2/F3).
 func CreateWorktree(repoPath, worktreePath string) error {
 	_, err := run(repoPath, "worktree", "add", "--detach", worktreePath, "HEAD")
 	return err
 }
 
-// CreateWorktreeOnBranch adds a worktree of repoPath at HEAD checked out on
-// branch (M11c). -B creates the branch when missing or resets it to HEAD when
-// it exists — safe because the worktree is a fresh checkout and accepted
-// diffs always land on the main working tree first (see AdvanceBranch).
-//
-// Git refuses -B when branch is already checked out in another worktree:
-// concurrent runs of one workstream, or a leaked/zombie worktree still
-// holding the ref. The fallback is a DETACHED checkout at HEAD — never the
-// existing branch ref in place. The ref may lag HEAD arbitrarily (accepted
-// diffs land on the main working tree and AdvanceBranch is best-effort), so
-// checking it out bakes a stale base into the run: the agent diffs against
-// commits main has already moved past. Review applies the extracted diff to
-// the main working tree regardless of what the worktree's symbolic HEAD was,
-// so detaching costs the workstream-branch model nothing.
-func CreateWorktreeOnBranch(repoPath, worktreePath, branch string) error {
-	if _, err := run(repoPath, "worktree", "add", "-B", branch, worktreePath, "HEAD"); err != nil {
-		if !strings.Contains(err.Error(), "already used by worktree") {
-			return err
-		}
-		if _, ferr := run(repoPath, "worktree", "add", "--detach", worktreePath, "HEAD"); ferr != nil {
-			return fmt.Errorf("%w (detached fallback: %w)", err, ferr)
-		}
-	}
-	return nil
+// PruneWorktrees drops .git/worktrees bookkeeping entries whose checkout
+// dir no longer exists (the ONLY thing prune does). The startup sweeper
+// runs it after reclaiming dirs so stale metadata can't accumulate.
+func PruneWorktrees(repoPath string) error {
+	_, err := run(repoPath, "worktree", "prune")
+	return err
 }
 
-// AdvanceBranch force-points branch at HEAD. Called after an accept so a
-// workstream branch accumulates the newly committed change. It fails when
-// branch is checked out in a live worktree — callers must run it after the
-// run's worktree is retired and treat any error as non-fatal (the next run's
-// -B checkout resets the branch forward regardless).
-func AdvanceBranch(repoPath, branch string) error {
-	_, err := run(repoPath, "branch", "-f", branch, "HEAD")
+// ListOdoBranches returns the short names of every local branch under
+// refs/heads/odo/ (legacy M11c workstream refs). The startup sweeper
+// retires them; nil/empty on repos with none.
+func ListOdoBranches(repoPath string) ([]string, error) {
+	out, err := run(repoPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/odo/")
+	if err != nil {
+		return nil, err
+	}
+	var branches []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line != "" {
+			branches = append(branches, line)
+		}
+	}
+	return branches, nil
+}
+
+// DeleteBranchMerged deletes a branch ONLY when it is merged into HEAD
+// (git -d): odo/* refs only ever accumulated accepted content, so a merged
+// delete loses nothing; a divergent ref refuses and stays for a human.
+func DeleteBranchMerged(repoPath, branch string) error {
+	_, err := run(repoPath, "branch", "-d", branch)
 	return err
 }
 
@@ -137,6 +139,82 @@ func ApplyDiff(repoPath, diffPath string) error {
 		return fmt.Errorf("stage patch paths: %w", err)
 	}
 	return nil
+}
+
+// CapturePatchBaseline records, for each patch path, whether it is tracked
+// in HEAD and whether it exists on disk BEFORE an apply attempt. Rollback
+// needs both axes separately: a path tracked in HEAD restores via
+// reset+checkout; a path the patch created (neither axis) must be deleted;
+// a pre-existing UNTRACKED user file (onDisk only) must be left untouched —
+// git apply refuses to clobber it, so the failure left the user's bytes in
+// place and deleting them would be data loss.
+func CapturePatchBaseline(repoPath string, paths []string) (inHEAD, onDisk map[string]bool, err error) {
+	inHEAD = map[string]bool{}
+	onDisk = map[string]bool{}
+	if len(paths) == 0 {
+		return inHEAD, onDisk, nil
+	}
+	args := append([]string{"ls-tree", "-r", "HEAD", "--name-only", "-z", "--"}, paths...)
+	out, err := run(repoPath, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("baseline ls-tree: %w", err)
+	}
+	for _, p := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
+		if p != "" {
+			inHEAD[p] = true
+		}
+	}
+	for _, p := range paths {
+		if _, statErr := os.Stat(filepath.Join(repoPath, p)); statErr == nil {
+			onDisk[p] = true
+		}
+	}
+	return inHEAD, onDisk, nil
+}
+
+// RollbackPatchApply restores the main checkout to pre-accept state after
+// a failed ApplyDiff, limited to the patch's own paths (I7: the attempt
+// never leaves self-produced working-tree damage or unmerged index
+// entries, and never touches anything outside the patch). tracked-in-HEAD
+// paths reset to HEAD content (index + working tree, unmerged entries
+// dropped); patch-created files (absent from HEAD AND from the pre-apply
+// disk baseline) are removed; pre-existing untracked user files survive.
+// Errors are joined — a partial rollback names every path it failed on.
+func RollbackPatchApply(repoPath string, paths []string, inHEAD, onDisk map[string]bool) error {
+	var tracked, created []string
+	for _, p := range paths {
+		switch {
+		case inHEAD[p]:
+			tracked = append(tracked, p)
+		case !onDisk[p]:
+			created = append(created, p)
+		}
+	}
+	var errs []error
+	if len(tracked) > 0 {
+		if _, err := run(repoPath, append([]string{"reset", "-q", "HEAD", "--"}, tracked...)...); err != nil {
+			errs = append(errs, fmt.Errorf("reset tracked: %w", err))
+		}
+		if _, err := run(repoPath, append([]string{"checkout", "--"}, tracked...)...); err != nil {
+			errs = append(errs, fmt.Errorf("checkout tracked: %w", err))
+		}
+	}
+	for _, p := range created {
+		// git rm clears staged and unmerged index entries plus the file;
+		// ignore-unmatch covers a path apply never actually created.
+		if _, err := run(repoPath, "rm", "-q", "-f", "--ignore-unmatch", "--", p); err != nil {
+			errs = append(errs, fmt.Errorf("rm created %s: %w", p, err))
+			continue
+		}
+		// git rm is a no-op on a path with no index entry (plain new file
+		// from a non-3way hunk) — remove the file itself.
+		if _, statErr := os.Stat(filepath.Join(repoPath, p)); statErr == nil {
+			if err := os.Remove(filepath.Join(repoPath, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("remove created %s: %w", p, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // HasUnmergedEntries reports whether repoPath's index carries unresolved

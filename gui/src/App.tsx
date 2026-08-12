@@ -21,6 +21,7 @@ import {
   pin,
   pollEvents,
   rejectDiff,
+  removeProject,
   sendMessage,
   unwrap,
 } from "./api";
@@ -544,6 +545,32 @@ export default function App() {
     }, 5000);
     return () => clearInterval(timer);
   }, [projects, activeProjectRoot]);
+
+  // M11 F8: remove a registry row (phantom/stale project escape hatch).
+  // Dropping the row from `projects` state also stops the 5s cross-project
+  // poll for that root (the poll effect iterates `projects`), which is what
+  // broke the 2026-08-11 resurrection loop: poll → respawn daemon → daemon
+  // re-registers → poll again. Active project removal is refused — the
+  // sidebar hides the control, this is the belt.
+  const handleRemoveProject = useCallback(
+    async (root: string) => {
+      if (root === activeProjectRoot) return;
+      try {
+        const list = await removeProject(root);
+        setProjects(list);
+        setCrossProjectStatus((prev) => {
+          if (!(root in prev)) return prev;
+          const next = { ...prev };
+          delete next[root];
+          return next;
+        });
+        setError(null);
+      } catch (e) {
+        setError(`remove project failed: ${errorMessage(e)}`);
+      }
+    },
+    [activeProjectRoot],
+  );
 
   const handleSend = useCallback(
     async (text: string, attachments: string[], steer: boolean) => {
@@ -1173,6 +1200,7 @@ export default function App() {
         activeProjectRoot={activeProjectRoot}
         crossProjectStatus={crossProjectStatus}
         onSwitchProject={(root) => void handleSwitchProject(root)}
+        onRemoveProject={(root) => void handleRemoveProject(root)}
         onAddProject={() => void handleAddProject()}
         workstreams={workstreams}
         workstream={workstream}

@@ -31,6 +31,11 @@ const (
 	DiffPending  = "pending"
 	DiffAccepted = "accepted"
 	DiffRejected = "rejected"
+	// DiffConflict: an accept attempt failed mid-apply and the daemon
+	// rolled the main checkout back to pre-accept state (I7). Terminal —
+	// the diff stays out of the review queue; the run's worktree is
+	// retired by the sweeper rules like any concluded row.
+	DiffConflict = "conflict"
 )
 
 // Conversation states.
@@ -50,14 +55,17 @@ type Project struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// Workstream: a named conversation lane. Schema v2 (detach-only, B-class
+// workstream↔git design) dropped branch and worktree_path: workstreams own
+// NO git refs (N:0), and worktree bindings live per-run on the diffs row
+// the run produces (the single-slot column was the Q6 cardinality bug —
+// every run overwrote it, so retire paths aimed at the wrong worktree).
 type Workstream struct {
-	ID           int64   `json:"id"`
-	ProjectID    int64   `json:"project_id"`
-	Name         string  `json:"name"`
-	Branch       *string `json:"branch,omitempty"`
-	WorktreePath *string `json:"worktree_path,omitempty"`
-	Status       string  `json:"status"`
-	CreatedAt    string  `json:"created_at"`
+	ID        int64  `json:"id"`
+	ProjectID int64  `json:"project_id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
 }
 
 type Conversation struct {
@@ -85,6 +93,11 @@ type Diff struct {
 	ConversationID int64   `json:"conversation_id"`
 	PathOnDisk     string  `json:"path_on_disk"`
 	BaseSHA        *string `json:"base_sha,omitempty"`
+	// WorktreePath binds the producing run's worktree (schema v2, I8/I10):
+	// the sweeper derives live/hold/reclaim decisions from these rows, and
+	// reject/accept retires exactly this dir. NULL on pre-v2 rows — the
+	// sweeper treats NULL as long-retired and never reclaims for them.
+	WorktreePath   *string `json:"worktree_path,omitempty"`
 	Status         string  `json:"status"`
 	CreatedAt      string  `json:"created_at"`
 }
@@ -112,8 +125,6 @@ CREATE TABLE IF NOT EXISTS workstreams (
     id            INTEGER PRIMARY KEY,
     project_id    INTEGER NOT NULL REFERENCES projects(id),
     name          TEXT NOT NULL,
-    branch        TEXT,
-    worktree_path TEXT,
     status        TEXT NOT NULL DEFAULT 'active',
     created_at    DATETIME NOT NULL DEFAULT (datetime('now'))
 );
@@ -142,6 +153,7 @@ CREATE TABLE IF NOT EXISTS diffs (
     conversation_id INTEGER NOT NULL REFERENCES conversations(id),
     path_on_disk    TEXT NOT NULL,
     base_sha        TEXT,
+    worktree_path   TEXT,
     status          TEXT NOT NULL DEFAULT 'pending',
     created_at      DATETIME NOT NULL DEFAULT (datetime('now'))
 );
@@ -189,17 +201,55 @@ func OpenReadOnly(path string) (*Store, error) {
 }
 
 func migrate(db *sql.DB) error {
+	// schemaV1 (kept name; its DDL is the CURRENT shape) creates fresh
+	// databases at v2. Existing v1 journals upgrade via migrateV2.
 	if _, err := db.Exec(schemaV1); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&n); err != nil {
-		return fmt.Errorf("store: migrate: read schema_version: %w", err)
-	}
-	if n == 0 {
-		if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (1)`); err != nil {
+	var version int
+	err := db.QueryRow(`SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1`).Scan(&version)
+	if err == sql.ErrNoRows {
+		if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (2)`); err != nil {
 			return fmt.Errorf("store: migrate: record version: %w", err)
 		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("store: migrate: read schema_version: %w", err)
+	}
+	if version < 2 {
+		if err := migrateV2(db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV2 (B-class workstream↔git redesign, I8/I10): per-run worktree
+// binding moves onto the diffs row; workstreams drop the branch and
+// single-slot worktree_path columns (workstreams own no git refs, N:0).
+// Pre-v2 diffs keep worktree_path NULL — the sweeper treats NULL as
+// long-retired and never reclaims on their behalf. Atomic: a crash between
+// statements retries the whole upgrade next boot.
+func migrateV2(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: migrate v2: begin: %w", err)
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		`ALTER TABLE diffs ADD COLUMN worktree_path TEXT`,
+		`ALTER TABLE workstreams DROP COLUMN branch`,
+		`ALTER TABLE workstreams DROP COLUMN worktree_path`,
+		`UPDATE schema_version SET version = 2`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("store: migrate v2: %s: %w", q, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: migrate v2: commit: %w", err)
 	}
 	return nil
 }
@@ -215,7 +265,7 @@ func nullString(s string) interface{} {
 // scanWorkstream scans a full workstreams row.
 func scanWorkstream(row interface{ Scan(...interface{}) error }) (Workstream, error) {
 	var w Workstream
-	err := row.Scan(&w.ID, &w.ProjectID, &w.Name, &w.Branch, &w.WorktreePath, &w.Status, &w.CreatedAt)
+	err := row.Scan(&w.ID, &w.ProjectID, &w.Name, &w.Status, &w.CreatedAt)
 	return w, err
 }
 

@@ -7,13 +7,13 @@ import (
 )
 
 // CreateOrGetWorkstream returns the active workstream named name under the
-// project, creating it when no active row exists. A new workstream's branch
-// is its bare name (callers sanitize for git first); git consumers prefix it
-// to "odo/<name>" (M11c) and the branch is created lazily on the first run.
+// project, creating it when no active row exists. Workstreams are pure
+// conversation lanes: schema v2 dropped the git branch binding entirely
+// (runs check out per-run DETACHED worktrees; nothing names odo/<name>).
 // Existing rows are returned untouched.
 func (s *Store) CreateOrGetWorkstream(ctx context.Context, projectID int64, name string) (Workstream, error) {
 	w, err := scanWorkstream(s.db.QueryRowContext(ctx,
-		`SELECT id, project_id, name, branch, worktree_path, status, created_at
+		`SELECT id, project_id, name, status, created_at
 		 FROM workstreams
 		 WHERE project_id = ? AND name = ? AND status = ?
 		 ORDER BY id DESC LIMIT 1`, projectID, name, WorkstreamActive))
@@ -23,10 +23,10 @@ func (s *Store) CreateOrGetWorkstream(ctx context.Context, projectID int64, name
 	if err != sql.ErrNoRows {
 		return Workstream{}, fmt.Errorf("store: get workstream: %w", err)
 	}
-	w = Workstream{ProjectID: projectID, Name: name, Branch: &name, Status: WorkstreamActive}
+	w = Workstream{ProjectID: projectID, Name: name, Status: WorkstreamActive}
 	err = s.db.QueryRowContext(ctx,
-		`INSERT INTO workstreams (project_id, name, branch) VALUES (?, ?, ?)
-		 RETURNING id, created_at`, projectID, name, name).
+		`INSERT INTO workstreams (project_id, name) VALUES (?, ?)
+		 RETURNING id, created_at`, projectID, name).
 		Scan(&w.ID, &w.CreatedAt)
 	if err != nil {
 		return Workstream{}, fmt.Errorf("store: create workstream: %w", err)
@@ -39,7 +39,7 @@ func (s *Store) CreateOrGetWorkstream(ctx context.Context, projectID int64, name
 // of CreateOrGetWorkstream for the no-daemon CLIs — it never creates.
 func (s *Store) GetWorkstreamByName(ctx context.Context, projectID int64, name string) (Workstream, error) {
 	w, err := scanWorkstream(s.db.QueryRowContext(ctx,
-		`SELECT id, project_id, name, branch, worktree_path, status, created_at
+		`SELECT id, project_id, name, status, created_at
 		 FROM workstreams
 		 WHERE project_id = ? AND name = ? AND status = ?
 		 ORDER BY id DESC LIMIT 1`, projectID, name, WorkstreamActive))
@@ -52,7 +52,7 @@ func (s *Store) GetWorkstreamByName(ctx context.Context, projectID int64, name s
 // GetWorkstream fetches a workstream by ID.
 func (s *Store) GetWorkstream(ctx context.Context, id int64) (Workstream, error) {
 	w, err := scanWorkstream(s.db.QueryRowContext(ctx,
-		`SELECT id, project_id, name, branch, worktree_path, status, created_at
+		`SELECT id, project_id, name, status, created_at
 		 FROM workstreams WHERE id = ?`, id))
 	if err != nil {
 		return Workstream{}, fmt.Errorf("store: get workstream %d: %w", id, err)
@@ -65,7 +65,7 @@ func (s *Store) GetWorkstream(ctx context.Context, id int64) (Workstream, error)
 // are excluded from the list.
 func (s *Store) ListWorkstreams(ctx context.Context, projectID int64) ([]Workstream, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, project_id, name, branch, worktree_path, status, created_at
+		`SELECT id, project_id, name, status, created_at
 		 FROM workstreams
 		 WHERE project_id = ? AND status = ?
 		 ORDER BY created_at ASC, id ASC`, projectID, WorkstreamActive)
@@ -83,17 +83,6 @@ func (s *Store) ListWorkstreams(ctx context.Context, projectID int64) ([]Workstr
 		ws = append(ws, w)
 	}
 	return ws, rows.Err()
-}
-
-// UpdateWorkstreamWorktree sets (or clears, when path is nil) the worktree
-// path bound to a workstream. ADR-0002 keeps one binding point per workstream.
-func (s *Store) UpdateWorkstreamWorktree(ctx context.Context, id int64, path *string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE workstreams SET worktree_path = ? WHERE id = ?`, path, id)
-	if err != nil {
-		return fmt.Errorf("store: update workstream worktree: %w", err)
-	}
-	return nil
 }
 
 // RenameWorkstream updates the name of a workstream. The name should be
@@ -120,10 +109,10 @@ func (s *Store) RenameWorkstream(ctx context.Context, id int64, name string) err
 	if collision > 0 {
 		return fmt.Errorf("store: rename workstream: name %q already in use", name)
 	}
-	// Update name and branch (branch follows name for git consistency).
+	// Update the name (schema v2: no branch column follows it).
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE workstreams SET name = ?, branch = ? WHERE id = ? AND status = ?`,
-		name, name, id, WorkstreamActive)
+		`UPDATE workstreams SET name = ? WHERE id = ? AND status = ?`,
+		name, id, WorkstreamActive)
 	if err != nil {
 		return fmt.Errorf("store: rename workstream: %w", err)
 	}

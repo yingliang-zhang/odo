@@ -57,7 +57,7 @@ func seedAuditConv(t *testing.T, st *store.Store, projectID int64, wsName string
 					t.Fatal(err)
 				}
 			}
-			d, err := st.InsertDiff(ctx, c.ID, diffPath, "")
+			d, err := st.InsertDiff(ctx, c.ID, diffPath, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}

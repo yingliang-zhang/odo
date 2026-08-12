@@ -745,27 +745,113 @@ async fn search_events(project_root: Option<String>, text: String) -> Result<Val
     run_command(root, req, READ_TIMEOUT).await
 }
 
-// M11 P1: read-only view of the daemon-owned global registry
-// (<home>/.odo/projects.json, ODO_REGISTRY_PATH override — same path
-// resolution as the Go registry) for the sidebar project switcher. Absent
-// file → empty list; a parse failure surfaces as a command error rather
-// than degrading to empty (the daemon owns the format and would still
-// boot on a corrupt file, so the UI should show the real problem).
-#[tauri::command]
-async fn list_projects() -> Result<Value, String> {
-    let path = match std::env::var_os("ODO_REGISTRY_PATH").filter(|p| !p.is_empty()) {
-        Some(p) => PathBuf::from(p),
+// Registry file location — ODO_REGISTRY_PATH override, else
+// <home>/.odo/projects.json (same resolution as the Go registry).
+fn registry_file_path() -> Result<PathBuf, String> {
+    match std::env::var_os("ODO_REGISTRY_PATH").filter(|p| !p.is_empty()) {
+        Some(p) => Ok(PathBuf::from(p)),
         None => {
             let home = std::env::var_os("HOME").ok_or("cannot find home directory")?;
-            Path::new(&home).join(".odo").join("projects.json")
+            Ok(Path::new(&home).join(".odo").join("projects.json"))
         }
-    };
+    }
+}
+
+// Absent file → empty list; a parse failure surfaces as an error rather
+// than degrading to empty (the daemon owns the format and would still
+// boot on a corrupt file, so the UI should show the real problem).
+fn read_registry(path: &Path) -> Result<Value, String> {
     if !path.exists() {
         return Ok(json!([]));
     }
     let content =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+// Same discipline as Go's writeFileAtomic: temp file in the same dir,
+// 0600, rename over the target. The tmp name carries nanos (not just the
+// pid): Tauri runs commands on a threadpool, so two concurrent removals
+// in one process must not share a tmp file. Permissions are set after
+// open unconditionally — OpenOptions::mode only applies at creation, and
+// a stale tmp from a crashed earlier run could otherwise smuggle 0644 in.
+fn write_registry_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        std::process::id(),
+        nanos
+    ));
+    let write_result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+        f.write_all(contents.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        f.sync_all().ok();
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename onto {}: {e}", path.display()))
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result
+}
+
+// Drop every row whose root matches (removal is idempotent: an absent
+// root just returns the list unchanged). Returns the full updated list so
+// the frontend can setState straight from the response.
+fn remove_project_from(path: &Path, root: &str) -> Result<Value, String> {
+    let rows = read_registry(path)?;
+    let mut rows = rows
+        .as_array()
+        .cloned()
+        .ok_or_else(|| format!("{}: registry is not a JSON array", path.display()))?;
+    rows.retain(|r| r.get("root").and_then(|v| v.as_str()) != Some(root));
+    let out = serde_json::to_string(&rows).map_err(|e| format!("marshal registry: {e}"))?;
+    write_registry_atomic(path, &(out + "\n"))?;
+    Ok(json!(rows))
+}
+
+// M11 P1: read-only view of the daemon-owned global registry
+// (<home>/.odo/projects.json, ODO_REGISTRY_PATH override — same path
+// resolution as the Go registry) for the sidebar project switcher.
+#[tauri::command]
+async fn list_projects() -> Result<Value, String> {
+    read_registry(&registry_file_path()?)
+}
+
+// M11 F8 registry escape hatch: drop a project from the global registry.
+// The 2026-08-11 phantom-project incident left a dead worktree row with
+// no way out but hand-editing ~/.odo/projects.json (the GUI's 5s
+// cross-project poll then respawned a stale daemon for it forever, and
+// the daemon's NewServer re-registered the entry — the resurrection loop
+// only ends once the row is gone AND the frontend stops polling it, see
+// App.tsx handleRemoveProject). Removing a row does not touch the
+// project's files or a running daemon; the Go-side worktree guard
+// (ensureProjectRegistered) keeps phantom rows from coming back.
+// The GUI refuses to offer this for the ACTIVE project (removal would be
+// undone at that daemon's next boot); the command itself stays agnostic —
+// switch away first, then remove.
+#[tauri::command]
+async fn remove_project(root: String) -> Result<Value, String> {
+    remove_project_from(&registry_file_path()?, &root)
 }
 
 // M11 F1: open a native folder picker, ensure the daemon for that project is
@@ -811,6 +897,65 @@ async fn add_project(app: tauri::AppHandle) -> Result<Option<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Registry-removal unit tests run without a daemon or a smoke root —
+    // remove_project_from is pure file logic over an explicit path.
+    fn temp_registry(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("odo-reg-test-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("projects.json")
+    }
+
+    fn seed_registry(path: &Path, roots: &[&str]) {
+        let rows: Vec<Value> = roots
+            .iter()
+            .map(|r| json!({"root": r, "name": Path::new(r).file_name().unwrap(), "added": "2026-08-11T00:00:00Z"}))
+            .collect();
+        std::fs::write(path, serde_json::to_string(&rows).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn remove_project_drops_only_the_target_row() {
+        let path = temp_registry("drop");
+        seed_registry(&path, &["/a/main", "/a/main/.odo/worktrees/x", "/b/other"]);
+        let out = remove_project_from(&path, "/a/main/.odo/worktrees/x").unwrap();
+        let roots: Vec<&str> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["root"].as_str().unwrap())
+            .collect();
+        assert_eq!(roots, ["/a/main", "/b/other"]);
+        // The file on disk carries the same result (persistence, not just return value)…
+        let on_disk = read_registry(&path).unwrap();
+        assert_eq!(on_disk.as_array().unwrap().len(), 2);
+        // …with owner-only permissions, matching Go's writeFileAtomic.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn remove_project_absent_root_is_idempotent() {
+        let path = temp_registry("absent");
+        seed_registry(&path, &["/a/main"]);
+        let out = remove_project_from(&path, "/never/registered").unwrap();
+        assert_eq!(out.as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn remove_project_missing_file_writes_empty_list() {
+        let path = temp_registry("missing");
+        let out = remove_project_from(&path, "/anything").unwrap();
+        assert_eq!(out.as_array().unwrap().len(), 0);
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 
     /// End-to-end round trip against a real daemon. Requires a daemon bound
     /// to a throwaway git repo with a stub OMP wrapper, e.g.:
@@ -1110,6 +1255,7 @@ pub fn run() {
             search_events,
             list_projects,
             add_project,
+            remove_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

@@ -1165,6 +1165,21 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .proj-group > .ws-list {
   padding-left: 28px;
 }
+/* M11 F8: row header wraps the project button + hover-remove affordance,
+   mirroring the .ws-row action-strip pattern. */
+.proj-row-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.proj-row-head > .proj-row {
+  flex: 1;
+  min-width: 0;
+}
+.proj-row-head:hover > .ws-actions,
+.proj-row-head:focus-within > .ws-actions {
+  display: flex;
+}
 .proj-row {
   display: flex;
   align-items: center;

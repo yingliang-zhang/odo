@@ -80,6 +80,14 @@ type Server struct {
 	curating   bool               // a curate pass is in flight (M11 P0)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
 
+	// acceptMu serializes the accept critical section (Q6 #6, previously
+	// unadjudicated): two concurrent accepts — human + auto-land, or two
+	// humans — share one main checkout, so apply/stage/commit/rollback on
+	// interleaved patch paths would sweep each other's files. Reject takes
+	// the same lock (uniform handler posture); ordering vs s.mu is
+	// acceptMu → mu and never reversed.
+	acceptMu sync.Mutex
+
 	// M16 (O-1 v2): auto-land. autoLandMu serializes ONE pipeline at a
 	// time (the final accept's apply/add/commit must not interleave, and
 	// verify/panel spend shouldn't pile up across conversations). NOT s.mu —
@@ -524,17 +532,6 @@ func sanitizeBranchName(name string) string {
 	return strings.Trim(b.String(), ".-")
 }
 
-// workstreamGitBranch maps a workstream's stored branch name to the git
-// branch its runs check out (M11c). The row stores the bare name (e.g.
-// "main"); every git consumer prefixes it with "odo/". "" means detached
-// worktrees — legacy workstreams with no branch binding.
-func workstreamGitBranch(w store.Workstream) string {
-	if w.Branch == nil || *w.Branch == "" {
-		return ""
-	}
-	return "odo/" + *w.Branch
-}
-
 // handleSendMessage journals the user message, creates a run worktree, and
 // starts the agent in it.
 func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, error) {
@@ -658,19 +655,14 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// Setup failures after this point revoke the run with a journaled
 	// agent_error so the chat history stays truthful.
 	runDirID := worktree.NewRunID()
-	wtPath, err := s.mgr.Create(runDirID, workstreamGitBranch(w))
+	wtPath, err := s.mgr.Create(runDirID)
 	if err != nil {
 		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("create worktree: %w", err))
-	}
-	if err := s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, &wtPath); err != nil {
-		_ = s.mgr.Remove(wtPath) // don't orphan the worktree we just created
-		return Response{}, fmt.Errorf("bind worktree: %w", err)
 	}
 
 	runID, err := ad.Start(ctx, wtPath, prompt)
 	if err != nil {
 		_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
-		_ = s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, nil)
 		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("start agent: %w", err))
 	}
 
@@ -1103,11 +1095,6 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 		return
 	}
 
-	c, err := s.store.GetConversation(ctx, conversationID)
-	if err != nil {
-		log.Printf("a2-continuation: get conversation: %v", err)
-		return
-	}
 	w, err := s.store.GetWorkstream(ctx, workstreamID)
 	if err != nil {
 		log.Printf("a2-continuation: get workstream: %v", err)
@@ -1120,22 +1107,16 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 	fullPrompt := buildPrompt(prompt, nil, ml)
 
 	runDirID := worktree.NewRunID()
-	wtPath, err := s.mgr.Create(runDirID, workstreamGitBranch(w))
+	wtPath, err := s.mgr.Create(runDirID)
 	if err != nil {
 		log.Printf("a2-continuation: create worktree: %v", err)
-		return
-	}
-	if err := s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, &wtPath); err != nil {
-		_ = s.mgr.Remove(wtPath)
-		log.Printf("a2-continuation: bind worktree: %v", err)
 		return
 	}
 
 	ad := s.adapters[""] // default adapter
 	runID, err := ad.Start(ctx, wtPath, fullPrompt)
 	if err != nil {
-		_ = s.mgr.Remove(wtPath)
-		_ = s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, nil)
+		_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
 		log.Printf("a2-continuation: start agent: %v", err)
 		return
 	}
@@ -1233,9 +1214,17 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 
 	// The diff is extracted whether the run succeeded or failed: partial
 	// changes are reviewable, and the human decides. (ADR-0001.)
+	//
+	// base_sha is the worktree's REAL HEAD here (I9) — the exact commit the
+	// staged diff was generated against. Copying conversations.base_commit_sha
+	// (the OLD path) mislabeled every run from the second one onward: the
+	// conversation's base froze at creation while accepts moved main forward,
+	// which also made auto-land's base_stale gate block truthful fresh diffs.
 	baseSHA := ""
-	if c, err := s.store.GetConversation(ctx, meta.conversationID); err == nil && c.BaseCommitSHA != nil {
-		baseSHA = *c.BaseCommitSHA
+	if sha, err := git.CurrentSHA(meta.worktreePath); err == nil {
+		baseSHA = sha
+	} else {
+		log.Printf("ipc: drainRun: read worktree base sha: %v (diff gets NULL base)", err)
 	}
 	diffPath, err := s.mgr.ExtractDiff(meta.worktreePath, meta.runDirID)
 	if err != nil {
@@ -1249,11 +1238,9 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	if diffPath == "" {
 		meta.finished = true // agent changed nothing; run is complete
 		// Nothing to review, so retire immediately: previously only a review
-		// action retired runs, and every no-diff run leaked its worktree and
-		// workstream binding forever (P1). Retire BEFORE firing a
-		// continuation — the continuation's checkout needs the workstream
-		// branch free, and the binding must be cleared before it reads it.
-		s.retireRun(ctx, meta.conversationID)
+		// action retired runs, and every no-diff run leaked its worktree
+		// forever (P1). Retire BEFORE firing a continuation.
+		s.retireRun(ctx, meta.conversationID, "")
 		// A2-lite: even with no diff, fire continuation if steers were queued.
 		if len(queuedSteers) > 0 && !meta.errored {
 			go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
@@ -1264,7 +1251,10 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		}
 		return nil
 	}
-	newDiff, derr := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA)
+	// The per-run worktree binding rides the diff row (schema v2): retire
+	// and the sweeper aim at exactly this run's worktree, never whatever the
+	// workstream's single-slot column happened to point at last (Q6 bug 1).
+	newDiff, derr := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA, meta.worktreePath)
 	if derr != nil {
 		log.Printf("ipc: drainRun: InsertDiff failed: %v", derr)
 		s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError, mustJSON(map[string]interface{}{
@@ -1313,6 +1303,10 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		return Response{}, fmt.Errorf("%s_diff: diff %d already %s", action, diffID, d.Status)
 	}
 
+	// Q6 #6: one accept (or reject) at a time daemon-wide — see acceptMu.
+	s.acceptMu.Lock()
+	defer s.acceptMu.Unlock()
+
 	applied := false
 	if action == "accept" {
 		// M6 (§8b): explicit guarded-path check — gitignore is not the
@@ -1340,11 +1334,54 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		} else if conflicts {
 			return Response{}, errors.New("accept_diff: main checkout has unresolved merge conflicts; resolve or reset them, then retry the accept")
 		}
-		// An unreadable patch file falls through to git apply, the authority
-		// on the patch format (its error names the file problem).
+		// I7 baseline BEFORE the apply attempt: on failure the daemon rolls
+		// the main checkout back to pre-accept state limited to these patch
+		// paths (no self-produced unmerged entries, no half-applied files,
+		// no damage outside the patch). When our parser can't enumerate the
+		// paths, falls back to no-baseline — git apply stays the authority.
+		var baseHEAD, baseDisk map[string]bool
+		if gerr == nil {
+			var berr error
+			baseHEAD, baseDisk, berr = git.CapturePatchBaseline(s.projectRoot, patchPaths)
+			if berr != nil {
+				return Response{}, fmt.Errorf("accept_diff: capture rollback baseline: %w", berr)
+			}
+		}
 		if err := git.ApplyDiff(s.projectRoot, d.PathOnDisk); err != nil {
-			// Stay pending: review didn't conclude. The git error text says why.
-			return Response{}, fmt.Errorf("accept_diff: apply: %w", err)
+			applyErr := err
+			// I7: roll back. A failed --3way can leave per-file conflict
+			// markers and unmerged index entries; the old "stay pending"
+			// comment assumed nothing was written, which was false — the
+			// conflict stuck the diff forever while main carried damage.
+			var rbErr error
+			if baseHEAD != nil {
+				rbErr = git.RollbackPatchApply(s.projectRoot, patchPaths, baseHEAD, baseDisk)
+			}
+			// Terminal conflict state: the diff leaves the review queue,
+			// the journal records the outcome, and the message tells the
+			// human exactly where main stands.
+			if uerr := s.store.UpdateDiffStatus(ctx, diffID, store.DiffConflict); uerr != nil {
+				log.Printf("accept_diff: mark diff %d conflict: %v", diffID, uerr)
+			}
+			payload := map[string]interface{}{
+				"action":  "conflict",
+				"diff_id": d.ID,
+				"error":   applyErr.Error(),
+				"rolled_back": rbErr == nil && baseHEAD != nil,
+			}
+			if actor != "" {
+				payload["actor"] = actor
+			}
+			if _, aerr := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); aerr != nil {
+				log.Printf("accept_diff: journal conflict for diff %d: %v", diffID, aerr)
+			}
+			if rbErr != nil {
+				return Response{}, fmt.Errorf("accept_diff: apply: %w (ROLLBACK INCOMPLETE: %v — inspect the main checkout)", applyErr, rbErr)
+			}
+			if baseHEAD == nil {
+				return Response{}, fmt.Errorf("accept_diff: apply: %w (no rollback baseline — patch paths unparseable, inspect the main checkout)", applyErr)
+			}
+			return Response{}, fmt.Errorf("accept_diff: apply failed, main checkout rolled back to pre-accept state (diff marked conflict): %w", applyErr)
 		}
 		// Commit the applied diff — only its own paths (P0) — so the next
 		// worktree (created from HEAD) includes all previously accepted
@@ -1386,90 +1423,59 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	// concurrent poll drains of the same run.
 	s.mu.Lock()
 	s.retireRunForDiff(ctx, d)
-	if action == "accept" {
-		// M11c: the run's worktree is retired, so no live worktree holds the
-		// workstream branch — advance it past the accept commit.
-		s.advanceWorkstreamBranch(ctx, d)
-	}
 	s.mu.Unlock()
 
 	return Response{DiffID: diffID, Applied: applied}, nil
 }
 
-// advanceWorkstreamBranch points the workstream's odo/<name> branch at the
-// main HEAD that now includes the accepted diff, so the branch accumulates
-// changes across runs. Caller holds s.mu (handleDiffAction's locked
-// section): the retire calls above must free the branch first — git refuses
-// `branch -f` while the branch is checked out in a live worktree. Failures
-// are non-fatal: a concurrent run on another conversation of the same
-// workstream can still hold the branch, and the next run's
-// `git worktree add -B` resets the ref forward regardless.
-func (s *Server) advanceWorkstreamBranch(ctx context.Context, d store.Diff) {
-	c, err := s.store.GetConversation(ctx, d.ConversationID)
-	if err != nil {
-		log.Printf("accept_diff: workstream branch advance: %v", err)
-		return
-	}
-	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
-	if err != nil {
-		log.Printf("accept_diff: workstream branch advance: %v", err)
-		return
-	}
-	if branch := workstreamGitBranch(w); branch != "" {
-		if err := git.AdvanceBranch(s.projectRoot, branch); err != nil {
-			log.Printf("accept_diff: workstream branch advance (non-fatal): %v", err)
-		}
-	}
-}
-
-// retireRunForDiff releases resources after a diff review. Caller holds
-// s.mu (handleDiffAction's locked section).
+// retireRunForDiff releases resources after a diff review: the worktree
+// retired is exactly the reviewed diff's OWN worktree (d.WorktreePath,
+// schema v2 per-run binding) — never a binding the workstream happened to
+// point at last (the Q6 cardinality bug targeted the wrong dir under
+// concurrent runs). Caller holds s.mu (handleDiffAction's locked section).
 func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
-	s.retireRun(ctx, d.ConversationID)
+	fallbackWT := ""
+	if d.WorktreePath != nil {
+		fallbackWT = *d.WorktreePath
+	}
+	s.retireRun(ctx, d.ConversationID, fallbackWT)
 }
 
 // retireRun closes the adapter run and removes the worktree for a concluded
-// review. After a restart there is no in-memory run; the workstream's bound
-// worktree path is the fallback. Removal failures are logged, not fatal — the
-// review already happened and worktrees are reaped by `git worktree prune`.
-// Caller holds s.mu (via retireRunForDiff).
-func (s *Server) retireRun(ctx context.Context, conversationID int64) {
-	var wtPath string
+// review. fallbackWT is the reviewed diff's recorded worktree ("" for the
+// no-diff retire out of drainRun). Removal failures are logged, not fatal —
+// the review already happened and the startup sweeper converges orphans.
+// Caller holds s.mu (via retireRunForDiff, or drainRun's no-diff path).
+func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT string) {
+	var wtPath, liveWT string
 	if runID, ok := s.byConv[conversationID]; ok {
 		if meta := s.runs[runID]; meta != nil {
 			if !meta.finished {
-				// The conversation's binding is a LIVE run, so the reviewed
-				// diff came from an earlier finished run. Closing here would
-				// kill the in-flight agent and delete its worktree mid-write
-				// (accept/reject interrupting a running agent). Leave run,
-				// maps, worktree, and binding untouched; the concluded run's
-				// stale worktree is reaped by the next review, a later
-				// no-diff retire, or `git worktree prune`.
-				return
+				// The conversation's active binding is a LIVE run — closing
+				// it would kill the in-flight agent mid-write (accept/reject
+				// interrupting a running agent). Leave run and maps alone.
+				liveWT = meta.worktreePath
+			} else {
+				wtPath = meta.worktreePath
+				_ = s.adapterFor(meta.adapter).Close(ctx, runID)
+				delete(s.runs, runID)
 			}
-			wtPath = meta.worktreePath
-			_ = s.adapterFor(meta.adapter).Close(ctx, runID)
-			delete(s.runs, runID)
 		}
-		delete(s.byConv, conversationID)
+		if liveWT == "" {
+			delete(s.byConv, conversationID)
+		}
 	}
 
-	c, err := s.store.GetConversation(ctx, conversationID)
-	if err != nil {
-		return
-	}
 	if wtPath == "" {
-		if w, err := s.store.GetWorkstream(ctx, c.WorkstreamID); err == nil && w.WorktreePath != nil {
-			wtPath = *w.WorktreePath
-		}
+		wtPath = fallbackWT
 	}
-	if wtPath != "" {
+	// A live run's worktree is never removed here; a STALE finished worktree
+	// (fallbackWT from an older reviewed diff) IS removed even while another
+	// run is live — distinct per-run dirs make that finally safe (schema v2).
+	if wtPath != "" && wtPath != liveWT {
 		if err := s.mgr.Remove(wtPath); err != nil {
 			log.Printf("ipc: retire run: remove worktree %s: %v", wtPath, err)
 		}
-	}
-	if err := s.store.UpdateWorkstreamWorktree(ctx, c.WorkstreamID, nil); err != nil {
-		log.Printf("ipc: retire run: unbind worktree: %v", err)
 	}
 }
 

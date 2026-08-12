@@ -31,6 +31,13 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       // Browser can't show a native folder picker — return null (user "cancelled")
       return null;
     }
+    case "remove_project": {
+      // Fresh array for the caller (React bails on Object.is-equal state)
+      // while the module fixture stays mutated for later list_projects.
+      const kept = fx.projects.filter(p => p.root !== args?.root);
+      fx.projects.splice(0, fx.projects.length, ...kept);
+      return kept;
+    }
 
     // ---------- Workstreams ----------
     case "list_workstreams": {

@@ -100,6 +100,26 @@ test("delete workstream via hover action", async ({ page }) => {
   await expect(sidebar.locator(".ws-item", { hasText: "to-delete" })).toBeHidden();
 });
 
+test("remove non-active project via hover action; active project has no affordance", async ({ page }) => {
+  const sidebar = page.locator(".sidebar");
+
+  // Active project row (odo): no remove control even on hover.
+  const activeHead = sidebar.locator(".proj-row-head", { hasText: "odo" });
+  await activeHead.hover();
+  await expect(activeHead.getByRole("button", { name: /Remove/ })).toHaveCount(0);
+
+  // Non-active row: two-step inline confirm, mirroring workstream delete.
+  const hdrHead = sidebar.locator(".proj-row-head", { hasText: "supersplat-hdr" });
+  await hdrHead.hover();
+  await hdrHead.getByRole("button", { name: "Remove supersplat-hdr from list" }).click();
+  await expect(hdrHead.locator(".ws-delete-confirm-text")).toHaveText("Remove?");
+  await hdrHead.getByRole("button", { name: "Confirm remove supersplat-hdr" }).click();
+
+  // Row gone from the tree; active project untouched.
+  await expect(sidebar.locator(".proj-row", { hasText: "supersplat-hdr" })).toHaveCount(0);
+  await expect(sidebar.locator(".proj-row-active", { hasText: "odo" })).toBeVisible();
+});
+
 test("switch to non-active project does not collapse tree", async ({ page }) => {
   const sidebar = page.locator(".sidebar");
 
