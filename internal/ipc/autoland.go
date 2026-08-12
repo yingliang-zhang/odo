@@ -37,6 +37,15 @@ package ipc
 //	                 bypass), and the diff body is fenced as data.
 //	unanimity       consensusVerdict == "accept" requires EVERY reviewer
 //	                 (the fail-open fix: a lone needs_fixes now blocks).
+//	settlement      M18 (settle.go): the four panel outcomes split —
+//	                 accept lands; unanimous reject blocks
+//	                 {panel_unanimous_reject} + transcript advisory (the
+//	                 diff stays pending — never auto-rejected); any
+//	                 reject at all blocks {panel_mixed}; an errored leg
+//	                 blocks {panel_infra} (infra is not a verdict); and
+//	                 zero rejects + ≥1 needs_fixes enters the auto-revise
+//	                 ladder (≤2 fresh repair rounds, no-progress stop,
+//	                 journal-derived suspension).
 //	land            handleDiffAction's original path — protected-path
 //	                 guard, unmerged-index refusal, 3-way apply, path-
 //	                 scoped staged commit, worktree retire — plus
@@ -48,9 +57,12 @@ package ipc
 //	accept{actor:"auto_panel"}            auto-landed (streak-excluded:
 //	                                      ComputeAutonomy counts these
 //	                                      separately, never toward rungs)
+//	auto_revise_round{actor:"auto_panel"} a spawned repair round (M18)
 //	auto_land_blocked{reason,...}         any gate/panel stop, with the
 //	                                      panel verdicts attached when the
-//	                                      panel ran (panel_disagreed)
+//	                                      panel ran, and the diff's
+//	                                      patch sha16 on every row
+//	memory_update{layer:"auto_land"}      ladder_suspended/resumed (M18)
 //
 // auto_apply values "branch"/"all" stay unconsumed (rung-0 contract:
 // only "main" has pipeline semantics). M16 amends the M15 O-1
@@ -229,10 +241,36 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	}
 	reviews := s.reviewFanout(ctx, models, prompt)
 	cv := consensusVerdict(reviews)
-	if cv != "accept" {
-		s.journalAutoLandBlocked(ctx, d, "panel_disagreed", "", reviews, cv)
+	// M18 settlement: an infra leg is not a verdict — the round never
+	// validly completed (fail closed, and it never ticks the ladder).
+	if panelInfraLeg(reviews) {
+		s.journalAutoLandBlocked(ctx, d, "panel_infra",
+			"a review leg failed on transport/auth/timeout — infra failures are not verdicts", reviews, cv)
 		return
 	}
+	switch settlementClass(cv, reviews) {
+	case "reject_unanimous":
+		// Every reviewer rejected the DIRECTION: the diff stays pending
+		// (a diff is the user's work product — never auto-rejected), and
+		// the fall-through to the human is transcript-visible, not
+		// ledger-only.
+		s.journalAutoLandBlocked(ctx, d, "panel_unanimous_reject",
+			"every reviewer rejected the direction; the diff stays pending for the human", reviews, cv)
+		s.journalRunAdvisory(ctx, d.ConversationID, fmt.Sprintf(
+			"the auto-land panel unanimously rejected diff #%d — it stays pending for your review (the reasons are in the journal).", d.ID))
+		return
+	case "reject_mixed":
+		s.journalAutoLandBlocked(ctx, d, "panel_mixed",
+			"at least one reviewer rejected the direction; the diff stays pending for the human", reviews, cv)
+		return
+	case "needs_fixes":
+		// Zero rejects + ≥1 needs_fixes: nobody said the direction is
+		// wrong, it's just not done — the auto-revise ladder decides
+		// (spawn a repair round, block to the human, or demote).
+		s.settleRevise(ctx, d, diffText, reviews)
+		return
+	}
+	// settlementClass "accept" falls through to the M16 landing path.
 
 	// Evidence before action: the unanimous verdict must be on the journal
 	// BEFORE the diff lands. A broken journal means no landing — an
@@ -408,13 +446,19 @@ func autoLandPrompt(goal, diffText, verifyCmd, verifyTail string) string {
 }
 
 // journalAutoLandBlocked records one blocked auto-land attempt. reviews
-// (attached when the panel ran) keep the dissent on the record.
+// (attached when the panel ran) keep the dissent on the record; the
+// diff's patch sha16 rides every row (M18: the ladder's no-progress
+// comparator and the audit's diff identity), best-effort — a row about an
+// unreadable patch simply omits it.
 func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reason, detail string, reviews []ReviewResult, consensus string) {
 	payload := map[string]interface{}{
 		"action":  "auto_land_blocked",
 		"diff_id": d.ID,
 		"actor":   autoActor,
 		"reason":  reason,
+	}
+	if data, err := os.ReadFile(d.PathOnDisk); err == nil {
+		payload["patch_sha16"] = sha16(data)
 	}
 	if detail != "" {
 		payload["detail"] = detail

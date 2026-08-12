@@ -97,6 +97,14 @@ func collectReplayTurns(events []store.Event, boundary int) []replayTurn {
 		if ev.Type != store.EventUserMessage && ev.Type != store.EventAgentText {
 			continue
 		}
+		// M18: an auto-revise repair prompt is machine-generated chain
+		// evidence, not a user turn — distillRender tombstones it and
+		// originGoal skips it; replaying it as "user" would confuse the
+		// NEXT repair run's prompt (and smuggle the demotion directive in
+		// as a lower-authority past turn, P0 review GLM).
+		if _, marked := parseAutoReviseMarker(ev.Payload); marked {
+			continue
+		}
 		var p struct {
 			Text string `json:"text"`
 		}

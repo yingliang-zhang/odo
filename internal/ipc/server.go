@@ -54,6 +54,13 @@ type runMeta struct {
 	// prompt grounds the panel in the user's words, never the agent's
 	// self-report.
 	goal string
+	// M18: revise-chain runs set this to the chain's ORIGIN goal. The
+	// repair brief (goal field) is the run's truthful trigger, but the
+	// auto-land panel must judge the revision against the USER's words,
+	// not the meta-prompt the ladder synthesized (P0 review GLM — the
+	// panel otherwise sees up to 44KB of toolchain labeled "the user's
+	// original instruction, verbatim"). Empty on every non-revise run.
+	reviewGoal string
 	// run_verdict (epoch-8, outstanding #1): mechanical output tallies for
 	// the terminal post-mortem. An exit-0 run is not proof of work — the
 	// kimi-k3 false stop produced exactly this shape (OMP exit 0, zero
@@ -1404,7 +1411,11 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// M16 (O-1 v2): the pending diff spawns the auto-land pipeline
 	// (pref-gated inside; goroutine, no locks held — the continuation
 	// trigger's shape). meta's fields are copied as arguments.
-	go s.maybeAutoLand(newDiff, meta.worktreePath, meta.goal, meta.errored, verdict)
+	reviewGoal := meta.goal
+	if meta.reviewGoal != "" {
+		reviewGoal = meta.reviewGoal
+	}
+	go s.maybeAutoLand(newDiff, meta.worktreePath, reviewGoal, meta.errored, verdict)
 
 	// A2-lite: if steering messages were queued during this run, auto-start
 	// a continuation run with the queued texts as the prompt. This replaces
@@ -1559,6 +1570,13 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	s.retireRunForDiff(ctx, d)
 	s.mu.Unlock()
 
+	// M18: a human accept is the ladder's only un-suspension reset
+	// (journaled only at the transition, derived — never an in-memory
+	// flag).
+	if applied && actor == "" {
+		s.maybeLadderResume(ctx, d.ConversationID, diffID)
+	}
+
 	return Response{DiffID: diffID, Applied: applied}, nil
 }
 
@@ -1699,7 +1717,13 @@ func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt stri
 	system := "You are a code reviewer. Review the following diff and provide your verdict."
 	res, err := client.Query(ctx, m.model, system, prompt)
 	if err != nil {
-		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error()}
+		// M18: the leg never reached a verdict — transport/auth/timeout
+		// is INFRA, not dissent. The Verdict stays needs_fixes (the M16
+		// degrade: a review that never happened must not read as an
+		// accept) but carries Infra so the settlement ladder fails the
+		// whole round closed as panel_infra instead of feeding an error
+		// string to the repair prompt.
+		return ReviewResult{Model: label, Verdict: "needs_fixes", Comments: "review failed: " + err.Error(), Infra: true}
 	}
 	return reviewVerdict(label, res.Text, res.Truncated)
 }
@@ -2108,8 +2132,9 @@ func parseVerdict(model, text string) ReviewResult {
 		// Compliant panels put the verdict on the FINAL line (both prompts
 		// demand think-first, verdict-last), so "text after it" is empty for
 		// every vote and the justification is silently dropped — the M16
-		// panel_disagreed row carried three empty comments. Fall back to the
-		// pre-verdict analysis so the recorded vote carries its reasons.
+		// blocked-row reviews carried three empty comments. Fall back to
+		// the pre-verdict analysis so the recorded vote carries its
+		// reasons.
 		comments = capDetail(strings.TrimSpace(strings.Join(lines[:last], "\n")))
 	}
 	return ReviewResult{
@@ -3253,6 +3278,15 @@ func distillRender(ev store.Event) string {
 			return ""
 		}
 		return fmt.Sprintf("### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
+	case store.EventUserMessage:
+		// M18: a synthesized repair prompt is daemon bookkeeping wearing a
+		// user_message row — multi-KB by construction (32KB diff + 12KB
+		// comments), and the note summarizes USER asks. One-line
+		// tombstone, M17 F1 shape.
+		if m, ok := parseAutoReviseMarker(ev.Payload); ok {
+			return fmt.Sprintf("### user_message (seq %d) [auto_revise round %d prompt omitted — %d bytes]\n\n", ev.Seq, m.Round, len(ev.Payload))
+		}
+		return fmt.Sprintf("### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
 	default:
 		return fmt.Sprintf("### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
 	}
@@ -3289,6 +3323,13 @@ func distillRenderSize(ev store.Event) int {
 			return 0
 		}
 		return len(ev.Type) + len(ev.Payload) + 64 // header + separators, over-estimated
+	case store.EventUserMessage:
+		// M18: tombstoned repair prompts measure exactly (render ==
+		// accounting, the M17 F1 byte-for-byte agreement).
+		if _, ok := parseAutoReviseMarker(ev.Payload); ok {
+			return len(distillRender(ev))
+		}
+		return len(ev.Type) + len(ev.Payload) + 64
 	default:
 		return len(ev.Type) + len(ev.Payload) + 64 // header + separators, over-estimated
 	}

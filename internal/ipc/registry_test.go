@@ -85,11 +85,11 @@ func TestIsOdoWorktreePath(t *testing.T) {
 	}{
 		{filepath.Join("/p", ".odo", "worktrees", "abc"), true},
 		{filepath.Join("/p", ".odo", "worktrees", "abc", "nested"), true},
-		{filepath.Join("/p", ".odo", "worktrees"), false},   // container dir itself is not a worktree
-		{filepath.Join("/p", ".odo"), false},                 // project state dir
+		{filepath.Join("/p", ".odo", "worktrees"), false},         // container dir itself is not a worktree
+		{filepath.Join("/p", ".odo"), false},                      // project state dir
 		{filepath.Join("/p", ".odoxic", "worktrees", "x"), false}, // near-miss on the state dir name
-		{filepath.Join("/p", ".odo", "other", "x"), false},   // near-miss on the subdir name
-		{filepath.Join("/p", "worktrees", "x"), false},       // worktrees without .odo parent
+		{filepath.Join("/p", ".odo", "other", "x"), false},        // near-miss on the subdir name
+		{filepath.Join("/p", "worktrees", "x"), false},            // worktrees without .odo parent
 		{"/", false},
 	}
 	for _, c := range cases {

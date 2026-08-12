@@ -53,7 +53,9 @@ stays, and three findings sharper than the brief:
   separately, never toward rungs (an auto-land must not inflate the streaks that
   would earn future autonomy)
 - `auto_land_blocked{reason, detail, [reviews]}` — any gate/panel stop, with the
-  panel verdicts attached when the panel ran (`panel_disagreed`)
+  panel verdicts attached when the panel ran. M18 retired the lump
+  `panel_disagreed` reason into the settlement classes — see
+  docs/milestones/m18-settlement-ladder.md.
 
 `auto_apply` values `branch`/`all` stay unconsumed (accepting them still fails closed
 in settings; nothing reads them). Skill proposals keep auto_accept deferred — the M15

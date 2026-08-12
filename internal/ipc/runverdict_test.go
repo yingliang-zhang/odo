@@ -139,7 +139,7 @@ func TestFalseStopRetryOnce(t *testing.T) {
 		}
 	}
 
-		// The journal stays truthful: two agent_done rows, zero agent_text —
+	// The journal stays truthful: two agent_done rows, zero agent_text —
 	// nothing forged. The second stop surfaces ONE daemon-authored,
 	// labeled advisory error (the human-wait fall-through, panel fix).
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events

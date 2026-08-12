@@ -138,6 +138,12 @@ type ReviewResult struct {
 	Model    string `json:"model"`
 	Verdict  string `json:"verdict"` // "accept" | "reject" | "needs_fixes"
 	Comments string `json:"comments"`
+	// Infra marks a leg that failed on transport/auth/timeout (M18): the
+	// model never issued a verdict. consensusVerdict still reads the
+	// Verdict field (unchanged semantics); the settlement ladder consults
+	// Infra to fail the round closed as panel_infra instead of mistaking
+	// an error string for dissent.
+	Infra bool `json:"infra,omitempty"`
 }
 
 // DiffInfo carries a diff record plus its file content to the client.
