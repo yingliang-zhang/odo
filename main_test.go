@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,6 +46,67 @@ func captureCLI(t *testing.T, fn func() int) (stdout, stderr string, code int) {
 		t.Fatal(err)
 	}
 	return sb.String(), eb.String(), code
+}
+
+// TestInstanceLockGuard pins the single-instance contract (epoch-8
+// outstanding #4): one daemon per project state dir — a second acquire on
+// a held lock fails loudly naming the lock, an error other than contention
+// is distinguishable, and closing the holder releases for the next daemon
+// (crash-stale locks are impossible via flock semantics).
+func TestInstanceLockGuard(t *testing.T) {
+	dir := t.TempDir()
+
+	first, err := acquireInstanceLock(dir)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "odo.lock"))
+	if err != nil {
+		t.Fatalf("lock file exists: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("lock mode = %o, want 0600", info.Mode().Perm())
+	}
+
+	// Contention: a live holder blocks the second daemon, naming the lock,
+	// and unwraps to the sentinel main routes to exit code 3 (Tauri
+	// attach-to-live).
+	second, err := acquireInstanceLock(dir)
+	if err == nil {
+		_ = second.Close()
+		t.Fatal("second acquire succeeded while the first holder is live")
+	}
+	if !errors.Is(err, errDaemonAlreadyRunning) {
+		t.Errorf("contention error = %v, want errors.Is errDaemonAlreadyRunning", err)
+	}
+	if !strings.Contains(err.Error(), "another odo daemon serves this project") {
+		t.Errorf("contention error = %q, want the refused-start message", err)
+	}
+
+	// Release: the holder's exit (file close) frees the lock for the next
+	// daemon — the stale-socket path then belongs to it alone.
+	if err := first.Close(); err != nil {
+		t.Fatalf("close holder: %v", err)
+	}
+	third, err := acquireInstanceLock(dir)
+	if err != nil {
+		t.Fatalf("acquire after holder exit: %v", err)
+	}
+	_ = third.Close()
+
+	// Exclusivity (round-2 panel): IO/open failures must NOT unwrap to the
+	// sentinel — Tauri maps exit 3 to attach-to-live, so a permissions/IO
+	// fault must never masquerade as a live peer. A stateDir that is a
+	// FILE makes OpenFile fail.
+	notDir := filepath.Join(t.TempDir(), "statedir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireInstanceLock(notDir); err == nil {
+		t.Fatal("lock acquired on a non-directory stateDir")
+	} else if errors.Is(err, errDaemonAlreadyRunning) {
+		t.Errorf("IO failure mapped to errDaemonAlreadyRunning — exit-3 exclusivity broken: %v", err)
+	}
 }
 
 func TestCLIRunsFromWorktree(t *testing.T) {

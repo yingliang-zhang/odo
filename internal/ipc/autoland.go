@@ -127,7 +127,7 @@ var autoLandSupplyChainFiles = map[string]bool{
 // copied off the run's runMeta by the caller. Pref-off returns SILENTLY:
 // a disabled feature deserves no journal noise (unlike a blocked attempt,
 // which is evidence).
-func (s *Server) maybeAutoLand(d store.Diff, worktreePath, goal string, runErrored bool) {
+func (s *Server) maybeAutoLand(d store.Diff, worktreePath, goal string, runErrored bool, runVerdict string) {
 	if adapter.ReadSettings().AutoApply != "main" {
 		return
 	}
@@ -144,14 +144,25 @@ func (s *Server) maybeAutoLand(d store.Diff, worktreePath, goal string, runError
 			}
 		}()
 	}
-	s.autoLand(context.Background(), d, worktreePath, goal, runErrored)
+	s.autoLand(context.Background(), d, worktreePath, goal, runErrored, runVerdict)
 }
 
 // autoLand runs the full pipeline for one pending diff. Blocks journal and
 // return; only a unanimous panel after all gates calls handleDiffAction.
-func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal string, runErrored bool) {
+func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal string, runErrored bool, runVerdict string) {
 	if runErrored {
 		s.journalAutoLandBlocked(ctx, d, "run_errored", "the producing run ended with agent_error", nil, "")
+		return
+	}
+	// run_verdict gate (epoch-8, outstanding #1): a tainted run is blocked
+	// before ANY other spend — "有 diff 零 text" means the tool side effects
+	// are real but the answer/summary never made it back, so there is no
+	// self-report-free confidence a panel verdict could stand on. The diff
+	// stays pending for the human (conservative, same posture as
+	// base_stale). false_stop here is the belt-and-suspenders case: it
+	// implies zero tool calls, but a phantom diff still never auto-lands.
+	if runVerdict != "" {
+		s.journalAutoLandBlocked(ctx, d, "run_"+runVerdict, "the producing run's verdict is "+runVerdict+" (no reliable output)", nil, "")
 		return
 	}
 	data, err := os.ReadFile(d.PathOnDisk)

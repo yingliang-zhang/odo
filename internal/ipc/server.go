@@ -54,6 +54,15 @@ type runMeta struct {
 	// prompt grounds the panel in the user's words, never the agent's
 	// self-report.
 	goal string
+	// run_verdict (epoch-8, outstanding #1): mechanical output tallies for
+	// the terminal post-mortem. An exit-0 run is not proof of work — the
+	// kimi-k3 false stop produced exactly this shape (OMP exit 0, zero
+	// output, doneSummary falling back to "agent completed"). Counted in
+	// drainRun's journal loop; read once at the terminal event.
+	texts     int
+	toolCalls int
+	thinkings int
+	isRetry   bool // false-stop retry run — immune to a further auto-retry
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -1067,24 +1076,48 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 // Runs in a goroutine because drainRun holds s.mu; this function takes
 // its own lock.
 func (s *Server) startContinuationRun(conversationID, workstreamID int64, queuedTexts []string) {
-	ctx := context.Background()
-	prompt := strings.Join(queuedTexts, "\n\n")
+	s.startFollowupRun(conversationID, workstreamID, queuedTexts, false)
+}
 
+// startRetryRun is the run_verdict retry entry (epoch-8): same machinery
+// as a steer-continuation, but the new run is marked isRetry so its own
+// false stop cannot chain another (loop bound = exactly one retry). The
+// retry spawn used to live here as startRetryRun; round-2 panel moved
+// false-stop retries into drainRun's synchronous admission below, so only
+// the continuation path rides the goroutine entry now.
+//
+// startFollowupRun is the goroutine entry (continuation path): drops are
+// silent — a superseded continuation deserves no journal noise.
+func (s *Server) startFollowupRun(conversationID, workstreamID int64, queuedTexts []string, isRetry bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.startFollowupRunLocked(conversationID, workstreamID, queuedTexts, isRetry)
+}
+
+// startFollowupRunLocked performs the admission + start with the caller
+// holding s.mu and returns whether the run was admitted and, if not, the
+// reason. drainRun's false-stop retry calls this SYNCHRONOUSLY (round-2
+// panel: goroutine admission let a user send win s.mu in the retire→retry
+// window and silently veto the retry, while the ledger had already
+// journaled retry_fired=true — a ledger lie AND a journal-silent wedge).
+// Under the drain's own lock a send cannot interleave, so the verdict row
+// reflects the true admission outcome.
+func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queuedTexts []string, isRetry bool) (admitted bool, dropReason string) {
+	ctx := context.Background()
+	prompt := strings.Join(queuedTexts, "\n\n")
 
 	// Re-check: don't start if a run is already active for this conversation
 	// (user may have sent a normal message in the window between drain and
 	// this goroutine).
 	if runID, ok := s.byConv[conversationID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
-			return // a new run already started; drop the continuation
+			return false, "active_run" // a new run already started; drop the continuation
 		}
 	}
 	// Respect the concurrency cap.
 	if cap := resolveMaxConcurrent(); s.activeRunCount() >= cap {
 		log.Printf("a2-continuation: skipping — concurrency cap %d reached", cap)
-		return
+		return false, "concurrency_cap"
 	}
 
 	// M11 P0: don't start a continuation during distill — same guard as
@@ -1092,13 +1125,13 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 	// a continuation run journal events into the epoch the distill is rolling.
 	if _, ok := s.distilling[conversationID]; ok {
 		log.Printf("a2-continuation: skipping — distill in progress for conversation %d", conversationID)
-		return
+		return false, "distill_active"
 	}
 
 	w, err := s.store.GetWorkstream(ctx, workstreamID)
 	if err != nil {
 		log.Printf("a2-continuation: get workstream: %v", err)
-		return
+		return false, "workstream_lookup"
 	}
 
 	// R1: continuation runs replay the current epoch too — the previous
@@ -1110,7 +1143,7 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 	wtPath, err := s.mgr.Create(runDirID)
 	if err != nil {
 		log.Printf("a2-continuation: create worktree: %v", err)
-		return
+		return false, "worktree_create"
 	}
 
 	ad := s.adapters[""] // default adapter
@@ -1118,7 +1151,7 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 	if err != nil {
 		_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
 		log.Printf("a2-continuation: start agent: %v", err)
-		return
+		return false, "agent_start"
 	}
 
 	s.runs[runID] = &runMeta{
@@ -1129,8 +1162,10 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 		workstreamID:   workstreamID,
 		worktreePath:   wtPath,
 		goal:           prompt, // the joined queued steers, verbatim
+		isRetry:        isRetry,
 	}
 	s.byConv[conversationID] = runID
+	return true, ""
 }
 
 // activeRunCount returns the number of non-finished runs across all
@@ -1188,11 +1223,26 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			return err
 		}
 		meta.consumed++ // advance per successfully journaled event
-		// M12 (D-todo): agent_text ingest is the todo write path — the
-		// daemon scans the journaled text for odo-todo blocks and merges
-		// them mechanically (the event itself is never modified).
-		if appended.Type == store.EventAgentText {
+		// run_verdict tallies (epoch-8): feed the terminal post-mortem.
+		switch appended.Type {
+		case store.EventAgentText:
+			// Only a non-empty text counts toward the verdict — doneSummary
+			// treats "" as "no text" the same way, and the false-stop
+			// signature must not be fooled by a blank block.
+			var tp struct {
+				Text string `json:"text"`
+			}
+			if jsonUnmarshalOK(appended.Payload, &tp) && strings.TrimSpace(tp.Text) != "" {
+				meta.texts++
+			}
+			// M12 (D-todo): agent_text ingest is the todo write path — the
+			// daemon scans the journaled text for odo-todo blocks and merges
+			// them mechanically (the event itself is never modified).
 			s.mergeAgentTodo(ctx, meta.conversationID, appended)
+		case store.EventAgentToolCall:
+			meta.toolCalls++
+		case store.EventAgentThinking:
+			meta.thinkings++
 		}
 	}
 	if len(evs) == 0 {
@@ -1202,6 +1252,23 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		return nil // more events to come (not reached in M0: terminal batch is atomic)
 	}
 	meta.errored = evs[len(evs)-1].Type == store.EventAgentError
+
+	// run_verdict (epoch-8, outstanding #1): mechanical post-mortem of an
+	// exit-0 run. The false-stop signature (OMP exits 0 with zero output —
+	// thinking-replay loss through the transport chain is the observed
+	// cause) is journaled as a ledger row, never a forged agent_error, and
+	// drives exactly one automatic retry; no_text (tools moved, the answer
+	// never came back) hard-blocks auto-land downstream. Errored runs keep
+	// their agent_error as the sole truth.
+	verdict := verdictNone
+	if !meta.errored {
+		switch {
+		case meta.texts == 0 && meta.toolCalls == 0:
+			verdict = verdictFalseStop
+		case meta.texts == 0:
+			verdict = verdictNoText
+		}
+	}
 
 	// A2-lite: defer the continuation trigger to a single tail after all
 	// finished paths. We collect the queue here and fire after diff
@@ -1228,6 +1295,13 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	}
 	diffPath, err := s.mgr.ExtractDiff(meta.worktreePath, meta.runDirID)
 	if err != nil {
+		// Every classification journals (runverdict.go): the early error
+		// return is not an exemption — telemetry stays complete. No retry
+		// here: the worktree/diff machinery is itself erroring, so a fresh
+		// run would land in the same hole; the human sees the agent_error.
+		if verdict != verdictNone {
+			s.journalRunVerdict(ctx, meta, verdict, false)
+		}
 		_, _ = s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError,
 			mustJSON(map[string]interface{}{"error": fmt.Sprintf("extract diff: %v", err)}))
 		meta.finished = true // mark finished so polling stops even on diff failure
@@ -1241,13 +1315,57 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		// action retired runs, and every no-diff run leaked its worktree
 		// forever (P1). Retire BEFORE firing a continuation.
 		s.retireRun(ctx, meta.conversationID, "")
-		// A2-lite: even with no diff, fire continuation if steers were queued.
-		if len(queuedSteers) > 0 && !meta.errored {
-			go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
-		} else {
-			// M12 (T1/T3): run-finished is an auto-distill evaluation point —
-			// arm the idle timer, or fire urgently when the window is huge.
-			s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+		switch {
+		case verdict == verdictFalseStop && !meta.isRetry:
+			// One automatic retry, verbatim goal plus any queued steers —
+			// the steers were typed against work the dead run never did.
+			// The retry run is marked isRetry, so a second false stop
+			// cannot chain another (loop bound = exactly 1).
+			//
+			// Round-2 panel fix: admission is SYNCHRONOUS under the drain's
+			// own s.mu — no user send can interleave between this drain and
+			// the retry's registration, and the verdict row journals the
+			// TRUE admission outcome (a goroutine-shaped fire used to
+			// journal retry_fired=true and then get silently dropped by the
+			// active-run/cap/distill re-checks: a ledger lie plus a
+			// journal-silent wedge).
+			log.Printf("run-verdict: retrying false-stop run for conversation %d", meta.conversationID)
+			texts := make([]string, 0, 1+len(queuedSteers))
+			texts = append(append(texts, meta.goal), queuedSteers...)
+			admitted, dropReason := s.startFollowupRunLocked(meta.conversationID, meta.workstreamID, texts, true)
+			s.journalRunVerdict(ctx, meta, verdict, admitted)
+			if !admitted {
+				log.Printf("run-verdict: retry for conversation %d not admitted: %s", meta.conversationID, dropReason)
+				s.journalRunAdvisory(ctx, meta.conversationID,
+					"a silent run was detected but the automatic retry could not start ("+
+						dropReason+"). Nothing was produced; resend manually.")
+				s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+			}
+		default:
+			// Errored runs fire no continuation (agent_error is the truth);
+			// a clean no-diff run continues from queued steers as before.
+			// The retry's own false stop journals retry_fired=false — the
+			// loop bound is visible in the ledger.
+			if verdict != verdictNone {
+				s.journalRunVerdict(ctx, meta, verdict, false)
+			}
+			if verdict == verdictFalseStop && meta.isRetry {
+				// Two consecutive false stops on one goal = the transport
+				// chain is broken, not a transient — stop retrying and SAY
+				// SO in the transcript (panel 2026-08-12: the human-wait
+				// fall-through must be visible, not ledger-only). No
+				// further retry fires.
+				s.journalRunAdvisory(ctx, meta.conversationID,
+					"the automatic retry after a silent run also returned empty — "+
+						"the model/gateway is likely stalled. Nothing was produced; resend manually.")
+			}
+			if len(queuedSteers) > 0 && !meta.errored {
+				go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+			} else {
+				// M12 (T1/T3): run-finished is an auto-distill evaluation
+				// point — arm the idle timer or fire urgently.
+				s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+			}
 		}
 		return nil
 	}
@@ -1267,10 +1385,25 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	}
 	meta.finished = true // mark finished only after the diff row exists
 
+	// The diff-bearing path journals its verdict too (no_text here means the
+	// work is real but the answer died — the pipeline treats it as tainted).
+	if verdict != verdictNone {
+		s.journalRunVerdict(ctx, meta, verdict, false)
+	}
+	if verdict == verdictFalseStop && meta.isRetry {
+		// Advisory parity (round-2 panel #2): a RETRY that false-stops earns
+		// the transcript-visible surface on every finished path, diff or
+		// not — here the phantom side effect is reviewable and the human
+		// must know why the answer is missing and auto-land blocked.
+		s.journalRunAdvisory(ctx, meta.conversationID,
+			"the automatic retry after a silent run returned empty again, but it left an "+
+				"unreviewed diff — likely model/gateway stall. Auto-land is blocked; review the diff manually.")
+	}
+
 	// M16 (O-1 v2): the pending diff spawns the auto-land pipeline
 	// (pref-gated inside; goroutine, no locks held — the continuation
 	// trigger's shape). meta's fields are copied as arguments.
-	go s.maybeAutoLand(newDiff, meta.worktreePath, meta.goal, meta.errored)
+	go s.maybeAutoLand(newDiff, meta.worktreePath, meta.goal, meta.errored, verdict)
 
 	// A2-lite: if steering messages were queued during this run, auto-start
 	// a continuation run with the queued texts as the prompt. This replaces

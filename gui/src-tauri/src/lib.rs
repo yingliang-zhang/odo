@@ -265,7 +265,7 @@ fn ensure_daemon_running(project_root: &str) -> Result<(), String> {
         .try_clone()
         .map_err(|e| format!("clone {}: {e}", log_path.display()))?;
 
-    Command::new(&binary)
+    let mut child = Command::new(&binary)
         .arg("-project")
         .arg(project_root)
         .current_dir(project_root)
@@ -275,12 +275,30 @@ fn ensure_daemon_running(project_root: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("spawn daemon {}: {e}", binary.display()))?;
 
+    // Daemon exit 3 = "a live peer already holds this project's instance
+    // lock" (single-instance flock, epoch-8). Attach semantics: keep
+    // polling for the PEER's socket instead of reporting a spawn failure —
+    // the peer is healthy (or mid-startup) and this respawn was the
+    // duplicate. Anything else failing remains the hard error below.
+    let mut peer_holds_lock = false;
     let deadline = std::time::Instant::now() + STARTUP_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if daemon_alive(project_root) {
             return Ok(());
         }
+        if !peer_holds_lock {
+            if let Ok(Some(status)) = child.try_wait() {
+                peer_holds_lock = status.code() == Some(3);
+            }
+        }
         std::thread::sleep(Duration::from_millis(100));
+    }
+    if peer_holds_lock {
+        return Err(format!(
+            "a live daemon already serves {project_root} (instance lock) but did not answer on {} within {STARTUP_TIMEOUT:?} — check {} for a wedged startup",
+            socket_path(project_root).display(),
+            log_path.display()
+        ));
     }
     Err(format!(
         "daemon did not answer on {} within {STARTUP_TIMEOUT:?} (see {})",

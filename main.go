@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -83,6 +84,30 @@ func main() {
 	if err := mgr.EnsureDirs(); err != nil {
 		log.Fatalf("init state dirs: %v", err)
 	}
+
+	// Single-instance guard (epoch-8 outstanding #4): one flock per project
+	// state dir, taken BEFORE the journal open and before socket remove/
+	// listen. The old flow removed + rebound the socket unconditionally — a
+	// second daemon deleted the live one's socket file (dual daemons then
+	// silently void acceptMu/autoLandMu serialization and race the journal),
+	// and an old instance's shutdown unlink could remove the NEW owner's
+	// socket. flock releases on any process death including SIGKILL, so a
+	// crash-stale lock is impossible by construction; the leftover socket
+	// file it leaves behind is handled by the stale-socket remove below.
+	instanceLock, err := acquireInstanceLock(mgr.StateDir())
+	if err != nil {
+		if errors.Is(err, errDaemonAlreadyRunning) {
+			// Exit 3 = "a live daemon already serves this project": the
+			// Tauri respawn loop reads this code as attach-to-live, not as
+			// a spawn failure (panel 2026-08-12 — silent dual-state was
+			// the worse failure, noisy respawn-thrash the second).
+			log.Printf("%v", err)
+			os.Exit(exitCodeAlreadyRunning)
+		}
+		log.Fatalf("%v", err)
+	}
+	defer instanceLock.Close()
+
 	st, err := store.Open(filepath.Join(mgr.StateDir(), "journal.sqlite"))
 	if err != nil {
 		log.Fatalf("open journal: %v", err)
@@ -159,6 +184,45 @@ func main() {
 		log.Printf("close journal: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// exitCodeAlreadyRunning is the daemon's distinct exit for the
+// lock-held-by-a-live-peer case. Tauri's ensure_daemon_running attaches
+// instead of reporting a spawn failure (panel fix 2026-08-12).
+//
+// Exclusivity contract (round-2 panel): exit 3 means lock contention and
+// NOTHING else — lock-file open/IO failures stay on the generic Fatalf
+// path (exit 1), so Tauri never treats a permissions/IO fault as a live
+// peer. Only errDaemonAlreadyRunning maps here.
+const exitCodeAlreadyRunning = 3
+
+// errDaemonAlreadyRunning wraps the instance-lock contention error so
+// main can route it to exitCodeAlreadyRunning.
+var errDaemonAlreadyRunning = errors.New("daemon already running")
+
+// acquireInstanceLock takes the per-project single-instance flock
+// (<stateDir>/odo.lock, 0600) and returns the held file; the caller keeps
+// it open for the process lifetime. An already-locked file means another
+// live daemon serves this project — refuse rather than fork shared state.
+// The socket unlink at shutdown is owned transitively: only the process
+// holding this lock ever reaches Serve/cleanup.
+//
+// Scope: per-host local filesystems. flock is unreliable on NFSv3-style
+// network mounts, but a stateDir on a network share is already broken
+// below this layer (unix-socket and sqlite journal are both host-local);
+// failing closed there is the correct posture.
+func acquireInstanceLock(stateDir string) (*os.File, error) {
+	lockPath := filepath.Join(stateDir, "odo.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open instance lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: another odo daemon serves this project (lock %s): %v",
+			errDaemonAlreadyRunning, lockPath, err)
+	}
+	return f, nil
 }
 
 // enrichDaemonEnv injects environment variables that are missing when

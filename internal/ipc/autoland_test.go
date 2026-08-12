@@ -238,7 +238,7 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 	t.Run("run errored", func(t *testing.T) {
 		f, s, _, _ := newServer(t)
 		d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
-		s.autoLand(context.Background(), d, t.TempDir(), "goal", true)
+		s.autoLand(context.Background(), d, t.TempDir(), "goal", true, "")
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "run_errored" {
 			t.Errorf("reasons = %v, want [run_errored]", got)
 		}
@@ -248,7 +248,7 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 		f, s, root, sha := newServer(t)
 		d := f.addDiff(t, "p.diff", patchSrc("README.md", 1, 1, false))
 		d.BaseSHA = &sha
-		s.autoLand(context.Background(), d, root, "goal", false)
+		s.autoLand(context.Background(), d, root, "goal", false, "")
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "verify_unconfigured" {
 			t.Errorf("reasons = %v, want [verify_unconfigured]", got)
 		}
@@ -268,7 +268,7 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 		big := b.String()
 		d := f.addDiff(t, "big.diff", big)
 		d.BaseSHA = &sha
-		s.autoLand(context.Background(), d, root, "goal", false)
+		s.autoLand(context.Background(), d, root, "goal", false, "")
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "prompt_too_large" {
 			t.Errorf("reasons = %v, want [prompt_too_large]", got)
 		}
@@ -285,7 +285,7 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 		gitIn(t, root, "commit", "-m", "drift")
 		d := f.addDiff(t, "p.diff", patchSrc("README.md", 1, 1, false))
 		d.BaseSHA = &sha
-		s.autoLand(context.Background(), d, root, "goal", false)
+		s.autoLand(context.Background(), d, root, "goal", false, "")
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "base_stale" {
 			t.Errorf("reasons = %v, want [base_stale]", got)
 		}
@@ -299,7 +299,7 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 		}
 		d := f.addDiff(t, "p.diff", patchSrc("README.md", 1, 1, false))
 		d.BaseSHA = &sha
-		s.autoLand(context.Background(), d, root, "goal", false)
+		s.autoLand(context.Background(), d, root, "goal", false, "")
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "no_review_models" {
 			t.Errorf("reasons = %v, want [no_review_models]", got)
 		}
@@ -314,7 +314,7 @@ func TestMaybeAutoLandPrefOffSilent(t *testing.T) {
 	f := newAutonomyFixture(t)
 	s := &Server{store: f.st, projectRoot: f.dir}
 	d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
-	s.maybeAutoLand(d, f.dir, "goal", false)
+	s.maybeAutoLand(d, f.dir, "goal", false, "")
 	if got := blockedReasons(t, f.st, f.c.ID); len(got) != 0 {
 		t.Errorf("reasons = %v, want none (pref off must be silent)", got)
 	}
