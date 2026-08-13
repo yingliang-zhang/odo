@@ -12,8 +12,8 @@ package ipc
 //	moa_fs_root: absolute or ~/ path of the allowed root (default: ~)
 //	moa_fs_deny: comma-separated dirs to exclude, absolute or root-relative
 //	             (default: Music, Pictures, Movies, .ssh, .aws, .gnupg,
-//	              .netrc, .kube, .docker, .npmrc, .pypirc,
-//	              .git-credentials)
+//	              .netrc, .kube, .docker, .npmrc, .pypirc, .git-credentials,
+//	              plus the 2026-08 SEC audit batch — see defaultFSDeny)
 //
 // Home covers most secrets-in-dotfiles reality; .ssh/.aws/.gnupg are
 // hard-coded into the default deny because a /panel answer ships file
@@ -59,6 +59,13 @@ var defaultFSDeny = []string{
 	".ssh", ".aws", ".gnupg",
 	".netrc", ".kube", ".docker", ".npmrc", ".pypirc",
 	".git-credentials",
+	// 2026-08 SEC audit batch: agent-config dirs/files, further
+	// credential stores, language tooling caches, and editor swap
+	// files whose contents must never ship to the model gateway.
+	// (.kube already covered above.)
+	".claude", "CLAUDE.md", "Makefile", ".cargo", ".rustup",
+	".thunderbird", "trustdb.gpg", "ages", ".gnupg/private-keys-v1.d",
+	"pip", "__pycache__", ".venv", "venv", "node_modules", "swap",
 }
 
 // errWalkAbort is the sentinel that stops a capped walk early; the concrete

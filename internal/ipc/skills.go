@@ -11,6 +11,7 @@ package ipc
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -145,12 +146,33 @@ func scanSkills(projectRoot string) []skillEntry {
 			// ~/.ssh/id_rsa would exfiltrate private keys into the
 			// agent prompt. A FIFO would hang the scan goroutine.
 			// Skills are plain markdown — only regular files are valid.
-			if fi, err := os.Lstat(f); err != nil {
-				continue
-			} else if !fi.Mode().IsRegular() {
+			//
+			// The read must go through ONE open file handle, not a
+			// second path lookup: the fd pins the inode, so swapping
+			// the path between the check and the read cannot redirect
+			// the read into attacker-chosen bytes. os.SameFile proves
+			// the opened inode IS the directory entry we rejected-or-
+			// accepted — Lstat alone then ReadFile would reopen that
+			// TOCTOU window.
+			lfi, err := os.Lstat(f)
+			if err != nil || !lfi.Mode().IsRegular() {
+				// Symlinks/FIFOs/devices rejected without ever being
+				// opened (open on a FIFO would block).
 				continue
 			}
-			content, err := os.ReadFile(f)
+			fh, err := os.Open(f)
+			if err != nil {
+				continue
+			}
+			fi, err := fh.Stat()
+			if err != nil || !fi.Mode().IsRegular() || !os.SameFile(lfi, fi) {
+				// The fd pins fi's inode; SameFile mismatch means the
+				// path was swapped between Lstat and Open — fail closed.
+				fh.Close()
+				continue
+			}
+			content, err := io.ReadAll(fh)
+			fh.Close()
 			if err != nil {
 				continue
 			}
@@ -212,11 +234,11 @@ func matchSkills(query string, entries []skillEntry) []skillEntry {
 		for _, k := range e.info.Keywords {
 			kwLower[strings.ToLower(k)] = true
 		}
+		haystack := strings.ToLower(e.info.Name + " " + e.info.Description)
 		for _, t := range tokens {
 			if kwLower[t] {
 				score += 2
 			}
-			haystack := strings.ToLower(e.info.Name + " " + e.info.Description)
 			if strings.Contains(haystack, t) {
 				score += 1
 			}

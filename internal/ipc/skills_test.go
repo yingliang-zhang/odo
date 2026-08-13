@@ -388,3 +388,51 @@ func TestScanSkills_SymlinkInGlobalDir(t *testing.T) {
 		t.Errorf("expected 0 entries (symlink rejected), got %d", len(entries))
 	}
 }
+
+// TestScanSkillsRejectsSwappedSymlink verifies the scan pins its read to
+// the inode it validated: a path that is a regular skill on the first scan
+// but swapped to a symlink before the rescan parses as NOTHING, and the
+// link target's bytes never enter a skill body (2026-08 SEC TOCTOU fix —
+// the fd pins the inode, os.SameFile rejects the swapped path).
+func TestScanSkillsRejectsSwappedSymlink(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	tmpProject := t.TempDir()
+
+	// Seed a real skill and verify it parses.
+	projDir := filepath.Join(tmpProject, ".odo", "skills")
+	os.MkdirAll(projDir, 0o755)
+	skillPath := filepath.Join(projDir, "swapped.md")
+	os.WriteFile(skillPath, []byte("---\nname: swapped\n---\n\nOriginal body"), 0o644)
+
+	entries := scanSkills(tmpProject)
+	if len(entries) != 1 || entries[0].info.Name != "swapped" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.info.Name)
+		}
+		t.Fatalf("first scan: expected [swapped], got %v", names)
+	}
+
+	// Swap the path for a symlink to a sentinel file outside the skills dir.
+	sentinel := filepath.Join(t.TempDir(), "sentinel.txt")
+	os.WriteFile(sentinel, []byte("SENTINEL SECRET BYTES"), 0o600)
+	if err := os.Remove(skillPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sentinel, skillPath); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+
+	// Rescan reads through the swapped path: the name must vanish and the
+	// sentinel content must never appear.
+	entries = scanSkills(tmpProject)
+	for _, e := range entries {
+		if e.info.Name == "swapped" {
+			t.Error("swapped symlink must not parse as a skill")
+		}
+		if strings.Contains(e.body, "SENTINEL SECRET BYTES") {
+			t.Error("symlink target content leaked into skill body")
+		}
+	}
+}
