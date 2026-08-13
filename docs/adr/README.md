@@ -5,3 +5,4 @@
 | 0001 | M0 Trust Posture — Human Review Only | Accepted |
 | 0002 | Fresh Odo Journal Schema | Accepted |
 | 0003 | Memory Architecture | Accepted |
+| 0004 | moa_fs_deny Merge Semantics | Accepted |

@@ -10,7 +10,10 @@ package ipc
 // default. Both are prefs.md-configurable:
 //
 //	moa_fs_root: absolute or ~/ path of the allowed root (default: ~)
-//	moa_fs_deny: comma-separated dirs to exclude, absolute or root-relative
+//	moa_fs_deny: comma-separated dirs to exclude, absolute or root-relative;
+//	             extends the built-in deny list (a `-` prefix removes one
+//	             entry — any entry, credentials included); absent, empty,
+//	             or noise-only values keep the built-ins
 //	             (default: Music, Pictures, Movies, .ssh, .aws, .gnupg,
 //	              .netrc, .kube, .docker, .npmrc, .pypirc, .git-credentials,
 //	              plus the 2026-08 SEC audit batch — see defaultFSDeny)
@@ -53,7 +56,8 @@ const (
 // defaultFSDeny lists root-relative paths (dirs and credential files)
 // excluded from every tool: Apple app-content stores (user decision) plus
 // credential dirs and dotfiles whose contents ship to the model gateway.
-// prefs moa_fs_deny replaces this list when present.
+// prefs moa_fs_deny extends this list (a -name token removes one entry);
+// see parseFSDeny.
 var defaultFSDeny = []string{
 	"Music", "Pictures", "Movies",
 	".ssh", ".aws", ".gnupg",
@@ -66,6 +70,61 @@ var defaultFSDeny = []string{
 	".claude", "CLAUDE.md", "Makefile", ".cargo", ".rustup",
 	".thunderbird", "trustdb.gpg", "ages", ".gnupg/private-keys-v1.d",
 	"pip", "__pycache__", ".venv", "venv", "node_modules", "swap",
+}
+
+// parseFSDeny merges the raw moa_fs_deny prefs value into the deny list.
+// The built-in defaults always apply (fail-closed): each bare token adds
+// one exclusion, each "-name" token removes one default or previously
+// added entry — any entry, credentials included (a recorded conscious
+// operator act; ADR-0004). A name appearing both ways stays denied:
+// contradiction resolves toward DENY, independent of token order. Dedup
+// is case-insensitive, matching check()'s fold (macOS APFS resolves .SSH/
+// and .ssh/ identically). An absent, empty, whitespace, or noise-only
+// value (",,,", " - ") yields exactly the defaults — there is no syntax
+// for an empty list. Result order: defaultFSDeny declared order, then
+// additions in file order. The result is never nil.
+func parseFSDeny(raw string) []string {
+	added := map[string]bool{}   // lowercased names of bare tokens
+	removed := map[string]bool{} // lowercased names of "-name" tokens
+	var order []string           // bare tokens, first-seen file order
+	for _, tok := range strings.Split(raw, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if strings.HasPrefix(tok, "-") {
+			if name := strings.TrimSpace(tok[1:]); name != "" {
+				removed[strings.ToLower(name)] = true
+			}
+			continue
+		}
+		l := strings.ToLower(tok)
+		if !added[l] {
+			added[l] = true
+			order = append(order, tok)
+		}
+	}
+	// Contradiction resolves toward DENY: a name both added and removed
+	// stays in the list, whichever token came first.
+	for l := range added {
+		delete(removed, l)
+	}
+	merged := make([]string, 0, len(defaultFSDeny)+len(order))
+	seen := make(map[string]bool, len(defaultFSDeny)+len(order))
+	emit := func(name string) {
+		l := strings.ToLower(name)
+		if !seen[l] && !removed[l] {
+			seen[l] = true
+			merged = append(merged, name)
+		}
+	}
+	for _, d := range defaultFSDeny {
+		emit(d)
+	}
+	for _, tok := range order {
+		emit(tok)
+	}
+	return merged
 }
 
 // errWalkAbort is the sentinel that stops a capped walk early; the concrete
@@ -95,15 +154,7 @@ func newFSToolExecutor() *fsToolExecutor {
 	if real, err := filepath.EvalSymlinks(root); err == nil {
 		root = real
 	}
-	entries := defaultFSDeny
-	if raw := adapter.LoadPrefsRaw("moa_fs_deny"); raw != "" {
-		entries = nil
-		for _, d := range strings.Split(raw, ",") {
-			if d = strings.TrimSpace(d); d != "" {
-				entries = append(entries, d)
-			}
-		}
-	}
+	entries := parseFSDeny(adapter.LoadPrefsRaw("moa_fs_deny"))
 	deny := make([]string, 0, len(entries))
 	for _, d := range entries {
 		d = expandHomePath(d, home)
