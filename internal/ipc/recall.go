@@ -185,16 +185,20 @@ func noteMatches(content, name string, terms []string) []string {
 // injection receipt can hash precisely what the prompt carried. An empty
 // query degrades to pure newest-first (the pre-M6 behavior).
 func recallWikiNotes(projectRoot, workstreamName, query string, retracted map[string]bool) (memory string, items []recallItem, noteBytes [][]byte) {
-	return recallWikiNotesCapped(projectRoot, workstreamName, query, retracted, recallMemoryCap)
+	memory, items, noteBytes, _ = recallWikiNotesCapped(projectRoot, workstreamName, query, retracted, recallMemoryCap)
+	return memory, items, noteBytes
 }
 
 // recallWikiNotesCapped is recallWikiNotes with the injection budget as a
 // parameter: slash-command context blocks (/panel) buy a tighter slice of
 // the same machinery instead of the send path's full recallMemoryCap.
-func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted map[string]bool, capBytes int) (memory string, items []recallItem, noteBytes [][]byte) {
+// heldBack is the number of notes the cap dropped (the count the trailing
+// marker line declares; 0 when everything fit) — M18 W2 item 4 journals it
+// on the send path as recall_held_back instead of discarding it.
+func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted map[string]bool, capBytes int) (memory string, items []recallItem, noteBytes [][]byte, heldBack int) {
 	matches, err := filepath.Glob(filepath.Join(projectRoot, "wiki", workstreamName+"-epoch-*.md"))
 	if err != nil {
-		return "", nil, nil
+		return "", nil, nil, 0
 	}
 	type note struct {
 		path    string
@@ -257,9 +261,9 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 			omitted, capBytes/1024, filepath.Join(projectRoot, "wiki"))
 	}
 	if b.Len() == 0 {
-		return "", nil, nil
+		return "", nil, nil, 0
 	}
-	return b.String(), items, noteBytes
+	return b.String(), items, noteBytes, omitted
 }
 
 // retractedNotes reads the conversation's memory_update{layer:"note"} events

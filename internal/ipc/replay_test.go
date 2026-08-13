@@ -241,7 +241,7 @@ func TestPromptAdvertisesJournalPull(t *testing.T) {
 		t.Errorf("memoryMapBlock on a fresh project = %q, want empty", got)
 	}
 
-	p := distillPrompt(nil)
+	p, _ := distillPrompt(nil)
 	for _, want := range []string{"## Open loops", "None."} {
 		if !strings.Contains(p, want) {
 			t.Errorf("distillPrompt missing open-loops mandate %q", want)

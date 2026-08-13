@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -781,7 +782,10 @@ func TestAutoOverCapFoldDeclaresOmission(t *testing.T) {
 		payload, _ := json.Marshal(map[string]interface{}{"text": strings.Repeat("x", 40000)})
 		events = append(events, store.Event{Seq: i, Type: store.EventUserMessage, Payload: payload})
 	}
-	prompt := distillPrompt(events)
+	prompt, om := distillPrompt(events)
+	if om != (omission{count: 1, firstSeq: 1, lastSeq: 1}) {
+		t.Errorf("over-cap omission = %+v, want {1 1 1}", om)
+	}
 	if !strings.Contains(prompt, "[odo: 1 older event(s), seq 1–1, omitted") {
 		t.Errorf("over-cap prompt lacks the omission declaration:\n%.200s", prompt)
 	}
@@ -1638,5 +1642,36 @@ func TestAutoStaleTimerCallbackCannotClaimRearm(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if got := pendingEntry(rig.server, convID); got != fresh {
 		t.Fatalf("pending entry = %+v, want the re-armed urgent entry %p (stale timer claimed it)", got, fresh)
+	}
+}
+
+// TestDistillPromptExcludesPanelChurn pins the journaled auto-land chain's
+// fold shape (M18 W2 Item 1): panel evidence (moa_review) and revise
+// mechanics (auto_revise_round) never reach the distill prompt; the
+// settlement outcome does — exactly one review_action line, the accept
+// carrying actor:auto_panel. Ladder memory_update rows keep rendering.
+func TestDistillPromptExcludesPanelChurn(t *testing.T) {
+	events := []store.Event{
+		{Seq: 1, Type: store.EventUserMessage, Payload: json.RawMessage(`{"text":"ship the refactor"}`)},
+		{Seq: 2, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"moa_review","actor":"auto_panel","diff_id":7,"consensus_verdict":"mixed","reviews":[{"model":"m1","verdict":"reject","body":"panel said a lot"}]}`)},
+		{Seq: 3, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":7,"origin_diff_id":7,"patch_sha16":"0123456789abcdef","comments_sha16":"fedcba9876543210"}`)},
+		{Seq: 4, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"moa_review","actor":"auto_panel","diff_id":8,"consensus_verdict":"accept","reviews":[{"model":"m1","verdict":"accept","body":"panel approved"}]}`)},
+		{Seq: 5, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"accept","actor":"auto_panel","diff_id":8}`)},
+		{Seq: 6, Type: store.EventMemoryUpdate, Payload: json.RawMessage(fmt.Sprintf(`{"layer":%q,"cause":"ladder_suspended","detail":"2 consecutive revise rounds ended without landing"}`, autoReviseLayer))},
+	}
+	p, _ := distillPrompt(events)
+	if !strings.Contains(p, "### review_action (seq 5) {\"action\":\"accept\",\"actor\":\"auto_panel\"}") {
+		t.Errorf("prompt missing the auto accept line with actor:\n%.400s", p)
+	}
+	if !strings.Contains(p, fmt.Sprintf("### memory_update (seq 6) {\"layer\":%q,\"cause\":\"ladder_suspended\"}", autoReviseLayer)) {
+		t.Errorf("prompt missing the unchanged ladder memory_update line:\n%.400s", p)
+	}
+	if n := strings.Count(p, "### review_action (seq "); n != 1 {
+		t.Errorf("prompt carries %d review_action lines, want exactly 1 (the auto accept):\n%.400s", n, p)
+	}
+	for _, banned := range []string{`"action":"moa_review"`, `"action":"auto_revise_round"`, `"consensus_verdict":"mixed"`, "panel said a lot", "panel approved"} {
+		if strings.Contains(p, banned) {
+			t.Errorf("distill prompt still carries panel churn %q", banned)
+		}
 	}
 }

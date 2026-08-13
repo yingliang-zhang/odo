@@ -313,3 +313,19 @@ in its six locked items); still deferred.
 Test seam: `ODO_OMP_WRAPPER` is read ONCE at adapter construction —
 tests that vary the wrapper (no-progress fixture) must parameterize
 before `startRig`, never via `t.Setenv` after.
+
+## W2 journal contract additions (fix-INT wave 2)
+
+Additive, optional-when-absent keys from the wave-2 receipt/omission
+batch; full ledger + rationale in `docs/design/fix-int-w2-design-lock.md`.
+- Receipt namespace: synthetic key `odo#memory-map` (journal#todo precedent).
+- `user_message`: + `prompt_sha16`, `recall_held_back` (only when >0).
+- `review_action{action:"distill"}`: + `omitted_count`, `omitted_first_seq`,
+  `omitted_last_seq` (present only when the cap dropped).
+- `memory_update`: new causes `snapshot` (rule-file materialization, +
+  `capped:true` when the read truncated) and `snapshot_failed` (fail-open hole).
+- `review_action`: new action `run_prompt` (continuation/retry receipt);
+  `patch_sha16` rides every `moa_review` row.
+- `/vision` `user_message`: + `image_sha16` (index-aligned with attachments).
+- Fail-closed gates: `assertPromptReceipts` on send/continuation/retry/revise,
+  `assertSlashReceipts` on /panel + /vision before the moa call.

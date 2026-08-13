@@ -516,6 +516,17 @@ func TestAutoLandBaseStaleAtLand(t *testing.T) {
 	if len(sc.moaRows) != 1 {
 		t.Errorf("moa_review rows = %d, want 1 (evidence before action)", len(sc.moaRows))
 	}
+	// M18 W2 item 4: the auto-land moa_review attests the exact diff bytes
+	// the fanout judged (the file read at pipeline entry).
+	if len(sc.moaRows) == 1 {
+		diffBytes, rerr := os.ReadFile(d.PathOnDisk)
+		if rerr != nil {
+			t.Fatalf("read judged diff: %v", rerr)
+		}
+		if got := sc.moaRows[0]["patch_sha16"]; got != sha16(diffBytes) {
+			t.Errorf("moa_review patch_sha16 = %v, want sha16 of the judged diff bytes", got)
+		}
+	}
 	if len(sc.accepts) != 0 {
 		t.Errorf("accept rows = %v, want none (nothing landed)", sc.accepts)
 	}

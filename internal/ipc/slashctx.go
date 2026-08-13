@@ -14,6 +14,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
@@ -69,8 +70,16 @@ func resolvePanelContextScope() string {
 // context scope and fetches the events ONCE (it needs both for the
 // journal receipt and, on the panel path, the recall query), so one slash
 // call costs one prefs read and one events read like the send path.
-func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID int64, query string, events []store.Event, scope string, mode slashContextMode) (block string, receipt map[string]string, conv *slashConvReceipt) {
+// convBlock is the rendered conversation-tail section ("" when the tail
+// did not render) returned separately so the caller can run the W2 item-4
+// closure (assertSlashReceipts) against exactly the assembled bytes AFTER
+// journaling the slash user_message.
+func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID int64, query string, events []store.Event, scope string, mode slashContextMode) (block string, receipt map[string]string, convBlock string, conv *slashConvReceipt) {
 	receipt = map[string]string{}
+	// W2 item 3: materialize changed rule files BEFORE the caller journals
+	// the slash user_message (send-path ordering at runMemoryLayers; both
+	// modes inject these layers).
+	s.journalRuleSnapshots(ctx, convID, events)
 	var sections []string
 	section := func(header, body string) {
 		sections = append(sections, header+"\n\n"+body)
@@ -95,7 +104,7 @@ func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID in
 		section("## Wiki index", index)
 	}
 	if mode == slashModePanel {
-		mem, items, noteBytes := recallWikiNotesCapped(s.projectRoot, wsName, query, s.retractedNotes(ctx, convID), slashRecallCap)
+		mem, items, noteBytes, _ := recallWikiNotesCapped(s.projectRoot, wsName, query, s.retractedNotes(ctx, convID), slashRecallCap)
 		if mem != "" {
 			for i, it := range items {
 				receipt[it.path] = sha16(noteBytes[i])
@@ -115,17 +124,105 @@ func (s *Server) slashContextBlock(ctx context.Context, wsName string, convID in
 			sections = append(sections, block) // carries its own "##" header
 		}
 	}
-	if block, first, last, dropped := slashConversation(events, mode); block != "" {
-		sections = append(sections, block) // carries its own header + receipt range
+	var first, last int
+	var dropped []int
+	convBlock, first, last, dropped = slashConversation(events, mode)
+	if convBlock != "" {
+		sections = append(sections, convBlock) // carries its own header + receipt range
 		conv = &slashConvReceipt{
 			after:   foldBoundary(events),
 			first:   first,
 			last:    last,
-			bytes:   len(block),
+			bytes:   len(convBlock),
 			dropped: dropped,
 		}
 	}
-	return strings.Join(sections, "\n\n---\n\n"), receipt, conv
+	block = strings.Join(sections, "\n\n---\n\n")
+	if s.slashReceiptBreachForTest != nil {
+		// Test seam (receiptBreachForTest precedent, server.go): diverges
+		// the journaled receipt from the injected block so slash-mode tests
+		// can drill assertSlashReceipts' fail-closed refusal. nil in
+		// production.
+		s.slashReceiptBreachForTest(receipt)
+	}
+	return block, receipt, convBlock, conv
+}
+
+// assertSlashReceipts is the slash-side closure of the M18 W2 item-4 gate
+// (assertPromptReceipts' sibling — same model-visible ⇔ logged fail-closed
+// posture). block is the assembled slash context block, receipt the
+// journal-bound path→sha16 map (journaled verbatim on the slash
+// user_message), conv the rendered conversation tail ("" when it did not
+// render). It refuses (non-nil error) when:
+//
+//   - an injected content-hash layer lacks its receipt entry (received but
+//     not logged), the logged sha disagrees with the injected bytes
+//     (received ≠ logged), or the injected body is absent from the
+//     assembled block (logged ≠ model-visible). Same content-hash
+//     convention as the send path: sha16 of the verbatim body, re-read
+//     here through the same capped readers the assembler used — the double
+//     read journalRuleSnapshots already pays on this path;
+//   - the conversation tail rendered but its block is absent from the
+//     assembled block. The tail's STRUCTURAL sub-receipt (the journaled
+//     replay keys) stays exempt for the send path's reason: the seq window
+//     pins the content, content bytes add nothing.
+//
+// Scope gate: panel_context_scope: project-only injects no user.md
+// SECTION, so a layer whose section header is absent from the block is
+// skipped rather than demanded — the assembler writes header and body
+// together, and a header is only anchored at a section boundary
+// ("\n\n---\n\n" join), never mid-body.
+//
+// Presence-only layers, the honest local bound (assertPromptReceipts'
+// wording): recalled-note and cross-workstream source entries are sealed
+// at injection by recallWikiNotesCapped / crossWsBlock (one code path
+// away) and their bodies are not retained, so unlike the send path — which
+// re-walks its retained item lists — this gate iterates no inventory here:
+// the verified map IS the journaled map, by construction.
+//
+// The fail posture lives with the callers (the send path's evidence-first
+// ordering): the slash user_message attempt is journaled FIRST; a breach
+// then refuses the query with a paired agent_error BEFORE any moa call.
+func (s *Server) assertSlashReceipts(block string, receipt map[string]string, conv string) error {
+	// Content-hash layers: key = source path, value = sha16(verbatim body),
+	// header the assembler wrote when the body injected.
+	for _, layer := range []struct{ key, header, body string }{
+		{"~/.odo/user.md", "## User memory", readUserMemory()},
+		{".odo/memory.md", "## Project memory", readProjectMemory(s.projectRoot)},
+		{".odo/pins.md", "## Pins", readPins(s.projectRoot)},
+		{"wiki/index.md", "## Wiki index", readIndex(s.projectRoot)},
+	} {
+		if layer.body == "" || !slashSectionPresent(block, layer.header) {
+			continue // not injected (empty at assembly, or scope-gated out)
+		}
+		got, ok := receipt[layer.key]
+		if !ok {
+			return fmt.Errorf("slash receipt: missing entry for %q (injected but not logged)", layer.key)
+		}
+		if want := sha16([]byte(layer.body)); got != want {
+			return fmt.Errorf("slash receipt: hash mismatch for %q: logged %s != injected %s", layer.key, got, want)
+		}
+		if !strings.Contains(block, layer.body) {
+			return fmt.Errorf("slash receipt: injected body for %q absent from the assembled block", layer.key)
+		}
+	}
+	if conv != "" && !strings.Contains(block, conv) {
+		return fmt.Errorf("slash receipt: conversation tail rendered but absent from the assembled block")
+	}
+	return nil
+}
+
+// slashSectionPresent reports whether header opens a section of the
+// assembled block: the assembler joins sections with "\n\n---\n\n" and
+// renders each as header + "\n\n" + body, so a real section header is
+// anchored at the block start or right after a join — body text merely
+// containing the header string mid-paragraph (or a scope-gated-out
+// layer's name inside another body) does NOT count.
+func slashSectionPresent(block, header string) bool {
+	if strings.HasPrefix(block, header+"\n\n") {
+		return true
+	}
+	return strings.Contains(block, "\n\n---\n\n"+header+"\n\n")
 }
 
 // slashConvReceipt mirrors the send path's replay receipt for the slash

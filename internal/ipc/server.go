@@ -137,6 +137,18 @@ type Server struct {
 	autoIdle      time.Duration
 	autoJitter    time.Duration
 	autoCurateAge time.Duration
+	// M18 W2 item 4 fail-closed drill (autoCurateAge seam precedent):
+	// non-nil ONLY in tests — assembleRunPrompt calls it between layer
+	// assembly and buildPrompt to simulate a receipt diverging from the
+	// injected content, proving the send/continuation/revise paths refuse
+	// before any adapter start. Production never sets it.
+	receiptBreachForTest func(ml *memoryLayers)
+	// The slash-side counterpart of the seam above (slashctx.go): non-nil
+	// ONLY in tests — slashContextBlock calls it after assembling the
+	// block+receipt so /panel and /vision tests diverge the journaled
+	// receipt from the injected content and drill assertSlashReceipts'
+	// fail-closed refusal before any moa call. Production never sets it.
+	slashReceiptBreachForTest func(receipt map[string]string)
 }
 
 // NewServer builds a Server bound to one project root. ad becomes the default
@@ -633,42 +645,31 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// R1+R4: replay (and its cold-start complement, the resume card) are
 	// assembled BEFORE journaling this message, so the replay excludes the
 	// message itself (its text lands verbatim at the prompt's end).
-	ml := s.runMemoryLayers(ctx, w.Name, c.ID, req.Text)
+	// assembleRunPrompt (M18 W2 item 4) additionally checks the
+	// model-visible ⇔ logged closure; on a breach the payload is still
+	// returned so the user_message attempt lands BEFORE the refusal.
+	prompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, c.ID, req.Text, req.Attachments...)
 
-	// buildPrompt is a pure render of ml + the request, so assembling it
-	// before journaling lets the user_message receipt carry the assembled
-	// prompt size (item D) without changing the replay ordering above.
-	prompt := buildPrompt(req.Text, req.Attachments, ml)
-
-	// Journal the user message with attachments (spec item 5).
+	// Journal the user message with attachments (spec item 5) and the
+	// unified receipt closure (W2 item 4: receipt, recall, replay
+	// sub-receipt, total_prompt_bytes, prompt_sha16).
 	msgPayload := map[string]interface{}{"text": req.Text}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
 	}
-	msgPayload["total_prompt_bytes"] = len(prompt)
-	if jr := ml.journalRecall(); len(jr) > 0 {
-		msgPayload["recall"] = jr
-	}
-	if len(ml.receipt) > 0 {
-		msgPayload["receipt"] = ml.receipt
-	}
-	if ml.replay != "" {
-		// R1 receipt: the covered seq range + the fold boundary it follows,
-		// + the dropped window (first,last) when the cap cut older turns.
-		rp := map[string]interface{}{
-			"after_seq": ml.replayAfter,
-			"first_seq": ml.replayFirst,
-			"last_seq":  ml.replayLast,
-			"bytes":     len(ml.replay),
-		}
-		if len(ml.replayDropped) == 2 {
-			rp["dropped_seqs"] = ml.replayDropped
-		}
-		msgPayload["replay"] = rp
+	for k, v := range receiptPayload {
+		msgPayload[k] = v
 	}
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
+	}
+
+	// M18 W2 item 4: fail closed BEFORE any adapter start — the attempt
+	// (user_message above) and the breach (agent_error below) both stay on
+	// record.
+	if assertErr != nil {
+		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("prompt receipt assertion failed: %w", assertErr))
 	}
 
 	// Setup failures after this point revoke the run with a journaled
@@ -703,25 +704,26 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 // injected layer bodies, the recall path list, and the injection receipt
 // (ADR-0003 inv 5: content hashes of exactly what was injected).
 type memoryLayers struct {
-	user          string             // ~/.odo/user.md (global principles)
-	project       string             // .odo/memory.md (project behavior rules)
-	pins          string             // .odo/pins.md (M5: user-authored, verbatim)
-	skills        string             // M8: matched skill procedures (keyword-selected)
-	skillReceipts []skillReceiptItem // M8: per-skill path + block hash for receipt
-	index         string             // wiki/index.md (M5: always-injected)
-	wiki          string             // recalled epoch notes block
-	cross         string             // M12 Batch 3a (D-cross): matched-only cross-workstream block
-	crossItems    []crossSource      // D-cross: per-source path/origin/matched terms + chunk sha
-	memoryMap     string             // R2: pull-based read-back hints (wiki/ + ledger absolute paths)
-	resume        string             // R4: cold-start open-loops handoff (injected only when the replay window is empty)
-	todo          string             // M12 (D-todo): durable plan block (journaled todo state, durable across folds)
-	replay        string             // R1: current-epoch journal replay block
-	replayFirst   int                // R1 receipt: first replayed journal seq
-	replayLast    int                // R1 receipt: last replayed journal seq
-	replayAfter   int                // R1 receipt: fold boundary the window starts after
-	replayDropped []int              // R1 receipt: [first,last] dropped seq window (nil without drops)
-	recall        []recallItem       // M6: was []string, now per-note with matched terms
-	receipt       map[string]string
+	user           string             // ~/.odo/user.md (global principles)
+	project        string             // .odo/memory.md (project behavior rules)
+	pins           string             // .odo/pins.md (M5: user-authored, verbatim)
+	skills         string             // M8: matched skill procedures (keyword-selected)
+	skillReceipts  []skillReceiptItem // M8: per-skill path + block hash for receipt
+	index          string             // wiki/index.md (M5: always-injected)
+	wiki           string             // recalled epoch notes block
+	cross          string             // M12 Batch 3a (D-cross): matched-only cross-workstream block
+	crossItems     []crossSource      // D-cross: per-source path/origin/matched terms + chunk sha
+	memoryMap      string             // R2: pull-based read-back hints (wiki/ + ledger absolute paths)
+	resume         string             // R4: cold-start open-loops handoff (injected only when the replay window is empty)
+	todo           string             // M12 (D-todo): durable plan block (journaled todo state, durable across folds)
+	replay         string             // R1: current-epoch journal replay block
+	replayFirst    int                // R1 receipt: first replayed journal seq
+	replayLast     int                // R1 receipt: last replayed journal seq
+	replayAfter    int                // R1 receipt: fold boundary the window starts after
+	replayDropped  []int              // R1 receipt: [first,last] dropped seq window (nil without drops)
+	recall         []recallItem       // M6: was []string, now per-note with matched terms
+	receipt        map[string]string
+	recallHeldBack int // M18 W2 item 4: notes the recall cap dropped (journaled as recall_held_back when >0)
 }
 
 // memoryLayers reads the current memory layers for the workstream and builds
@@ -743,8 +745,9 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 		receipt:       map[string]string{},
 	}
 	retracted := s.retractedNotes(ctx, conversationID)
-	m, items, noteBytes := recallWikiNotes(s.projectRoot, wsName, query, retracted)
+	m, items, noteBytes, heldBack := recallWikiNotesCapped(s.projectRoot, wsName, query, retracted, recallMemoryCap)
 	ml.wiki = m
+	ml.recallHeldBack = heldBack
 	// M12 Batch 3a (D-cross): matched-only cross-workstream push — empty
 	// unless the query earned it (no fallback tier leaks cross-ws). The
 	// store threads through to the sibling retraction gate (a note
@@ -770,6 +773,12 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 	if ml.index != "" {
 		ml.receipt["wiki/index.md"] = sha16([]byte(ml.index))
 	}
+	// M18 W2 item 4: the R2 read-back map is model-visible, so it must be
+	// logged (synthetic key, journal#todo precedent) — without this entry
+	// the pre-send closure would fail closed on a legitimate layer.
+	if ml.memoryMap != "" {
+		ml.receipt["odo#memory-map"] = sha16([]byte(ml.memoryMap))
+	}
 	for i, it := range items {
 		ml.receipt[it.path] = sha16(noteBytes[i])
 	}
@@ -792,10 +801,19 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 // text lands verbatim at the prompt's end.
 func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversationID int64, text string) memoryLayers {
 	var events []store.Event
+	eventsOK := false
 	if evs, lerr := s.store.ListEvents(ctx, conversationID, 0); lerr == nil {
 		events = evs
+		eventsOK = true
 	}
 	ml := s.memoryLayers(ctx, wsName, conversationID, recallQuery(text, events))
+	// W2 item 3: materialize changed rule files. The send/continuation/
+	// retry/revise callers all funnel through here BEFORE journaling the
+	// user_message the prompt serves, so the snapshot rows land ahead of
+	// it; a nil-but-fresh event list (zero rows) still snapshots.
+	if eventsOK {
+		s.journalRuleSnapshots(ctx, conversationID, events)
+	}
 	if events == nil {
 		return ml
 	}
@@ -933,6 +951,193 @@ func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	}
 	b.WriteString(text)
 	return b.String()
+}
+
+// promptReceiptPayload builds the unified model-visible ⇔ logged closure
+// (M18 W2 item 4) that run-starting paths journal: the ADR-0003 injection
+// receipt, the recall list, the held-back recall count (optional-when-absent),
+// the replay structural sub-receipt (window + dropped_seqs on omission), and
+// the assembled prompt's own total_prompt_bytes + prompt_sha16. The send path
+// merges the map into its user_message payload; the revise user_message gains
+// it intact (auto_revise marker preserved); continuation/retry anchor it on a
+// review_action{action:"run_prompt"} row instead (chat surface discipline:
+// the steers are already journaled, no user_message duplicate).
+func promptReceiptPayload(ml memoryLayers, prompt string) map[string]interface{} {
+	p := map[string]interface{}{
+		"total_prompt_bytes": len(prompt),
+		"prompt_sha16":       sha16([]byte(prompt)),
+	}
+	if jr := ml.journalRecall(); len(jr) > 0 {
+		p["recall"] = jr
+	}
+	if ml.recallHeldBack > 0 {
+		p["recall_held_back"] = ml.recallHeldBack
+	}
+	if len(ml.receipt) > 0 {
+		p["receipt"] = ml.receipt
+	}
+	if ml.replay != "" {
+		// R1 receipt: the covered seq range + the fold boundary it follows,
+		// + the dropped window (first,last) when the cap cut older turns.
+		rp := map[string]interface{}{
+			"after_seq": ml.replayAfter,
+			"first_seq": ml.replayFirst,
+			"last_seq":  ml.replayLast,
+			"bytes":     len(ml.replay),
+		}
+		if len(ml.replayDropped) == 2 {
+			rp["dropped_seqs"] = ml.replayDropped
+		}
+		p["replay"] = rp
+	}
+	return p
+}
+
+// assertPromptReceipts is the M18 W2 item-4 fail-closed gate: model-visible
+// ⇔ logged. ml is the layer stack about to be injected, prompt the exact
+// bytes the adapter will receive, payload the journal-bound unified closure
+// (promptReceiptPayload output — passed in because the caller journals
+// exactly that map; recomputing it here would check a copy, not the record).
+// It refuses (non-nil error) when:
+//
+//   - a non-empty layer field lacks its receipt entry;
+//   - a recomputable hash disagrees — content-hash convention for file-body
+//     layers (user ~/.odo/user.md, project .odo/memory.md, pins .odo/pins.md,
+//     index wiki/index.md: sha16 of the body verbatim); block-hash convention
+//     for rendered blocks whose bodies ARE retained on memoryLayers
+//     (<note>#open-loops resume card, journal#todo plan block, odo#memory-map
+//     read-back map: sha16 of the injected block). The received-vs-injected
+//     drift these catch is the production gap the memory-map fix above
+//     closed;
+//   - presence-only layers lack their per-item keys. Wiki epoch-note items,
+//     skill blocks and cross-workstream chunks are the honest local bound:
+//     the note bytes are not retained on memoryLayers after the recap
+//     build, the per-skill block hash is sealed by loadSkillsForPrompt and
+//     the per-source chunk sha by crossWsBlock, so this gate can only
+//     require each key to exist (the value was attested at injection time,
+//     one code path away);
+//   - the journaled totals drift: total_prompt_bytes == len(prompt) and
+//     prompt_sha16 == sha16(prompt) must hold byte-exactly.
+//
+// The replay is EXEMPT by construction: its structural sub-receipt
+// (first_seq/last_seq/after_seq/bytes/dropped_seqs) pins the journaled
+// window, which is the receipt — content bytes add nothing.
+//
+// Exemption ledger — model-visible content NOT covered by this gate, with
+// the attestation that covers it instead:
+//   - distill prompt bodies: pure f(journal events), and Item 2's
+//     omitted_count/omitted_first_seq/omitted_last_seq keys journal the one
+//     lossy cut (the cap) with the fact;
+//   - learner rows: Item 3's memory_update{cause:"snapshot"} rows carry the
+//     injected rule-file content + sha explicitly;
+//   - curator: topic-page writes are journaled artifacts (the journal holds
+//     the before/after);
+//   - review legs: every moa_review row attests patch_sha16 of the diff at
+//     hand (the panel's view is reconstructible);
+//   - panel tool results: derived — recomputable from the journaled tool
+//     call (same input ⇒ same output).
+func assertPromptReceipts(ml memoryLayers, prompt string, payload map[string]interface{}) error {
+	// Content-hash layers: key = source path, value = sha16(verbatim body).
+	for _, layer := range []struct{ key, body string }{
+		{"~/.odo/user.md", ml.user},
+		{".odo/memory.md", ml.project},
+		{".odo/pins.md", ml.pins},
+		{"wiki/index.md", ml.index},
+	} {
+		if layer.body == "" {
+			continue
+		}
+		got, ok := ml.receipt[layer.key]
+		if !ok {
+			return fmt.Errorf("prompt receipt: missing entry for %q (injected but not logged)", layer.key)
+		}
+		if want := sha16([]byte(layer.body)); got != want {
+			return fmt.Errorf("prompt receipt: hash mismatch for %q: logged %s != injected %s", layer.key, got, want)
+		}
+	}
+	// Block-hash layers recomputable from the retained field.
+	for _, layer := range []struct{ key, body string }{
+		{"odo#memory-map", ml.memoryMap},
+		{"journal#todo", ml.todo},
+	} {
+		if layer.body == "" {
+			continue
+		}
+		got, ok := ml.receipt[layer.key]
+		if !ok {
+			return fmt.Errorf("prompt receipt: missing entry for %q (injected but not logged)", layer.key)
+		}
+		if want := sha16([]byte(layer.body)); got != want {
+			return fmt.Errorf("prompt receipt: hash mismatch for %q: logged %s != injected %s", layer.key, got, want)
+		}
+	}
+	if ml.resume != "" {
+		// The open-loops key carries its note path (<path>#open-loops);
+		// scan the suffix and require exactly one, hash-matching the card.
+		want := sha16([]byte(ml.resume))
+		found := false
+		for k, v := range ml.receipt {
+			if !strings.HasSuffix(k, "#open-loops") {
+				continue
+			}
+			found = true
+			if v != want {
+				return fmt.Errorf("prompt receipt: hash mismatch for %q: logged %s != injected %s", k, v, want)
+			}
+		}
+		if !found {
+			return fmt.Errorf("prompt receipt: missing entry for %q (resume card injected but not logged)", "<note>#open-loops")
+		}
+	}
+	// Presence-only (the honest local bound — hashes sealed at injection).
+	if ml.wiki != "" {
+		for _, it := range ml.recall {
+			if _, ok := ml.receipt[it.path]; !ok {
+				return fmt.Errorf("prompt receipt: missing entry for wiki note %q (injected but not logged)", it.path)
+			}
+		}
+	}
+	for _, sr := range ml.skillReceipts {
+		if _, ok := ml.receipt[sr.path]; !ok {
+			return fmt.Errorf("prompt receipt: missing entry for skill block %q (injected but not logged)", sr.path)
+		}
+	}
+	for _, src := range ml.crossItems {
+		if _, ok := ml.receipt[src.path]; !ok {
+			return fmt.Errorf("prompt receipt: missing entry for cross-workstream chunk %q (injected but not logged)", src.path)
+		}
+	}
+	// The journaled totals must byte-match the adapter-bound prompt.
+	if got, want := payload["total_prompt_bytes"], len(prompt); got != want {
+		return fmt.Errorf("prompt receipt: total_prompt_bytes %v != prompt length %d", got, want)
+	}
+	if got, want := payload["prompt_sha16"], sha16([]byte(prompt)); got != want {
+		return fmt.Errorf("prompt receipt: prompt_sha16 %v != sha16(prompt) %s", got, want)
+	}
+	return nil
+}
+
+// assembleRunPrompt is the one run-prompt assembly (M18 W2 item 4):
+// runMemoryLayers + buildPrompt + the journaled closure + the fail-closed
+// assertion. Every run-starting path funnels through it so the receipt the
+// journal records is the prompt the adapter receives. On assertion failure
+// the prompt and payload are still returned (both derived from the same ml)
+// so the caller can journal the attempt before refusing — evidence-first.
+// attachments ride the send path only (revise/continuation pass none).
+func (s *Server) assembleRunPrompt(ctx context.Context, wsName string, conversationID int64, text string, attachments ...string) (prompt string, payload map[string]interface{}, err error) {
+	ml := s.runMemoryLayers(ctx, wsName, conversationID, text)
+	if s.receiptBreachForTest != nil {
+		// Test seam (autoCurateAge precedent): simulates a layer-assembly
+		// bug — the receipt diverging from the injected content — to drill
+		// the fail-closed gate below. nil in production.
+		s.receiptBreachForTest(&ml)
+	}
+	prompt = buildPrompt(text, attachments, ml)
+	payload = promptReceiptPayload(ml, prompt)
+	if aerr := assertPromptReceipts(ml, prompt, payload); aerr != nil {
+		return prompt, payload, aerr
+	}
+	return prompt, payload, nil
 }
 
 // memoryMapBlock is the R2 "memory map": ~6 lines telling the agent that the
@@ -1146,8 +1351,32 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 
 	// R1: continuation runs replay the current epoch too — the previous
 	// run's agent_text is in the journal and the steering agent must see it.
-	ml := s.runMemoryLayers(ctx, w.Name, conversationID, prompt)
-	fullPrompt := buildPrompt(prompt, nil, ml)
+	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, conversationID, prompt)
+	if assertErr != nil {
+		// M18 W2 item 4: fail closed, no silent drop — the breach is a
+		// journaled agent_error, the adapter never starts.
+		_ = s.failRun(ctx, conversationID, fmt.Errorf("prompt receipt assertion failed: %w", assertErr))
+		return false, "receipt_assert_failed"
+	}
+
+	// M18 W2 item 4: the continuation/retry anchors the same unified
+	// receipt closure on a review_action{action:"run_prompt"} row — the
+	// steers are already journaled, so NO user_message duplicate is
+	// written (chat surface discipline). actor:auto_panel marks it
+	// pipeline mechanics: the fold render excludes it (Item 1 whitelist).
+	origin := "continuation"
+	if isRetry {
+		origin = "retry"
+	}
+	row := map[string]interface{}{"action": "run_prompt", "actor": autoActor, "origin": origin}
+	for k, v := range receiptPayload {
+		row[k] = v
+	}
+	if _, err := s.store.AppendEvent(ctx, conversationID, store.EventReviewAction, mustJSON(row)); err != nil {
+		// Journal-first: starting unlogged would break evidence-before-action.
+		log.Printf("a2-continuation: journal run_prompt: %v", err)
+		return false, "journal_run_prompt"
+	}
 
 	runDirID := worktree.NewRunID()
 	wtPath, err := s.mgr.Create(runDirID)
@@ -1754,11 +1983,16 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 	reviews := s.reviewFanout(ctx, models, prompt)
 
 	cv := consensusVerdict(reviews)
+	// patch_sha16 (M18 W2 item 4): attests the EXACT diff bytes the panel
+	// judged (content rode the prompt fenced above — the handler already
+	// refused when the diff was unreadable), so a verdict stays falsifiable
+	// against the artifact even after the diff file rotates.
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":            "moa_review",
 		"diff_id":           d.ID,
 		"reviews":           reviews,
 		"consensus_verdict": cv,
+		"patch_sha16":       sha16(content),
 	})); err != nil {
 		return Response{}, err
 	}
@@ -1935,7 +2169,7 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		"\n\nYou have read-only tools over the user's files: read_file, grep, glob. " +
 		exec.describeScope() +
 		" Use them to ground your answer in the actual files whenever the question touches code or documents — do not ask the user to paste content. Every read is journaled."
-	block, receipt, conv := s.slashContextBlock(ctx, w.Name, c.ID, recallQuery(text, events), events, scope, slashModePanel)
+	block, receipt, convBlock, conv := s.slashContextBlock(ctx, w.Name, c.ID, recallQuery(text, events), events, scope, slashModePanel)
 	if block != "" {
 		system += "\n\n---\n\n" + block
 	}
@@ -1948,6 +2182,13 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		slashUserMessagePayload("/panel", text, receipt, scope, len(system)+len(text), conv)))
 	if err != nil {
 		return Response{}, err
+	}
+
+	// M18 W2 item 4: fail closed BEFORE any moa call — the attempt
+	// (user_message above) and the breach (agent_error below) both stay on
+	// record (the send path's evidence-first ordering).
+	if aerr := s.assertSlashReceipts(block, receipt, convBlock); aerr != nil {
+		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("slash receipt assertion failed: %w", aerr))
 	}
 	results := make([]PanelResult, len(models))
 	var wg sync.WaitGroup
@@ -2124,7 +2365,7 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	}
 	scope := resolvePanelContextScope()
 	system := "You are a vision-capable coding assistant. Analyze the image or screenshot described in the prompt. Identify visual issues, layout problems, or design suggestions."
-	block, receipt, conv := s.slashContextBlock(ctx, w.Name, c.ID, text, events, scope, slashModeVision)
+	block, receipt, convBlock, conv := s.slashContextBlock(ctx, w.Name, c.ID, text, events, scope, slashModeVision)
 	if block != "" {
 		system += "\n\n---\n\n" + block
 	}
@@ -2135,9 +2376,15 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	// when every file read succeeded. A read failure keeps the old error
 	// text and skips the gateway call — the user_message is still journaled.
 	images := make([]moa.VisionImage, 0, len(attachments))
+	// imageShas (M18 W2 item 4): sha16 of each image's file bytes, ALIGNED
+	// with attachments by index — the per-image counterpart of image_bytes.
+	// Read failures leave the entry "" (absent while the slice stays
+	// aligned); entries past the first failure were never attempted, so
+	// they stay "" too — a receipt never claims bytes it did not read.
+	imageShas := make([]string, len(attachments))
 	imageBytes := 0
 	var imageErr error
-	for _, p := range attachments {
+	for i, p := range attachments {
 		data, rerr := os.ReadFile(p)
 		if rerr != nil {
 			imageErr = fmt.Errorf("moa: read image %s: %w", p, rerr)
@@ -2145,6 +2392,7 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 		}
 		images = append(images, moa.VisionImage{Path: p, MediaType: moa.ImageMediaType(p), Data: data})
 		imageBytes += len(data)
+		imageShas[i] = sha16(data)
 	}
 
 	// Journal the user message with the injection receipt, the effective
@@ -2153,6 +2401,7 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	msgPayload := slashUserMessagePayload("/vision", text, receipt, scope, len(system)+len(text), conv)
 	if len(attachments) > 0 {
 		msgPayload["attachments"] = attachments
+		msgPayload["image_sha16"] = imageShas
 		if imageErr == nil {
 			msgPayload["image_bytes"] = imageBytes
 		}
@@ -2160,6 +2409,13 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	ev, err := s.store.AppendEvent(ctx, c.ID, store.EventUserMessage, mustJSON(msgPayload))
 	if err != nil {
 		return Response{}, err
+	}
+
+	// M18 W2 item 4: fail closed BEFORE any moa call — the attempt
+	// (user_message above) and the breach (agent_error below) both stay on
+	// record (the send path's evidence-first ordering).
+	if aerr := s.assertSlashReceipts(block, receipt, convBlock); aerr != nil {
+		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("slash receipt assertion failed: %w", aerr))
 	}
 
 	client := moa.NewClientFromEnv("", "")
@@ -2383,7 +2639,7 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// M12 (D-todo): surviving open plan items ride the distill prompt as
 	// labeled authoritative state → the note's Open loops are seeded from
 	// truth (the distiller can't drop a loop it was explicitly handed).
-	prompt := distillPrompt(window)
+	prompt, om := distillPrompt(window)
 	if seed := distillTodoSeed(events); seed != "" {
 		prompt += "\n\n" + seed
 	}
@@ -2539,7 +2795,7 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// the fold is falsifiable against the artifact on disk. The window is
 	// the render-time pin from above (the INVARIANT there) — rows the fold
 	// itself journaled after the render sit ABOVE it for the next epoch.
-	distillEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	marker := map[string]interface{}{
 		"action":         "distill",
 		"epoch":          newEpoch,
 		"wiki_path":      wikiPath,
@@ -2558,7 +2814,18 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		"trigger":       trigger,
 		"window_events": winStats.events,
 		"window_bytes":  winStats.eligibleBytes,
-	}))
+	}
+	// M18 W2 item 2: the full-window first_seq/last_seq keep their
+	// epoch-window meaning (the FoldWindow pin above); the omitted_* keys
+	// name the held-back PREFIX the prompt cap cut out of that window — the
+	// fact the prompt's omission line declares, now journaled (present ONLY
+	// when the cap dropped events; additive, absent otherwise).
+	if om.count > 0 {
+		marker["omitted_count"] = om.count
+		marker["omitted_first_seq"] = om.firstSeq
+		marker["omitted_last_seq"] = om.lastSeq
+	}
+	distillEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(marker))
 	if err != nil {
 		return Response{}, err
 	}
@@ -3299,17 +3566,31 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 	return out, nil
 }
 
+// omission is the over-cap fact distillPrompt threads to the distill
+// marker (M18 W2 item 2): count = how many events the cap cut from the
+// window's HEAD, firstSeq/lastSeq = the held-back prefix's seq range — the
+// SAME seq range the prompt's omission line declares. Zero value: nothing
+// omitted (under budget).
+type omission struct {
+	count, firstSeq, lastSeq int
+}
+
 // distillPrompt renders journaled events into the summary prompt: the M1
 // spec's instruction line, the Open loops mandate (R4 — the next epoch's
 // cold-start resume card is rendered from this section), then each event
 // through distillRender's fold filter (M17 F1). Windows larger than
 // distillPromptBytesCap keep the newest events; the omission is declared in
-// the prompt so the note never silently claims coverage it didn't see.
-func distillPrompt(events []store.Event) string {
+// the prompt so the note never silently claims coverage it didn't see. The
+// returned omission comes from the SAME capEvents call that cut the tail
+// (threaded, never recomputed) so the marker fact and the prompt line can
+// never disagree.
+func distillPrompt(events []store.Event) (string, omission) {
 	var b strings.Builder
 	b.WriteString("Summarize the key decisions, code changes, and open questions from this conversation. Format as markdown.\n\n")
 	b.WriteString("The note MUST end with a `## Open loops` section: one bullet per unresolved question, pending task, or decision still awaiting the user. If nothing is open, write `## Open loops` followed by the single line `None.` — never omit the section.\n\n")
+	var om omission
 	if tail, omitted := capEvents(events, distillPromptBytesCap); omitted > 0 {
+		om = omission{count: omitted, firstSeq: events[0].Seq, lastSeq: events[omitted-1].Seq}
 		fmt.Fprintf(&b, "[odo: %d older event(s), seq %d–%d, omitted — the journaled window outgrew the %d KiB prompt budget. Summarize only the events below; do not claim coverage of the omitted range.]\n\n",
 			omitted, events[0].Seq, events[omitted-1].Seq, distillPromptBytesCap/1024)
 		events = tail
@@ -3317,7 +3598,7 @@ func distillPrompt(events []store.Event) string {
 	for _, ev := range events {
 		b.WriteString(distillRender(ev))
 	}
-	return b.String()
+	return b.String(), om
 }
 
 // distillRender renders one journaled event for the fold prompt. "" means
@@ -3332,8 +3613,10 @@ func distillPrompt(events []store.Event) string {
 // transcript noise around the user's actual asks — full file contents
 // ride write/edit args, omp.go), so they render as one-line tombstones;
 // review_action and memory_update bookkeeping renders as
-// action/verdict/layer/cause one-liners. user_message and plain
-// agent_text stay verbatim — they are what the note must summarize.
+// action/verdict/actor/layer/cause one-liners (auto-panel moa_review /
+// auto_revise_round / run_prompt rows excluded —
+// foldExcludedReviewAction). user_message and plain agent_text stay
+// verbatim — they are what the note must summarize.
 func distillRender(ev store.Event) string {
 	switch ev.Type {
 	case store.EventAgentThinking:
@@ -3364,12 +3647,29 @@ func distillRender(ev store.Event) string {
 		var p struct {
 			Action  string `json:"action"`
 			Verdict string `json:"consensus_verdict"`
+			Actor   string `json:"actor"`
+			Reason  string `json:"reason"`
 		}
 		if jsonUnmarshalOK(ev.Payload, &p) && p.Action != "" {
-			if p.Verdict != "" {
-				return fmt.Sprintf("### review_action (seq %d) {\"action\":%q,\"verdict\":%q}\n\n", ev.Seq, p.Action, p.Verdict)
+			// M18 W2: auto-panel churn rows (moa_review / auto_revise_round /
+			// run_prompt journaled with actor:auto_panel) never fold — the
+			// prompt carries the pipeline's OUTCOMES, not its mechanics.
+			if foldExcludedReviewAction(p.Action, p.Actor) {
+				return ""
 			}
-			return fmt.Sprintf("### review_action (seq %d) {\"action\":%q}\n\n", ev.Seq, p.Action)
+			var line strings.Builder
+			fmt.Fprintf(&line, `{"action":%q`, p.Action)
+			if p.Verdict != "" {
+				fmt.Fprintf(&line, `,"verdict":%q`, p.Verdict)
+			}
+			if p.Actor != "" {
+				fmt.Fprintf(&line, `,"actor":%q`, p.Actor)
+			}
+			if p.Action == "auto_land_blocked" && p.Reason != "" {
+				fmt.Fprintf(&line, `,"reason":%q`, p.Reason)
+			}
+			line.WriteByte('}')
+			return fmt.Sprintf("### review_action (seq %d) %s\n\n", ev.Seq, line.String())
 		}
 		return fmt.Sprintf("### review_action (seq %d) [payload omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
 	case store.EventMemoryUpdate:
@@ -3412,6 +3712,23 @@ func isAdvisoryAgentText(ev store.Event) bool {
 		Vision bool `json:"vision"`
 	}
 	return jsonUnmarshalOK(ev.Payload, &p) && (p.Panel || p.Vision)
+}
+
+// foldExcludedReviewAction reports whether a review_action row is auto-land
+// pipeline churn: moa_review / auto_revise_round / run_prompt rows journaled
+// with actor:auto_panel never fold — the per-leg panel evidence and round
+// mechanics are transcript noise. The note carries the pipeline's OUTCOMES
+// instead: accept rows (what landed) and auto_land_blocked rows, whose
+// reason IS the open loop the note must surface.
+func foldExcludedReviewAction(action, actor string) bool {
+	if actor != autoActor {
+		return false
+	}
+	switch action {
+	case "moa_review", "auto_revise_round", "run_prompt":
+		return true
+	}
+	return false
 }
 
 // distillRenderSize sizes ev's fold-prompt render. Eligibility

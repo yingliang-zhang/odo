@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1039,6 +1040,11 @@ func TestBootstrapByWorkstream(t *testing.T) {
 func TestSteering(t *testing.T) {
 	t.Run("active run queues the steer text", func(t *testing.T) {
 		root := initRepo(t)
+		// W2: journalRuleSnapshots fires on the first send whenever a rule
+		// file exists — without HOME isolation the real ~/.odo/user.md
+		// inserts a snapshot row and shifts every later seq. Isolate HOME
+		// (the file's norm) so the seq arithmetic below is hermetic.
+		t.Setenv("HOME", t.TempDir())
 		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 		rig := startRig(t, root)
 		defer rig.stop(t)
@@ -1116,6 +1122,10 @@ func TestSteering(t *testing.T) {
 func TestCancelRun(t *testing.T) {
 	t.Run("active run is killed and journaled", func(t *testing.T) {
 		root := initRepo(t)
+		// HOME isolation: a non-empty real ~/.odo/user.md now earns a
+		// snapshot memory_update row on the send below, breaking the
+		// byte-exact journal assertion (TestDistill precedent).
+		t.Setenv("HOME", t.TempDir())
 		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 		rig := startRig(t, root)
 		defer rig.stop(t)
@@ -1315,6 +1325,70 @@ func TestDistill(t *testing.T) {
 	// Unknown conversation errors out.
 	if resp := rig.callExpectErr(t, Request{Cmd: CmdDistill, ConversationID: 424242}); resp.Error == "" {
 		t.Error("distill bogus conversation: want error")
+	}
+}
+
+// TestDistillMarkerJournalsOmittedSeqs (M18 W2 item 2): when the 256 KiB
+// prompt cap cut the window's head, the distill marker carries
+// omitted_count / omitted_first_seq / omitted_last_seq — the journal-fact
+// twin of the prompt's omission declaration line (TestDistillPromptOmission
+// pins the struct/line agreement). first_seq/last_seq keep their full
+// (epoch) window meaning; omitted_* name the held-back prefix. Under the
+// cap the three keys are ABSENT (additive, optional-when-absent).
+func TestDistillMarkerJournalsOmittedSeqs(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Two agent_text rows that each alone outgrow the prompt budget:
+	// capEvents keeps the newest (a single newest event is never dropped),
+	// so seq 1 becomes the held-back prefix [1, 1].
+	big := `{"text":"` + strings.Repeat("x", distillPromptBytesCap) + `"}`
+	for range 2 {
+		if _, err := rig.store.AppendEvent(context.Background(), convID, store.EventAgentText, big); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	d1 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if d1.WikiPath == "" {
+		t.Fatalf("over-cap distill failed: %+v", d1)
+	}
+	markers := payloadsByAction(t, allEvents(t, rig, convID), "distill")
+	if len(markers) != 1 {
+		t.Fatalf("distill markers = %d, want 1", len(markers))
+	}
+	m := markers[0]
+	if m["omitted_count"] != float64(1) || m["omitted_first_seq"] != float64(1) || m["omitted_last_seq"] != float64(1) {
+		t.Errorf("omitted keys = %v/%v/%v, want 1/1/1 (the held-back prefix)",
+			m["omitted_count"], m["omitted_first_seq"], m["omitted_last_seq"])
+	}
+	if m["first_seq"] != float64(1) || m["last_seq"] != float64(2) {
+		t.Errorf("window seqs = %v..%v, want 1..2 (full-window meaning unchanged)",
+			m["first_seq"], m["last_seq"])
+	}
+
+	// Control: a follow-up window well under the cap journals NO omitted_*
+	// keys — the fact exists only when the cap dropped events.
+	if _, err := rig.store.AppendEvent(context.Background(), convID, store.EventAgentText, `{"text":"tiny tail"}`); err != nil {
+		t.Fatal(err)
+	}
+	d2 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if d2.WikiPath == "" {
+		t.Fatalf("control distill failed: %+v", d2)
+	}
+	markers = payloadsByAction(t, allEvents(t, rig, convID), "distill")
+	if len(markers) != 2 {
+		t.Fatalf("distill markers = %d, want 2", len(markers))
+	}
+	for _, k := range []string{"omitted_count", "omitted_first_seq", "omitted_last_seq"} {
+		if _, ok := markers[1][k]; ok {
+			t.Errorf("under-cap marker carries %s — want absent (the omission fact journals only on a cap drop)", k)
+		}
 	}
 }
 
@@ -1540,6 +1614,7 @@ func TestReviewDiff(t *testing.T) {
 	// A4-lite: the review_action event carries a consensus_verdict.
 	var fullPayload struct {
 		ConsensusVerdict string `json:"consensus_verdict"`
+		PatchSha16       string `json:"patch_sha16"`
 	}
 	if err := json.Unmarshal(last.Payload, &fullPayload); err != nil {
 		t.Fatalf("consensus payload: %v", err)
@@ -1551,6 +1626,16 @@ func TestReviewDiff(t *testing.T) {
 	// The response also carries the consensus field.
 	if rev.Consensus != "reject" {
 		t.Errorf("Response.Consensus = %q, want %q", rev.Consensus, "reject")
+	}
+
+	// M18 W2 item 4: patch_sha16 attests the EXACT diff bytes the panel
+	// judged — sha16 of the diff file on disk the handler fenced verbatim.
+	diffBytes, err := os.ReadFile(done.Diff.Path)
+	if err != nil {
+		t.Fatalf("read reviewed diff: %v", err)
+	}
+	if fullPayload.PatchSha16 != sha16(diffBytes) {
+		t.Errorf("patch_sha16 = %q, want sha16 of the judged diff bytes %q", fullPayload.PatchSha16, sha16(diffBytes))
 	}
 }
 
@@ -2445,4 +2530,806 @@ func TestVisionRouting(t *testing.T) {
 	// This starts a real agent run, so poll it to completion.
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/visionx create hello.txt"})
 	rig.pollUntilDone(t, convID)
+}
+
+// ruleSnapshotRow is one journaled memory_update{cause:"snapshot"|
+// "snapshot_failed"} payload with its event seq.
+type ruleSnapshotRow struct {
+	seq     int
+	payload map[string]interface{}
+}
+
+// ruleSnapshotRows decodes the conversation's memory_update rows of one
+// cause, in seq order.
+func ruleSnapshotRows(t *testing.T, events []store.Event, cause string) []ruleSnapshotRow {
+	t.Helper()
+	var out []ruleSnapshotRow
+	for _, ev := range events {
+		if ev.Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			t.Fatalf("memory_update payload: %v", err)
+		}
+		if p["cause"] == cause {
+			out = append(out, ruleSnapshotRow{seq: ev.Seq, payload: p})
+		}
+	}
+	return out
+}
+
+// TestRuleSnapshotOnChange covers the W2 rule-file materialization on the
+// send path: the first send with non-empty memory.md/pins.md/user.md
+// journals one memory_update{cause:"snapshot"} row per layer pinning the
+// exact injected bytes (sha pairs with the user_message receipt entry for
+// the same source, seq ordered before it); an unchanged send journals no
+// new rows; a hand-edit earns a fresh row with a new sha; an over-cap file
+// truncates at the reader's cap with capped:true (absent otherwise).
+func TestRuleSnapshotOnChange(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	writeRuleFiles := func(mem, pins, user string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, ".odo", "memory.md"), []byte(mem), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".odo", "pins.md"), []byte(pins), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeUserMD(t, home, user)
+	}
+	memA, pinsA, userA := "- snap-rule alpha\n", "- snap-pin alpha\n", "snap-user alpha\n"
+	writeRuleFiles(memA, pinsA, userA)
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "first snapshot send"})
+	rig.pollUntilDone(t, convID)
+	if sent.Event == nil {
+		t.Fatal("first send: missing user_message event")
+	}
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	snaps := ruleSnapshotRows(t, events, "snapshot")
+	if len(snaps) != 3 {
+		t.Fatalf("snapshot rows after first send = %d, want 3 (memory/pins/user): %v", len(snaps), snaps)
+	}
+	wantFirst := map[string]struct{ source, content string }{
+		"memory": {".odo/memory.md", memA},
+		"pins":   {".odo/pins.md", pinsA},
+		"user":   {"~/.odo/user.md", userA},
+	}
+	receipt := receiptFromEvent(t, sent.Event)
+	firstSha := map[string]string{}
+	for _, row := range snaps {
+		layer, _ := row.payload["layer"].(string)
+		want, ok := wantFirst[layer]
+		if !ok {
+			t.Fatalf("snapshot row layer = %v, want one of memory/pins/user", row.payload["layer"])
+		}
+		if row.payload["source"] != want.source {
+			t.Errorf("layer %s source = %v, want %s", layer, row.payload["source"], want.source)
+		}
+		if row.payload["content"] != want.content {
+			t.Errorf("layer %s content = %q, want the exact file bytes %q", layer, row.payload["content"], want.content)
+		}
+		if want := sha16([]byte(want.content)); row.payload["sha"] != want {
+			t.Errorf("layer %s sha = %v, want %s", layer, row.payload["sha"], want)
+		}
+		if _, hasCapped := row.payload["capped"]; hasCapped {
+			t.Errorf("layer %s: capped key present on an untruncated read", layer)
+		}
+		if row.seq >= sent.Event.Seq {
+			t.Errorf("layer %s snapshot seq %d ≥ user_message seq %d — the row must precede the message it serves", layer, row.seq, sent.Event.Seq)
+		}
+		if receipt[want.source] != row.payload["sha"] {
+			t.Errorf("receipt[%q] = %q, want the snapshot sha %v", want.source, receipt[want.source], row.payload["sha"])
+		}
+		firstSha[layer], _ = row.payload["sha"].(string)
+	}
+
+	// Unchanged files: no new rows.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "unchanged second send"})
+	rig.pollUntilDone(t, convID)
+	events = rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	if snaps = ruleSnapshotRows(t, events, "snapshot"); len(snaps) != 3 {
+		t.Fatalf("snapshot rows after unchanged send = %d, want still 3: %v", len(snaps), snaps)
+	}
+
+	// Hand-edits: one fresh row per layer with new shas.
+	memB, pinsB, userB := "- snap-rule beta\n", "- snap-pin beta\n", "snap-user beta\n"
+	writeRuleFiles(memB, pinsB, userB)
+	sent3 := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "post-edit third send"})
+	rig.pollUntilDone(t, convID)
+	events = rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	snaps = ruleSnapshotRows(t, events, "snapshot")
+	if len(snaps) != 6 {
+		t.Fatalf("snapshot rows after hand-edit = %d, want 6 (3 first-sight + 3 changed): %v", len(snaps), snaps)
+	}
+	wantEdit := map[string]struct{ source, content string }{
+		"memory": {".odo/memory.md", memB},
+		"pins":   {".odo/pins.md", pinsB},
+		"user":   {"~/.odo/user.md", userB},
+	}
+	receipt3 := receiptFromEvent(t, sent3.Event)
+	seenEdit := map[string]bool{}
+	for _, row := range snaps[3:] {
+		layer, _ := row.payload["layer"].(string)
+		want := wantEdit[layer]
+		if row.payload["content"] != want.content || row.payload["sha"] != sha16([]byte(want.content)) {
+			t.Errorf("edited layer %s row = %q sha %v, want %q sha %s", layer, row.payload["content"], row.payload["sha"], want.content, sha16([]byte(want.content)))
+		}
+		if row.payload["sha"] == firstSha[layer] {
+			t.Errorf("edited layer %s sha unchanged %v — a hand-edit must earn a new sha", layer, row.payload["sha"])
+		}
+		if receipt3[want.source] != row.payload["sha"] {
+			t.Errorf("post-edit receipt[%q] = %q, want the new snapshot sha %v", want.source, receipt3[want.source], row.payload["sha"])
+		}
+		seenEdit[layer] = true
+	}
+	for layer := range wantEdit {
+		if !seenEdit[layer] {
+			t.Errorf("no fresh snapshot row for edited layer %s", layer)
+		}
+	}
+
+	// Over-cap memory.md: the row carries the truncated injected bytes with
+	// capped:true, and the sha still pairs with the receipt.
+	if err := os.WriteFile(filepath.Join(root, ".odo", "memory.md"), []byte(strings.Repeat("- filler rule line about go vet and tests\n", 200)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sent4 := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "capped fourth send"})
+	rig.pollUntilDone(t, convID)
+	events = rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	snaps = ruleSnapshotRows(t, events, "snapshot")
+	if len(snaps) != 7 {
+		t.Fatalf("snapshot rows after over-cap edit = %d, want 7 (only memory changed): %v", len(snaps), snaps)
+	}
+	cappedRow := snaps[6]
+	wantCapped := readProjectMemory(root)
+	if cappedRow.payload["layer"] != "memory" {
+		t.Errorf("over-cap row layer = %v, want memory", cappedRow.payload["layer"])
+	}
+	if cappedRow.payload["content"] != wantCapped {
+		t.Errorf("over-cap content = %d bytes, want the injected cut (%d bytes)", len(fmt.Sprint(cappedRow.payload["content"])), len(wantCapped))
+	}
+	if cappedRow.payload["sha"] != sha16([]byte(wantCapped)) {
+		t.Errorf("over-cap sha = %v, want %s", cappedRow.payload["sha"], sha16([]byte(wantCapped)))
+	}
+	if cappedRow.payload["capped"] != true {
+		t.Errorf("over-cap row capped = %v, want true", cappedRow.payload["capped"])
+	}
+	if receipt4 := receiptFromEvent(t, sent4.Event); receipt4[".odo/memory.md"] != cappedRow.payload["sha"] {
+		t.Errorf("capped receipt entry = %q, want the snapshot sha %v", receipt4[".odo/memory.md"], cappedRow.payload["sha"])
+	}
+}
+
+// TestRuleSnapshotReconstruction replays memory.md A→B→C across three
+// sends: content-at-seq-N (the newest snapshot row with seq ≤ N) equals the
+// bytes live when the user_message at seq N was journaled — the middle send
+// reconstructs the middle value.
+func TestRuleSnapshotReconstruction(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	memPath := filepath.Join(root, ".odo", "memory.md")
+
+	send := func(text string) *store.Event {
+		t.Helper()
+		resp := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: text})
+		rig.pollUntilDone(t, convID)
+		if resp.Event == nil {
+			t.Fatalf("%s: missing user_message event", text)
+		}
+		return resp.Event
+	}
+	if err := os.WriteFile(memPath, []byte("- version A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msgA := send("turn A")
+	if err := os.WriteFile(memPath, []byte("- version B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msgB := send("turn B")
+	if err := os.WriteFile(memPath, []byte("- version C\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msgC := send("turn C")
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	if snaps := ruleSnapshotRows(t, events, "snapshot"); len(snaps) != 3 {
+		t.Fatalf("snapshot rows = %d, want exactly 3 (one per change): %v", len(snaps), snaps)
+	}
+	// contentAt reconstructs the layer content the user_message at seq N
+	// was served: the newest memory-layer snapshot with seq ≤ N.
+	contentAt := func(seq int) string {
+		t.Helper()
+		for i := len(events) - 1; i >= 0; i-- {
+			ev := events[i]
+			if ev.Seq > seq || ev.Type != store.EventMemoryUpdate {
+				continue
+			}
+			var p struct {
+				Layer   string `json:"layer"`
+				Cause   string `json:"cause"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				continue
+			}
+			if p.Layer == "memory" && p.Cause == "snapshot" {
+				return p.Content
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		name string
+		msg  *store.Event
+		want string
+	}{
+		{"first", msgA, "- version A\n"},
+		{"middle", msgB, "- version B\n"},
+		{"last", msgC, "- version C\n"},
+	} {
+		if got := contentAt(tc.msg.Seq); got != tc.want {
+			t.Errorf("%s send content-at-seq-%d = %q, want %q", tc.name, tc.msg.Seq, got, tc.want)
+		}
+		if got := receiptFromEvent(t, tc.msg)[".odo/memory.md"]; got != sha16([]byte(tc.want)) {
+			t.Errorf("%s send receipt entry = %q, want sha16 of %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRuleSnapshotFailOpen: a snapshot append failure (a test trigger
+// rejects it) journals the snapshot_failed hole marker best-effort and the
+// send still completes (appendLedger precedent — a broken snapshot journal
+// must not wedge user sends).
+func TestRuleSnapshotFailOpen(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	if err := os.WriteFile(filepath.Join(root, ".odo", "memory.md"), []byte("- rejected rule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Reject snapshot appends only: `%"cause":"snapshot"%` requires the
+	// closing quote, so `"cause":"snapshot_failed"` (quote vs underscore)
+	// misses and the fallback row still lands.
+	if _, err := rig.store.DB().Exec(`CREATE TRIGGER reject_snapshot BEFORE INSERT ON events
+		WHEN NEW.type = 'memory_update' AND NEW.payload_json LIKE '%"cause":"snapshot"%'
+		BEGIN SELECT RAISE(ABORT, 'snapshot append rejected by test'); END;`); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "fail-open send"})
+	rig.pollUntilDone(t, convID)
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	if snaps := ruleSnapshotRows(t, events, "snapshot"); len(snaps) != 0 {
+		t.Fatalf("snapshot rows = %d, want 0 (the trigger rejected them): %v", len(snaps), snaps)
+	}
+	failed := ruleSnapshotRows(t, events, "snapshot_failed")
+	if len(failed) != 1 {
+		t.Fatalf("snapshot_failed rows = %d, want exactly 1 (the fail-open hole marker): %v", len(failed), failed)
+	}
+	if failed[0].payload["layer"] != "memory" {
+		t.Errorf("snapshot_failed layer = %v, want memory", failed[0].payload["layer"])
+	}
+	if detail, _ := failed[0].payload["detail"].(string); !strings.Contains(detail, "snapshot append rejected by test") {
+		t.Errorf("snapshot_failed detail = %q, want the trigger error", detail)
+	}
+	// The send itself succeeded (rig.call fails the test otherwise) and the
+	// loop closed: its user_message and the run's terminal event are in.
+	sent := 0
+	for _, ty := range rig.allEventTypes(t, convID) {
+		switch ty {
+		case store.EventUserMessage:
+			sent++
+		}
+	}
+	if sent != 1 {
+		t.Errorf("user_message count = %d, want 1 (the fail-open send journaled normally)", sent)
+	}
+}
+
+// ---------------------------------------------------------------------
+// M18 W2 item 4 — model-visible ⇔ logged pre-send closure
+// ---------------------------------------------------------------------
+
+// promptFileForText returns the .odo/prompts capture whose tail is the
+// (verbatim, un-layered) user text — ground truth for what the agent saw.
+func promptFileForText(t *testing.T, root, tail string) string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		if strings.HasSuffix(strings.TrimSpace(string(b)), strings.TrimSpace(tail)) {
+			return f
+		}
+	}
+	t.Fatalf("no prompt file ending with %q (%d prompt files found)", tail, len(files))
+	return ""
+}
+
+// TestAssertPromptReceiptsDetectsGap pins the fail-closed gate: an entry
+// dropped between injection start and the send, a hash drifting from the
+// injected bytes, and journaled totals drifting from the adapter-bound
+// prompt are each refused, named.
+func TestAssertPromptReceiptsDetectsGap(t *testing.T) {
+	ml := memoryLayers{
+		user:          "principles\n",
+		project:       "rules\n",
+		pins:          "pin\n",
+		index:         "idx\n",
+		memoryMap:     "map\n",
+		todo:          "plan\n",
+		resume:        "card\n",
+		wiki:          "## Prior notes (recalled)\n\n### main-epoch-3\n",
+		skills:        "skill dump\n",
+		cross:         "cross dump\n",
+		recall:        []recallItem{{path: "/root/wiki/main-epoch-3.md"}},
+		skillReceipts: []skillReceiptItem{{path: "/root/.odo/skills/zeta.md", blockHash: "aa"}},
+		crossItems:    []crossSource{{path: "/root/wiki/topics/zeta.md"}},
+		replay:        "## Journal replay (current epoch)\n",
+		replayFirst:   2, replayLast: 3, replayAfter: 1,
+		receipt: map[string]string{
+			"~/.odo/user.md":                        sha16([]byte("principles\n")),
+			".odo/memory.md":                        sha16([]byte("rules\n")),
+			".odo/pins.md":                          sha16([]byte("pin\n")),
+			"wiki/index.md":                         sha16([]byte("idx\n")),
+			"odo#memory-map":                        sha16([]byte("map\n")),
+			"journal#todo":                          sha16([]byte("plan\n")),
+			"/root/wiki/main-epoch-3.md#open-loops": sha16([]byte("card\n")),
+			"/root/wiki/main-epoch-3.md":            "00", // presence-only (sealed at recall)
+			"/root/.odo/skills/zeta.md":             "aa", // presence-only (sealed at load)
+			"/root/wiki/topics/zeta.md":             "bb", // presence-only (sealed at source)
+		},
+	}
+	prompt := buildPrompt("the goal", nil, ml)
+	payload := promptReceiptPayload(ml, prompt)
+	if err := assertPromptReceipts(ml, prompt, payload); err != nil {
+		t.Fatalf("clean assembly refused: %v", err)
+	}
+	clone := func() (memoryLayers, map[string]interface{}) {
+		m := ml
+		m.receipt = map[string]string{}
+		for k, v := range ml.receipt {
+			m.receipt[k] = v
+		}
+		return m, promptReceiptPayload(m, prompt)
+	}
+	t.Run("missing entry", func(t *testing.T) {
+		m, pl := clone()
+		delete(m.receipt, "~/.odo/user.md")
+		if err := assertPromptReceipts(m, prompt, pl); err == nil || !strings.Contains(err.Error(), "missing entry") {
+			t.Errorf("err = %v, want a missing-entry breach", err)
+		}
+	})
+	t.Run("hash mismatch", func(t *testing.T) {
+		m, pl := clone()
+		m.receipt[".odo/memory.md"] = "deadbeefdeadbeef"
+		if err := assertPromptReceipts(m, prompt, pl); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+			t.Errorf("err = %v, want a hash-mismatch breach", err)
+		}
+	})
+	t.Run("block hash mismatch", func(t *testing.T) {
+		m, pl := clone()
+		m.receipt["journal#todo"] = "deadbeefdeadbeef"
+		if err := assertPromptReceipts(m, prompt, pl); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+			t.Errorf("err = %v, want a block-hash breach", err)
+		}
+	})
+	t.Run("missing open-loops entry", func(t *testing.T) {
+		m, pl := clone()
+		delete(m.receipt, "/root/wiki/main-epoch-3.md#open-loops")
+		if err := assertPromptReceipts(m, prompt, pl); err == nil || !strings.Contains(err.Error(), "missing entry") {
+			t.Errorf("err = %v, want a missing-entry breach for the resume card", err)
+		}
+	})
+	t.Run("presence-only entry missing", func(t *testing.T) {
+		m, pl := clone()
+		delete(m.receipt, "/root/wiki/topics/zeta.md")
+		if err := assertPromptReceipts(m, prompt, pl); err == nil || !strings.Contains(err.Error(), "missing entry") {
+			t.Errorf("err = %v, want a missing-entry breach at the presence bound", err)
+		}
+	})
+	t.Run("total mismatch", func(t *testing.T) {
+		m, pl := clone()
+		pl["total_prompt_bytes"] = len(prompt) + 1
+		if err := assertPromptReceipts(m, prompt, pl); err == nil || !strings.Contains(err.Error(), "total_prompt_bytes") {
+			t.Errorf("err = %v, want a totals-drift breach", err)
+		}
+	})
+	t.Run("prompt sha mismatch", func(t *testing.T) {
+		m, pl := clone()
+		pl["prompt_sha16"] = "0bad0bad0bad0bad"
+		if err := assertPromptReceipts(m, prompt, pl); err == nil || !strings.Contains(err.Error(), "prompt_sha16") {
+			t.Errorf("err = %v, want a prompt-sha breach", err)
+		}
+	})
+}
+
+// receiptClassTable classifies every memoryLayers field for M18 W2 item 4:
+// receipted (content-hash / block-hash / presence-only, with the sealing
+// boundary) or exempt with a named reason. The reflection test below pins
+// exhaustiveness in both directions — a new layer field without a row here
+// fails.
+var receiptClassTable = map[string]struct {
+	class  string // content | block | presence | exempt
+	detail string
+}{
+	"user":           {"content", "~/.odo/user.md"},
+	"project":        {"content", ".odo/memory.md"},
+	"pins":           {"content", ".odo/pins.md"},
+	"index":          {"content", "wiki/index.md"},
+	"memoryMap":      {"block", "odo#memory-map"},
+	"todo":           {"block", "journal#todo"},
+	"resume":         {"block", "<note>#open-loops (key carries the note path)"},
+	"wiki":           {"presence", "per-note path — block hash sealed by recallWikiNotesCapped"},
+	"recall":         {"presence", "pairs with wiki"},
+	"skills":         {"presence", "per-skill path — block hash sealed by loadSkillsForPrompt"},
+	"skillReceipts":  {"presence", "pairs with skills"},
+	"cross":          {"presence", "per-source chunk — sha sealed by crossWsBlock"},
+	"crossItems":     {"presence", "pairs with cross"},
+	"replay":         {"exempt", "structural sub-receipt (first/last/after/bytes/dropped_seqs)"},
+	"replayFirst":    {"exempt", "part of the replay sub-receipt"},
+	"replayLast":     {"exempt", "part of the replay sub-receipt"},
+	"replayAfter":    {"exempt", "part of the replay sub-receipt"},
+	"replayDropped":  {"exempt", "part of the replay sub-receipt (nil without drops)"},
+	"receipt":        {"exempt", "the receipt map itself"},
+	"recallHeldBack": {"exempt", "journaled as the recall_held_back count fact"},
+}
+
+func TestMemoryLayersReceiptCoverageReflect(t *testing.T) {
+	typ := reflect.TypeOf(memoryLayers{})
+	for i := range typ.NumField() {
+		if name := typ.Field(i).Name; receiptClassTable[name].class == "" {
+			t.Errorf("memoryLayers field %q unclassified — receipt it or name the exemption", name)
+		}
+	}
+	for name := range receiptClassTable {
+		if _, ok := typ.FieldByName(name); !ok {
+			t.Errorf("class table row %q names no memoryLayers field — stale row", name)
+		}
+	}
+
+	// Full assemblies: a cold one (fold boundary, empty replay → resume
+	// card) and a warm one (turns after the boundary → replay window) —
+	// every classified key lands, and the gate passes both.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_REGISTRY_PATH", filepath.Join(t.TempDir(), "projects.json"))
+	root := t.TempDir()
+	writeUserMD(t, home, "# durable principles\n")
+	writeFile := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(".odo/memory.md", "# zeta rules\n")
+	writeFile(".odo/pins.md", "zeta pin\n")
+	writeFile(".odo/skills/zeta-flow.md", "---\nname: zeta-flow\ndescription: zeta steps\nkeywords: [zeta]\n---\n\nDo the zeta.\n")
+	writeFile("wiki/index.md", "# zeta index\n")
+	writeEpochNote(t, root, "main-epoch-3", "# Epoch 3\n\nzeta decision log.\n\n## Open loops\n\n- finish the zeta migration\n")
+	writeTopicPage(t, root, "zeta-topic", "# Zeta\n\nzeta surfaced here. (ui-epoch-2)\n")
+	writeEpochNote(t, root, "ui-epoch-2", "# UI 2\n\nzeta sibling content\n")
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "journal.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	p, err := st.CreateOrGetProject(ctx, root, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := st.CreateOrGetWorkstream(ctx, p.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := st.CreateConversation(ctx, w.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(st, root, nil, nil)
+	append := func(evType string, payload map[string]interface{}) {
+		t.Helper()
+		if _, err := st.AppendEvent(ctx, c.ID, evType, mustJSON(payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	append(store.EventUserMessage, map[string]interface{}{"text": "zeta ask"})
+	append(store.EventAgentText, map[string]interface{}{"text": "zeta answer"})
+	append(store.EventReviewAction, map[string]interface{}{"action": "distill", "last_seq": 2})
+	if _, err := s.mergeTodoOps(ctx, c.ID, "agent", []todoOp{{Op: todoOpAdd, Text: "zeta cleanup"}}, nil, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(name string, ml memoryLayers) {
+		t.Helper()
+		for field, body := range map[string]string{
+			"user": ml.user, "project": ml.project, "pins": ml.pins, "index": ml.index,
+			"memoryMap": ml.memoryMap, "todo": ml.todo, "skills": ml.skills,
+			"wiki": ml.wiki, "cross": ml.cross,
+		} {
+			if body == "" {
+				t.Errorf("%s: layer %s assembled empty — fixture must cover every field", name, field)
+			}
+		}
+		for k, want := range map[string]string{
+			"~/.odo/user.md": ml.user, ".odo/memory.md": ml.project, ".odo/pins.md": ml.pins,
+			"wiki/index.md": ml.index, "odo#memory-map": ml.memoryMap, "journal#todo": ml.todo,
+		} {
+			if got, ok := ml.receipt[k]; !ok || got != sha16([]byte(want)) {
+				t.Errorf("%s: receipt[%q] = %q ok=%v, want sha16 of the injected body", name, k, got, ok)
+			}
+		}
+		for _, it := range ml.recall {
+			if _, ok := ml.receipt[it.path]; !ok {
+				t.Errorf("%s: recalled note %q lacks a receipt entry", name, it.path)
+			}
+		}
+		for _, sr := range ml.skillReceipts {
+			if _, ok := ml.receipt[sr.path]; !ok {
+				t.Errorf("%s: skill block %q lacks a receipt entry", name, sr.path)
+			}
+		}
+		for _, src := range ml.crossItems {
+			if _, ok := ml.receipt[src.path]; !ok {
+				t.Errorf("%s: cross chunk %q lacks a receipt entry", name, src.path)
+			}
+		}
+		pr := buildPrompt("zeta next steps", nil, ml)
+		if err := assertPromptReceipts(ml, pr, promptReceiptPayload(ml, pr)); err != nil {
+			t.Errorf("%s: full assembly refused: %v", name, err)
+		}
+	}
+
+	cold := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	if cold.resume == "" || cold.replay != "" {
+		t.Fatalf("cold assembly: resume present=%v replay empty=%v, want card + no replay", cold.resume != "", cold.replay == "")
+	}
+	loops := 0
+	for k, v := range cold.receipt {
+		if strings.HasSuffix(k, "#open-loops") {
+			loops++
+			if v != sha16([]byte(cold.resume)) {
+				t.Errorf("open-loops receipt = %s, want sha16 of the card", v)
+			}
+		}
+	}
+	if loops != 1 {
+		t.Errorf("open-loops receipt entries = %d, want exactly 1", loops)
+	}
+	check("cold", cold)
+
+	append(store.EventUserMessage, map[string]interface{}{"text": "zeta follow-up"})
+	append(store.EventAgentText, map[string]interface{}{"text": "zeta done"})
+	warm := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	if warm.replay == "" || warm.resume != "" {
+		t.Fatalf("warm assembly: replay present=%v resume empty=%v, want replay + no card", warm.replay != "", warm.resume == "")
+	}
+	check("warm", warm)
+	// The replay rides a structural sub-receipt instead of a content hash.
+	payload := promptReceiptPayload(warm, buildPrompt("zeta next steps", nil, warm))
+	if _, ok := payload["replay"]; !ok {
+		t.Error("warm payload lacks the replay sub-receipt")
+	}
+}
+
+// TestSendJournalsPromptReceiptClosure: the send's user_message closure
+// (total_prompt_bytes, prompt_sha16) byte-matches the exact prompt the
+// adapter captured, and the injected read-back map is receipted under
+// odo#memory-map (receipted key + recomputable hash).
+func TestSendJournalsPromptReceiptClosure(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	writeEpochNote(t, root, "main-epoch-1", "Authentication uses JWT with refresh tokens.\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	const text = "Explain JWT auth"
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: text})
+	rig.pollUntilDone(t, convID)
+
+	var p struct {
+		Total   int               `json:"total_prompt_bytes"`
+		SHA     string            `json:"prompt_sha16"`
+		Receipt map[string]string `json:"receipt"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(promptFileForText(t, root, text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Total != len(b) {
+		t.Errorf("total_prompt_bytes = %d, want %d (captured prompt bytes)", p.Total, len(b))
+	}
+	if p.SHA != sha16(b) {
+		t.Errorf("prompt_sha16 = %s, want %s (captured prompt bytes)", p.SHA, sha16(b))
+	}
+	sha, ok := p.Receipt["odo#memory-map"]
+	if !ok {
+		t.Fatal("odo#memory-map absent — the wiki dir exists so the read-back map was injected")
+	}
+	mapBlock := memoryMapBlock(root)
+	if want := sha16([]byte(mapBlock)); sha != want {
+		t.Errorf("odo#memory-map = %s, want %s (sha16 of the injected block)", sha, want)
+	}
+	if !strings.Contains(string(b), mapBlock) {
+		t.Error("captured prompt lacks the read-back map body the receipt attests")
+	}
+}
+
+// countingAdapter records adapter starts (the fail-closed drill's "stub
+// adapter zero starts" probe); the rest of the contract is inert.
+type countingAdapter struct{ starts int }
+
+func (c *countingAdapter) Start(_ context.Context, _ string, _ string) (string, error) {
+	c.starts++
+	return "counting-run", nil
+}
+func (c *countingAdapter) Send(_ context.Context, _, _ string) error { return nil }
+func (c *countingAdapter) Events(_ context.Context, _ string, _ int) ([]adapter.AgentEvent, error) {
+	return nil, nil
+}
+func (c *countingAdapter) Cancel(_ context.Context, _ string) error { return nil }
+func (c *countingAdapter) Close(_ context.Context, _ string) error  { return nil }
+
+// TestSendFailsClosedOnReceiptBreach: with a receipt diverging from the
+// injected layers (test seam simulating the production gap this gate
+// guards), the send journals the attempt user_message, refuses via the
+// existent agent_error, and the adapter records ZERO starts.
+func TestSendFailsClosedOnReceiptBreach(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	// Seed the index so the receipt legitimately carries it; the seam then
+	// drops exactly that entry between assembly and the gate.
+	if err := os.MkdirAll(filepath.Join(root, "wiki"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "wiki", "index.md"), []byte("# index\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	fake := &countingAdapter{}
+	rig.server.RegisterAdapter("countstub", fake)
+	rig.server.receiptBreachForTest = func(ml *memoryLayers) { delete(ml.receipt, "wiki/index.md") }
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "hi", Adapter: "countstub"})
+	if !strings.Contains(resp.Error, "prompt receipt assertion failed") {
+		t.Errorf("error = %q, want the assertion refusal", resp.Error)
+	}
+	if fake.starts != 0 {
+		t.Errorf("adapter starts = %d, want 0 (refusal must precede adapter start)", fake.starts)
+	}
+	// Journal-first: attempt user_message, then the agent_error naming the
+	// breach — both on record.
+	if got, want := fmt.Sprint(rig.allEventTypes(t, convID)), "[user_message agent_error]"; got != want {
+		t.Errorf("events = %s, want %s", got, want)
+	}
+	var errText string
+	for _, ev := range mustListEvents(t, rig.store, convID) {
+		if ev.Type == store.EventAgentError {
+			var p struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(ev.Payload, &p)
+			errText = p.Error
+		}
+	}
+	if !strings.Contains(errText, "missing entry") {
+		t.Errorf("agent_error = %q, want it to name the missing receipt entry", errText)
+	}
+}
+
+// TestContinuationJournalsRunPrompt: a steer-queued continuation anchors
+// its unified receipt closure on review_action{action:"run_prompt",
+// origin:"continuation"} (actor:auto_panel so the fold whitelist excludes
+// it) — byte-matching the continuation's captured prompt — and journals NO
+// user_message duplicate (the steers are already journaled).
+func TestContinuationJournalsRunPrompt(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	writeEpochNote(t, root, "main-epoch-1", "zeta context\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "zeta work"})
+	const steerText = "continue the zeta work"
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: steerText, Steer: true})
+	rig.pollUntilDone(t, convID)
+
+	// The continuation admission journals the row BEFORE its adapter
+	// starts (journal-first) — wait for it, then drain the run it spawned.
+	deadline := time.Now().Add(15 * time.Second)
+	var row map[string]interface{}
+	for row == nil {
+		for _, ev := range mustListEvents(t, rig.store, convID) {
+			if ev.Type != store.EventReviewAction {
+				continue
+			}
+			var p map[string]interface{}
+			if json.Unmarshal(ev.Payload, &p) == nil && p["action"] == "run_prompt" {
+				row = p
+				break
+			}
+		}
+		if row == nil {
+			if time.Now().After(deadline) {
+				t.Fatal("the continuation's run_prompt row never journaled")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	pollDone(t, rig, convID)
+
+	if got := row["origin"]; got != "continuation" {
+		t.Errorf("origin = %v, want continuation (steer chain, not retry)", got)
+	}
+	if got := row["actor"]; got != autoActor {
+		t.Errorf("actor = %v, want %q — the Item-1 fold whitelist keys on it", got, autoActor)
+	}
+	b, err := os.ReadFile(promptFileForText(t, root, steerText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := row["prompt_sha16"]; got != sha16(b) {
+		t.Errorf("run_prompt prompt_sha16 = %v, want %s (captured continuation prompt)", got, sha16(b))
+	}
+	if got, ok := row["total_prompt_bytes"].(float64); !ok || int(got) != len(b) {
+		t.Errorf("run_prompt total_prompt_bytes = %v, want %d", row["total_prompt_bytes"], len(b))
+	}
+	receipt, _ := row["receipt"].(map[string]interface{})
+	if _, ok := receipt["odo#memory-map"]; !ok {
+		t.Errorf("run_prompt receipt lacks odo#memory-map: %v", row["receipt"])
+	}
+	users := 0
+	for _, ev := range mustListEvents(t, rig.store, convID) {
+		if ev.Type == store.EventUserMessage {
+			users++
+		}
+	}
+	if users != 2 {
+		t.Errorf("user_message count = %d, want 2 (send + steer; continuation wrote no duplicate)", users)
+	}
 }

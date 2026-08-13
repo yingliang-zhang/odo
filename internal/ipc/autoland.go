@@ -349,13 +349,16 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 
 	// Evidence before action: the unanimous verdict must be on the journal
 	// BEFORE the diff lands. A broken journal means no landing — an
-	// unrecorded auto-accept is the one thing worse than none.
+	// unrecorded auto-accept is the one thing worse than none. patch_sha16
+	// (M18 W2 item 4) attests the exact bytes the panel judged (data was
+	// read above; an unreadable diff blocked as unparseable_diff already).
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
 		"action":            "moa_review",
 		"diff_id":           d.ID,
 		"actor":             autoActor,
 		"reviews":           reviews,
 		"consensus_verdict": cv,
+		"patch_sha16":       sha16(data),
 	})); err != nil {
 		log.Printf("auto-land: journal panel verdict for diff %d: %v (NOT landing)", d.ID, err)
 		return

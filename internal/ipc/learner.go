@@ -73,6 +73,106 @@ func readFileFull(path string) string {
 	return string(b)
 }
 
+// ruleSnapshotTarget is one human-editable rule file the snapshotter
+// materializes into the journal: the memory_update layer key, the source
+// key the send path's injection receipt uses for the same file, the
+// absolute fs path, and the injection cap the layer reader applies (the
+// truncation detector for the capped flag).
+type ruleSnapshotTarget struct {
+	layer, source, path string
+	cap                 int
+}
+
+// journalRuleSnapshots materializes the always-injected rule files into the
+// journal as memory_update{layer, cause:"snapshot"} rows, one per layer
+// whose injected bytes changed since that layer's last snapshot (W2 item
+// 3). The injection receipt on a user_message hashes the injected bytes but
+// cannot reconstruct them; the snapshot pins the bytes themselves, so "what
+// did seq N inject?" replays as the newest snapshot of that source at
+// seq ≤ N. Callers (runMemoryLayers, slashContextBlock) run BEFORE
+// journaling the user_message the prompt serves, so the rows land ahead of
+// it and the seq-N receipt entry for a source equals the newest snapshot
+// sha of that source at seq ≤ N.
+//
+// The observed bytes are the exact injected bytes: the same file the layer
+// reader reads, run through the same capAtLineBoundary cut, with
+// capped:true only when the read truncated. The last-snapshot baseline is a
+// newest-first scan of the CALLER-fetched events (TodoStateFromEvents
+// precedent — no new store query, no cache). First sight with non-empty
+// content journals; a changed sha journals (a file that became empty is a
+// real change: the sha16("") row records the layer draining out of the
+// prompt); an unchanged file journals nothing. Fail-open: an append error
+// rides a best-effort snapshot_failed row and the caller proceeds
+// (appendLedger/journalLadder precedent — a broken journal must not wedge
+// user sends). The slash project-only scope gates user.md INJECTION, not
+// this materialization: a row records what the file held and pairs with a
+// receipt entry wherever one exists. The row carries no before key — the
+// previous content is derivable from the layer's previous snapshot row.
+func (s *Server) journalRuleSnapshots(ctx context.Context, convID int64, events []store.Event) {
+	targets := []ruleSnapshotTarget{
+		{layer: "memory", source: ".odo/memory.md", path: filepath.Join(s.projectRoot, ".odo", memoryFileName), cap: memoryCap},
+		{layer: "pins", source: ".odo/pins.md", path: pinsPath(s.projectRoot), cap: pinsCap},
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		targets = append(targets, ruleSnapshotTarget{layer: "user", source: "~/.odo/user.md", path: filepath.Join(home, ".odo", "user.md"), cap: userMemoryCap})
+	}
+	// Newest-first scan for each layer's last snapshot sha, done as soon as
+	// every layer resolved.
+	lastSha := map[string]string{}
+	for i := len(events) - 1; i >= 0 && len(lastSha) < len(targets); i-- {
+		if events[i].Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Layer string `json:"layer"`
+			Cause string `json:"cause"`
+			Sha   string `json:"sha"`
+		}
+		if err := json.Unmarshal(events[i].Payload, &p); err != nil || p.Cause != "snapshot" {
+			continue
+		}
+		switch p.Layer {
+		case "memory", "pins", "user":
+			if _, seen := lastSha[p.Layer]; !seen {
+				lastSha[p.Layer] = p.Sha
+			}
+		}
+	}
+	for _, tg := range targets {
+		raw, err := os.ReadFile(tg.path)
+		content, capped := "", false
+		if err == nil {
+			capped = len(raw) > tg.cap
+			content = capAtLineBoundary(string(raw), tg.cap)
+		}
+		sha := sha16([]byte(content))
+		prev, seen := lastSha[tg.layer]
+		if seen && prev == sha {
+			continue
+		}
+		if !seen && content == "" {
+			continue // absent/empty file at first sight: nothing to materialize
+		}
+		payload := map[string]interface{}{
+			"layer":   tg.layer,
+			"cause":   "snapshot",
+			"source":  tg.source,
+			"content": content,
+			"sha":     sha,
+		}
+		if capped {
+			payload["capped"] = true
+		}
+		if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(payload)); err != nil {
+			_, _ = s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+				"layer":  tg.layer,
+				"cause":  "snapshot_failed",
+				"detail": err.Error(),
+			}))
+		}
+	}
+}
+
 // memoryLineRe parses one daemon-written rule line:
 // `- <rule> — cites: <note>; reaffirmed: <epoch>`. The cites group stops at
 // ';' so `reaffirmed` is optional (M4 format).

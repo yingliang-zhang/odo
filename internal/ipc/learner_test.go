@@ -509,12 +509,18 @@ func seqsOf(events []store.Event) []int {
 
 // TestDistillPromptOmission pins the over-budget render at the real cap:
 // the prompt declares the omitted seq range and renders only the tail.
+// M18 W2 item 2: the returned omission struct carries the SAME numbers the
+// prompt's omission line declares (threaded from the one capEvents cut);
+// under budget both are zero.
 func TestDistillPromptOmission(t *testing.T) {
 	ev := func(seq int, fill byte, size int) store.Event {
 		return store.Event{Seq: seq, Type: "agent_text", Payload: json.RawMessage("key-" + strings.Repeat(string(fill), size))}
 	}
 	events := []store.Event{ev(1, 'A', distillPromptBytesCap), ev(2, 'B', 100), ev(3, 'C', 100)}
-	p := distillPrompt(events)
+	p, om := distillPrompt(events)
+	if om != (omission{count: 1, firstSeq: 1, lastSeq: 1}) {
+		t.Errorf("omission = %+v, want {count:1 firstSeq:1 lastSeq:1} (the prompt line's numbers)", om)
+	}
 	if !strings.Contains(p, "1 older event(s), seq 1–1, omitted") {
 		t.Errorf("prompt missing omission declaration:\n%.300s", p)
 	}
@@ -524,8 +530,18 @@ func TestDistillPromptOmission(t *testing.T) {
 	if !strings.Contains(p, "(seq 3)") {
 		t.Errorf("prompt missing the newest event")
 	}
-	if small := distillPrompt([]store.Event{ev(1, 'A', 10)}); strings.Contains(small, "omitted") {
-		t.Errorf("under-budget prompt carries the omission header")
+	// Two-cap window: the newest event alone is kept, both older events are
+	// the held-back prefix — struct and line must name range 1–2.
+	twoCap := []store.Event{ev(1, 'A', distillPromptBytesCap), ev(2, 'B', distillPromptBytesCap), ev(3, 'C', distillPromptBytesCap)}
+	p2, om2 := distillPrompt(twoCap)
+	if om2 != (omission{count: 2, firstSeq: 1, lastSeq: 2}) {
+		t.Errorf("two-cap omission = %+v, want {count:2 firstSeq:1 lastSeq:2}", om2)
+	}
+	if !strings.Contains(p2, "2 older event(s), seq 1–2, omitted") {
+		t.Errorf("two-cap prompt missing omission declaration:\n%.300s", p2)
+	}
+	if small, omSmall := distillPrompt([]store.Event{ev(1, 'A', 10)}); strings.Contains(small, "omitted") || omSmall != (omission{}) {
+		t.Errorf("under-budget prompt/omission = (%q, %+v), want the zero struct and no header", small[:40], omSmall)
 	}
 }
 
@@ -553,7 +569,7 @@ func TestDistillRenderFilter(t *testing.T) {
 		{Seq: 9, Type: "agent_text", Payload: json.RawMessage(`{"text":"the user-facing summary"}`)},
 	}
 
-	p := distillPrompt(events)
+	p, _ := distillPrompt(events)
 	for _, want := range []string{
 		`### user_message (seq 1)` + "\n" + `{"text":"ship the fix"}`,
 		fmt.Sprintf(`### agent_thinking (seq 2) [thinking omitted — %d bytes]`, len(thinking)),
@@ -605,6 +621,85 @@ func TestDistillRenderFilter(t *testing.T) {
 	}
 	if stats := measureWindow(big); stats.eligibleBytes >= distillPromptBytesCap {
 		t.Errorf("measureWindow(10MB thinking) = %d bytes, want ≪ 256 KiB post-filter", stats.eligibleBytes)
+	}
+}
+
+// TestDistillRenderAutoPanelWhitelist pins the M18 W2 fold whitelist:
+// auto-panel churn rows (moa_review / auto_revise_round / run_prompt with
+// actor:auto_panel) render NOTHING; kept pipeline outcomes gain an "actor"
+// key and auto_land_blocked additionally carries its reason; human rows
+// (no actor) render byte-identical to the pre-whitelist shape.
+func TestDistillRenderAutoPanelWhitelist(t *testing.T) {
+	excluded := []store.Event{
+		{Seq: 1, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"moa_review","actor":"auto_panel","diff_id":7,"consensus_verdict":"accept","reviews":[{"model":"m1","verdict":"accept","body":"long panel verdict body"}]}`)},
+		{Seq: 2, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":7,"origin_diff_id":7,"patch_sha16":"0123456789abcdef","comments_sha16":"fedcba9876543210"}`)},
+		{Seq: 3, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"run_prompt","actor":"auto_panel","origin":"continuation","receipt":{"odo#user":"abc"},"total_prompt_bytes":42}`)},
+	}
+	for _, ev := range excluded {
+		if got := distillRender(ev); got != "" {
+			t.Errorf("distillRender(%s) = %q, want \"\" (auto-panel churn never folds)", ev.Payload, got)
+		}
+	}
+
+	review := func(seq int, payload string) store.Event {
+		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(payload)}
+	}
+	for _, tc := range []struct {
+		name string
+		ev   store.Event
+		want string
+	}{
+		// Kept pipeline outcomes: actor carried; blocked rows also keep the
+		// reason — that IS the open loop.
+		{"auto accept", review(4, `{"action":"accept","actor":"auto_panel","diff_id":8}`),
+			"### review_action (seq 4) {\"action\":\"accept\",\"actor\":\"auto_panel\"}\n\n"},
+		{"auto blocked", review(5, `{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_mixed","diff_id":9}`),
+			"### review_action (seq 5) {\"action\":\"auto_land_blocked\",\"actor\":\"auto_panel\",\"reason\":\"panel_mixed\"}\n\n"},
+		// Regression pins: human rows (actor absent) render byte-identical
+		// to the pre-whitelist shape — no "actor" key ever emitted.
+		{"human moa_review", review(6, `{"action":"moa_review","consensus_verdict":"reject","reviews":[{"model":"m1","verdict":"reject","body":"very long review text"}]}`),
+			"### review_action (seq 6) {\"action\":\"moa_review\",\"verdict\":\"reject\"}\n\n"},
+		{"human accept", review(7, `{"action":"accept","diff_id":3}`),
+			"### review_action (seq 7) {\"action\":\"accept\"}\n\n"},
+		{"human distill marker", review(8, `{"action":"distill","epoch":3,"duration_ms":1234}`),
+			"### review_action (seq 8) {\"action\":\"distill\"}\n\n"},
+		// A churn ACTION with a non-panel actor is kept (only the
+		// auto_panel provenance is whitelisted out).
+		{"human-run revise round", review(9, `{"action":"auto_revise_round","actor":"human","round":1,"diff_id":7}`),
+			"### review_action (seq 9) {\"action\":\"auto_revise_round\",\"actor\":\"human\"}\n\n"},
+	} {
+		if got := distillRender(tc.ev); got != tc.want {
+			t.Errorf("%s: distillRender = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestDistillRenderSizeWhitelistAgreement pins M17 F1 under the whitelist:
+// distillRenderSize measures len(distillRender) for review_action, so a
+// row renders "" if and only if its size is 0 — eligibility accounting and
+// the fold prompt agree byte-for-byte across every row shape.
+func TestDistillRenderSizeWhitelistAgreement(t *testing.T) {
+	payloads := []string{
+		`{"action":"moa_review","actor":"auto_panel","diff_id":7,"consensus_verdict":"accept","reviews":[{"model":"m1","verdict":"accept","body":"long"}]}`,
+		`{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":7,"origin_diff_id":7,"patch_sha16":"aaa","comments_sha16":"bbb"}`,
+		`{"action":"run_prompt","actor":"auto_panel","origin":"retry","receipt":{}}`,
+		`{"action":"accept","actor":"auto_panel","diff_id":8}`,
+		`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_mixed","diff_id":9}`,
+		`{"action":"auto_land_blocked","actor":"auto_panel","diff_id":9}`, // reason absent: no key emitted
+		`{"action":"moa_review","consensus_verdict":"reject","reviews":[{"model":"m1","verdict":"reject"}]}`,
+		`{"action":"accept","diff_id":3}`,
+		`{"action":"auto_revise_round","actor":"human","round":1,"diff_id":7}`,
+		`garbage`,
+	}
+	for i, payload := range payloads {
+		ev := store.Event{Seq: i + 1, Type: store.EventReviewAction, Payload: json.RawMessage(payload)}
+		render := distillRender(ev)
+		if size := distillRenderSize(ev); size != len(render) {
+			t.Errorf("payload[%d]: distillRenderSize = %d, len(distillRender) = %d — render/accounting disagree", i, size, len(render))
+		}
+		if (render == "") != (distillRenderSize(ev) == 0) {
+			t.Errorf("payload[%d]: render %q vs size %d — '' must be exactly size 0", i, render, distillRenderSize(ev))
+		}
 	}
 }
 
@@ -877,9 +972,10 @@ func TestInjectionReceiptHashesFrozen(t *testing.T) {
 	}
 	receipt := receiptFromEvent(t, sent.Event)
 	wantReceipt := map[string]string{
-		"~/.odo/user.md": wantUserHash,
-		".odo/memory.md": wantMemHash,
-		notePath:         wantNoteHash,
+		"~/.odo/user.md":  wantUserHash,
+		".odo/memory.md":  wantMemHash,
+		notePath:          wantNoteHash,
+		"odo#memory-map":  sha16([]byte(memoryMapBlock(root))),
 	}
 	if len(receipt) != len(wantReceipt) {
 		t.Fatalf("receipt = %v, want exactly %v", receipt, wantReceipt)
@@ -902,8 +998,9 @@ func TestInjectionReceiptHashesFrozen(t *testing.T) {
 	if _, ok := receipt2["~/.odo/user.md"]; ok {
 		t.Errorf("receipt after removing user.md still has the user.md key: %v", receipt2)
 	}
-	if len(receipt2) != 2 || receipt2[".odo/memory.md"] != wantMemHash || receipt2[notePath] != wantNoteHash {
-		t.Errorf("receipt2 = %v, want memory.md + note keys only", receipt2)
+	if len(receipt2) != 3 || receipt2[".odo/memory.md"] != wantMemHash || receipt2[notePath] != wantNoteHash ||
+		receipt2["odo#memory-map"] != sha16([]byte(memoryMapBlock(root))) {
+		t.Errorf("receipt2 = %v, want memory.md + note + odo#memory-map keys", receipt2)
 	}
 	rig.pollUntilDone(t, convID)
 

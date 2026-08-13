@@ -343,8 +343,10 @@ func TestIndexInjectedIntoPrompt(t *testing.T) {
 		t.Fatalf("recall = %v, want [wiki/index.md]", recall)
 	}
 	receipt := receiptFromEvent(t, sent.Event)
-	if len(receipt) != 1 || receipt["wiki/index.md"] != sha16([]byte(indexContent)) {
-		t.Errorf("receipt = %v, want {wiki/index.md: %s}", receipt, sha16([]byte(indexContent)))
+	if len(receipt) != 2 || receipt["wiki/index.md"] != sha16([]byte(indexContent)) ||
+		receipt["odo#memory-map"] != sha16([]byte(memoryMapBlock(root))) {
+		t.Errorf("receipt = %v, want {wiki/index.md: %s, odo#memory-map: %s}",
+			receipt, sha16([]byte(indexContent)), sha16([]byte(memoryMapBlock(root))))
 	}
 
 	done := rig.pollUntilDone(t, convID)
@@ -521,10 +523,11 @@ func TestInjectionReceiptWithIndexAndPins(t *testing.T) {
 	receipt := receiptFromEvent(t, sent.Event)
 	wantReceipt := map[string]string{
 		"~/.odo/user.md": "99ab47d9f8d99c16",
-		".odo/memory.md": "46eb86bbcdf4eeda",
-		".odo/pins.md":   "4ee15cc70447e2dd",
-		"wiki/index.md":  "beb991d524a9dab3",
-		notePath:         "f95c368d357f9829",
+		".odo/memory.md":  "46eb86bbcdf4eeda",
+		".odo/pins.md":    "4ee15cc70447e2dd",
+		"wiki/index.md":   "beb991d524a9dab3",
+		notePath:          "f95c368d357f9829",
+		"odo#memory-map":  sha16([]byte(memoryMapBlock(root))),
 	}
 	if len(receipt) != len(wantReceipt) {
 		t.Fatalf("receipt = %v, want %v", receipt, wantReceipt)

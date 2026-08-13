@@ -66,6 +66,64 @@ func TestRecallCapOmittedMarker(t *testing.T) {
 	}
 }
 
+// TestRecallHeldBackJournaled (M18 W2 item 4): the send path journals the
+// recall cap's held-back count on the user_message as recall_held_back —
+// the SAME number the injected "N more note(s) held back" marker names —
+// so the journal records what the prompt merely declared. Under the cap
+// the key is absent (optional-when-absent).
+func TestRecallHeldBackJournaled(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	for n := 1; n <= 7; n++ {
+		writeEpochNote(t, root, fmt.Sprintf("main-epoch-%d", n), strings.Repeat("a", 2048))
+	}
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "what did we decide"})
+	var p struct {
+		HeldBack *int                     `json:"recall_held_back"`
+		Recall   []map[string]interface{} `json:"recall"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if p.HeldBack == nil {
+		t.Fatal("recall_held_back absent on an over-cap send — want the held-back note count")
+	}
+	// Agreement with the recall layer (the SAME number the injected marker
+	// line declares): recalled items + held-back notes = the 7 seeded.
+	if got := len(p.Recall) + *p.HeldBack; got != 7 {
+		t.Errorf("recall items (%d) + held_back (%d) = %d, want 7", len(p.Recall), *p.HeldBack, got)
+	}
+	if *p.HeldBack < 1 {
+		t.Errorf("recall_held_back = %d, want ≥1 on a >12 KiB note corpus", *p.HeldBack)
+	}
+	rig.pollUntilDone(t, convID)
+
+	// Under the cap the key is absent.
+	root2 := initRepo(t)
+	home2 := t.TempDir()
+	t.Setenv("HOME", home2)
+	writeEpochNote(t, root2, "main-epoch-1", "short\n")
+	rig2 := startRig(t, root2)
+	defer rig2.stop(t)
+	boot2 := rig2.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root2})
+	sent2 := rig2.call(t, Request{Cmd: CmdSendMessage, ConversationID: boot2.Conversation.ID, Text: "hi"})
+	var p2 map[string]interface{}
+	if err := json.Unmarshal(sent2.Event.Payload, &p2); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if _, ok := p2["recall_held_back"]; ok {
+		t.Errorf("recall_held_back present under the cap: %v", p2["recall_held_back"])
+	}
+	rig2.pollUntilDone(t, boot2.Conversation.ID)
+}
+
 // eventSeqByAction returns the seq of the last review_action with the given
 // action (0 when absent).
 func eventSeqByAction(t *testing.T, events []store.Event, action string) int {

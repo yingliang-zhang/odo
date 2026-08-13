@@ -550,17 +550,33 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 		return false, "workstream_lookup"
 	}
 
+	// M18 W2 item 4: assemble FIRST — the receipt closure rides the
+	// user_message, so assembly (and the fail-closed assertion) must run
+	// before journaling; the synthesized text still lands at the prompt's
+	// tail and the replay excludes it. On a breach the caller's
+	// revise_spawn_failed ledger row closes the contract before any
+	// adapter start (evidence journaled first — the gates above already
+	// passed, nothing else was written).
+	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, d.ConversationID, prompt)
+	if assertErr != nil {
+		return false, "receipt_assert_failed"
+	}
+
 	// The synthesized repair prompt IS the run's user_message, journaled
 	// verbatim with the machine-readable marker (lineage, distill
-	// tombstone, audit) before the round row.
-	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventUserMessage, mustJSON(map[string]interface{}{
-		"text": prompt,
-		"auto_revise": map[string]interface{}{
-			"round":          round,
-			"origin_diff_id": originID,
-			"origin_goal":    originGoal,
-		},
-	})); err != nil {
+	// tombstone, audit) before the round row; W2 item 4 extends the
+	// payload with the unified receipt closure (marker untouched).
+	msgPayload := map[string]interface{}{}
+	for k, v := range receiptPayload {
+		msgPayload[k] = v
+	}
+	msgPayload["text"] = prompt
+	msgPayload["auto_revise"] = map[string]interface{}{
+		"round":          round,
+		"origin_diff_id": originID,
+		"origin_goal":    originGoal,
+	}
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventUserMessage, mustJSON(msgPayload)); err != nil {
 		return false, "journal_user_message: " + err.Error()
 	}
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
@@ -577,10 +593,9 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 	}
 
 	// Fresh run, same conversation+worktree semantics as the original:
-	// memory layers re-read fresh (ADR-0003), fresh worktree from current
-	// HEAD — the retire path owns the original worktree, never this run.
-	ml := s.runMemoryLayers(ctx, w.Name, d.ConversationID, prompt)
-	fullPrompt := buildPrompt(prompt, nil, ml)
+	// memory layers re-read fresh by assembleRunPrompt above (ADR-0003),
+	// fresh worktree from current HEAD — the retire path owns the
+	// original worktree, never this run.
 	runDirID := worktree.NewRunID()
 	wtPath, err := s.mgr.Create(runDirID)
 	if err != nil {

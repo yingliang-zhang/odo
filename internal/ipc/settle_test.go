@@ -488,6 +488,7 @@ func TestSettleNeedsFixesReviseLands(t *testing.T) {
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
 	convID := boot.Conversation.ID
+
 	const goal = "Add hello.txt with the greeting"
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: goal})
 	done := pollDone(t, rig, convID)
@@ -579,6 +580,73 @@ func TestSettleNeedsFixesReviseLands(t *testing.T) {
 	d1row, _ := rig.store.GetDiff(context.Background(), d1)
 	if d0row.Status != store.DiffPending || d1row.Status != store.DiffAccepted {
 		t.Errorf("diff statuses = %q/%q, want pending (superseded, human-decidable)/accepted", d0row.Status, d1row.Status)
+	}
+}
+
+// TestReviseUserMessageCarriesReceipt (M18 W2 item 4): the revise spawn's
+// user_message keeps its auto_revise marker AND carries the unified
+// receipt closure of the repair run prompt — the same model-visible ⇔
+// logged facts the send path journals, byte-matched against the captured
+// prompt.
+func TestReviseUserMessageCarriesReceipt(t *testing.T) {
+	rig := settleRig(t, func(call int64, model string) (int, string) {
+		switch {
+		case call <= 3: // round 0: zero rejects + needs_fixes → revise round 1
+			if model == "rm1" {
+				return 200, "ACCEPT\nship it"
+			}
+			return 200, "NEEDS_FIXES\nfix x"
+		default: // round 1: everyone accepts the repair
+			return 200, "ACCEPT\nlooks right now"
+		}
+	})
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
+	convID := boot.Conversation.ID
+
+	// W2: assert the receipt closure — one injectable layer must exist or
+	// the unified payload legitimately omits "receipt", so seed a rule
+	// file before the send (the revise's assembly re-reads it).
+	if err := os.WriteFile(filepath.Join(rig.root, ".odo", "memory.md"), []byte("revise receipt fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Add hello.txt with the greeting"})
+	pollDone(t, rig, convID)
+	sc := waitSettle(t, rig.store, convID, "revise round 1 spawn", func(sc settleScan) bool {
+		return len(sc.markers) == 1
+	})
+	pollDone(t, rig, convID) // drains the repair run
+
+	var payload map[string]interface{}
+	for _, ev := range mustListEvents(t, rig.store, convID) {
+		if ev.Seq == sc.markers[0].seq {
+			if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if payload == nil {
+		t.Fatal("the marker user_message was not found")
+	}
+	if _, ok := payload["auto_revise"]; !ok {
+		t.Error("auto_revise marker lost in the payload extension")
+	}
+	b, err := os.ReadFile(promptFileForText(t, rig.root, sc.markers[0].text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := payload["prompt_sha16"]; got != sha16(b) {
+		t.Errorf("revise prompt_sha16 = %v, want %s (captured repair prompt)", got, sha16(b))
+	}
+	if got, ok := payload["total_prompt_bytes"].(float64); !ok || int(got) != len(b) {
+		t.Errorf("revise total_prompt_bytes = %v, want %d", payload["total_prompt_bytes"], len(b))
+	}
+	if _, ok := payload["receipt"]; !ok {
+		keys := make([]string, 0, len(payload))
+		for k := range payload {
+			keys = append(keys, k)
+		}
+		t.Fatalf("revise user_message lacks the injection receipt; payload keys = %v", keys)
 	}
 }
 
