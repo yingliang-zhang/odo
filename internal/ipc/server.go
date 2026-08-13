@@ -2761,8 +2761,10 @@ func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response,
 // (memory.md, memory-archive.md, pins.md, ledger.md, journal.sqlite,
 // worktrees) and wiki/ (epoch notes, topics, index.md — derived artifacts
 // owned by the daemon, not the agent).
+// Case-insensitive: macOS APFS/HFS+ resolve .ODO/ and Wiki/ identically.
 func isProtectedPath(p string) bool {
-	return strings.HasPrefix(p, ".odo/") || strings.HasPrefix(p, "wiki/")
+	lp := strings.ToLower(p)
+	return strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/")
 }
 
 // rejectProtectedPaths errs when any patch path is protected. Callers pass

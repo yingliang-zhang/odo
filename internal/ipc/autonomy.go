@@ -173,7 +173,7 @@ func classifyDiff(stat git.PatchStat, newTopDir bool, inScope map[string]bool) s
 		return "C0"
 	}
 	for _, f := range stat.Files {
-		if strings.HasPrefix(f.Path, ".odo/") || strings.HasPrefix(f.Path, "wiki/") {
+		if isProtectedPath(f.Path) {
 			return "C0"
 		}
 	}

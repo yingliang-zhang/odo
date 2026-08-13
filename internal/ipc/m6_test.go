@@ -824,3 +824,43 @@ func eventsTypes(t *testing.T, rig *testRig, convID int64) []string {
 	}
 	return out
 }
+
+// TestRejectProtectedPathsCaseFold (Hole 3): case-variant protected prefixes
+// must be rejected — macOS APFS resolves .ODO/ and Wiki/ identically to
+// .odo/ and wiki/.
+func TestRejectProtectedPathsCaseFold(t *testing.T) {
+	for _, p := range []string{".ODO/memory.md", "Wiki/guide.md", ".Odo/x", "WIKI/y"} {
+		if err := rejectProtectedPaths([]string{p}); err == nil {
+			t.Errorf("rejectProtectedPaths(%q) should error (case-fold bypass)", p)
+		}
+	}
+	if err := rejectProtectedPaths([]string{"src/main.go"}); err != nil {
+		t.Errorf("rejectProtectedPaths(src/main.go) = %v, want nil", err)
+	}
+}
+
+// TestIsProtectedPathCaseFold (Hole 3): isProtectedPath must match
+// case-insensitively to prevent macOS APFS bypass.
+func TestIsProtectedPathCaseFold(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{".odo/memory.md", true},
+		{"wiki/guide.md", true},
+		{".ODO/memory.md", true},
+		{"Wiki/guide.md", true},
+		{".Odo/x", true},
+		{"WIKI/y", true},
+		{".oDo/config", true},
+		{"src/main.go", false},
+		{"README.md", false},
+		{".odo", false}, // no trailing slash — not a path under .odo/
+		{"wiki", false}, // same
+	}
+	for _, tc := range cases {
+		if got := isProtectedPath(tc.path); got != tc.want {
+			t.Errorf("isProtectedPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

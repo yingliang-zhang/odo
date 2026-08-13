@@ -52,6 +52,8 @@ func TestClassifyDiffBoundaries(t *testing.T) {
 		{"301 lines C0", lineCount(301), false, nil, "C0"},
 		{"protected .odo path C0", git.PatchStat{Files: []git.FileStat{fs(".odo/memory.md", 1, 0)}, Added: 1}, false, nil, "C0"},
 		{"protected wiki path C0", git.PatchStat{Files: []git.FileStat{fs("wiki/x.md", 1, 0)}, Added: 1}, false, nil, "C0"},
+		{"protected .odo path uppercase C0", git.PatchStat{Files: []git.FileStat{fs(".ODO/memory.md", 1, 0)}, Added: 1}, false, nil, "C0"},
+		{"protected wiki path mixed case C0", git.PatchStat{Files: []git.FileStat{fs("Wiki/guide.md", 1, 0)}, Added: 1}, false, nil, "C0"},
 		{"new top-level dir C0", lineCount(10), true, nil, "C0"},
 		{"docs + docs dir C1", git.PatchStat{
 			Files: []git.FileStat{fs("README.md", 3, 1), fs("docs/guide.txt", 2, 0)}, Added: 5, Removed: 1}, false, nil, "C1"},

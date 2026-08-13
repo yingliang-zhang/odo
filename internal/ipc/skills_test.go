@@ -323,3 +323,68 @@ func TestHandleDeleteSkill_MissingName(t *testing.T) {
 		t.Errorf("wrong error: %s", resp.Error)
 	}
 }
+
+// TestScanSkills_RejectsSymlinks verifies that a symlink in the skills
+// dir is never read (Hole 2: symlink confinement).
+func TestScanSkills_RejectsSymlinks(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	tmpProject := t.TempDir()
+
+	// A secret file outside the skills dir.
+	secretDir := t.TempDir()
+	secretPath := filepath.Join(secretDir, "id_rsa")
+	os.WriteFile(secretPath, []byte("SECRET KEY CONTENT"), 0o600)
+
+	// Symlink in project skills dir → secret file.
+	projDir := filepath.Join(tmpProject, ".odo", "skills")
+	os.MkdirAll(projDir, 0o755)
+	if err := os.Symlink(secretPath, filepath.Join(projDir, "evil.md")); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+
+	// Legitimate skill alongside.
+	os.WriteFile(filepath.Join(projDir, "legit.md"),
+		[]byte("---\nname: legit\n---\n\nBody"), 0o644)
+
+	entries := scanSkills(tmpProject)
+	if len(entries) != 1 || entries[0].info.Name != "legit" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.info.Name)
+		}
+		t.Fatalf("expected [legit], got %v (symlink must be rejected)", names)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.body, "SECRET KEY CONTENT") {
+			t.Error("symlink target content leaked into skill body")
+		}
+	}
+}
+
+// TestScanSkills_SymlinkInGlobalDir verifies the global skills dir also
+// rejects symlinks.
+func TestScanSkills_SymlinkInGlobalDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	tmpProject := t.TempDir()
+
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	os.WriteFile(secret, []byte("LEAKED"), 0o600)
+
+	globalDir := filepath.Join(tmpHome, ".odo", "skills")
+	os.MkdirAll(globalDir, 0o755)
+	if err := os.Symlink(secret, filepath.Join(globalDir, "link.md")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	entries := scanSkills(tmpProject)
+	for _, e := range entries {
+		if strings.Contains(e.body, "LEAKED") {
+			t.Error("global symlink leaked content into prompt")
+		}
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries (symlink rejected), got %d", len(entries))
+	}
+}

@@ -11,7 +11,9 @@ package ipc
 //
 //	moa_fs_root: absolute or ~/ path of the allowed root (default: ~)
 //	moa_fs_deny: comma-separated dirs to exclude, absolute or root-relative
-//	             (default: Music, Pictures, Movies, .ssh, .aws, .gnupg)
+//	             (default: Music, Pictures, Movies, .ssh, .aws, .gnupg,
+//	              .netrc, .kube, .docker, .npmrc, .pypirc,
+//	              .git-credentials)
 //
 // Home covers most secrets-in-dotfiles reality; .ssh/.aws/.gnupg are
 // hard-coded into the default deny because a /panel answer ships file
@@ -48,10 +50,16 @@ const (
 	fsGlobResultsCap = 500
 )
 
-// defaultFSDeny lists root-relative dirs excluded from every tool: Apple
-// app-content stores (user decision) plus the classic credential dirs.
+// defaultFSDeny lists root-relative paths (dirs and credential files)
+// excluded from every tool: Apple app-content stores (user decision) plus
+// credential dirs and dotfiles whose contents ship to the model gateway.
 // prefs moa_fs_deny replaces this list when present.
-var defaultFSDeny = []string{"Music", "Pictures", "Movies", ".ssh", ".aws", ".gnupg"}
+var defaultFSDeny = []string{
+	"Music", "Pictures", "Movies",
+	".ssh", ".aws", ".gnupg",
+	".netrc", ".kube", ".docker", ".npmrc", ".pypirc",
+	".git-credentials",
+}
 
 // errWalkAbort is the sentinel that stops a capped walk early; the concrete
 // cause rides on the executor-local state (match cap vs scan cap).
@@ -125,16 +133,19 @@ func (e *fsToolExecutor) display(p string) string {
 }
 
 // check enforces the root boundary and the deny prefixes on a cleaned,
-// absolute path.
+// absolute path. Matching is case-insensitive: macOS APFS/HFS+ resolve
+// .SSH/ and .Netrc identically to .ssh/ and .netrc.
 func (e *fsToolExecutor) check(p string) error {
 	if e.root == "" {
 		return fmt.Errorf("no allowed root (home dir unresolved)")
 	}
-	if p != e.root && !strings.HasPrefix(p, e.root+string(filepath.Separator)) {
+	lp := strings.ToLower(p)
+	if p != e.root && !strings.HasPrefix(lp, strings.ToLower(e.root)+string(filepath.Separator)) {
 		return fmt.Errorf("path %s is outside the allowed root %s", e.display(p), e.display(e.root))
 	}
 	for _, d := range e.deny {
-		if p == d || strings.HasPrefix(p, d+string(filepath.Separator)) {
+		ld := strings.ToLower(d)
+		if lp == ld || strings.HasPrefix(lp, ld+string(filepath.Separator)) {
 			return fmt.Errorf("path %s is excluded (moa_fs_deny)", e.display(p))
 		}
 	}

@@ -140,6 +140,16 @@ func scanSkills(projectRoot string) []skillEntry {
 			continue
 		}
 		for _, f := range files {
+			// Security: reject non-regular files in the skills dir.
+			// os.ReadFile follows symlinks, so a link like evil.md →
+			// ~/.ssh/id_rsa would exfiltrate private keys into the
+			// agent prompt. A FIFO would hang the scan goroutine.
+			// Skills are plain markdown — only regular files are valid.
+			if fi, err := os.Lstat(f); err != nil {
+				continue
+			} else if !fi.Mode().IsRegular() {
+				continue
+			}
 			content, err := os.ReadFile(f)
 			if err != nil {
 				continue
