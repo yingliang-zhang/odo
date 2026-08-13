@@ -389,11 +389,22 @@ func TestQueryWithToolsHardCapSplit(t *testing.T) {
 // TestRequestTimeout pins the deadline math: base latency plus generation
 // time at the conservative tok/s floor, scaling with the output budget.
 func TestRequestTimeout(t *testing.T) {
-	if got := requestTimeout(0); got != 300*time.Second {
-		t.Errorf("requestTimeout(0) = %v, want 300s", got)
+	if got := requestTimeout(0); got != 900*time.Second {
+		t.Errorf("requestTimeout(0) = %v, want 900s", got)
 	}
-	if got := requestTimeout(65536); got != 300*time.Second+546*time.Second {
-		t.Errorf("requestTimeout(65536) = %v, want 846s", got)
+	if got := requestTimeout(65536); got != 900*time.Second+546*time.Second {
+		t.Errorf("requestTimeout(65536) = %v, want 1446s", got)
+	}
+}
+
+// TestRequestTimeoutFloor pins the 900s base as a FLOOR (fix-INT): a
+// max-effort review leg's server-side thinking fits inside the base at
+// every budget — the budget/120 headroom only ever stacks on top.
+func TestRequestTimeoutFloor(t *testing.T) {
+	for _, budget := range []int{0, 4096, 16384, 32768, 65536} {
+		if got := requestTimeout(budget); got < 900*time.Second {
+			t.Errorf("requestTimeout(%d) = %v, want >= 900s floor", budget, got)
+		}
 	}
 }
 

@@ -11,10 +11,13 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -269,6 +272,9 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 
 	t.Run("stale base blocks before any verify spend", func(t *testing.T) {
 		f, s, root, sha := newServer(t)
+		calls := startPanelStub(t, func(call int64, model string) (int, string) {
+			return 200, "ACCEPT\nshould never be consulted"
+		})
 		// Advance main HEAD past the diff's base — verify would attest a
 		// tree nobody lands.
 		if err := os.WriteFile(filepath.Join(root, "src", "b.go"), []byte("package src\n"), 0o644); err != nil {
@@ -281,6 +287,16 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 		s.autoLand(context.Background(), d, root, "goal", false, "")
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "base_stale" {
 			t.Errorf("reasons = %v, want [base_stale]", got)
+		}
+		// The entry check is a PRE-SPEND filter: reason unchanged, the
+		// detail names the entry position (fix-INT), and zero panel calls
+		// were made for the verdict it never paid for.
+		sc := scanSettle(t, f.st, f.c.ID)
+		if detail, _ := sc.blocked[0]["detail"].(string); !strings.Contains(detail, "at pipeline entry") {
+			t.Errorf("detail = %q, want the at-pipeline-entry marker", detail)
+		}
+		if n := atomic.LoadInt64(calls); n != 0 {
+			t.Errorf("panel calls = %d, want 0 (the entry check precedes all spend)", n)
 		}
 	})
 
@@ -440,4 +456,116 @@ func TestAutoLandVisualGate(t *testing.T) {
 			t.Errorf("ladder fired on a visual diff: rounds=%v markers=%v", sc.rounds, sc.markers)
 		}
 	})
+}
+
+// TestAutoLandBaseStaleAtLand (fix-INT D1/D3): HEAD drifts MID-PIPELINE —
+// the entry filter passed, verify and the panel ran, and only then a racing
+// commit moved main. The FINAL freshness check inside handleDiffAction
+// refuses with the sentinel; the auto caller journals base_stale_at_land
+// with the completed panel riding the blocked row as advisory evidence; the
+// diff stays pending and the main tree shows only the drift commit. The
+// diff's base must ride the STORE row — handleDiffAction re-reads it.
+func TestAutoLandBaseStaleAtLand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\n")
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", patchSrc("src/landed.go", 2, 0, true))
+
+	// The panel stub drifts main HEAD inside its handler — a racing human
+	// commit while the verdict is in flight — then replies ACCEPT for
+	// every leg anyway: the verdict genuinely arrived, just under a HEAD
+	// nobody lands anymore.
+	calls := startPanelStub(t, func(call int64, model string) (int, string) {
+		if werr := os.WriteFile(filepath.Join(root, "drift.txt"), []byte("racing human commit\n"), 0o644); werr != nil {
+			t.Errorf("drift write: %v", werr)
+		}
+		for _, args := range [][]string{{"add", "drift.txt"}, {"commit", "-m", "drift"}} {
+			argv := append([]string{"-C", root, "-c", "user.email=odo@test", "-c", "user.name=odo"}, args...)
+			if out, gerr := exec.Command("git", argv...).CombinedOutput(); gerr != nil {
+				t.Errorf("drift %v: %v: %s", args, gerr, out)
+			}
+		}
+		return 200, "ACCEPT\nlooks correct"
+	})
+
+	s.autoLand(context.Background(), d, root, "goal", false, "")
+	if n := atomic.LoadInt64(calls); n != 1 {
+		t.Fatalf("panel calls = %d, want 1 (the panel RAN — the block rides its evidence)", n)
+	}
+	sc := scanSettle(t, f.st, f.c.ID)
+	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "base_stale_at_land" {
+		t.Fatalf("blocked reasons = %v, want [base_stale_at_land]", got)
+	}
+	row := sc.blocked[0]
+	if row["consensus_verdict"] != "accept" {
+		t.Errorf("consensus_verdict = %v, want accept riding as advisory evidence", row["consensus_verdict"])
+	}
+	reviews, _ := row["reviews"].([]interface{})
+	if len(reviews) != 1 {
+		t.Errorf("reviews = %v, want the 1-model panel attached", row["reviews"])
+	}
+	if detail, _ := row["detail"].(string); !strings.Contains(detail, "the verify and panel attested the pre-drift tree") {
+		t.Errorf("detail = %q, want the pre-drift attestation advisory", detail)
+	}
+	if len(sc.moaRows) != 1 {
+		t.Errorf("moa_review rows = %d, want 1 (evidence before action)", len(sc.moaRows))
+	}
+	if len(sc.accepts) != 0 {
+		t.Errorf("accept rows = %v, want none (nothing landed)", sc.accepts)
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending", got.Status)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "drift.txt")); serr != nil {
+		t.Errorf("drift.txt missing: %v — the racing commit stays", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "src", "landed.go")); !os.IsNotExist(serr) {
+		t.Error("src/landed.go present in main — the stale land must never apply")
+	}
+}
+
+// TestHandleDiffActionStaleRefusalIsSentinel (fix-INT D3): the final
+// refusal is wrapped so the auto-land caller's errors.Is fires, and the
+// handler itself journals NOTHING — the pipeline caller owns the blocked
+// row (it alone has the completed panel evidence to attach).
+func TestHandleDiffActionStaleRefusalIsSentinel(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", patchSrc("src/a.go", 1, 1, false))
+	driftMain(t, root, "src/drift.go")
+
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", autoActor)
+	if !errors.Is(err, errBaseStale) {
+		t.Fatalf("err = %v, want errors.Is(err, errBaseStale)", err)
+	}
+	if got := blockedReasons(t, f.st, f.c.ID); len(got) != 0 {
+		t.Errorf("blocked reasons = %v, want none — the handler owns no auto_land_blocked row", got)
+	}
+	events, err := f.st.ListEvents(context.Background(), f.c.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == store.EventReviewAction {
+			t.Errorf("sentinel refusal journaled %s, want silence", e.Payload)
+		}
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending", got.Status)
+	}
 }

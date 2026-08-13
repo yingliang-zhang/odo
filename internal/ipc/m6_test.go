@@ -566,7 +566,16 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 		if err := os.WriteFile(p, []byte(patch), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		d, err := rig.store.InsertDiff(ctx, convID, p, "base", "")
+		// fix-INT W1: the accept path now enforces base freshness
+		// (handleDiffAction's checkBaseFresh) — seed the diff's base as
+		// the checkout's REAL HEAD so the benign accept below passes the
+		// gate the protected sub-cases never reach (they refuse earlier
+		// on the protected-path check itself).
+		head, err := git.CurrentSHA(root)
+		if err != nil {
+			t.Fatalf("CurrentSHA: %v", err)
+		}
+		d, err := rig.store.InsertDiff(ctx, convID, p, head, "")
 		if err != nil {
 			t.Fatalf("InsertDiff: %v", err)
 		}

@@ -109,7 +109,9 @@ type Server struct {
 	// time (the final accept's apply/add/commit must not interleave, and
 	// verify/panel spend shouldn't pile up across conversations). NOT s.mu —
 	// the pipeline holds it for minutes and takes s.mu briefly in
-	// handleDiffAction (nesting order: autoLandMu → mu, never reversed).
+	// handleDiffAction — and takes s.acceptMu for the whole land section,
+	// including the final base-freshness check (nesting order:
+	// autoLandMu → acceptMu → mu, never reversed).
 	// autoLandDone is the tests-only completion signal (nil in production).
 	autoLandMu   sync.Mutex
 	autoLandDone chan struct{}
@@ -1430,6 +1432,42 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	return nil
 }
 
+// errBaseStale is the base-freshness refusal's sentinel: checkBaseFresh
+// wraps it so the auto-land caller (the land step in autoland.go) can
+// errors.Is-distinguish "main HEAD drifted mid-pipeline" from an apply
+// failure — drift journals base_stale_at_land with the completed panel
+// riding the blocked row as advisory evidence, while a non-sentinel
+// refusal (protected path, conflicted index, apply error) stays log-only.
+var errBaseStale = errors.New("base stale")
+
+// checkBaseFresh is the FINAL, authoritative base-freshness check
+// (fix-INT D1/D3/D4): the entry check in autoland.go is a cheap pre-spend
+// filter, but HEAD can move mid-pipeline (verify + panel take minutes) or
+// since a human's review started, and verify/panel only ever attested
+// base+diff while the land applies onto CURRENT HEAD. Running here —
+// under acceptMu, after the unmerged-index refusal and before the
+// rollback baseline — makes the check-to-apply window zero for daemon
+// writers too: a concurrent accept's CommitPaths holds this same mutex.
+// Nil/empty base_sha SKIPS (grandfathering pre-v2 journal rows — the auto
+// path already refuses a missing base upstream as base_unresolvable, so
+// the skip re-opens no hole). A HEAD read error fails closed. Drift
+// refuses naming BOTH shas plus the remediation and journals NOTHING —
+// the diff stays pending and the human's next action IS the evidence
+// (unmerged-index refusal precedent).
+func (s *Server) checkBaseFresh(d store.Diff) error {
+	if d.BaseSHA == nil || *d.BaseSHA == "" {
+		return nil
+	}
+	head, err := git.CurrentSHA(s.projectRoot)
+	if err != nil {
+		return fmt.Errorf("accept_diff: read main HEAD for base freshness: %w", err)
+	}
+	if head != *d.BaseSHA {
+		return fmt.Errorf("accept_diff: main HEAD %s drifted from diff base %s — this diff was judged (and auto-land verified/panel-reviewed) against a tree that no longer exists; re-run the task on current HEAD or reject the diff, which stays pending: %w", head, *d.BaseSHA, errBaseStale)
+	}
+	return nil
+}
+
 // handleDiffAction implements accept_diff and reject_diff. Accept applies the
 // diff to the user's working tree with git apply (the visible loop closes
 // here). Both journal a review_action and retire the run's worktree.
@@ -1453,6 +1491,10 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	defer s.acceptMu.Unlock()
 
 	applied := false
+	// headSHA (fix-INT D5) is the main HEAD the action operated on,
+	// journaled on every resolution row — the accept path fills it with the
+	// freshness head, the reject path with a best-effort read below.
+	var headSHA string
 	if action == "accept" {
 		// M6 (§8b): explicit guarded-path check — gitignore is not the
 		// enforcement point (wiki/ is NOT gitignored, so this daemon-side
@@ -1478,6 +1520,21 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 			return Response{}, fmt.Errorf("accept_diff: check index: %w", cerr)
 		} else if conflicts {
 			return Response{}, errors.New("accept_diff: main checkout has unresolved merge conflicts; resolve or reset them, then retry the accept")
+		}
+		// Final base-freshness adjudication (fix-INT D1): see checkBaseFresh.
+		// Refusal leaves the diff pending and journals nothing; the auto
+		// caller's errors.Is(errBaseStale) branch owns that blocked row.
+		if err := s.checkBaseFresh(d); err != nil {
+			return Response{}, err
+		}
+		// The freshness head for the journaled row: a set BaseSHA that
+		// passed checkBaseFresh IS the current head under acceptMu — no
+		// re-read (tri-review N2); nil-base legacy rows read it once for
+		// additive evidence ("" on failure).
+		if d.BaseSHA != nil && *d.BaseSHA != "" {
+			headSHA = *d.BaseSHA
+		} else {
+			headSHA, _ = git.CurrentSHA(s.projectRoot)
 		}
 		// I7 baseline BEFORE the apply attempt: on failure the daemon rolls
 		// the main checkout back to pre-accept state limited to these patch
@@ -1552,9 +1609,24 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	if err := s.store.UpdateDiffStatus(ctx, diffID, status); err != nil {
 		return Response{}, err
 	}
+	// fix-INT D5 (additive): the adjudicated tree rides every resolution
+	// row — base_sha is the diff's stored base ("" = grandfathered pre-v2
+	// row), head_sha the main HEAD at the action. Consumers ignore unknown
+	// keys (ComputeAutonomy/ledger/audit iterate generically).
+	baseSHA := ""
+	if d.BaseSHA != nil {
+		baseSHA = *d.BaseSHA
+	}
+	if action == "reject" {
+		// Reject writes nothing to the tree, so freshness never adjudicates
+		// it; the head is journaled best-effort anyway ("" on read failure).
+		headSHA, _ = git.CurrentSHA(s.projectRoot)
+	}
 	payload := map[string]interface{}{
-		"action":  action,
-		"diff_id": d.ID,
+		"action":   action,
+		"diff_id":  d.ID,
+		"base_sha": baseSHA,
+		"head_sha": headSHA,
 	}
 	if actor != "" {
 		payload["actor"] = actor

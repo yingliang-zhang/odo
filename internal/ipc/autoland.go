@@ -19,6 +19,13 @@ package ipc
 //	                 applies onto CURRENT HEAD, so drift means verify
 //	                 attested a tree nobody lands (panel P0). Stale =
 //	                 blocked; the human accept path owns rebases.
+//	                 fix-INT split: THIS entry check is a cheap
+//	                 pre-spend filter only (journals base_stale); the
+//	                 AUTHORITATIVE check is final, inside
+//	                 handleDiffAction's accept branch under acceptMu
+//	                 (zero check-to-apply window), and drift past it
+//	                 journals base_stale_at_land with the completed
+//	                 panel riding the blocked row.
 //	verify gate     the repo-root `.odo-verify` command re-runs at the
 //	                 run's worktree root with an allowlisted child
 //	                 environment (verifyEnviron) — the gate executes the
@@ -72,9 +79,11 @@ package ipc
 //	                 ladder (≤2 fresh repair rounds, no-progress stop,
 //	                 journal-derived suspension).
 //	land            handleDiffAction's original path — protected-path
-//	                 guard, unmerged-index refusal, 3-way apply, path-
-//	                 scoped staged commit, worktree retire — plus
-//	                 actor:"auto_panel" on the journaled review_action.
+//	                 guard, unmerged-index refusal, the FINAL base-
+//	                 freshness check (errBaseStale → base_stale_at_land
+//	                 below), 3-way apply, path-scoped staged commit,
+//	                 worktree retire — plus actor:"auto_panel" on the
+//	                 journaled review_action.
 //
 // Every decision journals a review_action (append-only audit):
 //
@@ -96,6 +105,7 @@ package ipc
 // land remains reversible (git).
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -224,6 +234,9 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// drifted since the base was cut, verify would attest a tree nobody
 	// lands — cheap freshness check before any verify/panel spend; a stale
 	// base stays pending for the human (conservative, kimi's panel option a).
+	// ENTRY filter only: drift arriving mid-pipeline is caught by the FINAL
+	// check inside handleDiffAction (sentinel errBaseStale) and journals
+	// base_stale_at_land with the completed panel attached.
 	base := ""
 	if d.BaseSHA != nil {
 		base = *d.BaseSHA
@@ -234,7 +247,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		return
 	}
 	if head != base {
-		s.journalAutoLandBlocked(ctx, d, "base_stale", "main HEAD "+head+" drifted from diff base "+base, nil, "")
+		s.journalAutoLandBlocked(ctx, d, "base_stale", "main HEAD "+head+" drifted from diff base "+base+" — at pipeline entry (before verify/panel spend)", nil, "")
 		return
 	}
 
@@ -348,6 +361,14 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		return
 	}
 	if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor); err != nil {
+		// Drift mid-pipeline (HEAD moved after the entry check): the
+		// FINAL freshness check refused. The completed panel rides the
+		// blocked row as advisory evidence (human_gate_visual precedent)
+		// — the human re-runs or rejects with the verdict on record.
+		if errors.Is(err, errBaseStale) {
+			s.journalAutoLandBlocked(ctx, d, "base_stale_at_land",
+				err.Error()+" — the verify and panel attested the pre-drift tree; the diff stays pending for the human", reviews, cv)
+		}
 		// A human raced the panel (already accepted/rejected), or the
 		// executor refused (protected path, conflicted index, apply
 		// failure): the diff stays pending for the human either way.

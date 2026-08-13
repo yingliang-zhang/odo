@@ -524,6 +524,302 @@ func TestAcceptDoesNotSweepMainCheckout(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------- fix-INT base freshness (accept path)
+
+// realPatch generates an applicable unified diff for edit applied in a
+// scratch clone of root at its current HEAD — hand-shaped patch text
+// (patchSrc) doesn't match real file contents, and the accept path's
+// git apply --3way adjudicates content, not just paths.
+func realPatch(t *testing.T, root string, edit func(dir string)) string {
+	t.Helper()
+	scratch := t.TempDir()
+	gitIn(t, scratch, "clone", "-q", root, ".")
+	edit(scratch)
+	gitIn(t, scratch, "add", "-A")
+	patch := gitOut(t, scratch, "diff", "--cached", "HEAD")
+	if patch == "" {
+		t.Fatal("edit produced an empty patch")
+	}
+	// gitOut trims whitespace — restore the newline terminating the last
+	// hunk line, without which git apply reads a corrupt patch.
+	return patch + "\n"
+}
+
+// baseBoundDiff stores a pending diff row whose base_sha is root's CURRENT
+// HEAD — handleDiffAction reads base_sha from the STORE (unlike autoLand's
+// by-value diff), so the in-memory BaseSHA trick can't play here.
+func baseBoundDiff(t *testing.T, f autonomyFixture, root, name, patch string) store.Diff {
+	t.Helper()
+	path := filepath.Join(f.dir, name)
+	if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := f.st.InsertDiff(context.Background(), f.c.ID, path, gitOut(t, root, "rev-parse", "HEAD"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// driftMain advances root's HEAD with one new file, returning the new HEAD.
+func driftMain(t *testing.T, root, rel string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, rel), []byte("package src // drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", rel)
+	gitIn(t, root, "commit", "-m", "drift")
+	return gitOut(t, root, "rev-parse", "HEAD")
+}
+
+// resolutionRow returns the single review_action row with the given action
+// (accept/reject) journaled for diff d.
+func resolutionRow(t *testing.T, f autonomyFixture, d store.Diff, action string) map[string]interface{} {
+	t.Helper()
+	events, err := f.st.ListEvents(context.Background(), f.c.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []map[string]interface{}
+	for _, e := range events {
+		if e.Type != store.EventReviewAction {
+			continue
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("event %d: %v", e.ID, err)
+		}
+		if p["action"] == action && p["diff_id"] == float64(d.ID) {
+			found = append(found, p)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("review_action{%s} rows for diff %d = %d, want 1 (journal: %d events)", action, d.ID, len(found), len(events))
+	}
+	return found[0]
+}
+
+func reviewActionRowsFor(t *testing.T, f autonomyFixture, d store.Diff) []map[string]interface{} {
+	t.Helper()
+	events, err := f.st.ListEvents(context.Background(), f.c.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []map[string]interface{}
+	for _, e := range events {
+		if e.Type != store.EventReviewAction {
+			continue
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("event %d: %v", e.ID, err)
+		}
+		if p["diff_id"] == float64(d.ID) {
+			rows = append(rows, p)
+		}
+	}
+	return rows
+}
+
+// TestAcceptBlocksStaleBase (fix-INT D1/D3/D4): the FINAL freshness check
+// is inside the accept path itself — a diff whose stored base_sha no longer
+// equals main HEAD was judged (and auto-land verified/panel-reviewed)
+// against a tree that no longer exists. The refusal names BOTH shas, the
+// diff stays pending, NOTHING journals, and the main tree carries only the
+// drift commit.
+func TestAcceptBlocksStaleBase(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "landed.go"), []byte("package src // landed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	head := driftMain(t, root, "src/drift.go")
+
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	if err == nil {
+		t.Fatal("accept on a stale base: want error")
+	}
+	for _, want := range []string{*d.BaseSHA, head} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to name %q", err, want)
+		}
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending", got.Status)
+	}
+	if rows := reviewActionRowsFor(t, f, d); len(rows) != 0 {
+		t.Errorf("freshness refusal journaled %v, want no rows (the refusal needs no audit row)", rows)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "src", "landed.go")); !os.IsNotExist(serr) {
+		t.Error("landed.go present in main — the refusal must precede the apply")
+	}
+}
+
+// TestAcceptFreshBaseProceeds: the gate's fresh side — base == HEAD applies
+// cleanly, and the journaled accept row carries base_sha/head_sha (D5),
+// pinning the exact tree the decision was made against. On a fresh accept
+// the freshness head IS the stored base, so both keys equal it.
+func TestAcceptFreshBaseProceeds(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "landed.go"), []byte("package src // landed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+
+	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	if err != nil {
+		t.Fatalf("accept on a fresh base: %v", err)
+	}
+	if !resp.Applied {
+		t.Error("resp.Applied = false, want true")
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(root, "src", "landed.go")); rerr != nil || !strings.Contains(string(data), "landed") {
+		t.Errorf("landed.go = %q, %v — the patch must apply to main", data, rerr)
+	}
+	p := resolutionRow(t, f, d, "accept")
+	if p["base_sha"] != *d.BaseSHA {
+		t.Errorf("base_sha = %v, want %s", p["base_sha"], *d.BaseSHA)
+	}
+	if p["head_sha"] != *d.BaseSHA {
+		t.Errorf("head_sha = %v, want the pre-accept HEAD %s (fresh: freshness head == base)", p["head_sha"], *d.BaseSHA)
+	}
+}
+
+// TestAcceptNilBaseGrandfathered (D4): pre-v2 journal rows carry no
+// base_sha — the freshness gate SKIPS them (the auto path already
+// fail-closes a missing base as base_unresolvable, so the skip re-opens no
+// hole), and the accept row still records base_sha:"" + the operative head.
+func TestAcceptNilBaseGrandfathered(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	// addDiff's "" base stores a nil base_sha — the pre-v2 row shape.
+	d := f.addDiff(t, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "landed.go"), []byte("package src // landed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	head := gitOut(t, root, "rev-parse", "HEAD")
+
+	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	if err != nil {
+		t.Fatalf("accept on a grandfathered (nil base) diff: %v", err)
+	}
+	if !resp.Applied {
+		t.Error("resp.Applied = false, want true")
+	}
+	p := resolutionRow(t, f, d, "accept")
+	if p["base_sha"] != "" {
+		t.Errorf("base_sha = %v, want \"\" for a grandfathered row", p["base_sha"])
+	}
+	if p["head_sha"] != head {
+		t.Errorf("head_sha = %v, want the operative HEAD %s", p["head_sha"], head)
+	}
+}
+
+// TestRejectIgnoresStaleBase: freshness adjudicates ACCEPTS — reject
+// writes nothing to the tree, so a stale base must never turn a rejection
+// away. The reject payload still records base_sha/head_sha as evidence.
+func TestRejectIgnoresStaleBase(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", patchSrc("src/a.go", 1, 1, false)) // reject never consults the patch
+	head := driftMain(t, root, "src/drift.go")
+
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "reject", ""); err != nil {
+		t.Fatalf("reject on a stale base: %v", err)
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffRejected {
+		t.Errorf("diff status = %q, want rejected", got.Status)
+	}
+	p := resolutionRow(t, f, d, "reject")
+	if p["base_sha"] != *d.BaseSHA {
+		t.Errorf("base_sha = %v, want %s", p["base_sha"], *d.BaseSHA)
+	}
+	if p["head_sha"] != head {
+		t.Errorf("head_sha = %v, want the operative HEAD %s", p["head_sha"], head)
+	}
+}
+
+// TestStackedPendingDiffsSharedBaseSecondBlocks: two pending diffs cut from
+// the SAME base (queued parallel runs). Accepting #1 moves main HEAD, so
+// #2's stored base is instantly stale — exactly the window the final check
+// covers. #2 blocks naming the shas and stays pending; #1's row is intact.
+func TestStackedPendingDiffsSharedBaseSecondBlocks(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d1 := baseBoundDiff(t, f, root, "one.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "one.go"), []byte("package src // one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	d2 := baseBoundDiff(t, f, root, "two.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "two.go"), []byte("package src // two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	base := *d1.BaseSHA
+	if *d2.BaseSHA != base {
+		t.Fatalf("setup bug: bases differ (%s vs %s), want one shared base", *d2.BaseSHA, base)
+	}
+
+	if _, err := s.handleDiffAction(context.Background(), d1.ID, "accept", ""); err != nil {
+		t.Fatalf("accept #1 on the shared base: %v", err)
+	}
+	head := gitOut(t, root, "rev-parse", "HEAD")
+	if head == base {
+		t.Fatal("accept #1 must move HEAD (the path-scoped accept commit)")
+	}
+
+	_, err := s.handleDiffAction(context.Background(), d2.ID, "accept", "")
+	if err == nil || !strings.Contains(err.Error(), base) {
+		t.Fatalf("accept #2 err = %v, want the stale-base refusal naming %s", err, base)
+	}
+	got1, err := f.st.GetDiff(context.Background(), d1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got1.Status != store.DiffAccepted {
+		t.Errorf("#1 status = %q, want accepted", got1.Status)
+	}
+	got2, err := f.st.GetDiff(context.Background(), d2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.Status != store.DiffPending {
+		t.Errorf("#2 status = %q, want pending", got2.Status)
+	}
+	if p := resolutionRow(t, f, d1, "accept"); p["head_sha"] != base {
+		t.Errorf("#1 head_sha = %v, want the shared base %s", p["head_sha"], base)
+	}
+	if rows := reviewActionRowsFor(t, f, d2); len(rows) != 0 {
+		t.Errorf("#2 journaled %v, want no rows", rows)
+	}
+}
+
 // TestRunWorktreesDetachedAndFresh covers the schema-v2 detach-only design
 // (B-class workstream↔git redesign): run worktrees are detached HEADs —
 // they never name an odo/<name> branch (a symbolic HEAD was decoration; the

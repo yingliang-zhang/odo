@@ -40,9 +40,16 @@ const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(1900);
 const CURATE_READ_TIMEOUT: Duration = Duration::from_secs(660);
 
 /// M2: `review_diff` waits on every configured review model daemon-side
-/// (sequentially in the worst case). Five minutes plus margin covers the
-/// expected multi-model latency without hanging the UI forever.
-const REVIEW_READ_TIMEOUT: Duration = Duration::from_secs(330);
+/// (sequentially in the worst case). 900s matches the daemon's review-leg
+/// floor (moa `baseRequestTimeout`).
+/// It bounds UI patience, not the daemon's per-request ceiling (floor +
+/// max-token headroom ≈ 1446s at a 64K budget, fresh window per
+/// escalation): a leg legitimately running past 900s surfaces an invoke
+/// error while the daemon still completes and journals the verdict —
+/// fail-closed, same posture as SLASH_READ_TIMEOUT below. `apply_memory`
+/// shares this timeout (passenger of review_diff's ceiling; its legs are
+/// smaller — the share is deliberate, not scoped).
+const REVIEW_READ_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// /panel and /vision fan out to N models with up to 16 tool rounds each —
 /// the slowest observed real /panel took 393s (3 models + FS tools), past

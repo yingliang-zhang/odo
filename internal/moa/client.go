@@ -46,10 +46,14 @@ const (
 	maxEscalations = 3
 
 	// Per-request deadline = baseRequestTimeout + budget/genTokPerSecFloor.
-	// The old fixed 300s client timeout would cut off exactly what the
-	// escalation policy enables: 64K output tokens at the gateway's measured
-	// pace (deepseek-v4-flash ≥170 tok/s on 2026-08-09) needs ~6.5 minutes.
-	baseRequestTimeout = 300 * time.Second
+	// The 900s floor covers a max-effort review leg whose server-side
+	// thinking runs long before the first output token; the generation
+	// headroom above it is unchanged — 64K output tokens at the gateway's
+	// measured pace (deepseek-v4-flash ≥170 tok/s on 2026-08-09) needs ~6.5
+	// minutes, so the worst single request is 900 + 65536/120 ≈ 1446s.
+	// Raising the base moves the FLOOR, not the ceiling: budget/120
+	// headroom always stacks on top.
+	baseRequestTimeout = 900 * time.Second
 	genTokPerSecFloor  = 120 // conservative floor under the ≥170 tok/s measured on the slowest model
 
 	// defaultToolRounds bounds QueryWithTools' execute-and-continue loop.

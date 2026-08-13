@@ -90,8 +90,23 @@ additions marked NEW; evaluation order = numbering):
     docs/milestones/m18-settlement-ladder.md).
 
 **Land** — handleDiffAction's original path (protected-path guard, unmerged-index
-refusal, 3-way apply, path-scoped staged commit, worktree retire) plus
-`actor:"auto_panel"` on the journaled review_action.
+refusal, final base-freshness refusal, 3-way apply, path-scoped staged commit,
+worktree retire) plus `actor:"auto_panel"` on the journaled review_action.
+
+**Freshness, entry vs final (fix-INT wave 1)** — gate 5's `base_stale` is the
+ENTRY check: a cheap pre-spend filter whose journaled detail carries the marker
+`— at pipeline entry (before verify/panel spend)`. HEAD can still drift
+mid-pipeline (a racing commit during a multi-minute verify/panel), so the
+AUTHORITATIVE freshness check is FINAL: inside `handleDiffAction`'s accept
+branch, after the unmerged-index refusal and before the rollback baseline,
+under the same `acceptMu` that excludes concurrent accepts (zero
+check-to-apply window). It wraps the sentinel `errBaseStale`; the auto caller
+journals `base_stale_at_land` (new auto_land_blocked reason — contract change)
+with the completed panel riding the row as advisory evidence, while a human
+accept hitting the same check gets a refusal naming both SHAs and no journal
+row — the diff stays pending either way, and nil/empty `base_sha` skips the
+check entirely (pre-v2 journal rows grandfathered; the auto path already
+fail-closes a missing base as `base_unresolvable`).
 
 ## Journal contract (append-only audit)
 
