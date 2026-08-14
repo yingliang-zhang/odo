@@ -61,7 +61,7 @@ Legend: cost S <1d / M 1–3d / L >3d. Status: ✈ in flight · ⏳ queued ·
 | 3 | R-W1.5 receipts fill | panel/review payloads += `request_sha16`+`request_bytes` | run 3 §4 | S | ~~fix-INT~~ **unblocked** (W1/W2 landed) | ⏳ |
 | 4 | A-P0 #1 Guardian taxonomy + ledger cells | risk classes + actor/outcome/TimedOut on every `review_action`; aggregate in `odo autonomy audit`; GUI renders the cells (LedgerPanel) | run 1 §5#1 + run 2 #3 | S | own tri-model design round | ⏳ |
 | 5 | A-P0 #2 visible⟺logged assert | daemon-side pre-send assertion on the send path | run 1 §5#2 | S | — | ⚠ partially landed via fix-INT W2's send-closure assertion (`f17da7b`) — residual coverage needs a 5-min code check before scheduling anything |
-| 6 | A-P0 #3 durable steer inbox + queue dock | journal `steer/queued/spliced` + ChatSurface QueueDock (auto-drain, send-now chord) | run 1 §5#3 + run 2 #4 | S–M + M | park-and-switch design session | ⏳ |
+| 6 | A-P0 #3 durable steer inbox + queue dock | journal `steer/queued/spliced` + ChatSurface QueueDock (auto-drain, send-now chord) | run 1 §5#3 + run 2 #4 | S–M + M | park-and-switch design session | ✅ daemon impl landed (W6); GUI dock = future GUI wave |
 | 7 | **R-W2 distill → moa** | behind prefs flag `distill_via: omp`; deadline policy for 1446s worst case; modelspec entry precondition | run 3 §4 + run 4 §2 | S | **2** (resilience first) | ◎ |
 | 8 | R-W3 learner/curator → moa | parsers/vet untouched; ADR-0003 inv7 wording | run 3 §4 | S | 7 telemetry | ⏳ |
 | 9 | R-W4 Design-MoA | consolidator (`moa.Query`, `design_lock` event, strict truncation) + blind legs (`QueryWithTools`, round-cap decoupling, per-round context accounting, executor root param) | run 3 §4 + run 4 #4–6 | M | 2, 7, 8 | ⏳ |

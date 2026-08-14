@@ -89,9 +89,23 @@ type replayTurn struct {
 // (review_action, memory_update, agent_done/error) are noise a summary
 // layer already owns — replayed chat stays chat.
 func collectReplayTurns(events []store.Event, boundary int) []replayTurn {
+	// W6 first pass: a WAITING parked goal (user_message{park:true} not yet
+	// consumed by run_prompt{goal_seqs} or parked_goal_dropped{goal_seq})
+	// must NOT replay into intervening runs' prompts — the M18 repair-
+	// prompt hazard. It is a future ask, not history: its own activation
+	// prompt carries the text verbatim at the end (send-path shape), and
+	// consumed parks replay normally afterward (the goal ran; the text is
+	// honest history).
+	waitingParks := map[int]bool{}
+	for _, g := range deriveParkedGoals(events) {
+		waitingParks[g.seq] = true
+	}
 	var turns []replayTurn
 	for _, ev := range events {
 		if ev.Seq <= boundary {
+			continue
+		}
+		if waitingParks[ev.Seq] {
 			continue
 		}
 		if ev.Type != store.EventUserMessage && ev.Type != store.EventAgentText {

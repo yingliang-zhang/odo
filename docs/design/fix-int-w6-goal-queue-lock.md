@@ -139,7 +139,7 @@ the diff if undesired; the goal is done either way. No re-queue.
 ## Hard rules
 
 - No git add/commit. Touch: internal/ipc/{parked.go (new), server.go,
-  settle.go, protocol.go, autonomy.go} + their tests + docs listed.
+  protocol.go, replay.go, autonomy.go} + their tests + docs listed.
 - No GUI this wave. No new deps.
 - If a locked step contradicts the code, STOP and report.
 - Verify: `go build ./... && go vet ./internal/... && go test ./internal/ipc/ -count=1`

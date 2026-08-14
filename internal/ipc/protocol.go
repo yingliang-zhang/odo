@@ -67,6 +67,12 @@ const (
 	// M15 (O-1 rung-0): autonomy_status returns the rung-0 streak snapshot
 	// for the DiffViewer header (same journal reads as odo autonomy audit).
 	CmdAutonomyStatus = "autonomy_status"
+	// W6 (goal queue, ADR-0005): the manual override pair for the durable
+	// per-conversation parked-goal FIFO — resume activates the queue head
+	// (or Request.GoalSeq's entry), drop journals parked_goal_dropped and
+	// removes the entry ("clean the junk drawer").
+	CmdResumeParkedGoal = "resume_parked_goal"
+	CmdDropParkedGoal   = "drop_parked_goal"
 )
 
 // Request is one command line on the socket.
@@ -81,6 +87,12 @@ type Request struct {
 	AfterSeq       int       `json:"after_seq,omitempty"`
 	DiffID         int64     `json:"diff_id,omitempty"`
 	Steer          bool      `json:"steer,omitempty"`
+	// W6 (ADR-0005): Park journals user_message{park:true} — the durable
+	// queued goal — instead of starting a run; steer and park are mutually
+	// exclusive (refused pre-journal). GoalSeq selects one parked goal for
+	// resume_parked_goal / drop_parked_goal (0 = the queue head).
+	Park    bool `json:"park,omitempty"`
+	GoalSeq int  `json:"goal_seq,omitempty"`
 	Adapter        string    `json:"adapter,omitempty"`
 	Settings       *Settings `json:"settings,omitempty"`
 	Path           string    `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename
@@ -218,6 +230,11 @@ type Response struct {
 	// contract the frontend implements.
 	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`
 	RunningWorkstreams []int64       `json:"running_workstreams,omitempty"`
+	// W6 (goal queue): Parked is the conversation's parked-goal queue depth
+	// after a park/resume/drop command; ParkedGoals rides pending_counts
+	// with the per-workstream queue depth, keyed like PendingCounts.
+	Parked      int           `json:"parked,omitempty"`
+	ParkedGoals map[int64]int `json:"parked_goals,omitempty"`
 	// M12 (D-auto): pending_counts also reports scheduled auto-distills
 	// (countdown chip) and in-flight distills (manual or auto — the GUI
 	// locks the composer for manual, badges for auto).

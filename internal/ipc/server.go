@@ -92,6 +92,12 @@ type Server struct {
 	runs   map[string]*runMeta // adapter runID -> meta
 	byConv map[int64]string    // conversationID -> adapter runID (active run)
 
+	// W6 (ADR-0005): the parked-goal FIFOs, conversationID -> seq-ordered
+	// goals. The journal is the authority (user_message{park:true} minus
+	// run_prompt{goal_seqs}/parked_goal_dropped consumption); this is the
+	// hot cache, seeded at boot by recoverParkedGoals.
+	parked map[int64][]parkedGoal
+
 	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
 	curating   bool               // a curate pass is in flight (M11 P0)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
@@ -168,6 +174,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		mgr:          mgr,
 		runs:         make(map[string]*runMeta),
 		byConv:       make(map[int64]string),
+		parked:       make(map[int64][]parkedGoal),
 		distilling:   make(map[int64]struct{}),
 		distillKind:  make(map[int64]string),
 		autoPending:  make(map[int64]*autoPendingEntry),
@@ -178,6 +185,11 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	s.adapters[""] = ad
 	s.adapters["omp"] = ad
 	ensureProjectRegistered(projectRoot)
+	// W6: recover the durable parked-goal queues from the journal and
+	// dequeue for free conversations — at daemon startup, after the store
+	// is open and before serving (NewServer is the only touchable init
+	// hook; main.go's wiring stays untouched).
+	s.recoverParkedGoals(context.Background())
 	return s
 }
 
@@ -275,6 +287,10 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleSendMessage(ctx, req)
 	case CmdCancel:
 		resp, err = s.handleCancel(ctx, req)
+	case CmdResumeParkedGoal:
+		resp, err = s.handleResumeParkedGoal(ctx, req)
+	case CmdDropParkedGoal:
+		resp, err = s.handleDropParkedGoal(ctx, req)
 	case CmdPollEvents:
 		resp, err = s.handlePollEvents(ctx, req)
 	case CmdAcceptDiff:
@@ -602,6 +618,11 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
+	// W6: steer and park are mutually exclusive — refused pre-journal, and
+	// before any gate side effects (a refused input disarms nothing).
+	if req.Steer && req.Park {
+		return Response{}, fmt.Errorf("send_message: steer and park are mutually exclusive")
+	}
 	// M12 (D-auto): user input — a send OR a steer — disarms a scheduled
 	// auto-distill and cancels an in-flight AUTO distill before the note is
 	// written (cancel-before-note; journaled, then the input proceeds
@@ -614,6 +635,11 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// M8: steering is handled by handleSteering when req.Steer is set.
 	if req.Steer {
 		return s.handleSteering(ctx, c, req)
+	}
+	// W6: parking enqueues the goal (durable journal row + runtime queue)
+	// instead of starting a run; a free conversation dequeues immediately.
+	if req.Park {
+		return s.handleParkGoal(ctx, c, req)
 	}
 	adName := req.Adapter
 	if adName == "" {
@@ -1600,7 +1626,7 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			}
 			if len(queuedSteers) > 0 && !meta.errored {
 				go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
-			} else {
+			} else if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
 				// M12 (T1/T3): run-finished is an auto-distill evaluation
 				// point — arm the idle timer or fire urgently.
 				s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
@@ -1654,8 +1680,11 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// run with full memory-layer injection, not a silent file it never reads.
 	if len(queuedSteers) > 0 && !meta.errored {
 		go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
-	} else {
+	} else if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
 		// M12 (T1/T3): idle/urgent auto-distill evaluation at run finish.
+		// Skipped when the parked-goal queue took this drain's one
+		// successor slot (W6: steer continuations outrank parked goals;
+		// at most one continuation OR activation per finished run).
 		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 	}
 	return nil
@@ -3037,10 +3066,29 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 	for convID := range s.distilling {
 		distillingConvs = append(distillingConvs, convID)
 	}
+	// W6: parked-goal queue depth per workstream (the badge's queue
+	// counterpart; keyed like PendingCounts). Conversation lookups are
+	// best-effort — a conversation that vanished between park and poll
+	// drops out of the badge, never out of the journal.
+	var parkedByWS map[int64]int
+	for convID, goals := range s.parked {
+		if len(goals) == 0 {
+			continue
+		}
+		c, err := s.store.GetConversation(ctx, convID)
+		if err != nil {
+			continue
+		}
+		if parkedByWS == nil {
+			parkedByWS = make(map[int64]int)
+		}
+		parkedByWS[c.WorkstreamID] += len(goals)
+	}
 	s.mu.Unlock()
 	return Response{
 		PendingCounts:      counts,
 		RunningWorkstreams: running,
+		ParkedGoals:        parkedByWS,
 		AutoDistill:        auto,
 		Distilling:         len(distillingConvs) > 0,
 		DistillingConvs:    distillingConvs,
@@ -3727,7 +3775,10 @@ func isAdvisoryAgentText(ev store.Event) bool {
 // foldExcludedReviewAction reports whether a review_action row is auto-land
 // pipeline churn: moa_review / auto_revise_round / run_prompt rows journaled
 // with actor:auto_panel never fold — the per-leg panel evidence and round
-// mechanics are transcript noise. The note carries the pipeline's OUTCOMES
+// mechanics are transcript noise. (W6: run_prompt{origin:"parked_goal",
+// actor:auto_panel} rows are covered by the same run_prompt entry; a parked
+// user_message folds like any user turn — a parked goal IS a user ask — and
+// manual resume/drop rows carry no actor, so they render their one-liner.) The note carries the pipeline's OUTCOMES
 // instead: accept rows (what landed) and auto_land_blocked rows, whose
 // reason IS the open loop the note must surface.
 func foldExcludedReviewAction(action, actor string) bool {

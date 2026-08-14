@@ -450,6 +450,11 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 					}
 				}
 			}
+			// W6 regression-pinned: parked goals never move human-streak
+			// math — their user_message{park:true} rows died at the
+			// review_action type filter above, and the queue's own
+			// review_action rows (run_prompt{goal_seqs},
+			// parked_goal_dropped{goal_seq}) fall through here.
 			if p.Action != "accept" && p.Action != "reject" {
 				continue
 			}

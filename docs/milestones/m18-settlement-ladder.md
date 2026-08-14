@@ -329,3 +329,29 @@ batch; full ledger + rationale in `docs/design/fix-int-w2-design-lock.md`.
 - `/vision` `user_message`: + `image_sha16` (index-aligned with attachments).
 - Fail-closed gates: `assertPromptReceipts` on send/continuation/retry/revise,
   `assertSlashReceipts` on /panel + /vision before the moa call.
+
+## W6 goal-queue park-and-switch (fix-INT wave 6, ADR-0005)
+
+Additive, optional-when-absent keys from the durable goal-queue batch;
+full contract + rationale in `docs/design/fix-int-w6-goal-queue-lock.md`
+and `docs/adr/0005-goal-queue-park-and-switch.md`.
+
+- `user_message`: + `park` (bool) — the durable queued goal. `steer` and
+  `park` are mutually exclusive (refused pre-journal). Park journals the
+  text verbatim; no receipt/recall keys (steer-path journaler).
+- `review_action{action:"run_prompt"}`: + `origin:"parked_goal"` (existing
+  origins: `continuation`, `retry`) + `goal_seqs:[N]` linking the dequeue
+  receipt to the consumed park row(s).
+- `review_action`: new action `"parked_goal_dropped"` with `goal_seq:N`
+  (no actor — human decision).
+- IPC: `Request.Park` (bool) + `Request.GoalSeq` (int); new cmds
+  `resume_parked_goal`, `drop_parked_goal`; `Response.Parked` (queue depth)
+  + `Response.ParkedGoals` (per-workstream depth in `pending_counts`).
+- No new event types (ADR-0002 immune): park is a `user_message` payload
+  key; `parked_goal_dropped` is a `review_action` action value;
+  `run_prompt{origin:"parked_goal"}` is a `review_action` row.
+- `collectReplayTurns` gains a waiting-park exclusion (a waiting
+  `user_message{park:true}` not yet consumed must not replay into
+  intervening runs — the M18 repair-prompt hazard).
+- `ComputeAutonomy` unchanged (parked rows die at the first filter;
+  `run_prompt`/`parked_goal_dropped` hit `continue`).
