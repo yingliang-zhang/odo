@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -622,28 +623,40 @@ func reviewActionRowsFor(t *testing.T, f autonomyFixture, d store.Diff) []map[st
 	return rows
 }
 
-// TestAcceptBlocksStaleBase (fix-INT D1/D3/D4): the FINAL freshness check
-// is inside the accept path itself — a diff whose stored base_sha no longer
-// equals main HEAD was judged (and auto-land verified/panel-reviewed)
-// against a tree that no longer exists. The refusal names BOTH shas, the
-// diff stays pending, NOTHING journals, and the main tree carries only the
-// drift commit.
-func TestAcceptBlocksStaleBase(t *testing.T) {
+// TestAcceptStaleBaseRefreshConflict (P0a; supersedes fix-INT's
+// TestAcceptBlocksStaleBase): a stale base no longer hard-refuses — the
+// accept path attempts a --3way REBASE under acceptMu. When main and the
+// diff edited the SAME file, the merge conflicts: the attempt journals
+// refresh_attempted{outcome:"conflict"} naming BOTH shas, rolls main back
+// to the pre-attempt tree, and the diff stays pending (NOT conflict —
+// DiffConflict is reserved for fresh-base apply failures). The returned
+// error wraps errBaseStale and names both shas plus the refresh outcome.
+func TestAcceptStaleBaseRefreshConflict(t *testing.T) {
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	s := &Server{store: f.st, projectRoot: root}
 	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
-		if err := os.WriteFile(filepath.Join(dir, "src", "landed.go"), []byte("package src // landed\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // agent edit\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}))
-	head := driftMain(t, root, "src/drift.go")
+	oldBase := *d.BaseSHA
+	// Drift main by editing the SAME line the patch rewrites.
+	if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // user drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", "src/a.go")
+	gitIn(t, root, "commit", "-m", "user drift")
+	head := gitOut(t, root, "rev-parse", "HEAD")
 
 	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
 	if err == nil {
-		t.Fatal("accept on a stale base: want error")
+		t.Fatal("accept on a stale, conflicting base: want error")
 	}
-	for _, want := range []string{*d.BaseSHA, head} {
+	if !errors.Is(err, errBaseStale) {
+		t.Errorf("err = %v, want errors.Is(err, errBaseStale)", err)
+	}
+	for _, want := range []string{oldBase, head, "conflict"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %q, want it to name %q", err, want)
 		}
@@ -653,13 +666,125 @@ func TestAcceptBlocksStaleBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Status != store.DiffPending {
-		t.Errorf("diff status = %q, want pending", got.Status)
+		t.Errorf("diff status = %q, want pending (refresh failures never mark conflict)", got.Status)
 	}
-	if rows := reviewActionRowsFor(t, f, d); len(rows) != 0 {
-		t.Errorf("freshness refusal journaled %v, want no rows (the refusal needs no audit row)", rows)
+	// The refresh attempt is the ONLY journaled row for the diff, and it
+	// records the conflict with both shas and git's diagnostics.
+	rows := reviewActionRowsFor(t, f, d)
+	if len(rows) != 1 || rows[0]["action"] != "refresh_attempted" {
+		t.Fatalf("journal rows = %v, want exactly one refresh_attempted row", rows)
 	}
-	if _, serr := os.Stat(filepath.Join(root, "src", "landed.go")); !os.IsNotExist(serr) {
-		t.Error("landed.go present in main — the refusal must precede the apply")
+	r := rows[0]
+	if r["outcome"] != "conflict" || r["phase"] != "accept_apply" {
+		t.Errorf("refresh row = %v, want outcome=conflict phase=accept_apply", r)
+	}
+	if r["base_sha"] != oldBase || r["target_sha"] != head {
+		t.Errorf("refresh shas = %v→%v, want %s→%s", r["base_sha"], r["target_sha"], oldBase, head)
+	}
+	if detail, _ := r["detail"].(string); detail == "" {
+		t.Error("refresh row has no detail — the conflict's git diagnostics must ride the journal")
+	}
+	// Main rolled back: the drifted content is intact, the index carries no
+	// unmerged entries, and the checkout is clean.
+	if got := readFileStr(t, filepath.Join(root, "src", "a.go")); got != "package src // user drift\n" {
+		t.Errorf("src/a.go = %q, want the drifted content (rollback must restore main)", got)
+	}
+	if unmerged := gitOut(t, root, "ls-files", "-u"); unmerged != "" {
+		t.Errorf("unmerged index entries after rollback:\n%s", unmerged)
+	}
+	if status := gitOut(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("main status = %q after rollback, want clean", status)
+	}
+}
+
+// TestAcceptStaleBaseRefreshClean (P0a): main drifted on a path the diff
+// doesn't touch — the accept path's --3way rebase merges cleanly, the
+// accept succeeds in one action, and the journal tells the whole story:
+// refresh_attempted{clean} FIRST, then the accept row carrying
+// refreshed_from_sha (the diff's ORIGINAL base) with base_sha/head_sha on
+// the refreshed base. The store row's base moves to the landed-upon HEAD,
+// and both the drift commit's and the diff's content are in main.
+func TestAcceptStaleBaseRefreshClean(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "landed.go"), []byte("package src // landed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	oldBase := *d.BaseSHA
+	head := driftMain(t, root, "src/drift.go") // disjoint new-file drift
+
+	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	if err != nil {
+		t.Fatalf("accept on a stale but disjoint base: %v", err)
+	}
+	if !resp.Applied {
+		t.Error("resp.Applied = false, want true (the refresh applied the diff)")
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+	if got.BaseSHA == nil || *got.BaseSHA != head {
+		t.Errorf("store base_sha = %v, want the refreshed HEAD %s", got.BaseSHA, head)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(root, "src", "landed.go")); rerr != nil || !strings.Contains(string(data), "landed") {
+		t.Errorf("landed.go = %q, %v — the refreshed accept must apply to main", data, rerr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "src", "drift.go")); serr != nil {
+		t.Errorf("drift.go missing: %v — the refresh must not roll back the drift", serr)
+	}
+	// Journal-first (hard rule 6): the refresh row precedes the accept.
+	rows := reviewActionRowsFor(t, f, d)
+	if len(rows) != 2 || rows[0]["action"] != "refresh_attempted" || rows[1]["action"] != "accept" {
+		t.Fatalf("journal rows = %v, want [refresh_attempted, accept] in that order", rows)
+	}
+	r := rows[0]
+	if r["outcome"] != "clean" || r["phase"] != "accept_apply" {
+		t.Errorf("refresh row = %v, want outcome=clean phase=accept_apply", r)
+	}
+	if r["base_sha"] != oldBase || r["target_sha"] != head {
+		t.Errorf("refresh shas = %v→%v, want %s→%s", r["base_sha"], r["target_sha"], oldBase, head)
+	}
+	if _, hasDetail := r["detail"]; hasDetail {
+		t.Errorf("clean refresh row carries detail = %v — detail is conflict/error only", r["detail"])
+	}
+	a := rows[1]
+	if a["refreshed_from_sha"] != oldBase {
+		t.Errorf("accept refreshed_from_sha = %v, want the original base %s", a["refreshed_from_sha"], oldBase)
+	}
+	if a["base_sha"] != head || a["head_sha"] != head {
+		t.Errorf("accept base/head = %v/%v, want the refreshed HEAD %s for both", a["base_sha"], a["head_sha"], head)
+	}
+}
+
+// TestAcceptFreshBaseNoRefresh (P0a): a fresh base (stored base_sha ==
+// main HEAD) takes the normal accept path — no refresh attempt, no
+// refresh_attempted row, and no refreshed_from_sha key on the accept row.
+func TestAcceptFreshBaseNoRefresh(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "landed.go"), []byte("package src // landed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", ""); err != nil {
+		t.Fatalf("accept on a fresh base: %v", err)
+	}
+	rows := reviewActionRowsFor(t, f, d)
+	if len(rows) != 1 || rows[0]["action"] != "accept" {
+		t.Fatalf("journal rows = %v, want exactly one accept row (a fresh base never refreshes)", rows)
+	}
+	if _, has := rows[0]["refreshed_from_sha"]; has {
+		t.Errorf("fresh accept carries refreshed_from_sha = %v — no refresh happened", rows[0]["refreshed_from_sha"])
 	}
 }
 
@@ -764,11 +889,14 @@ func TestRejectIgnoresStaleBase(t *testing.T) {
 	}
 }
 
-// TestStackedPendingDiffsSharedBaseSecondBlocks: two pending diffs cut from
-// the SAME base (queued parallel runs). Accepting #1 moves main HEAD, so
-// #2's stored base is instantly stale — exactly the window the final check
-// covers. #2 blocks naming the shas and stays pending; #1's row is intact.
-func TestStackedPendingDiffsSharedBaseSecondBlocks(t *testing.T) {
+// TestStackedPendingDiffsSharedBaseSecondRefreshes (P0a; supersedes
+// fix-INT's *SecondBlocks): two pending diffs cut from the SAME base
+// (queued parallel runs). Accepting #1 moves main HEAD, so #2's stored
+// base is instantly stale — exactly the window the final gate covers —
+// but the diffs are disjoint, so #2's accept REBASES it onto the new HEAD
+// and lands instead of refusing (the old posture made N parallel diffs on
+// one base → N−1 unlandable; this is the contract P0a exists to change).
+func TestStackedPendingDiffsSharedBaseSecondRefreshes(t *testing.T) {
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	s := &Server{store: f.st, projectRoot: root}
@@ -795,9 +923,12 @@ func TestStackedPendingDiffsSharedBaseSecondBlocks(t *testing.T) {
 		t.Fatal("accept #1 must move HEAD (the path-scoped accept commit)")
 	}
 
-	_, err := s.handleDiffAction(context.Background(), d2.ID, "accept", "")
-	if err == nil || !strings.Contains(err.Error(), base) {
-		t.Fatalf("accept #2 err = %v, want the stale-base refusal naming %s", err, base)
+	resp, err := s.handleDiffAction(context.Background(), d2.ID, "accept", "")
+	if err != nil {
+		t.Fatalf("accept #2 on the now-stale shared base: %v — disjoint diffs must refresh, not refuse", err)
+	}
+	if !resp.Applied {
+		t.Error("accept #2 resp.Applied = false, want true")
 	}
 	got1, err := f.st.GetDiff(context.Background(), d1.ID)
 	if err != nil {
@@ -810,14 +941,30 @@ func TestStackedPendingDiffsSharedBaseSecondBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got2.Status != store.DiffPending {
-		t.Errorf("#2 status = %q, want pending", got2.Status)
+	if got2.Status != store.DiffAccepted {
+		t.Errorf("#2 status = %q, want accepted (the refresh landed it)", got2.Status)
 	}
+	if got2.BaseSHA == nil || *got2.BaseSHA != head {
+		t.Errorf("#2 base_sha = %v, want refreshed to #1's accept commit %s", got2.BaseSHA, head)
+	}
+	// Both diffs' content is in main, and #2's row set records the refresh.
 	if p := resolutionRow(t, f, d1, "accept"); p["head_sha"] != base {
 		t.Errorf("#1 head_sha = %v, want the shared base %s", p["head_sha"], base)
 	}
-	if rows := reviewActionRowsFor(t, f, d2); len(rows) != 0 {
-		t.Errorf("#2 journaled %v, want no rows", rows)
+	rows := reviewActionRowsFor(t, f, d2)
+	if len(rows) != 2 || rows[0]["action"] != "refresh_attempted" || rows[1]["action"] != "accept" {
+		t.Fatalf("#2 journal rows = %v, want [refresh_attempted, accept]", rows)
+	}
+	if rows[0]["outcome"] != "clean" || rows[0]["base_sha"] != base || rows[0]["target_sha"] != head {
+		t.Errorf("#2 refresh row = %v, want {clean, %s→%s}", rows[0], base, head)
+	}
+	if rows[1]["refreshed_from_sha"] != base {
+		t.Errorf("#2 accept refreshed_from_sha = %v, want %s", rows[1]["refreshed_from_sha"], base)
+	}
+	for _, name := range []string{"one.go", "two.go"} {
+		if _, serr := os.Stat(filepath.Join(root, "src", name)); serr != nil {
+			t.Errorf("src/%s missing after both refreshed accepts: %v", name, serr)
+		}
 	}
 }
 

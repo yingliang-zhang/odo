@@ -141,6 +141,46 @@ func ApplyDiff(repoPath, diffPath string) error {
 	return nil
 }
 
+// ProbeApplyClean tests whether diffPath would apply cleanly via --3way onto
+// repoPath's current HEAD, using a throwaway worktree that touches neither
+// the main checkout nor the diff's own worktree. Returns (true, "", nil) if
+// the 3-way merge is clean; (false, detail, nil) if it produces conflicts
+// (detail is git's stderr tail); (false, "", err) on other failures (e.g.
+// missing base blobs, worktree creation failure). The temp worktree is
+// removed unconditionally.
+func ProbeApplyClean(repoPath, diffPath string) (clean bool, detail string, err error) {
+	// The apply runs INSIDE the temp worktree, so a relative diffPath would
+	// resolve against it — pin the patch to an absolute path first.
+	abs, err := filepath.Abs(diffPath)
+	if err != nil {
+		return false, "", fmt.Errorf("probe patch path: %w", err)
+	}
+	tmp, err := os.MkdirTemp("", "odo-probe-*")
+	if err != nil {
+		return false, "", fmt.Errorf("probe worktree dir: %w", err)
+	}
+	// The temp worktree is removed unconditionally: RemoveWorktree tolerates
+	// a failed/never-completed add, and RemoveAll is belt-and-suspenders for
+	// the empty MkdirTemp dir in that case.
+	defer func() {
+		_ = RemoveWorktree(repoPath, tmp)
+		_ = os.RemoveAll(tmp)
+	}()
+	if _, err := run(repoPath, "worktree", "add", "--detach", tmp, "HEAD"); err != nil {
+		return false, "", fmt.Errorf("probe worktree add: %w", err)
+	}
+	if _, applyErr := run(tmp, "apply", "--3way", abs); applyErr != nil {
+		// A failed --3way that left unmerged index entries is a merge
+		// conflict (reportable, detail = git's own diagnostics); anything
+		// else — missing base blobs, unreadable patch — is a plain error.
+		if conflicts, cerr := HasUnmergedEntries(tmp); cerr == nil && conflicts {
+			return false, applyErr.Error(), nil
+		}
+		return false, "", applyErr
+	}
+	return true, "", nil
+}
+
 // CapturePatchBaseline records, for each patch path, whether it is tracked
 // in HEAD and whether it exists on disk BEFORE an apply attempt. Rollback
 // needs both axes separately: a path tracked in HEAD restores via

@@ -14,17 +14,22 @@ package ipc
 //	                 DROP_SIZE_KEEP_DIR: a 300-line cliff is fake
 //	                 precision with 350K-token contexts; the token cost
 //	                 breaker below is the ceiling).
-//	base freshness  main checkout HEAD must still equal the diff's
-//	                 base_sha — verify attests base+diff, and the land
-//	                 applies onto CURRENT HEAD, so drift means verify
-//	                 attested a tree nobody lands (panel P0). Stale =
-//	                 blocked; the human accept path owns rebases.
-//	                 fix-INT split: THIS entry check is a cheap
-//	                 pre-spend filter only (journals base_stale); the
-//	                 AUTHORITATIVE check is final, inside
-//	                 handleDiffAction's accept branch under acceptMu
-//	                 (zero check-to-apply window), and drift past it
-//	                 journals base_stale_at_land with the completed
+//	base freshness  P0a refresh: entry drift triggers a --3way rebase
+//	                 probe in a throwaway worktree (ProbeApplyClean —
+//	                 the main checkout is never touched, acceptMu never
+//	                 taken). Clean = the diff's base pointer moves to
+//	                 current HEAD (UpdateDiffBaseSHA +
+//	                 refresh_attempted{clean, pre_spend_probe}) and the
+//	                 pipeline proceeds to verify+panel attesting the
+//	                 tree the land now targets; conflict/error =
+//	                 refresh_attempted{...} then blocked base_stale,
+//	                 diff pending. The AUTHORITATIVE check is still
+//	                 final, inside handleDiffAction's accept branch
+//	                 under acceptMu (checkAndRefreshBase — zero
+//	                 check-to-apply window): drift past it attempts the
+//	                 same rebase against the real checkout, and a failed
+//	                 one journals base_stale_at_land via the caller's
+//	                 errors.Is(errBaseStale) branch with the completed
 //	                 panel riding the blocked row.
 //	verify gate     the repo-root `.odo-verify` command re-runs at the
 //	                 run's worktree root with an allowlisted child
@@ -80,7 +85,9 @@ package ipc
 //	                 journal-derived suspension).
 //	land            handleDiffAction's original path — protected-path
 //	                 guard, unmerged-index refusal, the FINAL base-
-//	                 freshness check (errBaseStale → base_stale_at_land
+//	                 freshness adjudication (checkAndRefreshBase: a
+//	                 clean refresh re-applies onto current HEAD, a
+//	                 failed one wraps errBaseStale → base_stale_at_land
 //	                 below), 3-way apply, path-scoped staged commit,
 //	                 worktree retire — plus actor:"auto_panel" on the
 //	                 journaled review_action.
@@ -91,6 +98,12 @@ package ipc
 //	accept{actor:"auto_panel"}            auto-landed (streak-excluded:
 //	                                      ComputeAutonomy counts these
 //	                                      separately, never toward rungs)
+//	refresh_attempted{clean|conflict|error} a stale-base rebase attempt
+//	                                      (P0a): phase pre_spend_probe =
+//	                                      the entry probe (actor auto_panel),
+//	                                      accept_apply = the final under-
+//	                                      mutex rebase; always preceding the
+//	                                      accept/blocked row it feeds
 //	auto_revise_round{actor:"auto_panel"} a spawned repair round (M18)
 //	auto_land_blocked{reason,...}         any gate/panel stop, with the
 //	                                      panel verdicts attached when the
@@ -240,10 +253,17 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// The verify below attests the run's worktree (diff base + diff), but
 	// the land applies onto the main checkout's CURRENT HEAD. If HEAD has
 	// drifted since the base was cut, verify would attest a tree nobody
-	// lands — cheap freshness check before any verify/panel spend; a stale
-	// base stays pending for the human (conservative, kimi's panel option a).
-	// ENTRY filter only: drift arriving mid-pipeline is caught by the FINAL
-	// check inside handleDiffAction (sentinel errBaseStale) and journals
+	// lands — so entry drift is adjudicated before any verify/panel spend.
+	// P0a: drift no longer blocks outright. Probe the rebase in a throwaway
+	// worktree (ProbeApplyClean: the main checkout is never touched and
+	// acceptMu is never taken — human accepts stay unblocked mid-probe).
+	// A clean probe means current_HEAD+diff merges by itself: move the
+	// diff's base pointer and proceed to verify+panel attesting the tree
+	// the land now targets. Anything else keeps the conservative posture:
+	// refresh_attempted journaled first, then blocked base_stale with the
+	// diff pending. ENTRY filter only: drift arriving mid-pipeline is
+	// caught by the FINAL check inside handleDiffAction
+	// (checkAndRefreshBase, sentinel errBaseStale) and journals
 	// base_stale_at_land with the completed panel attached.
 	base := ""
 	if d.BaseSHA != nil {
@@ -255,8 +275,42 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		return
 	}
 	if head != base {
-		s.journalAutoLandBlocked(ctx, d, "base_stale", "main HEAD "+head+" drifted from diff base "+base+" — at pipeline entry (before verify/panel spend)", nil, "")
-		return
+		clean, probeDetail, perr := git.ProbeApplyClean(s.projectRoot, d.PathOnDisk)
+		if perr != nil || !clean {
+			outcome := "error"
+			refreshErr := perr
+			if perr == nil {
+				outcome = "conflict"
+				refreshErr = errors.New(probeDetail)
+			}
+			s.journalRefreshAttempt(ctx, d, "pre_spend_probe", outcome, base, head, refreshErr)
+			reasonDetail := fmt.Sprintf("main HEAD %s drifted from diff base %s — refresh probe: %s", head, base, outcome)
+			if probeDetail != "" {
+				reasonDetail += ": " + capDetail(probeDetail)
+			} else if perr != nil {
+				reasonDetail += ": " + perr.Error()
+			}
+			s.journalAutoLandBlocked(ctx, d, "base_stale", reasonDetail, nil, "")
+			return
+		}
+		// Clean rebase available: move the diff's base pointer to the tree
+		// verify/panel are about to attest, journal the refresh, and fall
+		// through. The FINAL gate's checkAndRefreshBase re-reads the store
+		// and re-adjudicates (HEAD moving again after this point refreshes
+		// once more there or refuses — at most one attempt per gate, never
+		// a loop).
+		if uerr := s.store.UpdateDiffBaseSHA(ctx, d.ID, head); uerr != nil {
+			// Fail closed: the probe touched nothing, but a store that
+			// can't move the base pointer can't be trusted to carry the
+			// rest of the pipeline's journal either.
+			s.journalAutoLandBlocked(ctx, d, "base_stale",
+				"clean refresh probe (base "+base+" → "+head+") but recording the new base failed: "+uerr.Error(), nil, "")
+			return
+		}
+		if d.BaseSHA != nil {
+			*d.BaseSHA = head
+		}
+		s.journalRefreshAttempt(ctx, d, "pre_spend_probe", "clean", base, head, nil)
 	}
 
 	verifyCmd, err := verifyCommand(worktreePath)
@@ -375,10 +429,12 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		return
 	}
 	if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor); err != nil {
-		// Drift mid-pipeline (HEAD moved after the entry check): the
-		// FINAL freshness check refused. The completed panel rides the
-		// blocked row as advisory evidence (human_gate_visual precedent)
-		// — the human re-runs or rejects with the verdict on record.
+		// Drift mid-pipeline (HEAD moved after the entry probe): the
+		// FINAL gate's automatic refresh failed (conflict/error — its
+		// refresh_attempted row already precedes this one). The completed
+		// panel rides the blocked row as advisory evidence
+		// (human_gate_visual precedent) — the human re-runs or rejects
+		// with the verdict on record.
 		if errors.Is(err, errBaseStale) {
 			s.journalAutoLandBlocked(ctx, d, "base_stale_at_land",
 				err.Error()+" — the verify and panel attested the pre-drift tree; the diff stays pending for the human", reviews, cv)

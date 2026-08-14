@@ -71,6 +71,7 @@ type settleScan struct {
 	memory     []map[string]interface{} // memory_update layer:auto_land payloads
 	accepts    []map[string]interface{} // review_action accept payloads
 	moaRows    []map[string]interface{} // review_action moa_review payloads
+	reviewSeq  []map[string]interface{} // every review_action payload, journal order (P0a: refresh_attempted ordering)
 	advisories []string                 // odo:true transcript advisories
 }
 
@@ -93,6 +94,7 @@ func scanSettle(t *testing.T, st *store.Store, convID int64) settleScan {
 				out.markers = append(out.markers, markerRow{seq: ev.Seq, m: m, text: text})
 			}
 		case store.EventReviewAction:
+			out.reviewSeq = append(out.reviewSeq, p)
 			switch p["action"] {
 			case "auto_revise_round":
 				out.rounds = append(out.rounds, p)

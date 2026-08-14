@@ -1690,40 +1690,133 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	return nil
 }
 
-// errBaseStale is the base-freshness refusal's sentinel: checkBaseFresh
-// wraps it so the auto-land caller (the land step in autoland.go) can
+// errBaseStale is the base-freshness refusal's sentinel: checkAndRefreshBase
+// wraps it when a stale base fails its automatic refresh (conflict OR
+// error) so the auto-land caller (the land step in autoland.go) can
 // errors.Is-distinguish "main HEAD drifted mid-pipeline" from an apply
 // failure — drift journals base_stale_at_land with the completed panel
 // riding the blocked row as advisory evidence, while a non-sentinel
 // refusal (protected path, conflicted index, apply error) stays log-only.
 var errBaseStale = errors.New("base stale")
 
-// checkBaseFresh is the FINAL, authoritative base-freshness check
-// (fix-INT D1/D3/D4): the entry check in autoland.go is a cheap pre-spend
-// filter, but HEAD can move mid-pipeline (verify + panel take minutes) or
-// since a human's review started, and verify/panel only ever attested
-// base+diff while the land applies onto CURRENT HEAD. Running here —
-// under acceptMu, after the unmerged-index refusal and before the
-// rollback baseline — makes the check-to-apply window zero for daemon
-// writers too: a concurrent accept's CommitPaths holds this same mutex.
-// Nil/empty base_sha SKIPS (grandfathering pre-v2 journal rows — the auto
-// path already refuses a missing base upstream as base_unresolvable, so
-// the skip re-opens no hole). A HEAD read error fails closed. Drift
-// refuses naming BOTH shas plus the remediation and journals NOTHING —
-// the diff stays pending and the human's next action IS the evidence
-// (unmerged-index refusal precedent).
-func (s *Server) checkBaseFresh(d store.Diff) error {
+// checkAndRefreshBase is the FINAL, authoritative base-freshness
+// adjudication (P0a; supersedes fix-INT's checkBaseFresh, same D1/D3/D4
+// invariants): it runs where the refusal used to — under acceptMu, after
+// the unmerged-index refusal and before the caller's apply — so the
+// check-to-apply window stays zero for daemon writers (a concurrent
+// accept's CommitPaths holds this same mutex). HEAD drift now triggers a
+// REBASE instead of a hard refusal: the diff embeds its base blobs, so
+// git apply --3way merges it onto current HEAD as a real 3-way merge,
+// using the same baseline/apply/rollback trio the caller's fresh path
+// runs. Returns:
+//
+//	(false, nil) — base fresh, or nil/empty (fix-INT D4 grandfathering:
+//	the auto path already refuses a missing base upstream as
+//	base_unresolvable, so the skip re-opens no hole); the caller applies
+//	normally.
+//	(true, nil) — refresh CLEAN: the diff already applied to main and its
+//	base pointer moved to HEAD (UpdateDiffBaseSHA); the caller skips its
+//	baseline/apply and proceeds to CommitPaths.
+//	(false, err) — refresh failed: main rolled back to pre-attempt state,
+//	the diff stays pending (NOT conflict — DiffConflict is reserved for
+//	fresh-base apply failures), and err wraps errBaseStale for BOTH the
+//	conflict and the error outcome (the lock's contract treats them the
+//	same: fail closed), so the auto-land caller's errors.Is branch
+//	journals base_stale_at_land with its panel evidence.
+//
+// Every attempt journals refresh_attempted{phase:"accept_apply"} BEFORE
+// returning — journal-first, so the rebase's evidence precedes whichever
+// resolution/blocked row follows (hard rule 6). A HEAD read error fails
+// closed without touching the tree; an unparseable patch or missing
+// rollback baseline refuses the attempt — refreshing main without a way
+// back is not on the table. One attempt per gate encounter (hard rule 8):
+// if HEAD moves again after a clean refresh, the next gate's check starts
+// the adjudication over, it never loops inside one call.
+func (s *Server) checkAndRefreshBase(ctx context.Context, d *store.Diff) (refreshed bool, err error) {
 	if d.BaseSHA == nil || *d.BaseSHA == "" {
-		return nil
+		return false, nil
 	}
 	head, err := git.CurrentSHA(s.projectRoot)
 	if err != nil {
-		return fmt.Errorf("accept_diff: read main HEAD for base freshness: %w", err)
+		return false, fmt.Errorf("accept_diff: read main HEAD for base freshness: %w", err)
 	}
-	if head != *d.BaseSHA {
-		return fmt.Errorf("accept_diff: main HEAD %s drifted from diff base %s — this diff was judged (and auto-land verified/panel-reviewed) against a tree that no longer exists; re-run the task on current HEAD or reject the diff, which stays pending: %w", head, *d.BaseSHA, errBaseStale)
+	if head == *d.BaseSHA {
+		return false, nil
 	}
-	return nil
+	base := *d.BaseSHA
+	patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
+	if gerr != nil {
+		return false, fmt.Errorf("accept_diff: parse patch paths for refresh: %w", gerr)
+	}
+	baseHEAD, baseDisk, berr := git.CapturePatchBaseline(s.projectRoot, patchPaths)
+	if berr != nil {
+		return false, fmt.Errorf("accept_diff: capture rollback baseline: %w", berr)
+	}
+	if applyErr := git.ApplyDiff(s.projectRoot, d.PathOnDisk); applyErr == nil {
+		// Clean rebase onto current HEAD — move the base pointer before
+		// journaling so the trail records the store state as it stands.
+		// Fail closed (hard rule 6): if the pointer move fails, roll main
+		// back to the pre-attempt tree rather than leave an applied diff
+		// whose store row still claims the old base.
+		if uerr := s.store.UpdateDiffBaseSHA(ctx, d.ID, head); uerr != nil {
+			if rbErr := git.RollbackPatchApply(s.projectRoot, patchPaths, baseHEAD, baseDisk); rbErr != nil {
+				log.Printf("accept_diff: refresh rollback after UpdateDiffBaseSHA failure for diff %d: %v (inspect the main checkout)", d.ID, rbErr)
+			}
+			return false, fmt.Errorf("accept_diff: record refreshed base: %w", uerr)
+		}
+		*d.BaseSHA = head
+		s.journalRefreshAttempt(ctx, *d, "accept_apply", "clean", base, head, nil)
+		return true, nil
+	} else {
+		// Classify BEFORE the rollback erases the evidence: a failed --3way
+		// that left unmerged index entries is a merge conflict; anything
+		// else (missing blobs, unreadable patch) is a git error.
+		outcome := "error"
+		if conflicts, cerr := git.HasUnmergedEntries(s.projectRoot); cerr == nil && conflicts {
+			outcome = "conflict"
+		}
+		if rbErr := git.RollbackPatchApply(s.projectRoot, patchPaths, baseHEAD, baseDisk); rbErr != nil {
+			log.Printf("accept_diff: refresh rollback for diff %d: %v (inspect the main checkout)", d.ID, rbErr)
+		}
+		s.journalRefreshAttempt(ctx, *d, "accept_apply", outcome, base, head, applyErr)
+		return false, fmt.Errorf("accept_diff: base stale (%s→%s) and automatic refresh %s: %v — re-run the task on current HEAD or reject the diff, which stays pending: %w", base, head, outcome, applyErr, errBaseStale)
+	}
+}
+
+// journalRefreshAttempt records one stale-base rebase attempt as a
+// refresh_attempted row — an additive action value on EventReviewAction
+// (ADR-0002 immune: ComputeAutonomy and friends iterate payloads
+// generically). base_sha is the diff's ORIGINAL base, target_sha the HEAD
+// the rebase aimed at; detail carries the git diagnostics on
+// conflict/error only, capped at 200 chars. The pre_spend_probe phase
+// only runs inside the auto pipeline, so its rows carry
+// actor:"auto_panel"; accept_apply rows leave provenance to the
+// resolution/blocked row that follows (the accept row itself carries the
+// actor). Best-effort like the pipeline's other journal helpers: the
+// subsequent resolution row is journaled with an error return, so a lost
+// breadcrumb never leaves an unrecorded RESOLUTION.
+func (s *Server) journalRefreshAttempt(ctx context.Context, d store.Diff, phase, outcome, baseSHA, targetSHA string, applyErr error) {
+	payload := map[string]interface{}{
+		"action":     "refresh_attempted",
+		"diff_id":    d.ID,
+		"base_sha":   baseSHA,
+		"target_sha": targetSHA,
+		"outcome":    outcome,
+		"phase":      phase,
+	}
+	if applyErr != nil {
+		detail := applyErr.Error()
+		if len(detail) > 200 {
+			detail = detail[:200] + "…"
+		}
+		payload["detail"] = detail
+	}
+	if phase == "pre_spend_probe" {
+		payload["actor"] = autoActor
+	}
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); err != nil {
+		log.Printf("accept_diff: journal refresh attempt (%s/%s) for diff %d: %v", phase, outcome, d.ID, err)
+	}
 }
 
 // handleDiffAction implements accept_diff and reject_diff. Accept applies the
@@ -1753,6 +1846,12 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	// journaled on every resolution row — the accept path fills it with the
 	// freshness head, the reject path with a best-effort read below.
 	var headSHA string
+	// refreshedFromSHA (P0a) rides the accept resolution row when a
+	// stale-base refresh moved the diff's base to land it: the diff (and
+	// any panel) was judged against ORIGINAL_base+diff, but the land
+	// attests current_HEAD+diff, so the row must carry both — base_sha is
+	// the post-refresh base (== head_sha), refreshed_from_sha the original.
+	var refreshedFromSHA string
 	if action == "accept" {
 		// M6 (§8b): explicit guarded-path check — gitignore is not the
 		// enforcement point (wiki/ is NOT gitignored, so this daemon-side
@@ -1779,14 +1878,28 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		} else if conflicts {
 			return Response{}, errors.New("accept_diff: main checkout has unresolved merge conflicts; resolve or reset them, then retry the accept")
 		}
-		// Final base-freshness adjudication (fix-INT D1): see checkBaseFresh.
-		// Refusal leaves the diff pending and journals nothing; the auto
-		// caller's errors.Is(errBaseStale) branch owns that blocked row.
-		if err := s.checkBaseFresh(d); err != nil {
+		// Final base-freshness adjudication (P0a; see checkAndRefreshBase):
+		// a stale base attempts a --3way REBASE right here instead of the
+		// old hard refusal. A clean refresh ALREADY applied the diff to
+		// main, so the fresh-path baseline+apply below is skipped and only
+		// CommitPaths remains; a conflict/error keeps the diff pending,
+		// journals refresh_attempted, and returns errBaseStale-wrapped —
+		// the auto caller's errors.Is branch owns base_stale_at_land on
+		// top of that row.
+		originalBase := ""
+		if d.BaseSHA != nil {
+			originalBase = *d.BaseSHA
+		}
+		refreshed, err := s.checkAndRefreshBase(ctx, &d)
+		if err != nil {
 			return Response{}, err
 		}
+		if refreshed {
+			refreshedFromSHA = originalBase
+		}
 		// The freshness head for the journaled row: a set BaseSHA that
-		// passed checkBaseFresh IS the current head under acceptMu — no
+		// survived the check IS the current head under acceptMu — after a
+		// clean refresh the base pointer itself was moved to it — no
 		// re-read (tri-review N2); nil-base legacy rows read it once for
 		// additive evidence ("" on failure).
 		if d.BaseSHA != nil && *d.BaseSHA != "" {
@@ -1799,49 +1912,53 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		// paths (no self-produced unmerged entries, no half-applied files,
 		// no damage outside the patch). When our parser can't enumerate the
 		// paths, falls back to no-baseline — git apply stays the authority.
-		var baseHEAD, baseDisk map[string]bool
-		if gerr == nil {
-			var berr error
-			baseHEAD, baseDisk, berr = git.CapturePatchBaseline(s.projectRoot, patchPaths)
-			if berr != nil {
-				return Response{}, fmt.Errorf("accept_diff: capture rollback baseline: %w", berr)
+		// Skipped entirely when a stale-base refresh already applied the
+		// diff (its own baseline/rollback pair ran inside the attempt).
+		if !refreshed {
+			var baseHEAD, baseDisk map[string]bool
+			if gerr == nil {
+				var berr error
+				baseHEAD, baseDisk, berr = git.CapturePatchBaseline(s.projectRoot, patchPaths)
+				if berr != nil {
+					return Response{}, fmt.Errorf("accept_diff: capture rollback baseline: %w", berr)
+				}
 			}
-		}
-		if err := git.ApplyDiff(s.projectRoot, d.PathOnDisk); err != nil {
-			applyErr := err
-			// I7: roll back. A failed --3way can leave per-file conflict
-			// markers and unmerged index entries; the old "stay pending"
-			// comment assumed nothing was written, which was false — the
-			// conflict stuck the diff forever while main carried damage.
-			var rbErr error
-			if baseHEAD != nil {
-				rbErr = git.RollbackPatchApply(s.projectRoot, patchPaths, baseHEAD, baseDisk)
+			if err := git.ApplyDiff(s.projectRoot, d.PathOnDisk); err != nil {
+				applyErr := err
+				// I7: roll back. A failed --3way can leave per-file conflict
+				// markers and unmerged index entries; the old "stay pending"
+				// comment assumed nothing was written, which was false — the
+				// conflict stuck the diff forever while main carried damage.
+				var rbErr error
+				if baseHEAD != nil {
+					rbErr = git.RollbackPatchApply(s.projectRoot, patchPaths, baseHEAD, baseDisk)
+				}
+				// Terminal conflict state: the diff leaves the review queue,
+				// the journal records the outcome, and the message tells the
+				// human exactly where main stands.
+				if uerr := s.store.UpdateDiffStatus(ctx, diffID, store.DiffConflict); uerr != nil {
+					log.Printf("accept_diff: mark diff %d conflict: %v", diffID, uerr)
+				}
+				payload := map[string]interface{}{
+					"action":      "conflict",
+					"diff_id":     d.ID,
+					"error":       applyErr.Error(),
+					"rolled_back": rbErr == nil && baseHEAD != nil,
+				}
+				if actor != "" {
+					payload["actor"] = actor
+				}
+				if _, aerr := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); aerr != nil {
+					log.Printf("accept_diff: journal conflict for diff %d: %v", diffID, aerr)
+				}
+				if rbErr != nil {
+					return Response{}, fmt.Errorf("accept_diff: apply: %w (ROLLBACK INCOMPLETE: %v — inspect the main checkout)", applyErr, rbErr)
+				}
+				if baseHEAD == nil {
+					return Response{}, fmt.Errorf("accept_diff: apply: %w (no rollback baseline — patch paths unparseable, inspect the main checkout)", applyErr)
+				}
+				return Response{}, fmt.Errorf("accept_diff: apply failed, main checkout rolled back to pre-accept state (diff marked conflict): %w", applyErr)
 			}
-			// Terminal conflict state: the diff leaves the review queue,
-			// the journal records the outcome, and the message tells the
-			// human exactly where main stands.
-			if uerr := s.store.UpdateDiffStatus(ctx, diffID, store.DiffConflict); uerr != nil {
-				log.Printf("accept_diff: mark diff %d conflict: %v", diffID, uerr)
-			}
-			payload := map[string]interface{}{
-				"action":      "conflict",
-				"diff_id":     d.ID,
-				"error":       applyErr.Error(),
-				"rolled_back": rbErr == nil && baseHEAD != nil,
-			}
-			if actor != "" {
-				payload["actor"] = actor
-			}
-			if _, aerr := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); aerr != nil {
-				log.Printf("accept_diff: journal conflict for diff %d: %v", diffID, aerr)
-			}
-			if rbErr != nil {
-				return Response{}, fmt.Errorf("accept_diff: apply: %w (ROLLBACK INCOMPLETE: %v — inspect the main checkout)", applyErr, rbErr)
-			}
-			if baseHEAD == nil {
-				return Response{}, fmt.Errorf("accept_diff: apply: %w (no rollback baseline — patch paths unparseable, inspect the main checkout)", applyErr)
-			}
-			return Response{}, fmt.Errorf("accept_diff: apply failed, main checkout rolled back to pre-accept state (diff marked conflict): %w", applyErr)
 		}
 		// Commit the applied diff — only its own paths (P0) — so the next
 		// worktree (created from HEAD) includes all previously accepted
@@ -1885,6 +2002,12 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		"diff_id":  d.ID,
 		"base_sha": baseSHA,
 		"head_sha": headSHA,
+	}
+	// P0a (additive): a clean-refreshed accept attests current_HEAD+diff
+	// while the diff (and any panel) was judged against the ORIGINAL base
+	// — the row must name both, on top of the refresh_attempted row.
+	if refreshedFromSHA != "" {
+		payload["refreshed_from_sha"] = refreshedFromSHA
 	}
 	if actor != "" {
 		payload["actor"] = actor

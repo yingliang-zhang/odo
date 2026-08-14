@@ -72,6 +72,22 @@ func (s *Store) UpdateDiffStatus(ctx context.Context, diffID int64, status strin
 	return nil
 }
 
+// UpdateDiffBaseSHA sets a diff's base_sha after a successful refresh
+// rebased the diff onto a newer HEAD (P0a). The diff stays pending; only
+// the base pointer moves.
+func (s *Store) UpdateDiffBaseSHA(ctx context.Context, diffID int64, baseSHA string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE diffs SET base_sha = ? WHERE id = ?`, nullString(baseSHA), diffID)
+	if err != nil {
+		return fmt.Errorf("store: update diff base sha: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("store: update diff base sha: %w", sql.ErrNoRows)
+	}
+	return nil
+}
+
 // ListDiffs returns every diff for a conversation, ordered by id (insertion
 // order). Read-only consumers (outcome audits) use it to join diff rows to
 // the run events that produced them.

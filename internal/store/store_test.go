@@ -579,3 +579,40 @@ func TestSearchEvents(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateDiffBaseSHA (P0a): a successful refresh moves the diff's base
+// pointer while the row stays pending — round-trips through GetDiff — and
+// an unknown id reports ErrNoRows like every other diff update.
+func TestUpdateDiffBaseSHA(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	p, _ := s.CreateOrGetProject(ctx, "/repo/r", "r")
+	w, _ := s.CreateOrGetWorkstream(ctx, p.ID, "main")
+	c, _ := s.CreateConversation(ctx, w.ID, "")
+
+	d, err := s.InsertDiff(ctx, c.ID, "/repo/r/.odo/diffs/1.diff", "base0", "")
+	if err != nil {
+		t.Fatalf("InsertDiff: %v", err)
+	}
+	if d.BaseSHA == nil || *d.BaseSHA != "base0" {
+		t.Fatalf("setup: base_sha = %v, want base0", d.BaseSHA)
+	}
+
+	if err := s.UpdateDiffBaseSHA(ctx, d.ID, "base1"); err != nil {
+		t.Fatalf("UpdateDiffBaseSHA: %v", err)
+	}
+	got, err := s.GetDiff(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("GetDiff: %v", err)
+	}
+	if got.BaseSHA == nil || *got.BaseSHA != "base1" {
+		t.Errorf("base_sha after refresh = %v, want base1", got.BaseSHA)
+	}
+	if got.Status != DiffPending {
+		t.Errorf("status after refresh = %q, want pending (only the base moves)", got.Status)
+	}
+
+	if err := s.UpdateDiffBaseSHA(ctx, 4242, "base1"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("update missing diff: err = %v, want sql.ErrNoRows", err)
+	}
+}

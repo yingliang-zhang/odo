@@ -390,3 +390,137 @@ func TestTestAssertionDelta(t *testing.T) {
 		})
 	}
 }
+
+// ------------------------------------------- P0a: ProbeApplyClean (stale-diff refresh probe)
+
+// probeLeaks counts leftover probe worktrees: registered .git/worktrees
+// entries beyond the main checkout and odo-probe-* dirs in the OS temp dir.
+func probeLeaks(t *testing.T, repo string) (worktrees int, dirs int) {
+	t.Helper()
+	worktrees = strings.Count(mustRun(t, repo, "worktree", "list", "--porcelain"), "worktree ")
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "odo-probe-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return worktrees, len(matches)
+}
+
+// TestProbeApplyClean_CleanOnDrift (P0a): HEAD moved past the diff's base
+// but on a DISJOINT path — the diff's embedded base blobs let --3way merge
+// it onto the new HEAD, so the probe reports clean. The probe runs entirely
+// inside a throwaway worktree: main's HEAD, files, and index are untouched.
+func TestProbeApplyClean_CleanOnDrift(t *testing.T) {
+	repo := newPatchRepo(t)
+	patch := generatePatch(t, repo, "patched\n")
+	headBefore := mustRun(t, repo, "rev-parse", "HEAD")
+	writeAndCommit(t, repo, "drift.txt", "drift\n") // disjoint drift
+	headDrifted := mustRun(t, repo, "rev-parse", "HEAD")
+	if headDrifted == headBefore {
+		t.Fatal("setup bug: drift commit did not move HEAD")
+	}
+
+	clean, detail, err := ProbeApplyClean(repo, patch)
+	if err != nil || !clean || detail != "" {
+		t.Fatalf("ProbeApplyClean = (%v, %q, %v), want (true, \"\", nil)", clean, detail, err)
+	}
+	// Main untouched: same HEAD, original file content, pristine status.
+	if got := mustRun(t, repo, "rev-parse", "HEAD"); got != headDrifted {
+		t.Errorf("main HEAD = %s after the probe, want %s (probe must not move main)", got, headDrifted)
+	}
+	if got := readFile(repo, "base.txt"); got != "base\n" {
+		t.Errorf("main base.txt = %q, want the pre-probe content (probe leaked into main)", got)
+	}
+	if status := mustRun(t, repo, "status", "--porcelain"); status != "" {
+		t.Errorf("main status = %q after the probe, want clean", status)
+	}
+}
+
+// TestProbeApplyClean_ConflictOnOverlap (P0a): HEAD moved by editing the
+// SAME file the patch rewrites — the 3-way merge conflicts, the probe
+// reports it (non-empty detail carrying git's diagnostics, no error), and
+// main is untouched.
+func TestProbeApplyClean_ConflictOnOverlap(t *testing.T) {
+	repo := newPatchRepo(t)
+	patch := generatePatch(t, repo, "patched\n")
+	writeAndCommit(t, repo, "base.txt", "user drift\n") // overlapping drift
+	headDrifted := mustRun(t, repo, "rev-parse", "HEAD")
+
+	clean, detail, err := ProbeApplyClean(repo, patch)
+	if err != nil || clean {
+		t.Fatalf("ProbeApplyClean = (%v, %q, %v), want (false, detail, nil)", clean, detail, err)
+	}
+	if !strings.Contains(detail, "base.txt") {
+		t.Errorf("detail = %q, want git's conflict diagnostics naming base.txt", detail)
+	}
+	if got := mustRun(t, repo, "rev-parse", "HEAD"); got != headDrifted {
+		t.Errorf("main HEAD = %s after the probe, want %s", got, headDrifted)
+	}
+	if got := readFile(repo, "base.txt"); got != "user drift\n" {
+		t.Errorf("main base.txt = %q, want the drifted content (probe leaked into main)", got)
+	}
+	if status := mustRun(t, repo, "status", "--porcelain"); status != "" {
+		t.Errorf("main status = %q after the probe, want clean", status)
+	}
+}
+
+// TestProbeApplyClean_CleansUp (P0a): the throwaway worktree is removed
+// unconditionally — neither a clean nor a conflicting probe leaves a
+// registered worktree entry or an odo-probe-* dir behind.
+func TestProbeApplyClean_CleansUp(t *testing.T) {
+	repo := newPatchRepo(t)
+	conflictPatch := generatePatch(t, repo, "patched again\n")
+	writeAndCommit(t, repo, "base.txt", "user drift\n") // makes conflictPatch conflict
+	wtBefore, dirsBefore := probeLeaks(t, repo)
+
+	// The clean leg needs a patch that still merges onto HEAD after one
+	// more drift commit: a new-file patch cut from the CURRENT (drifted)
+	// HEAD, then drift again on a disjoint path.
+
+	disjoint := t.TempDir()
+	mustRun(t, repo, "worktree", "add", "--detach", filepath.Join(disjoint, "scratch"), "HEAD")
+	scratch := filepath.Join(disjoint, "scratch")
+	if err := os.WriteFile(filepath.Join(scratch, "added.txt"), []byte("added\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, scratch, "add", "-A")
+	disjointPatch, err := run(scratch, "diff", "--cached", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, repo, "worktree", "remove", "--force", scratch)
+	patchPath := filepath.Join(disjoint, "d.diff")
+	if err := os.WriteFile(patchPath, []byte(disjointPatch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommit(t, repo, "second-drift.txt", "drift\n") // disjoint: probe is clean
+
+	if clean, _, err := ProbeApplyClean(repo, patchPath); err != nil || !clean {
+		t.Fatalf("disjoint probe = (%v, _, %v), want clean", clean, err)
+	}
+	conflictPath := filepath.Join(disjoint, "c.diff")
+	if data, err := os.ReadFile(conflictPatch); err != nil {
+		t.Fatal(err)
+	} else if err := os.WriteFile(conflictPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if clean, _, err := ProbeApplyClean(repo, conflictPath); err != nil || clean {
+		t.Fatalf("overlap probe = (%v, _, %v), want conflict", clean, err)
+	}
+
+	wtAfter, dirsAfter := probeLeaks(t, repo)
+	if wtAfter != wtBefore {
+		t.Errorf("registered worktrees = %d, want %d (a probe leaked a worktree entry)", wtAfter, wtBefore)
+	}
+	if dirsAfter != dirsBefore {
+		t.Errorf("odo-probe-* dirs = %d, want %d (a probe leaked its checkout)", dirsAfter, dirsBefore)
+	}
+}
+
+// readFile returns the working-tree content of one repo file.
+func readFile(repo, name string) string {
+	data, err := os.ReadFile(filepath.Join(repo, name))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
