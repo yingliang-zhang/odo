@@ -1651,6 +1651,110 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-color: var(--accent, var(--border));
 }
 
+/* W6 (goal queue): the composer "Queue · N" chip and its popover — the
+   parked-goal FIFO. Same hairline chip + anchored popover family as the
+   Plan chip (shared classes carry the base geometry); these rules add the
+   queue-specific row layout: position, 2-line-clamped text, Resume/Drop
+   actions. */
+.queue-dock {
+  position: relative;
+  align-self: flex-start;
+}
+
+.queue-popover {
+  min-width: 300px;
+  max-width: 420px;
+}
+
+.queue-note {
+  padding: 2px 6px 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.queue-row {
+  align-items: flex-start;
+}
+
+.queue-pos {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 24px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding-top: 1px;
+}
+
+.queue-next-tag {
+  background: rgba(204, 167, 66, 0.14);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  color: var(--warn);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 5px;
+  text-transform: lowercase;
+}
+
+/* 2-line clamp, tail-pinned: the goal's own words stay readable even when
+   several rows are queued. */
+.queue-row-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+.queue-actions {
+  flex: none;
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.queue-act {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--accent, var(--text));
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  line-height: 1;
+}
+
+.queue-act:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.queue-act:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.queue-drop {
+  color: var(--text-dim);
+}
+
+.queue-drop:hover:not(:disabled),
+.queue-drop.armed {
+  color: var(--err);
+}
+
 .attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -1742,6 +1846,35 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 .stop-btn:hover {
   opacity: 0.9;
+}
+
+/* W6 (goal queue): the composer park toggle, immediately left of Send.
+   Overrides the .chat-input button accent fill: a quiet icon button when
+   disarmed, amber when armed (amber = queue, matching ws-parked-pill). */
+.chat-input button.park-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  padding: 7px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-input button.park-toggle:hover:not(:disabled) {
+  color: var(--text);
+  filter: none;
+}
+
+.chat-input button.park-toggle.armed {
+  background: rgba(204, 167, 66, 0.14);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.chat-input button.park-toggle:disabled {
+  opacity: 0.4;
 }
 
 .bubble .attachment-chips {
@@ -2845,6 +2978,19 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 .ws-pending-pill {
   background: var(--err);
+  color: #fff;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+/* W6 (goal queue): per-workstream parked-goal depth. Same geometry as
+   ws-pending-pill but amber (queue), never --err — a parked goal is not
+   a problem awaiting review. */
+.ws-parked-pill {
+  background: var(--warn);
   color: #fff;
   border-radius: 9px;
   font-size: 10px;

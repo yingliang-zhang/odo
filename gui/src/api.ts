@@ -45,6 +45,7 @@ import type {
   ListWikiResponse,
   ListWorkstreamsResponse,
   MemoryProposalsResponse,
+  ParkedGoalResponse,
   PendingCountsResponse,
   PinResponse,
   PollEventsResponse,
@@ -101,6 +102,10 @@ export function removeProject(root: string): Promise<ProjectEntry[]> {
 export interface SendOptions {
   // steer: journal the message for the running agent (no new run started).
   steer?: boolean;
+  // W6 (goal queue): park queues the message as a parked goal. Mutually
+  // exclusive with steer — the composer passes at most one (the daemon
+  // refuses a steer+park combination).
+  park?: boolean;
   // adapter: backend to run with ("omp"); ignored for steering.
   adapter?: string;
   // M11 P1: route to that project's daemon; null keeps the bridge default.
@@ -120,6 +125,9 @@ export function sendMessage(
   }
   if (opts?.steer) {
     req.steer = true;
+  }
+  if (opts?.park) {
+    req.park = true;
   }
   if (opts?.adapter) {
     req.adapter = opts.adapter;
@@ -153,6 +161,20 @@ export function saveAttachment(
 // ended before the cancel landed — a benign race, so callers may ignore it.
 export function cancel(conversationId: number, projectRoot?: string): Promise<CancelResponse> {
   return invoke<CancelResponse>("cancel", { conversationId, projectRoot: projectRoot ?? null });
+}
+
+// W6 (goal queue): activate one parked goal now. The daemon refuses with
+// ok:false when a run is active, the concurrency cap is reached, or a
+// distill is in progress — the goal stays queued, so the caller treats a
+// refusal as a benign reconcile, not an error.
+export function resumeParkedGoal(conversationId: number, goalSeq: number, projectRoot?: string): Promise<ParkedGoalResponse> {
+  return invoke<ParkedGoalResponse>("resume_parked_goal", { conversationId, goalSeq, projectRoot: projectRoot ?? null });
+}
+
+// W6 (goal queue): journal a human drop for one parked goal (the "clean
+// the junk drawer" path). Always available, even while a run is active.
+export function dropParkedGoal(conversationId: number, goalSeq: number, projectRoot?: string): Promise<ParkedGoalResponse> {
+  return invoke<ParkedGoalResponse>("drop_parked_goal", { conversationId, goalSeq, projectRoot: projectRoot ?? null });
 }
 
 export function listWorkstreams(projectRoot: string): Promise<ListWorkstreamsResponse> {

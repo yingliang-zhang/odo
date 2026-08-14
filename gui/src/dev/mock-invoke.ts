@@ -70,13 +70,45 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- Messaging ----------
     case "send_message": {
-      return { ok: true, event: fx.ev("user_message", { text: args?.text ?? "" }, args?.conversationId ?? 1) };
+      const convId = args?.conversationId ?? 1;
+      // W6 (goal queue): park journals user_message{park:true} and bumps
+      // the queue depth. Mirror the daemon cap (goalQueueCap=8): over-cap
+      // parks fail loud pre-journal — never silently drop a human message.
+      if (args?.park) {
+        if (fx.syncParkedGoals(convId) >= 8) {
+          return { ok: false, error: "send_message: parked goal queue full (8)" };
+        }
+        const event = fx.ev("user_message", { text: args?.text ?? "", park: true }, convId);
+        fx.events.push(event);
+        return { ok: true, event, parked: fx.syncParkedGoals(convId) };
+      }
+      return { ok: true, event: fx.ev("user_message", { text: args?.text ?? "" }, convId) };
     }
     case "cancel": {
       return { ok: true };
     }
+    // W6 (goal queue): a human resume journals run_prompt{origin:
+    // "parked_goal", goal_seqs:[seq]} WITHOUT an actor (the daemon's
+    // auto-dequeues carry one) — the poll loop delivers it, the dock
+    // reconciles, and the transcript shows the receipt badge.
+    case "resume_parked_goal": {
+      const convId = args?.conversationId ?? 1;
+      const seq = args?.goalSeq ?? 0;
+      const event = fx.ev("review_action", { action: "run_prompt", origin: "parked_goal", goal_seqs: [seq] }, convId);
+      fx.events.push(event);
+      return { ok: true, parked: fx.syncParkedGoals(convId) };
+    }
+    // W6 (goal queue): a human drop journals parked_goal_dropped
+    // {goal_seq}; consumption arrives through the same poll path.
+    case "drop_parked_goal": {
+      const convId = args?.conversationId ?? 1;
+      const seq = args?.goalSeq ?? 0;
+      const event = fx.ev("review_action", { action: "parked_goal_dropped", goal_seq: seq }, convId);
+      fx.events.push(event);
+      return { ok: true, parked: fx.syncParkedGoals(convId) };
+    }
     case "poll_events": {
-      return fx.makePollResponse(args?.conversationId ?? 1);
+      return fx.makePollResponse(args?.conversationId ?? 1, args?.afterSeq ?? undefined);
     }
 
     // ---------- Diffs ----------
@@ -190,6 +222,7 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return {
         ok: true,
         pending_counts: fx.pendingCounts,
+        parked_goals: fx.parkedGoals,
         running_workstreams: fx.runningWorkstreams,
         auto_distill: fx.autoDistill ?? [],
         distilling: false,

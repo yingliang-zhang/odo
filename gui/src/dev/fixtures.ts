@@ -3,6 +3,7 @@
 // run in a plain browser (npm run dev) without the Tauri webview or a
 // live daemon. Add ?mock=0 to force the real invoke even in a browser.
 
+import { deriveParkedGoals } from "../parked";
 import type {
   AcceptDiffResponse,
   AutoDistillCountdown,
@@ -158,6 +159,11 @@ export const events: OdoEvent[] = [
   ev("user_message", { text: "Now fix the socket perms" }, 3),
   ev("agent_text", { text: "Adjusting the socket chmod to 0600." }, 3),
   ev("agent_done", { summary: "Socket permissions fixed" }, 3),
+
+  // W6 (goal queue): one parked goal waiting in the default conversation,
+  // so dev mode and e2e see the QueueDock (and the sidebar pill) on first
+  // paint. Conv 1's seq numbering stays gap-free (this is its seq 12).
+  ev("user_message", { text: "Parked: sweep the flaky sidebar selector", park: true }),
 ];
 
 // ---------- Diffs ----------
@@ -248,6 +254,30 @@ export const userContent = `# USER.md
 
 export const pendingCounts: Record<string, number> = { 1: 1, 2: 0, 3: 0, 10: 0 };
 export const runningWorkstreams: number[] = [];
+// E2E lever: pretend the daemon reports a live run on the polled
+// conversation (agent_running). Background runs go through
+// runningWorkstreams; this covers the FOREGROUND case (steer/park mutex).
+export const runState = { foreground: false };
+
+// W6 (goal queue): per-workstream parked-goal depth, keyed like
+// pendingCounts. Kept in step with the journaled events by
+// syncParkedGoals (the same derivation the daemon applies — mock parity:
+// the journal is the authority, the count is derived, never incremented
+// by hand).
+export const parkedGoals: Record<string, number> = {};
+
+export function syncParkedGoals(conversationId: number): number {
+  const depth = deriveParkedGoals(events.filter((e) => e.conversation_id === conversationId)).length;
+  const wsId = conversations[conversationId]?.workstream_id;
+  if (wsId != null) {
+    if (depth > 0) parkedGoals[String(wsId)] = depth;
+    else delete parkedGoals[String(wsId)];
+  }
+  return depth;
+}
+
+// Initial sync for the seeded parked event in the default conversation.
+syncParkedGoals(1);
 // M12: no scheduled auto-distill in the default fixture — the composer
 // chip stays hidden, matching pre-M12 screens. E2E adds its own entry when
 // it wants the countdown visible.
@@ -471,11 +501,16 @@ export function makeBootstrap(root?: string, workstreamId?: number): BootstrapRe
   };
 }
 
-export function makePollResponse(convId: number): PollEventsResponse {
+// afterSeq mirrors the daemon's poll cursor: only journal rows NEWER than
+// the client's watermark arrive. Bootstrap replays the whole journal and
+// sets the watermark, so fixture events appended mid-session (mock park /
+// resume / drop) flow in exactly like daemon-journaled rows; callers that
+// omit afterSeq (legacy) get the old empty pull.
+export function makePollResponse(convId: number, afterSeq?: number): PollEventsResponse {
   return {
     ok: true,
-    events: [],
-    agent_running: false,
+    events: events.filter((e) => e.conversation_id === convId && e.seq > (afterSeq ?? Number.MAX_SAFE_INTEGER)),
+    agent_running: runState.foreground,
     preview: null,
     streaming: false,
     diff: convId === 1 ? pendingDiff : null,

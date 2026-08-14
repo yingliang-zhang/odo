@@ -371,6 +371,7 @@ async fn send_message(
     attachments: Option<Vec<String>>,
     steer: Option<bool>,
     adapter: Option<String>,
+    park: Option<bool>,
     project_root: Option<String>,
 ) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
@@ -383,6 +384,11 @@ async fn send_message(
     // a new run; adapter selects the backend ("omp").
     if let Some(steer) = steer {
         req["steer"] = json!(steer);
+    }
+    // W6 (goal queue): park queues the message as a parked goal instead of
+    // sending/steering (the daemon refuses a steer+park combination).
+    if let Some(p) = park {
+        req["park"] = json!(p);
     }
     if let Some(adapter) = adapter {
         if !adapter.is_empty() {
@@ -406,6 +412,25 @@ async fn send_message(
 async fn cancel(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     let req = json!({"cmd": "cancel", "conversation_id": conversation_id});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// W6 (goal queue): activate one parked goal now (the manual path when the
+// queue is held — prefs manual, errored run, or simply impatience). The
+// daemon refuses ok:false when admission fails; the goal stays queued.
+#[tauri::command]
+async fn resume_parked_goal(conversation_id: i64, goal_seq: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "resume_parked_goal", "conversation_id": conversation_id, "goal_seq": goal_seq});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// W6 (goal queue): journal a human drop for one parked goal. Always
+// available, even while a run is active.
+#[tauri::command]
+async fn drop_parked_goal(conversation_id: i64, goal_seq: i64, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "drop_parked_goal", "conversation_id": conversation_id, "goal_seq": goal_seq});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -1246,6 +1271,8 @@ pub fn run() {
             bootstrap,
             send_message,
             cancel,
+            resume_parked_goal,
+            drop_parked_goal,
             poll_events,
             accept_diff,
             reject_diff,

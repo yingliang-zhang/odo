@@ -87,6 +87,16 @@ export interface EventPayload {
   action?: string;
   diff_id?: number;
   attachments?: string[];
+  // W6 (goal queue): user_message carries park:true when the user queued
+  // the goal for later (derives the durable parked-goal FIFO);
+  // review_action rows consume queued seqs — run_prompt{goal_seqs} marks
+  // dequeuing runs (origin "parked_goal", actor set for automatic
+  // dequeues, absent for a human resume), parked_goal_dropped{goal_seq}
+  // journals a human drop.
+  park?: boolean;
+  goal_seqs?: number[];
+  goal_seq?: number;
+  actor?: string;
   // M3: memory recall — user_message journals what was injected into the
   // prompt. Fixed markers come first in daemon order: ~/.odo/user.md →
   // .odo/memory.md (M4) → .odo/pins.md (M5) → wiki/index.md (M5), then the
@@ -185,6 +195,10 @@ export type SendMessageRequest = {
   // a new run; adapter selects the backend ("omp").
   steer?: boolean;
   adapter?: string;
+  // W6 (goal queue): park queues the message as a parked goal instead of
+  // sending/steering (the daemon refuses steer+park, so the composer
+  // passes at most one).
+  park?: boolean;
   // M11 P1: routes to that project's daemon; null = bridge default.
   projectRoot?: string | null;
 };
@@ -193,6 +207,25 @@ export interface SendMessageResponse {
   ok: boolean;
   error?: string;
   event?: OdoEvent;
+  // W6: the conversation's parked-goal queue depth after a park.
+  parked?: number;
+}
+
+// W6 (goal queue): one queued goal, derived from the journal
+// (gui/src/parked.ts mirrors the daemon's deriveParkedGoals): the seq of
+// its user_message{park:true} row plus the verbatim text.
+export interface ParkedGoal {
+  seq: number;
+  text: string;
+}
+
+// Daemon `resume_parked_goal` / `drop_parked_goal` response. ok:false
+// (e.g. "no parked goal with seq N") is a benign reconcile — an
+// auto-dequeue raced the click, and the next poll reflects it.
+export interface ParkedGoalResponse {
+  ok: boolean;
+  error?: string;
+  parked?: number;
 }
 
 // Belt A: cancel carries no payload; ok:false ("no active run") is the
@@ -390,6 +423,10 @@ export interface PendingCountsResponse {
   error?: string;
   pending_counts?: Record<string, number>;
   running_workstreams?: number[];
+  // W6 (goal queue): per-workstream parked-goal queue depth, keyed like
+  // pending_counts. The sidebar's parked pill is sourced from this —
+  // the daemon's count is the authoritative depth.
+  parked_goals?: Record<string, number>;
   auto_distill?: AutoDistillCountdown[];
   distilling?: boolean;
   distilling_convs?: number[];

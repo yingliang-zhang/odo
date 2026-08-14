@@ -76,6 +76,9 @@ interface Props {
   workstream: Workstream | null;
   agentRunning: boolean;
   pendingCounts: Record<number, number>;
+  // W6 (goal queue): per-workstream parked-goal depth (pending_counts.
+  // parked_goals) — the daemon's count is the authoritative queue depth.
+  parkedCounts: Record<number, number>;
   runningWorkstreams: number[];
   onSwitchWorkstream: (id: number) => void;
   // Phase 5: single-call handler for clicking a workstream in a non-active
@@ -102,6 +105,7 @@ export default function Sidebar({
   workstream,
   agentRunning,
   pendingCounts,
+  parkedCounts,
   runningWorkstreams,
   onSwitchWorkstream,
   onOpenForeignWorkstream,
@@ -231,6 +235,9 @@ export default function Sidebar({
     const daemonRunning = isActiveProject && runningWorkstreams.includes(w.id);
     const fg = active && (agentRunning || daemonRunning);
     const pending = isActiveProject ? (pendingCounts[w.id] ?? 0) : 0;
+    // W6: parked goals share the pending pill's active-project scoping —
+    // remote rows have no per-workstream queue data.
+    const parked = isActiveProject ? (parkedCounts[w.id] ?? 0) : 0;
     const ds = dotState(fg, daemonRunning && !active, pending);
     return (
       <li
@@ -275,6 +282,11 @@ export default function Sidebar({
             <TailPin label={w.name} title={w.name} />
             <span className="ws-meta">
               {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
+              {parked > 0 && (
+                <span className="ws-parked-pill" title={`${parked} parked goal${parked > 1 ? "s" : ""}`}>
+                  {parked}
+                </span>
+              )}
             </span>
           </button>
             {isActiveProject && (

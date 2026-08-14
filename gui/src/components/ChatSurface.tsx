@@ -15,9 +15,11 @@ import { basename } from "../files";
 import type { AutoDistillCountdown, OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
 import PlanChip from "./PlanChip";
+import QueueDock from "./QueueDock";
 import { saveAttachment } from "../api";
 import { deriveTodoState } from "../todo";
-import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown } from "lucide-react";
+import { deriveParkedGoals } from "../parked";
+import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown, Archive } from "lucide-react";
 import ToolTicker from "./ToolTicker";
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
@@ -39,7 +41,14 @@ interface Props {
   // J: spinner shown while /panel or /vision blocks on the daemon side.
   panelThinking?: boolean;
   sendDisabled: boolean;
-  onSend: (text: string, attachments: string[], steer: boolean) => Promise<void>;
+  // W6 (goal queue): park queues the message as a parked goal; at most one
+  // of steer/park is true (parkArmed forces steer off — the daemon refuses
+  // a steer+park combination).
+  onSend: (text: string, attachments: string[], steer: boolean, park?: boolean) => Promise<void>;
+  // W6 (goal queue): the QueueDock's manual actions, forwarded to the
+  // daemon's resume_parked_goal / drop_parked_goal.
+  onResumeParked?: (seq: number) => Promise<void>;
+  onDropParked?: (seq: number) => Promise<void>;
   // Belt A: abort the running agent (Stop button / Esc).
   onCancel: () => void;
   // M1 memory distiller: the conversation's current epoch, surfaced by the
@@ -304,6 +313,8 @@ export default function ChatSurface({
   panelThinking,
   sendDisabled,
   onSend,
+  onResumeParked,
+  onDropParked,
   onCancel,
   epoch,
   conversationId,
@@ -324,6 +335,15 @@ export default function ChatSurface({
   // M12 (D-todo): the plan layer's read side — derived from the journaled
   // event history already in memory (bootstrap replay + poll appends).
   const todoItems = useMemo(() => deriveTodoState(events), [events]);
+  // W6 (goal queue): the QueueDock's read side — same derivation rule as
+  // todoItems (full journal, same as the daemon), so a workstream switch
+  // or daemon restart repopulates the dock on bootstrap replay.
+  const parkedGoals = useMemo(() => deriveParkedGoals(events), [events]);
+  // W6: the composer park toggle. Armed → submit parks the goal instead of
+  // sending/steering. A conversation switch disarms: park intent never
+  // leaks across workstreams.
+  const [parkArmed, setParkArmed] = useState(false);
+  useEffect(() => setParkArmed(false), [conversationId]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -468,16 +488,21 @@ export default function ChatSurface({
     setSending(true);
     try {
       // M1 steering: while the agent runs, submitting journals the message
-      // with steer=true instead of starting a new run.
-      await onSend(text, attachments, agentRunning);
+      // with steer=true instead of starting a new run. W6: an armed park
+      // toggle forces steer off (structural mutex — the daemon refuses
+      // steer+park) and queues the goal instead.
+      const steer = agentRunning && !parkArmed;
+      await onSend(text, attachments, steer, parkArmed);
       setDraft("");
       setAttachments([]);
+      setParkArmed(false); // one-shot: park targets the submitted goal only
     } catch {
-      // onSend already surfaced the error; keep the draft for retry.
+      // onSend already surfaced the error; keep the draft (and the armed
+      // toggle) for retry.
     } finally {
       setSending(false);
     }
-  }, [draft, attachments, canSend, sending, sendDisabled, onSend, agentRunning]);
+  }, [draft, attachments, canSend, sending, sendDisabled, onSend, agentRunning, parkArmed]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -949,6 +974,17 @@ export default function ChatSurface({
           onError={(m) => onTodoError?.(m)}
           disabled={sendDisabled || distillLocked}
         />
+        {/* W6 (goal queue): the parked-goal FIFO for this conversation,
+            derived from the journal — hidden when the queue is empty. */}
+        {parkedGoals.length > 0 && (
+          <QueueDock
+            goals={parkedGoals}
+            onResume={onResumeParked}
+            onDrop={onDropParked}
+            agentRunning={agentRunning}
+            distillLocked={distillLocked}
+          />
+        )}
         {attachments.length > 0 && (
           <div className="attachment-chips">
             {attachments.map((path) => (
@@ -1029,8 +1065,22 @@ export default function ChatSurface({
               Stop
             </button>
           )}
+          {/* W6 (goal queue): arm to queue the submit as a parked goal.
+              Slash commands route before the daemon's park branch, so the
+              toggle disables on a "/" draft. */}
+          <button
+            type="button"
+            className={`park-toggle${parkArmed ? " armed" : ""}`}
+            aria-pressed={parkArmed}
+            aria-label="Park: queue this goal for later"
+            title={parkArmed ? "Parked — this goal queues for later" : "Park: queue this goal for later"}
+            disabled={draft.trim().startsWith("/")}
+            onClick={() => setParkArmed((v) => !v)}
+          >
+            <Archive size={14} />
+          </button>
           <button type="submit" disabled={sendDisabled || sending || distillLocked || !canSend}>
-            {agentRunning ? "Steer" : "Send"}
+            {parkArmed ? "Park" : agentRunning ? "Steer" : "Send"}
           </button>
         </form>
         <div className="composer-hint">

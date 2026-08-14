@@ -215,6 +215,30 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
             </span>
           </div>
         );
+      } else if (p.action === "run_prompt" && p.origin === "parked_goal") {
+        // W6 (goal queue): a parked goal left the queue. Automatic dequeues
+        // carry the pipeline's actor — the run they start streams visibly,
+        // so the receipt row renders nothing (same posture as todo_merge);
+        // a human resume (no actor) leaves a one-line receipt badge.
+        if (p.actor != null && p.actor !== "") {
+          return null;
+        }
+        body = (
+          <div className="bubble bubble-review">
+            <span className="badge badge-other" title="a parked goal was resumed into a run">
+              resumed parked goal
+            </span>
+          </div>
+        );
+      } else if (p.action === "parked_goal_dropped") {
+        // W6: the human dropped one queued goal; the drop is journaled.
+        body = (
+          <div className="bubble bubble-review">
+            <span className="badge badge-other" title="a parked goal was dropped from the queue">
+              dropped parked goal
+            </span>
+          </div>
+        );
       } else {
         body = (
           <div className="bubble bubble-review">

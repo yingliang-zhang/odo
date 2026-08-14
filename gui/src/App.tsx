@@ -22,6 +22,8 @@ import {
   pollEvents,
   rejectDiff,
   removeProject,
+  resumeParkedGoal,
+  dropParkedGoal,
   sendMessage,
   unwrap,
 } from "./api";
@@ -177,6 +179,10 @@ export default function App() {
   // workstreams, refreshed every few poll ticks via pending_counts.
   const [pendingCounts, setPendingCounts] = useState<Record<number, number>>({});
   const [runningWorkstreams, setRunningWorkstreams] = useState<number[]>([]);
+  // W6 (goal queue): per-workstream parked-goal depth from pending_counts
+  // (the daemon's count is the authoritative depth; the QueueDock derives
+  // its rows from the journal and may lag by a poll tick).
+  const [parkedGoals, setParkedGoals] = useState<Record<number, number>>({});
 
   // Belt D: persisted theme applies on mount regardless of which surface
   // (settings dialog vs. fresh launch) wrote it. Absent/invalid values
@@ -319,6 +325,12 @@ export default function App() {
         if (Number.isFinite(id)) pending[id] = v;
       }
       setPendingCounts(pending);
+      const parked: Record<number, number> = {};
+      for (const [k, v] of Object.entries(counts.parked_goals ?? {})) {
+        const id = Number(k);
+        if (Number.isFinite(id)) parked[id] = v;
+      }
+      setParkedGoals(parked);
       setRunningWorkstreams(counts.running_workstreams ?? []);
       setAutoDistill(counts.auto_distill ?? []);
       setDistillingConvs(counts.distilling_convs ?? []);
@@ -573,7 +585,7 @@ export default function App() {
   );
 
   const handleSend = useCallback(
-    async (text: string, attachments: string[], steer: boolean) => {
+    async (text: string, attachments: string[], steer: boolean, park?: boolean) => {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
       // M12: the daemon disarms/cancels auto-distill on send itself; the
@@ -586,13 +598,20 @@ export default function App() {
         const resp = unwrap(
           await sendMessage(cid, text, attachments, {
             steer,
+            park,
             projectRoot: projectRootRef.current ?? undefined,
           }),
         );
         if (resp.event) recordEvents([resp.event]);
         // The daemon starts the agent synchronously inside send_message.
-        // A steering message does not start a run.
-        if (!steer) setAgentRunning(true);
+        // Steering journals a message for the running agent; parking only
+        // queues a goal — neither starts a new run here. (A park on a free
+        // conversation may auto-dequeue daemon-side; the poll reconciles.)
+        if (!steer && !park) setAgentRunning(true);
+        // W6: prompt reconcile — the sidebar's parked pill is sourced from
+        // pending_counts, so re-read after the daemon's depth changed
+        // rather than waiting for the poll loop's every-4th-tick cadence.
+        if (park) void refreshPendingCounts();
         setError(null);
       } catch (e) {
         setError(`send failed: ${errorMessage(e)}`);
@@ -603,6 +622,31 @@ export default function App() {
     },
     [recordEvents, refreshPendingCounts],
   );
+
+  // W6 (goal queue): manual resume/drop from the QueueDock. An ok:false
+  // ("no parked goal with seq N") is a benign reconcile — an auto-dequeue
+  // raced the click — so it never reaches the error banner; the response
+  // is journaled and flows back through the poll loop, and the counts
+  // refresh moves the sidebar pill now instead of at the next tick.
+  const handleResumeParked = useCallback(async (seq: number) => {
+    if (!conversation) return;
+    try {
+      await resumeParkedGoal(conversation.id, seq, project?.root_path ?? undefined);
+      void refreshPendingCounts();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [conversation, project, refreshPendingCounts]);
+
+  const handleDropParked = useCallback(async (seq: number) => {
+    if (!conversation) return;
+    try {
+      await dropParkedGoal(conversation.id, seq, project?.root_path ?? undefined);
+      void refreshPendingCounts();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [conversation, project, refreshPendingCounts]);
 
   // Belt A: stop the running agent. ok:false ("no active run") is the
   // expected race against a run that finished on its own — the next poll
@@ -1206,6 +1250,7 @@ export default function App() {
         workstream={workstream}
         agentRunning={agentRunning}
         pendingCounts={pendingCounts}
+        parkedCounts={parkedGoals}
         runningWorkstreams={runningWorkstreams}
         onSwitchWorkstream={handleSwitchWorkstream}
         onOpenForeignWorkstream={(root, wsId) => void handleSwitchWorkstream(wsId, root)}
@@ -1328,6 +1373,10 @@ export default function App() {
           projectRoot={project?.root_path ?? null}
           onTodoChanged={() => pollNowRef.current()}
           onTodoError={(m) => setError(m)}
+          // W6 (goal queue): the composer park toggle and the QueueDock's
+          // Resume/Drop; rows derive from `events` (already passed above).
+          onResumeParked={handleResumeParked}
+          onDropParked={handleDropParked}
         />
       </main>
       <ContextPanel
