@@ -54,12 +54,13 @@ Legend: cost S <1d / M 1–3d / L >3d. Status: ✈ in flight · ⏳ queued ·
 
 | # | Wave | Content | Src | Cost | Depends | Status |
 |---|---|---|---|---|---|---|
-| 0 | fix-INT W1 | accept TOCTOU / `base_stale_at_land` / bridge REVIEW 330→900s | prior session | — | — | ✈ (K3 implementing, uncommitted) |
-| 1 | fix-INT W2 | fold allowlist / cap-drop journaling / #14 memory-pins materialization | ledger | — | 0 | ⏳ |
+| 0 | fix-INT W1 | accept TOCTOU / `base_stale_at_land` / bridge REVIEW 330→900s | prior session | — | — | ✅ `86b2351` |
+| 1 | fix-INT W2 | fold allowlist / cap-drop journaling / #14 memory-pins + **send-closure assertion** | ledger | — | — | ✅ `f17da7b` |
+| 1a | fix-INT W4 | `moa_fs_deny` replace→union merge (ADR-0004) | ledger | — | — | ✅ `8ad385c` |
 | 2 | **R-W1 moa resilience** | bounded retry (≤3, jitter, Retry-After; never 4xx) + typed `Error{Status,Class}` + `Result{InputTokens,Wall,TokPerSec}`; hermetic httptest pins | run 4 #1–3 | S | none — client-internal | ◎ |
-| 3 | R-W1.5 receipts fill | panel/review payloads += `request_sha16`+`request_bytes` | run 3 §4 | S | 0+1 (fix-INT lands first) | ⏳ |
+| 3 | R-W1.5 receipts fill | panel/review payloads += `request_sha16`+`request_bytes` | run 3 §4 | S | ~~fix-INT~~ **unblocked** (W1/W2 landed) | ⏳ |
 | 4 | A-P0 #1 Guardian taxonomy + ledger cells | risk classes + actor/outcome/TimedOut on every `review_action`; aggregate in `odo autonomy audit`; GUI renders the cells (LedgerPanel) | run 1 §5#1 + run 2 #3 | S | own tri-model design round | ⏳ |
-| 5 | A-P0 #2 visible⟺logged assert | daemon-side pre-send assertion on the send path | run 1 §5#2 | S | folds into fix-INT W2 (run 1 §9) | ⏳ |
+| 5 | A-P0 #2 visible⟺logged assert | daemon-side pre-send assertion on the send path | run 1 §5#2 | S | — | ⚠ partially landed via fix-INT W2's send-closure assertion (`f17da7b`) — residual coverage needs a 5-min code check before scheduling anything |
 | 6 | A-P0 #3 durable steer inbox + queue dock | journal `steer/queued/spliced` + ChatSurface QueueDock (auto-drain, send-now chord) | run 1 §5#3 + run 2 #4 | S–M + M | park-and-switch design session | ⏳ |
 | 7 | **R-W2 distill → moa** | behind prefs flag `distill_via: omp`; deadline policy for 1446s worst case; modelspec entry precondition | run 3 §4 + run 4 §2 | S | **2** (resilience first) | ◎ |
 | 8 | R-W3 learner/curator → moa | parsers/vet untouched; ADR-0003 inv7 wording | run 3 §4 | S | 7 telemetry | ⏳ |
