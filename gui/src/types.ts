@@ -175,6 +175,21 @@ export interface Diff {
   content: string;
 }
 
+// P1a (review inbox): one inbox row — the daemon's DiffInfoEx embeds
+// DiffInfo, and Go flattens the embedded struct, so the wire shape is a
+// single object carrying both the diff fields and the workstream label.
+export interface DiffInfoEx extends Diff {
+  workstream_name: string;
+  conversation_id: number;
+  workstream_id: number;
+}
+
+export interface ListAllPendingDiffsResponse {
+  ok: boolean;
+  error?: string;
+  all_pending_diffs?: DiffInfoEx[];
+}
+
 export interface BootstrapResponse {
   ok: boolean;
   error?: string;

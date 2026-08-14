@@ -41,6 +41,7 @@ import type {
   DistillResponse,
   GetSettingsResponse,
   LedgerResponse,
+  ListAllPendingDiffsResponse,
   ListTopicsResponse,
   ListWikiResponse,
   ListWorkstreamsResponse,
@@ -275,6 +276,13 @@ export function readWiki(path: string, projectRoot?: string): Promise<ReadWikiRe
 // runs and pending diffs — poll_events is per-conversation.
 export function pendingCounts(projectRoot: string): Promise<PendingCountsResponse> {
   return invoke<PendingCountsResponse>("pending_counts", { projectRoot });
+}
+
+// P1a (review inbox): every pending diff across the project's active
+// workstreams with content + workstream labels — the Review tab's single
+// fetch. Gated on tab visibility at the call site; never poll blindly.
+export function listAllPendingDiffs(projectRoot?: string): Promise<ListAllPendingDiffsResponse> {
+  return invoke<ListAllPendingDiffsResponse>("list_all_pending_diffs", { projectRoot: projectRoot ?? null });
 }
 
 // M12 (D-auto): the composer countdown chip's Cancel — disarm a scheduled

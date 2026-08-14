@@ -11,6 +11,7 @@ import {
   deleteWorkstream,
   distill,
   errorMessage,
+  listAllPendingDiffs,
   listProjects,
   listTopics,
   listWiki,
@@ -33,6 +34,7 @@ import ContextPanel, { type PanelTab } from "./components/ContextPanel";
 import DiffViewer from "./components/DiffViewer";
 import LedgerPanel from "./components/LedgerPanel";
 import MemoryPanel from "./components/MemoryPanel";
+import ReviewInbox from "./components/ReviewInbox";
 import SkillsPanel from "./components/SkillsPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import Sidebar from "./components/Sidebar";
@@ -41,7 +43,7 @@ import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { notifyRunDone } from "./notify";
-import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, OdoEvent, PreviewEvent, Project, ProjectEntry, Workstream } from "./types";
+import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -134,7 +136,7 @@ export default function App() {
   );
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     const stored = localStorage.getItem("odo-panel-tab");
-    const VALID: PanelTab[] = ["changes", "wiki", "memory", "ledger", "skills"];
+    const VALID: PanelTab[] = ["changes", "review", "wiki", "memory", "ledger", "skills"];
     return stored && (VALID as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
   });
   // M9 P3: memory sub-tab for toast click-throughs (files vs proposals).
@@ -225,6 +227,9 @@ export default function App() {
   // Belt B: same pattern for the search bar (Esc closes it).
   const searchOpenRef = useRef(false);
   const panelOpenRef = useRef(false);
+  // P1a: the poll loop reads the active tab through a ref (the interval
+  // callback closes over the boot cycle, not the render cycle).
+  const panelTabRef = useRef<PanelTab>("changes");
   // M9 P2: track previous pending-diff count for genuine 0→1 transition,
   // and a bootstrap latch so the first poll after applyBootstrap doesn't
   // auto-open the panel on pre-existing pending diffs.
@@ -313,6 +318,9 @@ export default function App() {
   // auto-distill disclosure (countdown chip / blocked state / in-flight
   // indicator). Extracted so send/distill/ctl paths re-fetch promptly
   // instead of waiting for the poll loop's every-4th-tick cadence.
+  // P1a: pendingTotalRef mirrors the badge sum so the poll loop's inbox
+  // gate can skip the IPC outright at zero pending.
+  const pendingTotalRef = useRef(0);
   const refreshPendingCounts = useCallback(async () => {
     const root = projectRootRef.current;
     if (root == null) return;
@@ -334,10 +342,38 @@ export default function App() {
       setRunningWorkstreams(counts.running_workstreams ?? []);
       setAutoDistill(counts.auto_distill ?? []);
       setDistillingConvs(counts.distilling_convs ?? []);
+      pendingTotalRef.current = Object.values(pending).reduce((a, b) => a + b, 0);
     } catch {
       // Stale badges are fine; never disturb the poll loop.
     }
   }, []);
+
+  // P1a (review inbox): every pending diff across the project's workstreams
+  // for the Review tab. Fetch cadence is visibility-gated: an immediate run
+  // when the tab opens, then ≥6s between runs through the poll loop, so the
+  // hidden tab costs zero daemon reads (the sidebar badges' pending_counts
+  // poll already supplies project-wide freshness).
+  const [inboxDiffs, setInboxDiffs] = useState<DiffInfoEx[]>([]);
+  const lastInboxFetchRef = useRef(0);
+  const refreshInbox = useCallback(async () => {
+    const root = projectRootRef.current;
+    if (root == null) return;
+    lastInboxFetchRef.current = Date.now();
+    try {
+      const resp = await listAllPendingDiffs(root);
+      if (projectRootRef.current !== root) return; // project switched mid-flight
+      setInboxDiffs(resp.ok ? (resp.all_pending_diffs ?? []) : []);
+    } catch {
+      // Stale rows are fine; the next gated refresh retries.
+    }
+  }, []);
+
+  // P1a: the Review tab badge is the project-wide pending total (the same
+  // sum the sidebar's project-row pill derives from pendingCounts).
+  const pendingTotal = useMemo(
+    () => Object.values(pendingCounts).reduce((a, b) => a + b, 0),
+    [pendingCounts],
+  );
 
   // Background runs: daemon-reported running workstreams minus the one in
   // view. Invisible from the chat surface (panel sessions, other ws) — the
@@ -506,6 +542,17 @@ export default function App() {
         // every ~4th tick (~6 s idle, ~1.4 s while a run streams).
         if (pollTickRef.current % 4 === 0) {
           await refreshPendingCounts();
+          // P1a: the Review tab's refresh rides this 4th-tick cadence when
+          // visible, ≥6s between fetches; Σpending==0 skips the IPC and
+          // clears rows locally. refreshPendingCounts just updated
+          // pendingTotalRef on this same tick, so the gate reads fresh data.
+          if (panelTabRef.current === "review") {
+            if (pendingTotalRef.current === 0) {
+              setInboxDiffs((rows) => (rows.length === 0 ? rows : []));
+            } else if (Date.now() - lastInboxFetchRef.current >= 6000) {
+              await refreshInbox();
+            }
+          }
         }
         setError(null);
         // E P2: reset consecutive failure counter on success
@@ -534,7 +581,7 @@ export default function App() {
       agentRunning ? POLL_INTERVAL_RUNNING_MS : POLL_INTERVAL_IDLE_MS,
     );
     return () => clearInterval(timer);
-  }, [booted, recordEvents, agentRunning, refreshPendingCounts]);
+  }, [booted, recordEvents, agentRunning, refreshPendingCounts, refreshInbox]);
 
   // M11 P2: cross-project status poll — every 5s, fetch pending_counts for
   // all registered projects except the active one (whose counts come from the
@@ -682,6 +729,14 @@ export default function App() {
   useEffect(() => {
     panelOpenRef.current = panelOpen;
   }, [panelOpen]);
+  useEffect(() => {
+    panelTabRef.current = panelTab;
+  }, [panelTab]);
+  // P1a: immediate inbox fetch when the Review tab becomes visible (the
+  // poll loop's ≥6s gate owns the steady-state cadence).
+  useEffect(() => {
+    if (panelOpen && panelTab === "review") void refreshInbox();
+  }, [panelOpen, panelTab, refreshInbox]);
 
   // Belt A global shortcuts. Modals close themselves on Escape through
   // their own window listeners; the overlay check keeps a bare Escape from
@@ -1055,22 +1110,31 @@ export default function App() {
       const resp = unwrap(await acceptDiff(diffId, projectRootRef.current ?? undefined));
       if (resp.applied) {
         setDiff((d) => (d && d.id === diffId ? { ...d, status: "accepted" } : d));
+        // P1a: the inbox row resolves instantly (accept works cross-
+        // workstream by diffID); badges + dataset re-sync right behind it.
+        setInboxDiffs((rows) => rows.filter((r) => r.id !== diffId));
+        void refreshPendingCounts();
+        void refreshInbox();
         setError(null);
       }
     } catch (e) {
       setError(`accept failed: ${errorMessage(e)}`);
     }
-  }, []);
+  }, [refreshPendingCounts, refreshInbox]);
 
   const handleReject = useCallback(async (diffId: number) => {
     try {
       unwrap(await rejectDiff(diffId, projectRootRef.current ?? undefined));
       setDiff((d) => (d && d.id === diffId ? { ...d, status: "rejected" } : d));
+      // P1a: same optimistic inbox resolution as accept.
+      setInboxDiffs((rows) => rows.filter((r) => r.id !== diffId));
+      void refreshPendingCounts();
+      void refreshInbox();
       setError(null);
     } catch (e) {
       setError(`reject failed: ${errorMessage(e)}`);
     }
-  }, []);
+  }, [refreshPendingCounts, refreshInbox]);
 
   // M4: clicking the toast dismisses it (the auto-dismiss also runs on a
   // 10 s timer); closing/applying in the review panel re-reads the badge.
@@ -1385,6 +1449,7 @@ export default function App() {
         activeTab={panelTab}
         onTabChange={setPanelTab}
         changesBadge={diffs.length > 0 ? diffs.length : undefined}
+        reviewBadge={pendingTotal > 0 ? pendingTotal : undefined}
         wikiBadge={wikiNoteCount ?? undefined}
         memoryBadge={pendingMemoryProposals > 0 ? pendingMemoryProposals : undefined}
       >
@@ -1403,6 +1468,20 @@ export default function App() {
           : diff
             ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={(text) => handleSend(text, [], agentRunning)} projectRoot={project?.root_path ?? null} agentRunning={agentRunning} />
             : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
+        )}
+        {panelTab === "review" && (
+          // P1a: cross-workstream inbox. Rows are project-scoped, so the
+          // key remounts on project switch — never render another
+          // project's inbox against this one's handlers.
+          <ReviewInbox
+            key={project?.root_path ?? "default"}
+            rows={inboxDiffs}
+            onAccept={handleAccept}
+            onReject={handleReject}
+            projectRoot={project?.root_path ?? null}
+            agentRunning={agentRunning}
+            onJump={(id) => void handleSwitchWorkstream(id)}
+          />
         )}
         {panelTab === "wiki" && (conversation?.id != null ? (
           // M11 P1: the key remounts the panel on project switch so no

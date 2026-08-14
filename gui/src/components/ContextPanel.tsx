@@ -4,10 +4,10 @@
 // Phase 3: Wiki/Memory/Ledger tabs get their content.
 
 import { type ReactNode, useRef, useState } from "react";
-import { GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, X } from "lucide-react";
+import { GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, Inbox, X } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
-export type PanelTab = "changes" | "wiki" | "memory" | "ledger" | "skills";
+export type PanelTab = "changes" | "review" | "wiki" | "memory" | "ledger" | "skills";
 
 interface Props {
   open: boolean;
@@ -16,6 +16,7 @@ interface Props {
   onTabChange: (tab: PanelTab) => void;
   // Badge counts for each tab (null/undefined = no badge)
   changesBadge?: number;
+  reviewBadge?: number;
   wikiBadge?: number | null;
   memoryBadge?: number;
   ledgerBadge?: number | null;
@@ -25,6 +26,8 @@ interface Props {
 
 const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
   { id: "changes", label: "Changes", icon: <GitCompareArrows size={12} /> },
+  // P1a: cross-workstream pending-review inbox (Changes stays per-conversation).
+  { id: "review", label: "Review", icon: <Inbox size={12} /> },
   { id: "wiki", label: "Wiki", icon: <FileText size={12} /> },
   { id: "memory", label: "Memory", icon: <MapPin size={12} /> },
   { id: "skills", label: "Skills", icon: <BookMarked size={12} /> },
@@ -37,6 +40,7 @@ export default function ContextPanel({
   activeTab,
   onTabChange,
   changesBadge,
+  reviewBadge,
   wikiBadge,
   memoryBadge,
   ledgerBadge,
@@ -66,6 +70,7 @@ export default function ContextPanel({
 
   const badges: Record<PanelTab, number | null | undefined> = {
     changes: changesBadge,
+    review: reviewBadge,
     wiki: wikiBadge,
     memory: memoryBadge,
     skills: undefined,

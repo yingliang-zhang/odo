@@ -317,6 +317,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleListWiki(ctx, req)
 	case CmdPendingCounts:
 		resp, err = s.handlePendingCounts(ctx, req)
+	case CmdListAllPendingDiffs:
+		resp, err = s.handleListAllPendingDiffs(ctx, req)
 	case CmdReadWiki:
 		resp, err = s.handleReadWiki(ctx, req)
 	case CmdReadMemory:
@@ -3216,6 +3218,36 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 		Distilling:         len(distillingConvs) > 0,
 		DistillingConvs:    distillingConvs,
 	}, nil
+}
+
+// handleListAllPendingDiffs returns every pending diff across all active
+// workstreams of the project with full content and workstream labels (P1a
+// review inbox). Read-only: no journal writes, no locks (mirrors
+// handlePendingCounts). An unreadable diff file leaves Content empty — the
+// row stays actionable by ID.
+func (s *Server) handleListAllPendingDiffs(ctx context.Context, req Request) (Response, error) {
+	p, err := s.resolveProject(ctx, req.ProjectRoot)
+	if err != nil {
+		return Response{}, fmt.Errorf("list_all_pending_diffs: %w", err)
+	}
+	rows, err := s.store.ListAllPendingDiffs(ctx, p.ID)
+	if err != nil {
+		return Response{}, fmt.Errorf("list_all_pending_diffs: %w", err)
+	}
+	out := make([]DiffInfoEx, 0, len(rows))
+	for _, r := range rows {
+		info := DiffInfoEx{
+			DiffInfo:       DiffInfo{ID: r.ID, Status: r.Status, Path: r.PathOnDisk},
+			ConversationID: r.ConversationID,
+			WorkstreamID:   r.WorkstreamID,
+			WorkstreamName: r.WorkstreamName,
+		}
+		if b, err := os.ReadFile(r.PathOnDisk); err == nil {
+			info.Content = string(b)
+		}
+		out = append(out, info)
+	}
+	return Response{OK: true, AllPendingDiffs: out}, nil
 }
 
 // handleLedger returns the .odo/ledger.md content as memory_content (same

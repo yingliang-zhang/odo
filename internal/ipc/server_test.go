@@ -2447,6 +2447,136 @@ func TestPendingCounts(t *testing.T) {
 	rig.callExpectErr(t, Request{Cmd: CmdPendingCounts, ProjectRoot: filepath.Join(root, "elsewhere")})
 }
 
+// TestListPendingReviews covers the P1a review inbox IPC: pending diffs
+// from every active workstream surface in one list with content and
+// workstream labels, and accept-by-diffID works cross-workstream without
+// switching the active workstream first.
+func TestListPendingReviews(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	wsMain := boot.Workstream.ID
+	convMain := boot.Conversation.ID
+
+	created := rig.call(t, Request{Cmd: CmdCreateWorkstream, ProjectRoot: root, Name: "feature-x"})
+	wsX := created.Workstream.ID
+	bootX := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: wsX})
+	convX := bootX.Conversation.ID
+
+	// One pending diff per workstream; the stub copies the prompt into
+	// hello.txt, so the prompt text lands inside each run's diff content.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convMain, Text: "main work"})
+	doneMain := rig.pollUntilDone(t, convMain)
+	if doneMain.Diff == nil {
+		t.Fatal("main run: no diff")
+	}
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convX, Text: "feature work"})
+	doneX := rig.pollUntilDone(t, convX)
+	if doneX.Diff == nil {
+		t.Fatal("feature run: no diff")
+	}
+
+	resp := rig.call(t, Request{Cmd: CmdListAllPendingDiffs, ProjectRoot: root})
+	if len(resp.AllPendingDiffs) != 2 {
+		t.Fatalf("inbox rows = %d, want 2: %+v", len(resp.AllPendingDiffs), resp.AllPendingDiffs)
+	}
+	// Ordered by workstream id: main's diff first, then feature-x's.
+	rows := resp.AllPendingDiffs
+	if rows[0].ID != doneMain.Diff.ID || rows[1].ID != doneX.Diff.ID {
+		t.Errorf("row order = [%d %d], want [%d %d]",
+			rows[0].ID, rows[1].ID, doneMain.Diff.ID, doneX.Diff.ID)
+	}
+	if rows[0].WorkstreamID != wsMain || rows[0].WorkstreamName != "main" || rows[0].ConversationID != convMain {
+		t.Errorf("row 0 labels = (%d,%q,%d), want (%d,%q,%d)",
+			rows[0].WorkstreamID, rows[0].WorkstreamName, rows[0].ConversationID, wsMain, "main", convMain)
+	}
+	if rows[1].WorkstreamID != wsX || rows[1].WorkstreamName != "feature-x" || rows[1].ConversationID != convX {
+		t.Errorf("row 1 labels = (%d,%q,%d), want (%d,%q,%d)",
+			rows[1].WorkstreamID, rows[1].WorkstreamName, rows[1].ConversationID, wsX, "feature-x", convX)
+	}
+	if !strings.Contains(rows[0].Content, "main work") {
+		t.Errorf("row 0 content missing prompt text; got %q", rows[0].Content)
+	}
+	if !strings.Contains(rows[1].Content, "feature work") {
+		t.Errorf("row 1 content missing prompt text; got %q", rows[1].Content)
+	}
+
+	// Accept the feature-x diff by ID without switching to that workstream.
+	rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: doneX.Diff.ID})
+	resp = rig.call(t, Request{Cmd: CmdListAllPendingDiffs, ProjectRoot: root})
+	if len(resp.AllPendingDiffs) != 1 || resp.AllPendingDiffs[0].ID != doneMain.Diff.ID {
+		t.Fatalf("post-accept inbox = %+v, want only main's diff", resp.AllPendingDiffs)
+	}
+}
+
+// TestListPendingReviewsIncludesOrphanConversationDiff verifies the inbox
+// JOIN scope: a diff that stays pending on a pre-distill (no longer active)
+// conversation still surfaces — the sidebar count uses the same scope, so
+// the row must be actionable from the inbox.
+func TestListPendingReviewsIncludesOrphanConversationDiff(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	wsID := boot.Workstream.ID
+
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "orphan work"})
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+
+	// Distill retires the conversation (new epoch, new conversation row);
+	// the diff stays pending on the old one.
+	rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+
+	resp := rig.call(t, Request{Cmd: CmdListAllPendingDiffs, ProjectRoot: root})
+	if len(resp.AllPendingDiffs) != 1 {
+		t.Fatalf("inbox rows = %d, want 1 (orphan diff surfaced): %+v",
+			len(resp.AllPendingDiffs), resp.AllPendingDiffs)
+	}
+	row := resp.AllPendingDiffs[0]
+	if row.ID != done.Diff.ID || row.ConversationID != convID || row.WorkstreamID != wsID {
+		t.Errorf("row = %+v, want diff %d on conversation/workstream %d/%d",
+			row, done.Diff.ID, convID, wsID)
+	}
+	if !strings.Contains(row.Content, "orphan work") {
+		t.Errorf("row content missing prompt text; got %q", row.Content)
+	}
+
+	// The row is still actionable from the inbox.
+	rig.call(t, Request{Cmd: CmdRejectDiff, DiffID: done.Diff.ID})
+	resp = rig.call(t, Request{Cmd: CmdListAllPendingDiffs, ProjectRoot: root})
+	if len(resp.AllPendingDiffs) != 0 {
+		t.Errorf("post-reject inbox = %+v, want empty", resp.AllPendingDiffs)
+	}
+}
+
+// TestListPendingReviewsEmptyProject verifies a fresh project returns an
+// empty inbox, not an error.
+func TestListPendingReviewsEmptyProject(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	resp := rig.call(t, Request{Cmd: CmdListAllPendingDiffs, ProjectRoot: root})
+	if len(resp.AllPendingDiffs) != 0 {
+		t.Errorf("fresh inbox = %+v, want empty", resp.AllPendingDiffs)
+	}
+	// A foreign project root is refused.
+	rig.callExpectErr(t, Request{Cmd: CmdListAllPendingDiffs, ProjectRoot: filepath.Join(root, "elsewhere")})
+}
+
 // moaMockServer returns a httptest server that mocks the MoA API and a
 // cleanup function. Each call returns the model name in the text field so
 // tests can verify routing. Callers must set MOA_BASE_URL and SUDO_CODING_KEY.

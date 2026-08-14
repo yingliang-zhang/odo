@@ -563,6 +563,15 @@ async fn pending_counts(project_root: Option<String>) -> Result<Value, String> {
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// P1a (review inbox): all pending diffs across the project's active
+// workstreams with content + workstream labels — the Review tab's payload.
+#[tauri::command]
+async fn list_all_pending_diffs(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "list_all_pending_diffs", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M15 (O-1 rung-0): the autonomy streak snapshot the DiffViewer header
 // shows on open; a read-only journal computation daemon-side.
 #[tauri::command]
@@ -1289,6 +1298,7 @@ pub fn run() {
             list_wiki,
             read_wiki,
             pending_counts,
+            list_all_pending_diffs,
             autonomy_status,
             read_memory,
             memory_proposals,

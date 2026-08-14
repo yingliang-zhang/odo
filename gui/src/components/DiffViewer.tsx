@@ -481,7 +481,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         ) : (
           row.line
         )}
-        {pending && isCode && (
+        {pending && isCode && onSendComments && (
           <button
             type="button"
             className={`diff-comment-btn${comments.has(i) ? " has-comment" : ""}`}
@@ -518,7 +518,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         <div key={key} className="diff-line diff-line-old" data-line={cell.src}>
           <span className="diff-linenum diff-linenum-old">{cell.lineNum ?? ""}</span>
           {renderCode("-", cell.text, cell.lang)}
-          {pending && cell.src != null && (
+          {pending && cell.src != null && onSendComments && (
             <button
               type="button"
               className={`diff-comment-btn${comments.has(cell.src) ? " has-comment" : ""}`}
@@ -536,7 +536,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         <div key={key} className="diff-line diff-line-new" data-line={cell.src}>
           <span className="diff-linenum diff-linenum-new">{cell.lineNum ?? ""}</span>
           {renderCode("+", cell.text, cell.lang)}
-          {pending && cell.src != null && (
+          {pending && cell.src != null && onSendComments && (
             <button
               type="button"
               className={`diff-comment-btn${comments.has(cell.src) ? " has-comment" : ""}`}
@@ -726,7 +726,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           )}
         </pre>
       )}
-      {openLine != null && pending && (
+      {openLine != null && pending && onSendComments && (
         <div className="diff-comment-box">
           <textarea
             value={comments.get(openLine) ?? ""}

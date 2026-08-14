@@ -13,6 +13,7 @@ import type {
   CreateWorkstreamResponse,
   CurateResponse,
   Diff,
+  DiffInfoEx,
   DistillResponse,
   GetSettingsResponse,
   LedgerResponse,
@@ -193,6 +194,44 @@ index 789abc..012def 100644
 `,
 };
 
+// P1a (review inbox): the same two pending diffs the Review tab lists —
+// diff 1 on workstream main (the Changes tab's fixture), diff 2 on
+// feat-sidebar-tree, so dev/e2e exercise the cross-workstream accept path.
+// pendingCounts below is their per-workstream aggregate; the mock
+// accept/reject cases keep the two in step via resolveInboxDiff (mock
+// parity: the row list is the authority, the count is derived).
+export const inboxDiffs: DiffInfoEx[] = [
+  { ...pendingDiff, conversation_id: 1, workstream_id: 1, workstream_name: "main" },
+  {
+    id: 2,
+    status: "pending",
+    path: "/tmp/odo-diff-2.patch",
+    content: `diff --git a/README.md b/README.md
+index 123456..789abc 100644
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,5 @@ 
+ some context
++## Cross-workstream change
++Added by the feat-sidebar-tree run.
+`,
+    conversation_id: 2,
+    workstream_id: 2,
+    workstream_name: "feat-sidebar-tree",
+  },
+];
+
+// Resolve an inbox row (accept or reject): drop it and derive the ws count.
+export function resolveInboxDiff(diffId: number): void {
+  const idx = inboxDiffs.findIndex((d) => d.id === diffId);
+  if (idx < 0) return;
+  const [removed] = inboxDiffs.splice(idx, 1);
+  const key = String(removed.workstream_id);
+  const next = Math.max(0, (pendingCounts[key] ?? 1) - 1);
+  if (next === 0) delete pendingCounts[key];
+  else pendingCounts[key] = next;
+}
+
 // ---------- Wiki ----------
 
 export const wikiNotes: WikiNoteInfo[] = [
@@ -252,7 +291,9 @@ export const userContent = `# USER.md
 
 // ---------- Pending counts ----------
 
-export const pendingCounts: Record<string, number> = { 1: 1, 2: 0, 3: 0, 10: 0 };
+// P1a: ws2's count is 1 — the inboxDiffs row on feat-sidebar-tree is part
+// of the same baseline (the Review tab's rows must equal these pills).
+export const pendingCounts: Record<string, number> = { 1: 1, 2: 1, 3: 0, 10: 0 };
 export const runningWorkstreams: number[] = [];
 // E2E lever: pretend the daemon reports a live run on the polled
 // conversation (agent_running). Background runs go through

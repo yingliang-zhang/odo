@@ -113,10 +113,17 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- Diffs ----------
     case "accept_diff": {
+      fx.resolveInboxDiff(args?.diffId ?? 0);
       return { ok: true, diff_id: args?.diffId, applied: true };
     }
     case "reject_diff": {
+      fx.resolveInboxDiff(args?.diffId ?? 0);
       return { ok: true, diff_id: args?.diffId, applied: false };
+    }
+    // P1a (review inbox): the Review tab's dataset — same rows the sidebar
+    // pills count (resolveInboxDiff keeps the two in step).
+    case "list_all_pending_diffs": {
+      return { ok: true, all_pending_diffs: [...fx.inboxDiffs] };
     }
     case "review_diff": {
       return {

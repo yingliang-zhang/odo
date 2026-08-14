@@ -30,6 +30,10 @@ const (
 	CmdGetSettings      = "get_settings"
 	CmdUpdateSettings   = "update_settings"
 	CmdPendingCounts    = "pending_counts"
+	// P1a (review inbox): list_all_pending_diffs returns every pending diff
+	// across all active workstreams of the project, labeled with the owning
+	// workstream — the aggregate review tab's data source.
+	CmdListAllPendingDiffs = "list_all_pending_diffs"
 	CmdListWiki         = "list_wiki"
 	CmdReadWiki         = "read_wiki"
 	CmdReadMemory       = "read_memory"
@@ -179,6 +183,17 @@ type DiffInfo struct {
 	Content string `json:"content"`
 }
 
+// DiffInfoEx extends DiffInfo with the owning workstream label for the
+// cross-workstream review inbox (P1a). JSON flattens the embedding, so the
+// wire shape is {id, status, path, content, conversation_id, workstream_id,
+// workstream_name}.
+type DiffInfoEx struct {
+	DiffInfo
+	ConversationID int64  `json:"conversation_id"`
+	WorkstreamID   int64  `json:"workstream_id"`
+	WorkstreamName string `json:"workstream_name"`
+}
+
 // WikiNoteInfo describes one distilled wiki note for the browser list.
 type WikiNoteInfo struct {
 	Path       string `json:"path"`
@@ -230,6 +245,9 @@ type Response struct {
 	// contract the frontend implements.
 	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`
 	RunningWorkstreams []int64       `json:"running_workstreams,omitempty"`
+	// P1a (review inbox): list_all_pending_diffs payload — pending diffs
+	// across all active workstreams with workstream labels.
+	AllPendingDiffs []DiffInfoEx `json:"all_pending_diffs,omitempty"`
 	// W6 (goal queue): Parked is the conversation's parked-goal queue depth
 	// after a park/resume/drop command; ParkedGoals rides pending_counts
 	// with the per-workstream queue depth, keyed like PendingCounts.

@@ -131,6 +131,49 @@ func (s *Store) ListPendingDiffs(ctx context.Context, conversationID int64) ([]D
 	return diffs, rows.Err()
 }
 
+// PendingDiffRow is one pending diff annotated with its owning workstream
+// (P1a review inbox). The SQL JOIN's column order matches Diff's scanner
+// fields followed by the two workstream columns.
+type PendingDiffRow struct {
+	Diff
+	WorkstreamID   int64
+	WorkstreamName string
+}
+
+// ListAllPendingDiffs returns every pending diff across all active
+// workstreams of a project, ordered by workstream id then diff id (matches
+// sidebar workstream ordering + per-conversation diff ordering). The JOIN
+// scope intentionally mirrors PendingDiffCountsByWorkstream — all
+// conversations, active workstreams only — so inbox rows never desync from
+// sidebar pills. Read-only; single query, no Go iteration over workstreams.
+func (s *Store) ListAllPendingDiffs(ctx context.Context, projectID int64) ([]PendingDiffRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT d.id, d.conversation_id, d.path_on_disk, d.base_sha,
+		        d.worktree_path, d.status, d.created_at,
+		        w.id, w.name
+		 FROM diffs d
+		 JOIN conversations c ON d.conversation_id = c.id
+		 JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE d.status = ? AND w.project_id = ? AND w.status = ?
+		 ORDER BY w.id, d.id`,
+		DiffPending, projectID, WorkstreamActive)
+	if err != nil {
+		return nil, fmt.Errorf("store: list all pending diffs: %w", err)
+	}
+	defer rows.Close()
+	var out []PendingDiffRow
+	for rows.Next() {
+		var r PendingDiffRow
+		if err := rows.Scan(&r.ID, &r.ConversationID, &r.PathOnDisk, &r.BaseSHA,
+			&r.WorktreePath, &r.Status, &r.CreatedAt,
+			&r.WorkstreamID, &r.WorkstreamName); err != nil {
+			return nil, fmt.Errorf("store: list all pending diffs: scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // PendingDiffCountsByWorkstream returns the count of pending diffs per
 // workstream of a project (read-only; feeds the sidebar badge IPC).
 func (s *Store) PendingDiffCountsByWorkstream(ctx context.Context, projectID int64) (map[int64]int, error) {

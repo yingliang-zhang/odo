@@ -431,6 +431,85 @@ func TestDiffLifecycle(t *testing.T) {
 	}
 }
 
+func TestListAllPendingDiffs(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	pA, _ := s.CreateOrGetProject(ctx, "/repo/ri-a", "ri-a")
+	pB, _ := s.CreateOrGetProject(ctx, "/repo/ri-b", "ri-b")
+
+	w1, _ := s.CreateOrGetWorkstream(ctx, pA.ID, "main")
+	w2, _ := s.CreateOrGetWorkstream(ctx, pA.ID, "feature-x")
+	wB, _ := s.CreateOrGetWorkstream(ctx, pB.ID, "main")
+	c1, _ := s.CreateConversation(ctx, w1.ID, "")
+	c2, _ := s.CreateConversation(ctx, w2.ID, "")
+	cB, _ := s.CreateConversation(ctx, wB.ID, "")
+
+	d1a, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/1.diff", "", "")
+	if err != nil {
+		t.Fatalf("InsertDiff d1a: %v", err)
+	}
+	d1b, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/2.diff", "", "")
+	if err != nil {
+		t.Fatalf("InsertDiff d1b: %v", err)
+	}
+	d2, err := s.InsertDiff(ctx, c2.ID, "/repo/ri-a/.odo/diffs/3.diff", "", "")
+	if err != nil {
+		t.Fatalf("InsertDiff d2: %v", err)
+	}
+	// Noise: an accepted diff in w1 and a pending diff in the foreign project —
+	// both must be excluded from pA's inbox.
+	dAcc, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/4.diff", "", "")
+	if err != nil {
+		t.Fatalf("InsertDiff dAcc: %v", err)
+	}
+	if err := s.UpdateDiffStatus(ctx, dAcc.ID, DiffAccepted); err != nil {
+		t.Fatalf("UpdateDiffStatus: %v", err)
+	}
+	dB, err := s.InsertDiff(ctx, cB.ID, "/repo/ri-b/.odo/diffs/1.diff", "", "")
+	if err != nil {
+		t.Fatalf("InsertDiff dB: %v", err)
+	}
+
+	rows, err := s.ListAllPendingDiffs(ctx, pA.ID)
+	if err != nil {
+		t.Fatalf("ListAllPendingDiffs: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3 (accepted + foreign excluded): %+v", len(rows), rows)
+	}
+	// Order: w1's diffs by id, then w2's.
+	wantIDs := []int64{d1a.ID, d1b.ID, d2.ID}
+	wantWS := []struct {
+		id   int64
+		name string
+	}{{w1.ID, "main"}, {w1.ID, "main"}, {w2.ID, "feature-x"}}
+	for i, r := range rows {
+		if r.ID != wantIDs[i] {
+			t.Errorf("row %d ID = %d, want %d", i, r.ID, wantIDs[i])
+		}
+		if r.WorkstreamID != wantWS[i].id || r.WorkstreamName != wantWS[i].name {
+			t.Errorf("row %d workstream = (%d,%q), want (%d,%q)",
+				i, r.WorkstreamID, r.WorkstreamName, wantWS[i].id, wantWS[i].name)
+		}
+		if r.Status != DiffPending {
+			t.Errorf("row %d status = %q, want pending", i, r.Status)
+		}
+		if r.ConversationID != c1.ID && r.ConversationID != c2.ID {
+			t.Errorf("row %d conversation = %d, want %d or %d", i, r.ConversationID, c1.ID, c2.ID)
+		}
+	}
+	for _, r := range rows {
+		if r.ID == dB.ID {
+			t.Errorf("foreign project diff %d leaked into pA inbox", dB.ID)
+		}
+	}
+
+	// Empty project: no rows, no error.
+	if rows, err := s.ListAllPendingDiffs(ctx, 4242); err != nil || len(rows) != 0 {
+		t.Errorf("ListAllPendingDiffs on empty project = (%v, %v), want empty", rows, err)
+	}
+}
+
 func TestListWorkstreams(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
