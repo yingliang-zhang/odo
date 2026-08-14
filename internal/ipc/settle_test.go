@@ -944,6 +944,7 @@ func TestComputeAutonomySettleRowsRegression(t *testing.T) {
 	// below.
 	tallies := after.Settle
 	before.Settle, after.Settle = SettleTallies{}, SettleTallies{}
+	before.Risk, after.Risk = RiskReport{}, RiskReport{} // W5: risk tallies are additive — zeroed for the regression-compare
 	if !reflect.DeepEqual(before, after) {
 		t.Errorf("ComputeAutonomy moved under ladder rows:\n before=%+v\n after=%+v", before, after)
 	}

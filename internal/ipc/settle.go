@@ -59,7 +59,10 @@ package ipc
 //	                         action); patch_sha16/comments_sha16 are the
 //	                         no-progress comparators for the next round,
 //	                         and comments_sha16 attests the exact feedback
-//	                         bytes the repair run was sent.
+//	                         bytes the repair run was sent. fix-INT W5:
+//	                         the round row additionally carries the risk
+//	                         receipt (risk_class/risk_evidence/risk_
+//	                         classifier) of the round's own diff.
 //	auto_land_blocked        + payload patch_sha16 everywhere now; new
 //	                         reasons: panel_unanimous_reject, panel_mixed,
 //	                         panel_infra, repair_prompt_too_large,
@@ -579,7 +582,7 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventUserMessage, mustJSON(msgPayload)); err != nil {
 		return false, "journal_user_message: " + err.Error()
 	}
-	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	roundPayload := map[string]interface{}{
 		"action":         "auto_revise_round",
 		"actor":          autoActor,
 		"round":          round,
@@ -588,7 +591,11 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 		"patch_sha16":    patchSHA,
 		"comments_sha16": commentsSHA,
 		"comment_models": commentModels,
-	})); err != nil {
+	}
+	// fix-INT W5 (DSF adoption): the round's own diff gets its class —
+	// the risk receipt attests the same bytes patch_sha16 attests.
+	mountRiskReceipt(roundPayload, riskReceipt(d.PathOnDisk))
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(roundPayload)); err != nil {
 		return false, "journal_round: " + err.Error()
 	}
 

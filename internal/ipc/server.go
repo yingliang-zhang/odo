@@ -1860,6 +1860,12 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	if actor != "" {
 		payload["actor"] = actor
 	}
+	// fix-INT W5 (additive): every human/auto accept + reject carries the
+	// Guardian risk receipt for the diff it resolved (risk.go:
+	// risk_class/risk_evidence/risk_classifier; an unreadable patch omits
+	// all three). The ratchet wave reads these via ComputeAutonomy's risk
+	// table; today's consumers ignore them (ADR-0002).
+	mountRiskReceipt(payload, riskReceipt(d.PathOnDisk))
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); err != nil {
 		return Response{}, err
 	}
@@ -1987,13 +1993,17 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 	// judged (content rode the prompt fenced above — the handler already
 	// refused when the diff was unreadable), so a verdict stays falsifiable
 	// against the artifact even after the diff file rotates.
-	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	moaPayload := map[string]interface{}{
 		"action":            "moa_review",
 		"diff_id":           d.ID,
 		"reviews":           reviews,
 		"consensus_verdict": cv,
 		"patch_sha16":       sha16(content),
-	})); err != nil {
+	}
+	// W5: the manual panel's row carries the same risk receipt as the
+	// auto path's (same bytes, same mechanical classifier, risk.go).
+	mountRiskReceipt(moaPayload, riskReceiptKeys(string(content)))
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(moaPayload)); err != nil {
 		return Response{}, err
 	}
 	return Response{Reviews: reviews, Consensus: cv}, nil

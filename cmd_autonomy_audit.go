@@ -14,6 +14,10 @@ import (
 // and the auto_apply pref. It is pure observability — rung 0 instruments
 // the loop so a later milestone has the evidence; nothing auto-applies.
 //
+// fix-INT W5: a second table, `risk breakdown:` — the Guardian risk
+// tallies (risk.go classes × human/auto accept, reject, auto-block,
+// unrated pre-W5 rows). Also observational; the ratchet gate is future.
+//
 // The computation is ipc.ComputeAutonomy — the SAME journal reads the
 // autonomy_status IPC serves the GUI — run here against a READ-ONLY
 // (query_only) journal open, no daemon, no LLM.
@@ -52,6 +56,18 @@ func renderAutonomyHuman(r ipc.AutonomyReport) {
 		}
 		fmt.Printf("  %-13s %4d acc %4d rej · streak %-3d next %-5s%s\n", c.Class, c.Accepted, c.Rejected, c.Streak, next, elig)
 		fmt.Printf("    %s\n", c.Description)
+	}
+	// fix-INT W5: the Guardian risk table — multi-label, so column sums
+	// may exceed resolutions (printed honestly). Same no-data gate as the
+	// streaks table above (0 resolutions → neither table prints).
+	fmt.Println("\nrisk breakdown:")
+	for _, rc := range r.Risk.Classes {
+		fmt.Printf("  %-18s %3d acc %3d rej · %3d auto-acc %3d auto-blocked\n",
+			rc.Class, rc.Accepted, rc.Rejected, rc.AutoAccepted, rc.AutoBlocked)
+		fmt.Printf("    %s\n", rc.Description)
+	}
+	if r.Risk.Unrated > 0 {
+		fmt.Printf("  unrated rows: %d (pre-W5 entries without risk_class — absence is the audit bucket)\n", r.Risk.Unrated)
 	}
 	fmt.Printf("\nrevert detection: %s\n", r.RevertCheck)
 	if r.UnreadableDiffs > 0 {

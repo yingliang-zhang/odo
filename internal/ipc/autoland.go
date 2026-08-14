@@ -98,6 +98,14 @@ package ipc
 //	                                      patch sha16 on every row
 //	memory_update{layer:"auto_land"}      ladder_suspended/resumed (M18)
 //
+// fix-INT W5: every review_action row above (blocked, auto moa_review,
+// accept, revise round) additionally carries the Guardian risk receipt
+// — risk_class ([]string, severity-ranked, ["none"] when rated clean),
+// risk_classifier ("mechanical"), and risk_evidence (one trigger
+// artifact per class, omitted when clean) — classified from the patch
+// bytes by risk.go; all three keys omitted when the patch is
+// unreadable (patch_sha16 precedent).
+//
 // auto_apply values "branch"/"all" stay unconsumed (rung-0 contract:
 // only "main" has pipeline semantics). M16 amends the M15 O-1
 // no-auto-apply deferral for DIFF LANDING ONLY (m16-auto-land.md +
@@ -352,14 +360,17 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// unrecorded auto-accept is the one thing worse than none. patch_sha16
 	// (M18 W2 item 4) attests the exact bytes the panel judged (data was
 	// read above; an unreadable diff blocked as unparseable_diff already).
-	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	moaPayload := map[string]interface{}{
 		"action":            "moa_review",
 		"diff_id":           d.ID,
 		"actor":             autoActor,
 		"reviews":           reviews,
 		"consensus_verdict": cv,
 		"patch_sha16":       sha16(data),
-	})); err != nil {
+	}
+	// W5: the risk receipt for exactly the bytes the panel judged.
+	mountRiskReceipt(moaPayload, riskReceiptKeys(diffText))
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(moaPayload)); err != nil {
 		log.Printf("auto-land: journal panel verdict for diff %d: %v (NOT landing)", d.ID, err)
 		return
 	}
@@ -506,7 +517,9 @@ func verifyEnviron(environ []string) []string {
 // (attached when the panel ran) keep the dissent on the record; the
 // diff's patch sha16 rides every row (M18: the ladder's no-progress
 // comparator and the audit's diff identity), best-effort — a row about an
-// unreadable patch simply omits it.
+// unreadable patch simply omits it. fix-INT W5: the Guardian risk receipt
+// rides every blocked row too, classified from the same bytes
+// (risk_class/risk_evidence/risk_classifier; unreadable = all omitted).
 func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reason, detail string, reviews []ReviewResult, consensus string) {
 	payload := map[string]interface{}{
 		"action":  "auto_land_blocked",
@@ -516,6 +529,9 @@ func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reaso
 	}
 	if data, err := os.ReadFile(d.PathOnDisk); err == nil {
 		payload["patch_sha16"] = sha16(data)
+		// W5: risk receipt from the same bytes — every blocked reason
+		// carries the diff's hazard classification (all ~14 reasons).
+		mountRiskReceipt(payload, riskReceiptKeys(string(data)))
 	}
 	if detail != "" {
 		payload["detail"] = detail

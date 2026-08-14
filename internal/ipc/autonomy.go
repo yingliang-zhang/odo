@@ -33,6 +33,19 @@ package ipc
 //
 // Thresholds: 10 clean accepts -> rung-1 eligibility; +20 more (30 total)
 // -> rung-2. All thresholds live in the constants block below.
+//
+// fix-INT W5 (Guardian risk taxonomy): the same scan tallies the second
+// audit table — RiskReport — from the risk_class/risk_classifier/
+// risk_evidence keys the W5 write sites journal (risk.go). Risk classes
+// measure HAZARD of content (credential_probe, data_exfil, destructive,
+// security_weakening, supply_chain); C-classes measure automaticability
+// of shape. The two axes are orthogonal — a C1 docs accept is "none"
+// risk; a C3 small source diff reading .env is credential_probe.
+// Multi-label: one resolution can feed several risk rows (column sums
+// may exceed Resolutions). Rows lacking risk_class entirely are the
+// pre-W5 remainder, counted as Unrated. Observational only: these
+// tallies never feed the streaks (gating belongs to the ratchet wave —
+// instrument-before-gate, the M15 rung-0 precedent).
 
 import (
 	"context"
@@ -97,6 +110,7 @@ type AutonomyReport struct {
 	RevertCheck          string                `json:"revert_check"` // how streaks treat reverts
 	Classes              []AutonomyClassReport `json:"classes"`
 	Settle               SettleTallies         `json:"settle"` // M18 ladder facts (audit header line)
+	Risk                 RiskReport            `json:"risk"`   // fix-INT W5 Guardian risk tallies (second audit table)
 }
 
 // SettleTallies (M18 batch B) are the settle-ladder facts scanned from the
@@ -110,6 +124,40 @@ type SettleTallies struct {
 	Resumes          int `json:"resumes"`            // memory_update{cause:ladder_resumed} (human accepts only)
 	ReviseNoProgress int `json:"revise_no_progress"` // blocked{revise_no_progress} hard stops
 	VisualGateBlocks int `json:"visual_gate_blocks"` // blocked{human_gate_visual} (visual class → human)
+}
+
+// RiskReport (fix-INT W5) is the second audit table, parallel to the
+// C-class table (not a cross-tab — that needs a diff×diff join and
+// belongs with the ratchet wave). ComputeAutonomy scans the same
+// review_action rows; when risk_class is present it tallies each class
+// into the row's bucket (multi-label: a diff contributes ≤1 to each of
+// its classes — column sums may exceed Resolutions, printed honestly).
+// Pure observability: the C0–C3 classification above never reads these
+// (risk classes measure hazard, not automaticability; the regression
+// test pins that a full risk vocabulary moves no streak).
+type RiskReport struct {
+	Classes []RiskClassReport `json:"classes"`
+	Unrated int               `json:"unrated"` // pre-W5 rows (no risk_class key)
+}
+
+// RiskClassReport is one risk-class row of the audit table.
+type RiskClassReport struct {
+	Class        string `json:"class"`
+	Description  string `json:"description"`
+	Accepted     int    `json:"accepted"`      // human accept
+	Rejected     int    `json:"rejected"`      // human reject
+	AutoAccepted int    `json:"auto_accepted"` // auto-panel accept
+	AutoBlocked  int    `json:"auto_blocked"`  // auto_land_blocked (any reason)
+}
+
+// riskClassDescription labels the risk rows (also the CLI's legend).
+var riskClassDescription = map[string]string{
+	"credential_probe":   "reads secret-shaped material (env *_KEY/_TOKEN/_SECRET/_PASSWORD, ~/.ssh/id_*, .aws/credentials, .gnupg, keychain)",
+	"data_exfil":         "co-adds a local-source read + network egress in one hunk",
+	"destructive":        "file deletion, or rm -rf/RemoveAll/rmtree/DROP TABLE/push --force/reset --hard in added lines",
+	"security_weakening": "added line weakens a control (InsecureSkipVerify, --insecure, //nosec, chmod 777/666, CORS *, auth-disable)",
+	"supply_chain":       "touches a dependency manifest/lockfile (autoLandSupplyChainFiles SSOT)",
+	"none":               "rated clean (no class trigger; distinguishes rated-clean from pre-W5 unrated)",
 }
 
 // classDescription labels the class rows (also the CLI's legend).
@@ -295,6 +343,13 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 	}
 	report.WorkstreamsScanned = len(streams)
 
+	// fix-INT W5: the risk table's tally rows in severity-rank order
+	// (riskClassOrder, risk.go). Assembled into report at return.
+	riskTally := map[string]*RiskClassReport{}
+	for _, c := range riskClassOrder {
+		riskTally[c] = &RiskClassReport{Class: c, Description: riskClassDescription[c]}
+	}
+
 	var recs []resolutionRec
 	for _, w := range streams {
 		c, cerr := st.GetActiveConversation(ctx, w.ID)
@@ -339,10 +394,11 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 				continue
 			}
 			var p struct {
-				Action string `json:"action"`
-				DiffID int64  `json:"diff_id"`
-				Actor  string `json:"actor"`
-				Reason string `json:"reason"`
+				Action    string    `json:"action"`
+				DiffID    int64     `json:"diff_id"`
+				Actor     string    `json:"actor"`
+				Reason    string    `json:"reason"`
+				RiskClass *[]string `json:"risk_class"` // nil = pre-W5 row (unrated bucket)
 			}
 			if json.Unmarshal(ev.Payload, &p) != nil {
 				continue
@@ -356,6 +412,42 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 					report.Settle.ReviseNoProgress++
 				case "human_gate_visual":
 					report.Settle.VisualGateBlocks++
+				}
+			}
+			// fix-INT W5: fold the risk receipt into the second audit table.
+			// moa_review / auto_revise_round rows carry the receipt too, but
+			// they resolve nothing — their classes feed no bucket (a verdict
+			// evidence row and a spawned round are not accept/reject/block
+			// outcomes); they DO rate, so they never inflate Unrated. Rows
+			// with NO risk_class key are the pre-W5 remainder — counted
+			// honestly (the unclassified/unreadable_diffs posture).
+			switch p.Action {
+			case "accept", "reject", "auto_land_blocked", "moa_review", "auto_revise_round":
+				if p.RiskClass == nil {
+					report.Risk.Unrated++
+					break
+				}
+				seen := map[string]bool{} // ≤1 per class per row (defensive; classifyRisk emits unique classes)
+				for _, class := range *p.RiskClass {
+					if seen[class] {
+						continue
+					}
+					seen[class] = true
+					row := riskTally[class]
+					if row == nil { // forward-compat: a future wave's class still reports
+						row = &RiskClassReport{Class: class, Description: "unknown class (emitter newer than this audit)"}
+						riskTally[class] = row
+					}
+					switch {
+					case p.Action == "auto_land_blocked":
+						row.AutoBlocked++
+					case p.Action == "accept" && p.Actor == autoActor:
+						row.AutoAccepted++
+					case p.Action == "accept":
+						row.Accepted++
+					case p.Action == "reject":
+						row.Rejected++
+					}
 				}
 			}
 			if p.Action != "accept" && p.Action != "reject" {
@@ -517,6 +609,23 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 	report.Classes = []AutonomyClassReport{}
 	for _, c := range autonomyClassOrder {
 		report.Classes = append(report.Classes, *tally[c])
+	}
+	// fix-INT W5: risk rows in severity-rank order; forward-compat
+	// extras (classes this audit predates) sorted for determinism.
+	report.Risk.Classes = make([]RiskClassReport, 0, len(riskTally))
+	for _, c := range riskClassOrder {
+		report.Risk.Classes = append(report.Risk.Classes, *riskTally[c])
+		delete(riskTally, c)
+	}
+	if len(riskTally) > 0 {
+		extras := make([]string, 0, len(riskTally))
+		for c := range riskTally {
+			extras = append(extras, c)
+		}
+		sort.Strings(extras)
+		for _, c := range extras {
+			report.Risk.Classes = append(report.Risk.Classes, *riskTally[c])
+		}
 	}
 	return report, nil
 }
