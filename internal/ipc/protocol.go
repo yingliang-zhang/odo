@@ -6,6 +6,7 @@ package ipc
 
 import (
 	"github.com/yingliang-zhang/odo/internal/adapter"
+	"github.com/yingliang-zhang/odo/internal/moa"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
@@ -77,6 +78,12 @@ const (
 	// removes the entry ("clean the junk drawer").
 	CmdResumeParkedGoal = "resume_parked_goal"
 	CmdDropParkedGoal   = "drop_parked_goal"
+	// R-W4 (Design-MoA): design_moa fans a goal out to blind-sealed
+	// proposal legs (the prefs review: models over read-only repo tools),
+	// then consolidates them into one DESIGN LOCK via a single
+	// orchestrator-model moa.Query, journaled as review_action
+	// {action:"design_lock"}. Opt-in: requires prefs `design_via: moa`.
+	CmdDesignMoa = "design_moa"
 )
 
 // Request is one command line on the socket.
@@ -111,6 +118,10 @@ type Request struct {
 	// M12 (D-todo): todo_update's item id (daemon-assigned t<N>) for
 	// done/strike/reopen/reword.
 	TodoID string `json:"todo_id,omitempty"`
+	// R-W4 (design_moa): Goal is the design question; ContextFiles are
+	// repo-root-relative paths inlined into every leg's prompt (capped).
+	Goal         string   `json:"goal,omitempty"`
+	ContextFiles []string `json:"context_files,omitempty"`
 }
 
 // AutoDistillInfo is one scheduled auto-distill for the pending_counts
@@ -178,6 +189,28 @@ type ReviewResult struct {
 	// its length. Absent on infra legs — no answer shipped, nothing to
 	// attest (patch_sha16 covers the judged content; this pair covers the
 	// assembled request).
+	RequestSHA16 string `json:"request_sha16,omitempty"`
+	RequestBytes int    `json:"request_bytes,omitempty"`
+}
+
+// DesignProposal is one blind-sealed leg's outcome (R-W4 design_moa).
+// Shape mirrors PanelResult (E1 audit: every executed tool call rides the
+// row) plus the R-W1.5 wire receipt. A failed leg — transport/auth/timeout
+// or a truncated final answer (strict truncation: the partial never feeds
+// the consolidator) — keeps its receipts, drops its text, and marks Error
+// (+ Truncated when the cause was the output cap).
+type DesignProposal struct {
+	Model        string          `json:"model"`
+	Text         string          `json:"text,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	Truncated    bool            `json:"truncated,omitempty"`
+	ToolCalls    []moa.ToolAudit `json:"tool_calls,omitempty"`
+	Budget       int             `json:"budget,omitempty"`
+	OutputTokens int             `json:"output_tokens,omitempty"`
+	Escalations  []moa.Escalation `json:"escalations,omitempty"`
+	// R-W1.5: sha16 + length of the exact request body whose answer
+	// shipped (the final tool-loop round). Present even on failed legs
+	// when a body shipped.
 	RequestSHA16 string `json:"request_sha16,omitempty"`
 	RequestBytes int    `json:"request_bytes,omitempty"`
 }
@@ -278,4 +311,9 @@ type Response struct {
 	Path string `json:"path,omitempty"`
 	// autonomy_status: the rung-0 observability snapshot (M15 O-1).
 	Autonomy *AutonomyReport `json:"autonomy,omitempty"`
+	// R-W4 (design_moa): the consolidated DESIGN LOCK document plus every
+	// leg's proposal/metadata ("proposals" is already the memory_proposals
+	// wire key, hence design_proposals).
+	DesignLock      string           `json:"design_lock,omitempty"`
+	DesignProposals []DesignProposal `json:"design_proposals,omitempty"`
 }

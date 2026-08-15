@@ -83,7 +83,7 @@ type Server struct {
 	mgr            *worktree.Manager
 
 	// mu (M11 P0) guards every piece of in-memory run bookkeeping below it:
-	// runs, byConv, distilling, curating, and each runMeta's
+	// runs, byConv, distilling, curating, designing, and each runMeta's
 	// consumed/previewEvent/finished/errored fields. Handlers doing only
 	// store/filesystem work don't take it; distill and curate explicitly
 	// drop it around their multi-minute agent runs. wg tracks handleConn
@@ -100,6 +100,7 @@ type Server struct {
 
 	distilling map[int64]struct{} // conversations with an in-flight distill (M11 P0)
 	curating   bool               // a curate pass is in flight (M11 P0)
+	designing  bool               // a design_moa pass is in flight (R-W4; the curating precedent)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
 	curateWG   sync.WaitGroup     // detached auto-curates (M17: drained at Wait/teardown)
 
@@ -358,6 +359,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handlePendingCounts(ctx, req)
 	case CmdListAllPendingDiffs:
 		resp, err = s.handleListAllPendingDiffs(ctx, req)
+	case CmdDesignMoa:
+		resp, err = s.handleDesignMoa(ctx, req)
 	case CmdReadWiki:
 		resp, err = s.handleReadWiki(ctx, req)
 	case CmdReadMemory:

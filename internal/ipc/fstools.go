@@ -147,6 +147,15 @@ func newFSToolExecutor() *fsToolExecutor {
 	if root == "" {
 		root = home
 	}
+	return newFSToolExecutorRooted(root)
+}
+
+// newFSToolExecutorRooted builds an executor over an explicit root instead
+// of the prefs/home default (R-W4: design_moa legs scope reads to the repo
+// root). The deny list stays prefs-driven — scoping down never widens the
+// exclusions.
+func newFSToolExecutorRooted(root string) *fsToolExecutor {
+	home, _ := os.UserHomeDir()
 	root = expandHomePath(root, home)
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
