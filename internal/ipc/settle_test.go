@@ -658,9 +658,6 @@ func TestReviseUserMessageCarriesReceipt(t *testing.T) {
 // transition, no in-memory state); the third evaluation spawns NOTHING; a
 // human accept resumes it; the next needs_fixes starts a fresh round-1 —
 // which, failing again at round 2, suspends a second time.
-// TestSettleRoundCapSuspendsAndResumes is skipped pending rewrite for 3-round cap.
-// The production code is correct (TestSettleAutoAcceptNeverResumes validates the 3-round
-// suspend path). This integration test needs manual index recalibration for 3 rounds.
 func TestSettleRoundCapSuspendsAndResumes(t *testing.T) { t.Skip("pending rewrite for 3-round cap"); testSettleRoundCapSuspendsAndResumes(t) }
 
 func testSettleRoundCapSuspendsAndResumes(t *testing.T) {
