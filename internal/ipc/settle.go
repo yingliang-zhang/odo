@@ -30,13 +30,13 @@ package ipc
 // 3-model panel. Boundaries (journal-derived, no in-memory state):
 //
 //	round cap 3     at most 3 revise spawns between landings (the
-//	                original run is round 0); a 3rd needs_fixes-zone
+//	                original run is round 0); a 4th needs_fixes-zone
 //	                evaluation SUSPENDS the ladder for the conversation.
 //	no-progress     the round's patch sha16 equals the previous round's,
 //	                or the panel's comment-set sha16 repeats → blocked
 //	                {revise_no_progress} → human.
 //	infra           above — never a verdict, never a ladder tick.
-//	suspension      2 consecutive revise rounds ending needs_fixes (or
+//	suspension      3 consecutive revise rounds ending needs_fixes (or
 //	                no_progress) without an intervening landing: journal
 //	                memory_update{layer:auto_land, cause:ladder_suspended}
 //	                at the transition; every later needs_fixes evaluation
@@ -108,8 +108,8 @@ const (
 	settleMaxReviseRounds = 3
 
 	// Repair-prompt content caps (locked numbers — do not tune): the
-	// previous diff rides the prompt verbatim only under 32KB, the
-	// grouped non-accept comments only under 48KB. Over either cap the
+	// previous diff rides the prompt verbatim only under 64KB, the
+	// grouped non-accept comments only under 16KB. Over either cap the
 	// prompt would trade faithful context for a cheap patch — the chain
 	// skips straight to the human instead of silently truncating.
 	// The diff cap was raised from 32KB to 64KB (2026-08-15): a 35KB
@@ -383,7 +383,7 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 		return
 	}
 	if len(st.rounds) >= settleMaxReviseRounds {
-		// 2 consecutive revise rounds ended without a landing — demote.
+		// 3 consecutive revise rounds ended without a landing — demote.
 		// The transition journals BOTH the ledger marker (the durable
 		// suspension every later evaluation consults) and the blocked row
 		// for this diff; later evaluations hit the suspended branch above
