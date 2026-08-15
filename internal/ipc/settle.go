@@ -107,11 +107,14 @@ const (
 
 	// Repair-prompt content caps (locked numbers — do not tune): the
 	// previous diff rides the prompt verbatim only under 32KB, the
-	// grouped non-accept comments only under 12KB. Over either cap the
+	// grouped non-accept comments only under 48KB. Over either cap the
 	// prompt would trade faithful context for a cheap patch — the chain
 	// skips straight to the human instead of silently truncating.
-	settleDiffCapBytes     = 32 * 1024
-	settleCommentsCapBytes = 12 * 1024
+	// The diff cap was raised from 32KB to 64KB (2026-08-15): a 35KB
+	// diff like R-W4 (Design-MoA) hit the old cap and blocked repair
+	// unnecessarily. Modern models handle 64KB+ context comfortably.
+	settleDiffCapBytes     = 64 * 1024
+	settleCommentsCapBytes = 16 * 1024
 	// settleGoalCapBytes caps the origin goal riding into the repair
 	// prompt. The lock's 32KB is about the prompt bundle: an uncapped
 	// many-KB human ask would smuggle the bundle over exactly the same

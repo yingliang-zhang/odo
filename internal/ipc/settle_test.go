@@ -320,8 +320,8 @@ func TestSettleRepairPromptUnit(t *testing.T) {
 	}
 
 	// The locked boundaries, pinned exactly.
-	if settleMaxReviseRounds != 2 || settleDiffCapBytes != 32*1024 || settleCommentsCapBytes != 12*1024 {
-		t.Errorf("caps drifted: rounds=%d diff=%d comments=%d (locked at 2 / 32K / 12K)",
+	if settleMaxReviseRounds != 2 || settleDiffCapBytes != 64*1024 || settleCommentsCapBytes != 16*1024 {
+		t.Errorf("caps drifted: rounds=%d diff=%d comments=%d (locked at 2 / 64K / 16K)",
 			settleMaxReviseRounds, settleDiffCapBytes, settleCommentsCapBytes)
 	}
 }
@@ -451,9 +451,9 @@ func TestSettleRepairPromptTooLarge(t *testing.T) {
 		}
 	})
 
-	t.Run("grouped comments over 12KB", func(t *testing.T) {
+	t.Run("grouped comments over 16KB", func(t *testing.T) {
 		startPanelStub(t, func(call int64, model string) (int, string) {
-			return 200, "NEEDS_FIXES\n" + strings.Repeat("x", 5000)
+			return 200, "NEEDS_FIXES\n" + strings.Repeat("x", 8000)
 		})
 		f, s, d, root := newBlockedServer(t, patchSrc("src/a.go", 1, 1, false))
 		s.autoLand(context.Background(), d, root, "goal", false, "")
