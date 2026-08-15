@@ -386,6 +386,45 @@ export default function App() {
     [runningWorkstreams, workstream?.id, workstreams],
   );
 
+  // GUI Wave A (#1): background-run start/finish notices for the StatusBar
+  // flashes. Watched on the RAW runningWorkstreams set so view switches
+  // (jumping to/away from a running ws) never register as start/finish —
+  // only true set transitions do. The workstream in view is excluded from
+  // both lists: its lifecycle is already visible as the fg "running"
+  // indicator. First observation only seeds the baseline (a long-running
+  // bg run at launch is not "new").
+  const [bgNotice, setBgNotice] = useState<{ started: string[]; finished: string[] } | null>(null);
+  const prevRunningRef = useRef<number[] | null>(null);
+  const bgNoticeTimerRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevRunningRef.current;
+    prevRunningRef.current = runningWorkstreams;
+    if (prev == null) return; // seed baseline; no notice on first observation
+    const startedIds = runningWorkstreams.filter((id) => !prev.includes(id) && id !== workstream?.id);
+    const finishedIds = prev.filter((id) => !runningWorkstreams.includes(id) && id !== workstream?.id);
+    if (startedIds.length === 0 && finishedIds.length === 0) return;
+    const nameOf = (id: number) => workstreams.find((w) => w.id === id)?.name ?? `ws ${id}`;
+    window.clearTimeout(bgNoticeTimerRef.current);
+    setBgNotice({ started: startedIds.map(nameOf), finished: finishedIds.map(nameOf) });
+    // 4 s: shorter than toast confirmations (10 s) — a glanceable cue, not
+    // an acknowledgment queue.
+    bgNoticeTimerRef.current = window.setTimeout(() => setBgNotice(null), 4000);
+  }, [runningWorkstreams, workstream?.id, workstreams]);
+  useEffect(() => () => window.clearTimeout(bgNoticeTimerRef.current), []);
+
+  // GUI Wave A (#2): foreground current-activity line for the sidebar row
+  // — latest tool the run has called, when one is journaled this session.
+  // Background rows get only a fixed label: their events are never polled.
+  const fgRunLabel = useMemo(() => {
+    const fg = agentRunning || (workstream != null && runningWorkstreams.includes(workstream.id));
+    if (!fg) return null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if (ev.type === "agent_tool_call" && ev.payload?.tool) return `Running: ${ev.payload.tool}`;
+    }
+    return "Running";
+  }, [agentRunning, workstream, runningWorkstreams, events]);
+
   // Wiki note + topic counts for the sidebar. Failures degrade to
   // "unknown" (the lines are omitted); they never surface in the error
   // banner.
@@ -1316,6 +1355,7 @@ export default function App() {
         pendingCounts={pendingCounts}
         parkedCounts={parkedGoals}
         runningWorkstreams={runningWorkstreams}
+        fgRunLabel={fgRunLabel}
         onSwitchWorkstream={handleSwitchWorkstream}
         onOpenForeignWorkstream={(root, wsId) => void handleSwitchWorkstream(wsId, root)}
         onCreateWorkstream={handleCreateWorkstream}
@@ -1536,6 +1576,7 @@ export default function App() {
         projectRoot={project?.root_path ?? null}
         agentRunning={agentRunning}
         backgroundRuns={backgroundRuns}
+        bgNotice={bgNotice}
         onJumpWorkstream={(id) => void handleSwitchWorkstream(id)}
         pendingDiffs={diffs.length}
         wikiNoteCount={wikiNoteCount}

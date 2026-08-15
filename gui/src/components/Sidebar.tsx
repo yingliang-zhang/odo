@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { errorMessage } from "../api";
 import { ChevronLeft, ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
@@ -80,6 +80,10 @@ interface Props {
   // parked_goals) — the daemon's count is the authoritative queue depth.
   parkedCounts: Record<number, number>;
   runningWorkstreams: number[];
+  // Wave A (#2): current-activity line for the running foreground row
+  // ("Running: <tool>") — App derives it from the polled events, which
+  // exist for the conversation in view only; null when the fg ws is idle.
+  fgRunLabel: string | null;
   onSwitchWorkstream: (id: number) => void;
   // Phase 5: single-call handler for clicking a workstream in a non-active
   // project — avoids the two-call race (switch-project + switch-workstream)
@@ -107,6 +111,7 @@ export default function Sidebar({
   pendingCounts,
   parkedCounts,
   runningWorkstreams,
+  fgRunLabel,
   onSwitchWorkstream,
   onOpenForeignWorkstream,
   onCreateWorkstream,
@@ -147,6 +152,25 @@ export default function Sidebar({
   // at poll cadence when the daemon is unavailable for that project.
   const [remoteWorkstreams, setRemoteWorkstreams] = useState<Record<string, Workstream[]>>({});
   const [fetchAttempted, setFetchAttempted] = useState<Set<string>>(new Set());
+
+  // GUI Wave A (#2): attention ordering for the ACTIVE project's
+  // workstream list — Needs-input (pending diffs) → Working (running)
+  // → Idle. A "Done" tier lands with a daemon-observable done signal;
+  // pending_counts + running_workstreams can't see one yet, and inventing
+  // client-side state for it would lie. Ties keep the daemon's created_at
+  // order (stable sort). Remote-project rows and the project tree itself
+  // are never reordered (audit guard: rank only inside the ws section).
+  const attentionOrdered = useMemo(
+    () =>
+      [...workstreams].sort((a, b) => {
+        const rankOf = (w: Workstream) => {
+          const running = runningWorkstreams.includes(w.id) || (w.id === workstream?.id && agentRunning);
+          return (pendingCounts[w.id] ?? 0) > 0 ? 0 : running ? 1 : 2;
+        };
+        return rankOf(a) - rankOf(b);
+      }),
+    [workstreams, pendingCounts, runningWorkstreams, agentRunning, workstream?.id],
+  );
 
   const toggleProject = (root: string) => {
     setCollapsedProjects((prev) => {
@@ -239,6 +263,11 @@ export default function Sidebar({
     // remote rows have no per-workstream queue data.
     const parked = isActiveProject ? (parkedCounts[w.id] ?? 0) : 0;
     const ds = dotState(fg, daemonRunning && !active, pending);
+    // Wave A (#2): per-row current-activity line while running. The fg row
+    // shows App's live label (latest tool); a bg run gets a fixed "still
+    // running" — its events are never polled, so anything richer would be
+    // fabricated.
+    const activity = fg ? fgRunLabel : daemonRunning ? "still running" : null;
     return (
       <li
         key={w.id}
@@ -279,14 +308,19 @@ export default function Sidebar({
           >
             <span className={clsx("ws-dot", dotClass[ds])} aria-hidden="true" />
             <span className="sr-only">{dotLabel[ds]}</span>
-            <TailPin label={w.name} title={w.name} />
-            <span className="ws-meta">
-              {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
-              {parked > 0 && (
-                <span className="ws-parked-pill" title={`${parked} parked goal${parked > 1 ? "s" : ""}`}>
-                  {parked}
+            <span className="ws-item-body">
+              <span className="ws-item-line">
+                <TailPin label={w.name} title={w.name} />
+                <span className="ws-meta">
+                  {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
+                  {parked > 0 && (
+                    <span className="ws-parked-pill" title={`${parked} parked goal${parked > 1 ? "s" : ""}`}>
+                      {parked}
+                    </span>
+                  )}
                 </span>
-              )}
+              </span>
+              {activity && <span className="ws-activity-line">{activity}</span>}
             </span>
           </button>
             {isActiveProject && (
@@ -359,7 +393,7 @@ export default function Sidebar({
       ? Object.values(pendingCounts).reduce((a, b) => a + b, 0)
       : (crossProjectStatus[p.root]?.pending ?? 0);
     const ds = dotState(fg, bg, pending);
-    const wsList = isActive ? workstreams : (remoteWorkstreams[p.root] ?? []);
+    const wsList = isActive ? attentionOrdered : (remoteWorkstreams[p.root] ?? []);
 
     return (
       <li key={p.root} className="proj-group">

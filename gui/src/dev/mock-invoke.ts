@@ -226,12 +226,17 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- Visibility ----------
     case "pending_counts": {
+      // Copy the array fields: React state holds response values directly,
+      // so an in-place fixture mutation (the e2e simulation pattern) would
+      // otherwise read Object.is-equal to the previous state and bail the
+      // render. Real IPC payloads are always fresh objects; the mock must
+      // match that identity discipline.
       return {
         ok: true,
         pending_counts: fx.pendingCounts,
         parked_goals: fx.parkedGoals,
-        running_workstreams: fx.runningWorkstreams,
-        auto_distill: fx.autoDistill ?? [],
+        running_workstreams: [...fx.runningWorkstreams],
+        auto_distill: [...(fx.autoDistill ?? [])],
         distilling: false,
         distilling_convs: [],
       };
