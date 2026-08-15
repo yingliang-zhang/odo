@@ -29,7 +29,7 @@ package ipc
 // re-enters the full pipeline: every mechanical gate, fresh verify, full
 // 3-model panel. Boundaries (journal-derived, no in-memory state):
 //
-//	round cap 2     at most 2 revise spawns between landings (the
+//	round cap 3     at most 3 revise spawns between landings (the
 //	                original run is round 0); a 3rd needs_fixes-zone
 //	                evaluation SUSPENDS the ladder for the conversation.
 //	no-progress     the round's patch sha16 equals the previous round's,
@@ -101,9 +101,11 @@ import (
 
 const (
 	// settleMaxReviseRounds caps revise spawns between landings. The
-	// original run is round 0; rounds 1 and 2 may spawn; a third
-	// needs_fixes-zone evaluation suspends the ladder.
-	settleMaxReviseRounds = 2
+	// original run is round 0; rounds 1–3 may spawn; a fourth
+	// needs_fixes-zone evaluation suspends the ladder. Raised from 2
+	// to 3 (2026-08-15) at user request — some diffs need an extra
+	// repair pass for the panel to converge.
+	settleMaxReviseRounds = 3
 
 	// Repair-prompt content caps (locked numbers — do not tune): the
 	// previous diff rides the prompt verbatim only under 32KB, the
