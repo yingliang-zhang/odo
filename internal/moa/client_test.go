@@ -3,6 +3,7 @@ package moa
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,19 @@ func TestQuerySuccess(t *testing.T) {
 	if res.Text != "ACCEPT\n\nLooks good." {
 		t.Errorf("text = %q, want ACCEPT...", res.Text)
 	}
+	// R-W1 usage ledger: input tokens, wall time, derived rate, stop reason.
+	if res.InputTokens != 100 || res.OutputTokens != 50 {
+		t.Errorf("usage = %d in / %d out, want 100/50", res.InputTokens, res.OutputTokens)
+	}
+	if res.StopReason != "end_turn" {
+		t.Errorf("stop_reason = %q, want end_turn", res.StopReason)
+	}
+	if res.WallSeconds <= 0 {
+		t.Errorf("wall_seconds = %v, want > 0", res.WallSeconds)
+	}
+	if res.TokPerSec <= 0 {
+		t.Errorf("tok_per_sec = %v, want > 0 (derived from output/wall)", res.TokPerSec)
+	}
 }
 
 func TestQueryThinkingBlocksDropped(t *testing.T) {
@@ -71,7 +85,9 @@ func TestQueryThinkingBlocksDropped(t *testing.T) {
 }
 
 func TestQueryError(t *testing.T) {
+	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error": "invalid key"}`))
 	}))
@@ -81,6 +97,18 @@ func TestQueryError(t *testing.T) {
 	_, err := c.Query(context.Background(), "test", "", "test")
 	if err == nil {
 		t.Fatal("expected error for 401, got nil")
+	}
+	// R-W1: a typed client_error, exactly one request — 4xx NEVER retries
+	// (a bad key is fail-loud signal, not a flaky network).
+	var mErr *Error
+	if !errors.As(err, &mErr) {
+		t.Fatalf("err = %v (%T), want a typed *Error", err, err)
+	}
+	if mErr.Class != ClassClientError || mErr.Status != 401 {
+		t.Errorf("class/status = %q/%d, want client_error/401", mErr.Class, mErr.Status)
+	}
+	if calls != 1 {
+		t.Errorf("requests = %d, want 1 — client errors never retry", calls)
 	}
 }
 
@@ -427,5 +455,177 @@ func TestQueryWithToolsDefaultRoundCap(t *testing.T) {
 	}
 	if calls != maxToolRounds {
 		t.Errorf("requests = %d, want %d (default == ceiling)", calls, maxToolRounds)
+	}
+}
+
+// R-W1 transport resilience pins (moa audit 2026-08-14 §2#1–3). The retry
+// loop is the only transport guarantee an unattended distill cycle has:
+// one transient 429/5xx must not silently kill a one-shot.
+
+// recorderSleep stubs the backoff wait seam and captures the retry
+// schedule, keeping these pins wall-time free.
+func recorderSleep(t *testing.T) *[]time.Duration {
+	t.Helper()
+	got := new([]time.Duration)
+	old := sleepRetry
+	sleepRetry = func(ctx context.Context, d time.Duration) error {
+		*got = append(*got, d)
+		return nil
+	}
+	t.Cleanup(func() { sleepRetry = old })
+	return got
+}
+
+// TestRetryServerErrorThenSuccess: a 5xx is retried after jittered backoff
+// (200ms ±50% on the first retry) and the retry can succeed.
+func TestRetryServerErrorThenSuccess(t *testing.T) {
+	sleeps := recorderSleep(t)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, `{"error":"gateway boom"}`)
+			return
+		}
+		w.Write([]byte(`{"content":[{"type":"text","text":"recovered"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key")
+	res, err := c.Query(context.Background(), "m", "", "q")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if res.Text != "recovered" || res.InputTokens != 10 {
+		t.Errorf("res = %+v, want recovered with 10 input tokens", res)
+	}
+	if calls != 2 {
+		t.Errorf("requests = %d, want 2 (one retry)", calls)
+	}
+	if len(*sleeps) != 1 {
+		t.Fatalf("backoff sleeps = %v, want exactly one", *sleeps)
+	}
+	if got := (*sleeps)[0]; got < 100*time.Millisecond || got > 300*time.Millisecond {
+		t.Errorf("first backoff = %v, want %v ±50%%", got, retryBaseDelay)
+	}
+}
+
+// TestRetryRateLimitHonorsRetryAfter: the server's Retry-After hint (in
+// delta-seconds) is honored verbatim instead of the exponential backoff.
+func TestRetryRateLimitHonorsRetryAfter(t *testing.T) {
+	sleeps := recorderSleep(t)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key")
+	if _, err := c.Query(context.Background(), "m", "", "q"); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("requests = %d, want 2", calls)
+	}
+	if len(*sleeps) != 1 || (*sleeps)[0] != 2*time.Second {
+		t.Errorf("sleeps = %v, want exactly [2s] — the hint overrides backoff", *sleeps)
+	}
+}
+
+// TestRateLimitExhaustedTypedError: a persistent 429 exhausts the budget
+// and surfaces a typed rate_limit error carrying the raw (uncapped)
+// Retry-After hint; the waits themselves honor the 30s cap.
+func TestRateLimitExhaustedTypedError(t *testing.T) {
+	sleeps := recorderSleep(t)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key")
+	_, err := c.Query(context.Background(), "m", "", "q")
+	var mErr *Error
+	if !errors.As(err, &mErr) {
+		t.Fatalf("err = %v (%T), want a typed *Error", err, err)
+	}
+	if mErr.Class != ClassRateLimit || mErr.Status != 429 {
+		t.Errorf("class/status = %q/%d, want rate_limit/429", mErr.Class, mErr.Status)
+	}
+	if mErr.RetryAfter == nil || *mErr.RetryAfter != 60 {
+		t.Errorf("RetryAfter = %v, want 60 (the raw hint reaches callers uncapped)", mErr.RetryAfter)
+	}
+	if calls != maxAttempts {
+		t.Errorf("requests = %d, want %d (budget exhausted)", calls, maxAttempts)
+	}
+	want := []time.Duration{retryAfterCap * time.Second, retryAfterCap * time.Second}
+	if !reflect.DeepEqual(*sleeps, want) {
+		t.Errorf("sleeps = %v, want %v (hint capped at %ds)", *sleeps, want, retryAfterCap)
+	}
+}
+
+// TestRetryNetworkErrorExhausted: a dead endpoint retries the full budget
+// (2 waits = 3 attempts) with growing jittered backoff, then surfaces a
+// typed network error with no HTTP status.
+func TestRetryNetworkErrorExhausted(t *testing.T) {
+	sleeps := recorderSleep(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close() // connection refused on every attempt
+
+	c := NewClient(srv.URL, "test-key")
+	_, err := c.Query(context.Background(), "m", "", "q")
+	var mErr *Error
+	if !errors.As(err, &mErr) {
+		t.Fatalf("err = %v (%T), want a typed *Error", err, err)
+	}
+	if mErr.Class != ClassNetwork || mErr.Status != 0 {
+		t.Errorf("class/status = %q/%d, want network/0", mErr.Class, mErr.Status)
+	}
+	if len(*sleeps) != maxAttempts-1 {
+		t.Fatalf("sleeps = %v, want %d waits (%d attempts)", *sleeps, maxAttempts-1, maxAttempts)
+	}
+	for i, s := range *sleeps {
+		base := retryBaseDelay << i
+		if s < base/2 || s > base*3/2 {
+			t.Errorf("sleep %d = %v, want %v ±50%%", i, s, base)
+		}
+	}
+}
+
+// TestRetryContextCancellation: cancellation never retries. The caller
+// cancels while the client would be waiting out backoff after a
+// retryable 500 — the request chain ends with the context error intact
+// (errors.Is keeps working) and exactly one request on the wire.
+func TestRetryContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		cancel() // caller cancels after the retryable failure lands
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key")
+	_, err := c.Query(ctx, "m", "", "q")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled in the chain", err)
+	}
+	var mErr *Error
+	if errors.As(err, &mErr) {
+		t.Errorf("err = %v, want the context error, not a typed transport Error", err)
+	}
+	if calls != 1 {
+		t.Errorf("requests = %d, want 1 — cancellation never retries", calls)
 	}
 }

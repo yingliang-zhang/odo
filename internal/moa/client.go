@@ -17,12 +17,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +71,24 @@ const (
 	// (gateway diagnostics; the old "check server logs" text hid 400s that
 	// name the exact problem, e.g. an unsupported tools field).
 	errBodyTail = 512
+
+	// Transport resilience (R-W1, moa audit 2026-08-14 §2#1). One logical
+	// request is retried on the failure classes a gateway can recover from —
+	// 429 rate limiting, 5xx server errors, and transport/timeout failures.
+	// 4xx auth/validation NEVER retries: a bad key is fail-loud signal, not
+	// a flaky network.
+	maxAttempts = 3 // total attempts: first try + 2 retries
+
+	// Exponential backoff between attempts: 200ms × 2^n with ±50% jitter.
+	// The base is deliberately small — the gateway's transient window is
+	// measured in milliseconds, and the derived per-request deadline (900s
+	// floor) dwarfs the worst-case backoff sum (~0.7s).
+	retryBaseDelay = 200 * time.Millisecond
+
+	// retryAfterCap bounds a Retry-After hint (seconds): an unattended
+	// distill cycle must survive a hostile or broken hint without sleeping
+	// forever (audit: honor Retry-After ≤ 30s).
+	retryAfterCap = 30
 )
 
 // Client is a minimal Anthropic Messages API client.
@@ -240,10 +262,116 @@ func requestTimeout(maxTok int) time.Duration {
 	return baseRequestTimeout + time.Duration(maxTok/genTokPerSecFloor)*time.Second
 }
 
+// Error classes (Error.Class): stable machine codes so callers branch on
+// failure kind without parsing message strings (R-W1, moa audit §2#2).
+const (
+	ClassRateLimit   = "rate_limit"   // HTTP 429; RetryAfter may carry the server's hint
+	ClassServerError = "server_error" // HTTP 5xx
+	ClassNetwork     = "network"      // transport failed before any HTTP response
+	ClassClientError = "client_error" // HTTP 4xx (never retried) and local request failures
+	ClassTimeout     = "timeout"      // transport timeout, incl. the budget-derived deadline
+)
+
+// Error is a typed moa failure: the HTTP status (0 when the request never
+// got a response), a stable class, and the human detail. Callers split
+// failure kinds with errors.As — e.g. the auto-land ladder treats network
+// and rate_limit as retryable-infra while client_error stays fail-loud.
+type Error struct {
+	Status     int    // HTTP status code (0 for network errors)
+	Class      string // one of the Class* constants above
+	Message    string // human-readable detail (capped response tail or transport error)
+	RetryAfter *int   // seconds, from the Retry-After header (nil if absent)
+}
+
+func (e *Error) Error() string {
+	if e.Status == 0 {
+		return fmt.Sprintf("moa: %s: %s", e.Class, e.Message)
+	}
+	return fmt.Sprintf("moa: %s (HTTP %d): %s", e.Class, e.Status, e.Message)
+}
+
+// retryable gates the retry loop: only the recoverable classes retry.
+// A client_error (auth, validation, malformed request) re-fails identically
+// on every attempt — retrying it is pure latency.
+func (e *Error) retryable() bool {
+	switch e.Class {
+	case ClassRateLimit, ClassServerError, ClassNetwork, ClassTimeout:
+		return true
+	}
+	return false
+}
+
+// classifyStatus buckets an HTTP status code into an Error class.
+func classifyStatus(code int) string {
+	switch {
+	case code == http.StatusTooManyRequests:
+		return ClassRateLimit
+	case code >= 500:
+		return ClassServerError
+	default:
+		return ClassClientError
+	}
+}
+
+// parseRetryAfter reads a delta-seconds Retry-After hint. HTTP-date hints
+// fall back to exponential backoff — the gateway only emits delta-seconds.
+func parseRetryAfter(h string) *int {
+	sec, err := strconv.Atoi(strings.TrimSpace(h))
+	if err != nil || sec < 0 {
+		return nil
+	}
+	return &sec
+}
+
+// sleepRetry is the backoff wait seam: production sleeps until the timer
+// fires or the request deadline/caller cancellation lands, and hermetic
+// tests stub it to capture the schedule without paying wall time.
+var sleepRetry = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// backoffDelay computes the wait before retry n (1-based): base × 2^(n−1)
+// with ±50% jitter, so parallel legs (a 3-model panel retrying together)
+// don't hammer the gateway in lockstep.
+func backoffDelay(n int) time.Duration {
+	base := retryBaseDelay << (n - 1)
+	span := int64(base) / 2
+	return base + time.Duration(rand.Int64N(2*span+1)-span)
+}
+
+// retryDelay picks the wait before the next attempt: the server's
+// Retry-After hint verbatim but capped (an instruction, not a negotiation),
+// else jittered exponential backoff.
+func retryDelay(n int, terr *Error) time.Duration {
+	if terr.RetryAfter != nil {
+		sec := *terr.RetryAfter
+		if sec > retryAfterCap {
+			sec = retryAfterCap
+		}
+		return time.Duration(sec) * time.Second
+	}
+	return backoffDelay(n)
+}
+
 // post sends one request body and returns the parsed response. The shared
 // transport for Query, QueryWithImages, and the tool loop. maxTok is the
-// request's max_tokens and sets the per-request deadline.
+// request's max_tokens and sets the derived deadline, which bounds the
+// WHOLE attempt chain (first try + backoff waits + retries).
+//
+// Retry policy (R-W1): a typed Error in a recoverable class (429, 5xx,
+// transport, timeout) retries up to maxAttempts with jittered exponential
+// backoff, honoring a capped Retry-After hint; client_error never retries;
+// caller cancellation/deadline aborts immediately with the context error
+// preserved in the chain.
 func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*messageResponse, error) {
+	callerCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout(maxTok))
 	defer cancel()
 	body, err := json.Marshal(reqBody)
@@ -251,9 +379,33 @@ func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*me
 		return nil, fmt.Errorf("moa: marshal request: %w", err)
 	}
 	url := c.BaseURL + "/v1/messages"
+	for attempt := 1; ; attempt++ {
+		msg, terr := c.attempt(ctx, url, body)
+		if terr == nil {
+			return msg, nil
+		}
+		if cerr := callerCtx.Err(); cerr != nil {
+			// Caller cancellation/deadline: never retry, and keep the
+			// context error in the chain so errors.Is keeps working.
+			return nil, fmt.Errorf("moa: request aborted: %w", cerr)
+		}
+		if attempt >= maxAttempts || !terr.retryable() {
+			return nil, terr
+		}
+		delay := retryDelay(attempt, terr)
+		log.Printf("moa: %s; retrying in %s (attempt %d of %d)", terr, delay, attempt+1, maxAttempts)
+		if err := sleepRetry(ctx, delay); err != nil {
+			return nil, fmt.Errorf("moa: retry wait aborted: %w", err)
+		}
+	}
+}
+
+// attempt performs one HTTP round trip and the full decode. Every failure
+// surfaces as a typed *Error; post owns the retry decision.
+func (c *Client) attempt(ctx context.Context, url string, body []byte) (*messageResponse, *Error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("moa: new request: %w", err)
+		return nil, &Error{Class: ClassClientError, Message: "new request: " + err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", c.APIKey)
@@ -261,13 +413,18 @@ func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*me
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("moa: http request: %w", err)
+		class := ClassNetwork
+		var netErr net.Error
+		if (errors.As(err, &netErr) && netErr.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
+			class = ClassTimeout
+		}
+		return nil, &Error{Class: class, Message: "http request: " + err.Error()}
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("moa: read response: %w", err)
+		return nil, &Error{Class: ClassNetwork, Message: "read response: " + err.Error()}
 	}
 	if resp.StatusCode != http.StatusOK {
 		tail := strings.TrimSpace(string(raw))
@@ -277,11 +434,16 @@ func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*me
 		if tail == "" {
 			tail = "(empty body)"
 		}
-		return nil, fmt.Errorf("moa: API returned %d: %s", resp.StatusCode, tail)
+		return nil, &Error{
+			Status:     resp.StatusCode,
+			Class:      classifyStatus(resp.StatusCode),
+			Message:    tail,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 	var msg messageResponse
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		return nil, fmt.Errorf("moa: parse response: %w", err)
+		return nil, &Error{Status: http.StatusOK, Class: ClassClientError, Message: "parse response: " + err.Error()}
 	}
 	// Second pass captures the content array as raw bytes for verbatim
 	// assistant echo in the tool loop (see rawContent above).
@@ -289,7 +451,7 @@ func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*me
 		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return nil, fmt.Errorf("moa: parse response content: %w", err)
+		return nil, &Error{Status: http.StatusOK, Class: ClassClientError, Message: "parse response content: " + err.Error()}
 	}
 	msg.rawContent = envelope.Content
 	return &msg, nil
@@ -352,6 +514,30 @@ type Result struct {
 	Budget       int          `json:"budget,omitempty"`
 	OutputTokens int          `json:"output_tokens,omitempty"`
 	Escalations  []Escalation `json:"escalations,omitempty"`
+
+	// Usage ledger (R-W1, moa audit §2#3). Token fields describe the FINAL
+	// request whose answer shipped; earlier escalated attempts re-paid the
+	// same prompt, visible via the Escalations ledger. WallSeconds spans
+	// the whole logical call — transport retries, backoff waits, and budget
+	// re-issues included — so re-payment cost is no longer invisible.
+	// TokPerSec = OutputTokens / WallSeconds: effective end-to-end rate
+	// (not pure generation speed).
+	InputTokens int     `json:"input_tokens,omitempty"`
+	StopReason  string  `json:"stop_reason,omitempty"`
+	WallSeconds float64 `json:"wall_seconds,omitempty"`
+	TokPerSec   float64 `json:"tok_per_sec,omitempty"`
+}
+
+// finalUsage fills one Result's usage ledger from the response that
+// shipped and the logical call's start time.
+func (r *Result) finalUsage(msg *messageResponse, start time.Time) {
+	r.InputTokens = msg.Usage.InputTokens
+	r.OutputTokens = msg.Usage.OutputTokens
+	r.StopReason = msg.StopReason
+	r.WallSeconds = time.Since(start).Seconds()
+	if r.WallSeconds > 0 {
+		r.TokPerSec = float64(r.OutputTokens) / r.WallSeconds
+	}
 }
 
 // outputBudget tracks one logical completion's max_tokens across retries:
@@ -392,18 +578,19 @@ func (c *Client) oneShot(ctx context.Context, model string, mkBody func(model st
 	}
 	spec := modelspec.Lookup(model)
 	bud := outputBudget{now: spec.MaxTokens, cap: spec.MaxOutput}
+	start := time.Now()
 	for {
 		msg, err := c.post(ctx, mkBody(model, bud.now), bud.now)
 		if err != nil {
 			return Result{}, err
 		}
 		res := Result{
-			Text:         msg.text(),
-			Thinking:     msg.thinking(),
-			Budget:       bud.now,
-			OutputTokens: msg.Usage.OutputTokens,
-			Escalations:  bud.esc,
+			Text:        msg.text(),
+			Thinking:    msg.thinking(),
+			Budget:      bud.now,
+			Escalations: bud.esc,
 		}
+		res.finalUsage(msg, start)
 		switch msg.classifyStop() {
 		case stopTruncated:
 			if bud.escalate(model, msg.Usage.OutputTokens) {
@@ -483,8 +670,15 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 
 	spec := modelspec.Lookup(model)
 	bud := outputBudget{now: spec.MaxTokens, cap: spec.MaxOutput}
-	result := func(text string) Result {
-		return Result{Text: text, Budget: bud.now, Escalations: bud.esc}
+	start := time.Now()
+	// result builds the loop's final Result from a response: budget ledger
+	// plus usage ledger. Thinking stays out (unlike oneShot): the loop's
+	// traces span rounds and the review journal is the only consumer that
+	// caps/keeps them — /panel never journals thinking.
+	result := func(msg *messageResponse) Result {
+		res := Result{Text: msg.text(), Budget: bud.now, Escalations: bud.esc}
+		res.finalUsage(msg, start)
+		return res
 	}
 	messages := []messageEntry{{Role: "user", Content: prompt}}
 	var audits []ToolAudit
@@ -508,12 +702,11 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 			if len(msg.toolUses()) > 0 {
 				return Result{}, audits, fmt.Errorf("moa: %s tool loop truncated at the %d-token cap after %d escalation(s) (not executing a half-written tool_use)", model, bud.now, len(bud.esc))
 			}
-			res := result(msg.text())
+			res := result(msg)
 			if res.Text == "" {
 				return Result{}, audits, fmt.Errorf("moa: %s truncated with no visible text (stop_reason=max_tokens at the %d-token cap after %d escalations)", model, bud.now, len(bud.esc))
 			}
 			res.Truncated = true
-			res.OutputTokens = msg.Usage.OutputTokens
 			log.Printf("moa: %s tool-loop final answer truncated at the %d-token cap; returning flagged partial", model, bud.now)
 			return res, audits, nil
 		case stopTerminal:
@@ -521,12 +714,10 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 		}
 		uses := msg.toolUses()
 		if len(uses) == 0 {
-			text := msg.text()
-			if text == "" {
+			res := result(msg)
+			if res.Text == "" {
 				return Result{}, audits, fmt.Errorf("moa: response had no text content blocks (stop_reason=%s)", msg.StopReason)
 			}
-			res := result(text)
-			res.OutputTokens = msg.Usage.OutputTokens
 			return res, audits, nil
 		}
 		if round >= maxRounds {
