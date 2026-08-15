@@ -143,3 +143,9 @@ text per the kimi leg spec §D-todo.8, landed with the D-todo commit):
 > **Invariant 7 (amended):** Distill remains the only *LLM* write cadence. Todo merges are mechanical journal folds triggered by agent_text ingest — the same class of daemon bookkeeping as review_action/memory_update — not an extraction cadence.
 >
 > **Layers table (add row):** | todo (plan state) | journal `todo_merge` snapshots | conversation | agent-proposed ops + user + daemon (mechanical merge) | open items ≤1.5KB, before replay | 1.5KB |
+
+## Amendments (2026-08-15, R-W3)
+
+Recorded from the router-vs-OMP evaluation (`docs/compare/router-vs-omp-eval-2026-08-14.md`, verdict B, DSF wording):
+
+> **Invariant 7 (amended):** Distill remains the only *cadence* for LM-influenced memory writes — the learner rides inside the fold, curation triggers off distill markers on note count/age. R-W3 changes how the daemon *procures* those completions, not who owns the write: behind prefs `learner_via:` / `curator_via:` the learner and curator may take one direct `moa.Query` instead of an OMP one-shot. The transport swap neither creates a model write path nor moves the cadence — the daemon owns every memory write. Model output on either route is inert text until daemon-side parsers and gates pass (learner proposals wait for human `apply_memory`; curator JSON passes shape, topic-validity, and citation-liveness gates), and every moa-route request body is journaled as an exact-bytes receipt (`request_sha16`/`request_bytes` on the fold and curate markers). Invariant 1 stands unmodified: no agent process ever writes a memory layer.

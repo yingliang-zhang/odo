@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -1648,4 +1651,185 @@ func TestPlanUserApplySkip(t *testing.T) {
 	if again != got {
 		t.Errorf("replay = %q, want unchanged %q (retry converges)", again, got)
 	}
+}
+
+// TestLearnerViaMoa (R-W3) covers prefs `learner_via: moa`: the learner
+// one-shot goes through one direct moa.Query — the exact wire request is
+// capturable and its receipts (learner_via/learner_model/
+// learner_request_sha16/learner_request_bytes + output budget) land
+// additively on the fold marker — while absent, explicit-"omp", and
+// unknown values keep the OMP wrapper route byte-identical. Parsers and
+// vet run unchanged on either route.
+func TestLearnerViaMoa(t *testing.T) {
+	t.Run("moa route journals wire receipts with the batch", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+		setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 1\n\nDecided to always test before claiming done.\n")
+		// The learner answer comes from the moa stub, NOT the wrapper:
+		// ODO_LEARNER_OUTPUT is deliberately unset, so any reroute back to
+		// the wrapper fails loudly.
+		srv, calls := startPassMoaStub(t, `{"memory":[{"rule":"Always run go test ./... before claiming a task is done.","evidence":"main-epoch-1","contradicts":""}],"user":[],"reaffirm":[]}`, false)
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		writePrefs(t, home, "learner_via: moa\norchestrator: orch-m3k@test\n")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		convID, d := runToDistill(t, rig, root)
+		if d.WikiPath == "" || d.MemoryProposals != 1 {
+			t.Fatalf("distill = (path %q, proposals %d), want the stub's one proposal", d.WikiPath, d.MemoryProposals)
+		}
+
+		// Route: exactly one moa.Query, on the prefs orchestrator model,
+		// carrying the self-contained learner prompt (instruction + the
+		// just-written note), system field empty.
+		got := calls()
+		if len(got) != 1 {
+			t.Fatalf("moa calls = %d, want 1", len(got))
+		}
+		if got[0].model != "orch-m3k" {
+			t.Errorf("model = %q, want orch-m3k", got[0].model)
+		}
+		if !strings.Contains(got[0].prompt, "memory learner pass") ||
+			!strings.Contains(got[0].prompt, "main-epoch-1") ||
+			!strings.Contains(got[0].prompt, "Decided to always test before claiming done.") {
+			t.Errorf("prompt missing learner instruction/note: %.160q", got[0].prompt)
+		}
+		if got[0].maxTok != 16384 {
+			t.Errorf("max_tokens = %d, want the unknown-model default 16384", got[0].maxTok)
+		}
+
+		// Proposals landed identically to the wrapper route: the batch
+		// carries the vetted rule with its note-name evidence.
+		events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+		proposes := payloadsByAction(t, events, "memory_propose")
+		if len(proposes) != 1 {
+			t.Fatalf("memory_propose events = %d, want 1", len(proposes))
+		}
+		rawProps, ok := proposes[0]["proposals"].([]interface{})
+		if !ok || len(rawProps) != 1 {
+			t.Fatalf("proposals = %v, want 1 entry", proposes[0]["proposals"])
+		}
+		if p := rawProps[0].(map[string]interface{}); p["rule"] != "Always run go test ./... before claiming a task is done." {
+			t.Errorf("proposal rule = %v", p["rule"])
+		}
+
+		// Receipts on the fold marker, wire-exact: sha16 + byte count are
+		// recomputed from the body the stub received, independently of the
+		// client that stamped them.
+		folds := payloadsByAction(t, events, "distill")
+		if len(folds) != 1 {
+			t.Fatalf("distill markers = %d, want 1", len(folds))
+		}
+		m := folds[0]
+		if m["learner_via"] != "moa" || m["learner_model"] != "orch-m3k" {
+			t.Errorf("learner route = %v/%v, want moa/orch-m3k", m["learner_via"], m["learner_model"])
+		}
+		if m["learner_request_sha16"] != sha16(got[0].body) {
+			t.Errorf("learner_request_sha16 = %v, want sha16 of the wire body", m["learner_request_sha16"])
+		}
+		if m["learner_request_bytes"] != float64(len(got[0].body)) {
+			t.Errorf("learner_request_bytes = %v, want %d", m["learner_request_bytes"], len(got[0].body))
+		}
+		if m["learner_budget"] != float64(16384) || m["learner_output_tokens"] != float64(321) {
+			t.Errorf("learner budget/output_tokens = %v/%v, want 16384/321", m["learner_budget"], m["learner_output_tokens"])
+		}
+		if _, present := m["learner_escalations"]; present {
+			t.Errorf("learner_escalations present on a clean end_turn: %v", m["learner_escalations"])
+		}
+		// distill_via is unset here — the fold's own bare receipt keys
+		// must stay absent (OMP route attests nothing moa-shaped).
+		for _, key := range []string{"via", "model", "prompt_sha16", "output_tokens", "budget"} {
+			if _, present := m[key]; present {
+				t.Errorf("fold marker carries distill receipt key %q with distill_via unset", key)
+			}
+		}
+
+		// No OMP process served the learner: the prompts dir carries the
+		// chat run + distill prompt, and nothing rendered the learner
+		// instruction through the wrapper.
+		matches, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
+		if err != nil || len(matches) != 2 {
+			t.Fatalf("prompt files = %v, err %v — want user + distill only", matches, err)
+		}
+		for _, fp := range matches {
+			b, _ := os.ReadFile(fp)
+			if strings.Contains(string(b), "memory learner pass") {
+				t.Errorf("learner prompt %s went through the OMP wrapper on the moa route", fp)
+			}
+		}
+	})
+
+	t.Run("absent, explicit omp, and unknown values keep the OMP route", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+		setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Quiet epoch\n\nNothing to learn.\n")
+		// Empty proposals per distill: the wrapper serves the learner and
+		// the proof is the journaled absence + the prompt files, not a batch.
+		setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[],"user":[],"reaffirm":[]}`)
+		// A moa stub that FAILS the test if ever called proves no reroute.
+		var moaCalled atomic.Bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			moaCalled.Store(true)
+			w.WriteHeader(http.StatusTeapot)
+		}))
+		defer srv.Close()
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		distillCount := 0
+		distillOnce := func(label string) {
+			rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Work " + label})
+			rig.pollUntilDone(t, convID)
+			d := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+			if d.WikiPath == "" || d.MemoryProposals != 0 {
+				t.Fatalf("%s distill = (path %q, proposals %d)", label, d.WikiPath, d.MemoryProposals)
+			}
+			distillCount++
+			events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+			folds := payloadsByAction(t, events, "distill")
+			if len(folds) != distillCount {
+				t.Fatalf("%s distill markers = %d, want %d", label, len(folds), distillCount)
+			}
+			for i, m := range folds {
+				for key := range m {
+					if strings.HasPrefix(key, "learner_") {
+						t.Errorf("%s marker %d carries moa receipt key %q on the OMP route", label, i, key)
+					}
+				}
+			}
+			// The wrapper rendered every learner prompt so far.
+			count := 0
+			matches, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, fp := range matches {
+				b, _ := os.ReadFile(fp)
+				if strings.Contains(string(b), "memory learner pass") {
+					count++
+				}
+			}
+			if count != distillCount {
+				t.Errorf("%s learner prompt files = %d, want %d (wrapper-served)", label, count, distillCount)
+			}
+		}
+		// No line at all: the dark-launch default is the OMP one-shot.
+		distillOnce("absent")
+		writePrefs(t, home, "learner_via: omp\n")
+		distillOnce("explicit-omp")
+		writePrefs(t, home, "learner_via: warp\n")
+		distillOnce("unknown-value")
+		if moaCalled.Load() {
+			t.Error("moa gateway called on an OMP-route learner")
+		}
+	})
 }

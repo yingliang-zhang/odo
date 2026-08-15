@@ -2915,7 +2915,7 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// handleDistill journals after gating the skill proposals. A learner
 	// failure degrades to a journaled memory_update and never fails the
 	// distill.
-	proposals, reaffirm, stats, _ := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
+	proposals, reaffirm, stats, learnerRec, _ := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
 
 	// M9: gate skill proposals through tri-model review. Non-skill proposals
 	// (memory.md, user.md) go straight to the batch; skills are partitioned
@@ -3050,6 +3050,13 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		if len(rec.escalations) > 0 {
 			marker["escalations"] = rec.escalations
 		}
+	}
+	// R-W3 learner receipts (same additive rule: present ONLY on the prefs
+	// `learner_via: moa` route). The learner rides inside the fold, so its
+	// wire-request attestation lands here under the "learner_" prefix,
+	// unambiguous next to the distill receipt's bare names.
+	if learnerRec != nil {
+		learnerRec.journal(marker, "learner_")
 	}
 	// M18 W2 item 2: the full-window first_seq/last_seq keep their
 	// epoch-window meaning (the FoldWindow pin above); the omitted_* keys
@@ -3769,28 +3776,30 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 }
 
 // R-W2 (router-vs-omp-eval-2026-08-14): prefs.md `distill_via:` picks the
-// distill route. Absent or "omp" keeps the historical OMP one-shot — the
-// dark-launch default until moa-route telemetry says flip; "moa" routes a
-// single moa.Query (the D5 review precedent). The values name routes, not
-// adapters: the moa route bypasses every adapter internal.
+// distill route; R-W3 adds `learner_via:` and `curator_via:` for the other
+// two memory-pipeline one-shots. Absent or "omp" keeps the historical OMP
+// one-shot — the dark-launch default until moa-route telemetry says flip;
+// "moa" routes a single moa.Query (the D5 review precedent). The values
+// name routes, not adapters: the moa route bypasses every adapter
+// internal.
 const (
-	distillViaOMP = "omp"
-	distillViaMoa = "moa"
+	viaOMP = "omp"
+	viaMoa = "moa"
 )
 
-// resolveDistillVia re-reads prefs per call (the resolveMaxConcurrent
-// pattern): a prefs edit takes effect on the next distill. Unrecognized
-// values log and fall back to OMP — a typo must never silently reroute
-// the memory pipeline.
-func resolveDistillVia() string {
-	switch v := adapter.LoadPrefsRaw("distill_via"); v {
-	case "", distillViaOMP:
-		return distillViaOMP
-	case distillViaMoa:
-		return distillViaMoa
+// resolveVia re-reads prefs per call (the resolveMaxConcurrent pattern): a
+// prefs edit takes effect on the next pass. Unrecognized values log and
+// fall back to OMP — a typo must never silently reroute the memory
+// pipeline.
+func resolveVia(task, prefKey string) string {
+	switch v := adapter.LoadPrefsRaw(prefKey); v {
+	case "", viaOMP:
+		return viaOMP
+	case viaMoa:
+		return viaMoa
 	default:
-		log.Printf("distill: unknown distill_via %q; falling back to %q", v, distillViaOMP)
-		return distillViaOMP
+		log.Printf("%s: unknown %s %q; falling back to %q", task, prefKey, v, viaOMP)
+		return viaOMP
 	}
 }
 
@@ -3813,7 +3822,7 @@ type distillReceipt struct {
 // seed) because seeding needs the full event history while the window
 // does not.
 func (s *Server) runDistillAgent(ctx context.Context, prompt string) (string, *distillReceipt, error) {
-	if resolveDistillVia() == distillViaMoa {
+	if resolveVia("distill", "distill_via") == viaMoa {
 		return s.runDistillViaMoa(ctx, prompt)
 	}
 	ad := s.distillAdapter
@@ -3854,9 +3863,77 @@ func (s *Server) runDistillViaMoa(ctx context.Context, prompt string) (string, *
 		return "", nil, fmt.Errorf("%s truncated at the %d-token hard cap after %d escalation(s); note not written, fold not committed", model, res.Budget, len(res.Escalations))
 	}
 	return res.Text, &distillReceipt{
-		via:          distillViaMoa,
+		via:          viaMoa,
 		model:        model,
 		promptSHA:    sha16([]byte(prompt)),
+		budget:       res.Budget,
+		outputTokens: res.OutputTokens,
+		escalations:  res.Escalations,
+	}, nil
+}
+
+// moaReceipt is the R-W3 learner/curate route ledger: which model served
+// the pass, the client-stamped wire-request receipt (sha16 of the exact
+// marshaled body + its length — R-W1.5), and the output-budget outcome
+// moa.Result reports. Nil on the OMP route (whose receipts stay the
+// exemption-ledger's, server.go assertPromptReceipts).
+type moaReceipt struct {
+	via          string
+	model        string
+	requestSHA16 string
+	requestBytes int
+	budget       int
+	outputTokens int
+	escalations  []moa.Escalation
+}
+
+// journal adds the receipt's additive keys under prefix — bare on the
+// curate marker (no naming collision), "learner_" on the fold marker
+// (where the distill receipt already owns the bare names). Kept to one
+// method so the three markers never drift key spellings.
+func (r *moaReceipt) journal(m map[string]interface{}, prefix string) {
+	m[prefix+"via"] = r.via
+	m[prefix+"model"] = r.model
+	m[prefix+"request_sha16"] = r.requestSHA16
+	m[prefix+"request_bytes"] = r.requestBytes
+	m[prefix+"output_tokens"] = r.outputTokens
+	m[prefix+"budget"] = r.budget
+	if len(r.escalations) > 0 {
+		m[prefix+"escalations"] = r.escalations
+	}
+}
+
+// runMoaOneShot sends one memory-pipeline pass's prompt to the prefs
+// orchestrator model as a single direct moa.Query — no OMP process, no
+// tmpdir, no session. The system field stays empty: learnerPrompt /
+// curatorPrompt are self-contained instructions-plus-data, and an empty
+// system keeps the wire body exactly the journal-attestable bytes
+// (model-visible ⇔ logged). runDistillViaMoa is the sibling for the fold
+// itself; this is the R-W3 learner/curator share.
+//
+// Deadline policy: the R-W2 one — the outer bound is ONE worst-case moa
+// attempt chain at the model's hard output cap (moa.TimeoutForModel),
+// replacing learnerTimeout/curatorTimeout ONLY on this route. A truncated
+// answer fails CLOSED: a partial proposal set or topic rewrite must never
+// reach parsers/vet or the page writer. task names the pass in messages
+// ("learner" | "curator").
+func runMoaOneShot(ctx context.Context, task, prompt string) (string, *moaReceipt, error) {
+	model := adapter.ReadSettings().OrchestratorModel
+	client := moa.NewClientFromEnv("", "")
+	ctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(model))
+	defer cancel()
+	res, err := client.Query(ctx, model, "", prompt)
+	if err != nil {
+		return "", nil, err
+	}
+	if res.Truncated {
+		return "", nil, fmt.Errorf("%s truncated at the %d-token hard cap after %d escalation(s); output discarded, nothing written", task, res.Budget, len(res.Escalations))
+	}
+	return res.Text, &moaReceipt{
+		via:          viaMoa,
+		model:        model,
+		requestSHA16: res.RequestSHA16,
+		requestBytes: res.RequestBytes,
 		budget:       res.Budget,
 		outputTokens: res.OutputTokens,
 		escalations:  res.Escalations,
@@ -3866,8 +3943,8 @@ func (s *Server) runDistillViaMoa(ctx context.Context, prompt string) (string, *
 // runOneShot runs prompt through ad in a throwaway directory, blocking until
 // the run's terminal event or timeout, and returns the concatenated
 // agent_text output. Distill (OMP route), learner, and curator use it
-// (review migrated to moa.Query in D5; distill migrates on the prefs
-// `distill_via: moa` route, R-W2).
+// (review migrated to moa.Query in D5; distill/learner/curator migrate on
+// their prefs `*_via: moa` routes, R-W2/R-W3).
 func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout time.Duration) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "odo-oneshot-")
 	if err != nil {

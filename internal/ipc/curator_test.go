@@ -2,13 +2,19 @@ package ipc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // M5 Curation tests. Two seams:
@@ -907,4 +913,210 @@ func TestCurateSkipsRetractedNotes(t *testing.T) {
 	if !strings.Contains(resp.Error, "every epoch note stands retracted") {
 		t.Errorf("all-retracted curate error = %q, want the unretract hint", resp.Error)
 	}
+}
+
+// TestCuratorViaMoa (R-W3) covers prefs `curator_via: moa`: the curator
+// one-shot goes through one direct moa.Query — the exact wire request is
+// capturable and its receipts (via/model/request_sha16/request_bytes +
+// output budget) land additively on the pass marker — while a truncated
+// answer fails the whole curate closed before any page rewrite, and
+// explicit-"omp"/unknown values keep the OMP wrapper route byte-identical.
+func TestCuratorViaMoa(t *testing.T) {
+	t.Run("moa route journals wire receipts with the pass marker", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+		// The curator answer comes from the moa stub, NOT the wrapper:
+		// ODO_CURATOR_OUTPUT is deliberately unset, so any reroute back to
+		// the wrapper fails loudly.
+		srv, calls := startPassMoaStub(t, curatorStubJSON, false)
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		writePrefs(t, home, "curator_via: moa\norchestrator: orch-m3k@test\n")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		convID := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root}).Conversation.ID
+		writeNote(t, root, "main-epoch-1", "# Epoch 1 (main)\n\nAuthentication uses JWT with refresh tokens at /auth/refresh.\n")
+		writeNote(t, root, "main-epoch-2", "# Epoch 2 (main)\n\nToken TTL set to 15 minutes.\n")
+		writeNote(t, root, "feature-epoch-1", "# Epoch 1 (feature)\n\nKeep the build boring.\n")
+
+		resp := rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+		if resp.WikiPath != "wiki/index.md" {
+			t.Fatalf("curate wiki_path = %q, want wiki/index.md", resp.WikiPath)
+		}
+
+		// Pages + index rewritten identically to the wrapper route.
+		wantAuth := "# Authentication\n\n- JWT auth with refresh at /auth/refresh (main-epoch-1)\n- Token TTL is 15 minutes (main-epoch-2)\n"
+		if got := readFileStr(t, filepath.Join(root, "wiki", "topics", "authentication.md")); got != wantAuth {
+			t.Errorf("authentication.md = %q, want %q", got, wantAuth)
+		}
+
+		// Route: exactly one moa.Query, on the prefs orchestrator model,
+		// carrying the self-contained curator prompt + every note.
+		got := calls()
+		if len(got) != 1 {
+			t.Fatalf("moa calls = %d, want 1", len(got))
+		}
+		if got[0].model != "orch-m3k" {
+			t.Errorf("model = %q, want orch-m3k", got[0].model)
+		}
+		if !strings.Contains(got[0].prompt, "memory curator pass") ||
+			!strings.Contains(got[0].prompt, "main-epoch-2") ||
+			!strings.Contains(got[0].prompt, "feature-epoch-1") {
+			t.Errorf("prompt missing curator instruction/notes: %.160q", got[0].prompt)
+		}
+
+		// Receipts on the pass marker, wire-exact: recomputed from the
+		// body the stub received, independently of the stamping client.
+		curates := payloadsByAction(t, allEvents(t, rig, convID), "curate")
+		if len(curates) != 1 {
+			t.Fatalf("curate markers = %d, want 1", len(curates))
+		}
+		m := curates[0]
+		if m["via"] != "moa" || m["model"] != "orch-m3k" {
+			t.Errorf("route = %v/%v, want moa/orch-m3k", m["via"], m["model"])
+		}
+		if m["request_sha16"] != sha16(got[0].body) {
+			t.Errorf("request_sha16 = %v, want sha16 of the wire body", m["request_sha16"])
+		}
+		if m["request_bytes"] != float64(len(got[0].body)) {
+			t.Errorf("request_bytes = %v, want %d", m["request_bytes"], len(got[0].body))
+		}
+		if m["budget"] != float64(16384) || m["output_tokens"] != float64(321) {
+			t.Errorf("budget/output_tokens = %v/%v, want 16384/321", m["budget"], m["output_tokens"])
+		}
+		if _, present := m["escalations"]; present {
+			t.Errorf("escalations present on a clean end_turn: %v", m["escalations"])
+		}
+
+		// No OMP process served the curator: nothing rendered the curator
+		// instruction through the wrapper.
+		matches, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fp := range matches {
+			b, _ := os.ReadFile(fp)
+			if strings.Contains(string(b), "memory curator pass") {
+				t.Errorf("curator prompt %s went through the OMP wrapper on the moa route", fp)
+			}
+		}
+	})
+
+	t.Run("truncated answer fails the curate closed", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+		srv, calls := startPassMoaStub(t, curatorStubJSON, true)
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		writePrefs(t, home, "curator_via: moa\norchestrator: orch-m3k@test\n")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		convID := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root}).Conversation.ID
+		writeNote(t, root, "main-epoch-1", "# Epoch 1\n\nFacts.\n")
+
+		resp := rig.callExpectErr(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+		if !strings.Contains(resp.Error, "curator truncated at the 32768-token hard cap after 1 escalation(s)") ||
+			!strings.Contains(resp.Error, "nothing written") {
+			t.Errorf("error = %q, want the truncation fail-closed message", resp.Error)
+		}
+		// One escalation: max_tokens at the 16384 default, re-issue at
+		// doubled budget, still truncated → closed.
+		if got := calls(); len(got) != 2 || got[0].maxTok != 16384 || got[1].maxTok != 32768 {
+			t.Errorf("calls = %+v, want 16384 → 32768 escalate-then-close", got)
+		}
+		// Nothing written: no topic pages, no index, and no pass marker —
+		// one journaled failed row is the durable trace.
+		matches, _ := filepath.Glob(filepath.Join(root, "wiki", "topics", "*.md"))
+		if len(matches) != 0 {
+			t.Errorf("topic pages written after a truncated answer: %v", matches)
+		}
+		if _, err := os.Stat(filepath.Join(root, "wiki", "index.md")); !os.IsNotExist(err) {
+			t.Errorf("index.md written after a truncated answer: %v", err)
+		}
+		if n := len(payloadsByAction(t, allEvents(t, rig, convID), "curate")); n != 0 {
+			t.Errorf("curate pass markers = %d, want none (fail-closed)", n)
+		}
+		failed := false
+		for _, ev := range allEvents(t, rig, convID) {
+			if ev.Type != store.EventMemoryUpdate {
+				continue
+			}
+			var p map[string]interface{}
+			if json.Unmarshal(ev.Payload, &p) == nil && p["layer"] == "curator" && p["cause"] == "failed" {
+				failed = true
+				if !strings.Contains(fmt.Sprint(p["detail"]), "truncated") {
+					t.Errorf("failed detail = %v, want the truncation fact", p["detail"])
+				}
+			}
+		}
+		if !failed {
+			t.Error("memory_update{layer:curator,cause:failed} missing")
+		}
+	})
+
+	t.Run("explicit omp and unknown values keep the OMP route", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+		setOneShotEnv(t, "ODO_CURATOR_OUTPUT", curatorStubJSON)
+		// A moa stub that FAILS the test if ever called proves no reroute.
+		var moaCalled atomic.Bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			moaCalled.Store(true)
+			w.WriteHeader(http.StatusTeapot)
+		}))
+		defer srv.Close()
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		convID := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root}).Conversation.ID
+		writeNote(t, root, "main-epoch-1", "# Epoch 1 (main)\n\nAuthentication uses JWT with refresh tokens at /auth/refresh.\n")
+		writeNote(t, root, "main-epoch-2", "# Epoch 2 (main)\n\nToken TTL set to 15 minutes.\n")
+		writeNote(t, root, "feature-epoch-1", "# Epoch 1 (feature)\n\nKeep the build boring.\n")
+
+		curateOnce := func(label string) {
+			resp := rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+			if resp.WikiPath != "wiki/index.md" {
+				t.Fatalf("%s curate failed: %+v", label, resp)
+			}
+			curates := payloadsByAction(t, allEvents(t, rig, convID), "curate")
+			last := curates[len(curates)-1]
+			for _, key := range []string{"via", "model", "request_sha16", "request_bytes", "output_tokens", "budget"} {
+				if _, present := last[key]; present {
+					t.Errorf("%s curate marker carries moa receipt key %q on the OMP route", label, key)
+				}
+			}
+		}
+		writePrefs(t, home, "curator_via: omp\n")
+		curateOnce("explicit-omp")
+		writePrefs(t, home, "curator_via: warp\n")
+		curateOnce("unknown-value")
+		if moaCalled.Load() {
+			t.Error("moa gateway called on an OMP-route curate")
+		}
+		// The wrapper rendered both curator prompts.
+		count := 0
+		matches, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fp := range matches {
+			b, _ := os.ReadFile(fp)
+			if strings.Contains(string(b), "memory curator pass") {
+				count++
+			}
+		}
+		if count != 2 {
+			t.Errorf("curator prompt files = %d, want 2 (wrapper-served)", count)
+		}
+	})
 }

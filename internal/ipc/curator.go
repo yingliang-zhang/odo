@@ -566,11 +566,25 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 		return err
 	}
 
-	ad := s.distillAdapter
-	if ad == nil {
-		ad = s.adapters[""] // same fallback as runDistillAgent
+	// R-W3: the prefs `curator_via:` switch picks the completion route
+	// (absent/"omp" → the historical OMP one-shot; "moa" → one direct
+	// moa.Query, its receipts landing on the pass marker below). Truncation
+	// fails closed inside runMoaOneShot — before citation gating, before
+	// ANY page rewrite; the daemon remains the sole writer of every memory
+	// layer (ADR-0003 inv 7 amendment): curator JSON is parsed text, gates
+	// act, writes are daemon calls.
+	prompt := curatorPrompt(notes)
+	raw := ""
+	var rec *moaReceipt
+	if resolveVia("curator", "curator_via") == viaMoa {
+		raw, rec, err = runMoaOneShot(ctx, "curator", prompt)
+	} else {
+		ad := s.distillAdapter
+		if ad == nil {
+			ad = s.adapters[""] // same fallback as runDistillAgent
+		}
+		raw, err = runOneShot(ctx, ad, prompt, curatorTimeout)
 	}
-	raw, err := runOneShot(ctx, ad, curatorPrompt(notes), curatorTimeout)
 	if err != nil {
 		return fail(fmt.Errorf("curate: curator run: %w", err), err.Error())
 	}
@@ -674,6 +688,12 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 		// the audit trail names exactly what was dropped.
 		marker["stripped_citations"] = tokens
 		detail += fmt.Sprintf(" (stripped %d ghost-cited line(s): %s)", len(stripped), strings.Join(tokens, ", "))
+	}
+	// R-W3: the moa route's wire-request receipt (absent on the OMP route,
+	// whose attestation stays the exemption-ledger's). Bare keys — the
+	// curate marker carries no distill receipt to collide with.
+	if rec != nil {
+		rec.journal(marker, "")
 	}
 	if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(marker)); err != nil {
 		return err

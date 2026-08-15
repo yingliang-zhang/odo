@@ -1540,6 +1540,63 @@ func startDistillMoaStub(t *testing.T, noteText string, truncateNote bool) (*htt
 	}
 }
 
+// passMoaCall records one moa request as the stub received it: the decoded
+// fields plus the RAW body, so a test can recompute the journaled
+// request_sha16/request_bytes receipt independently of the client (the
+// wire-exact discipline of R-W1.5's TestRequestReceiptWireExact).
+type passMoaCall struct {
+	model  string
+	maxTok int
+	prompt string
+	body   []byte
+}
+
+// startPassMoaStub installs a moa-API stub for the R-W3 learner/curate
+// routes: every request is answered end_turn with answer unless truncate
+// is set (max_tokens forever plus an unterminated-JSON body — the
+// budget-escalation-then-still-truncated shape that must fail the pass
+// closed).
+func startPassMoaStub(t *testing.T, answer string, truncate bool) (*httptest.Server, func() []passMoaCall) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []passMoaCall
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model    string `json:"model"`
+			MaxTok   int    `json:"max_tokens"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.Unmarshal(body, &req)
+		var prompt string
+		if n := len(req.Messages); n > 0 {
+			prompt = req.Messages[n-1].Content
+		}
+		mu.Lock()
+		calls = append(calls, passMoaCall{model: req.Model, maxTok: req.MaxTok, prompt: prompt, body: body})
+		mu.Unlock()
+		stop, text, outTok := "end_turn", answer, 321
+		if truncate {
+			stop, text, outTok = "max_tokens", `{"truncated":[`, 777
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": text}},
+			"stop_reason": stop,
+			"usage":       map[string]int{"output_tokens": outTok},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []passMoaCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]passMoaCall(nil), calls...)
+	}
+}
+
 // TestDistillViaMoa (R-W2) covers the prefs `distill_via: moa` route: the
 // fold prompt goes through one moa.Query — the exact wire request is
 // capturable and its receipts (via/model/prompt_sha16/output budget,

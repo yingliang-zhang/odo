@@ -25,22 +25,26 @@ use std::time::Duration;
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `distill` runs a full summary-agent completion followed by the M4
-/// learner one-shot (bounded by the 5-minute `learnerTimeout`) and the M9
-/// tri-model skill gate (bounded by the 5-minute skill-gate HTTP client
-/// timeout) — all synchronously before the daemon answers. The distill
-/// turn is bounded by the daemon's 10-minute `distillTimeout` on the OMP
-/// route, or by one worst-case moa attempt chain (900s + 64K/120 ≈ 1446s)
-/// when prefs `distill_via: moa` is active (R-W2). The older rationale
-/// cited the daemon serving "one connection at a time"; since M11 each
-/// call is a fresh connection served by its own goroutine, but the chain
-/// still runs synchronously per call, so the read timeout covers all
-/// three plus margin (1446s + 5m + 5m + margin ≈ 2100s).
-const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(2100);
+/// learner one-shot and the M9 tri-model skill gate (bounded by the
+/// 5-minute skill-gate HTTP client timeout) — all synchronously before the
+/// daemon answers. Each of the distill and learner legs is bounded by the
+/// daemon's 10-minute OMP timeout on the OMP route, or by one worst-case
+/// moa attempt chain (900s + 64K/120 ≈ 1446s) when its prefs `*_via: moa`
+/// flag is active (R-W2 `distill_via:`, R-W3 `learner_via:`). The older
+/// rationale cited the daemon serving "one connection at a time"; since
+/// M11 each call is a fresh connection served by its own goroutine, but
+/// the chain still runs synchronously per call, so the read timeout covers
+/// the dual-moa worst chain plus margin (1446s + 1446s + 5m + margin ≈
+/// 3300s).
+const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(3300);
 
-/// `curate` runs the curator one-shot (bounded by the daemon's 10-minute
-/// `curatorTimeout`): it reads up to 50 epoch notes and rewrites every topic
-/// page plus wiki/index.md synchronously before answering — 10m + margin.
-const CURATE_READ_TIMEOUT: Duration = Duration::from_secs(660);
+/// `curate` runs the curator one-shot: it reads up to 50 epoch notes and
+/// rewrites every topic page plus wiki/index.md synchronously before
+/// answering. Bounded by the daemon's 10-minute `curatorTimeout` on the
+/// OMP route (10m + margin), or by one worst-case moa attempt chain ≈
+/// 1446s when prefs `curator_via: moa` is active (R-W3) — the moa chain
+/// governs the ceiling.
+const CURATE_READ_TIMEOUT: Duration = Duration::from_secs(1560);
 
 /// M2: `review_diff` waits on every configured review model daemon-side
 /// (sequentially in the worst case). 900s matches the daemon's review-leg

@@ -516,14 +516,15 @@ func orEmpty(s string) string {
 
 // runLearner executes the learner one-shot for the just-distilled note (M9
 // refactor: no longer journals memory_propose internally). It returns the
-// vetted proposals (memory + user + skills), reaffirm targets, and veto
-// stats. handleDistill journals the memory_propose after gating the skill
-// proposals. On failure it journals memory_update{layer:"learner",
-// cause:"failed"} and returns empty results.
+// vetted proposals (memory + user + skills), reaffirm targets, veto
+// stats, and — on the prefs `learner_via: moa` route (R-W3) — the
+// wire-request receipt (nil on the OMP route). handleDistill journals the
+// memory_propose after gating the skill proposals. On failure it journals
+// memory_update{layer:"learner", cause:"failed"} and returns empty results.
 //
 // epoch is the distilled note's epoch (conversation epoch BEFORE the
 // increment), so batch identity is `latest distill newEpoch − 1` (spec §5).
-func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int) (proposals []MemoryProposal, reaffirm []string, stats vetoStats, err error) {
+func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int) (proposals []MemoryProposal, reaffirm []string, stats vetoStats, rec *moaReceipt, err error) {
 	fail := func(ferr error) {
 		_, _ = s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":  "learner",
@@ -538,19 +539,31 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 	sibs := siblingMemories(s.resolvedRoot)
 	userMem := readUserMemory()
 
-	ad := s.distillAdapter
-	if ad == nil {
-		ad = s.adapters[""] // same fallback as runDistillAgent
+	// R-W3: the prefs `learner_via:` switch picks the completion route
+	// (absent/"omp" → the historical OMP one-shot; "moa" → one direct
+	// moa.Query). Parsers and vet run identically on either route; the
+	// daemon remains the sole writer (ADR-0003 inv 1, 7) — model output is
+	// parsed text, never an action.
+	rawText := ""
+	if resolveVia("learner", "learner_via") == viaMoa {
+		rawText, rec, err = runMoaOneShot(ctx, "learner", learnerPrompt(noteName, noteContent, ownMem, sibs, userMem))
+	} else {
+		ad := s.distillAdapter
+		if ad == nil {
+			ad = s.adapters[""] // same fallback as runDistillAgent
+		}
+		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, sibs, userMem), learnerTimeout)
 	}
-	raw, err := runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, sibs, userMem), learnerTimeout)
 	if err != nil {
 		fail(fmt.Errorf("learner run: %w", err))
-		return nil, nil, vetoStats{}, nil // learner failure never fails the distill
+		return nil, nil, vetoStats{}, nil, nil // learner failure never fails the distill
 	}
-	res, err := parseLearnerOutput(raw)
+	res, err := parseLearnerOutput(rawText)
 	if err != nil {
 		fail(err)
-		return nil, nil, vetoStats{}, nil
+		// The moa receipt stays attached: the request shipped and is
+		// attestable even though the answer failed to parse.
+		return nil, nil, vetoStats{}, rec, nil
 	}
 	proposals, procedures, reaffirm, stats := vetLearnerOutput(res, noteName, ownMem, noteContent, ownName, sibs, s.projectRoot)
 
@@ -568,7 +581,7 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 		})
 	}
 
-	return proposals, reaffirm, stats, nil
+	return proposals, reaffirm, stats, rec, nil
 }
 
 // siblingMemories returns up to 3 registered sibling projects' memory.md
