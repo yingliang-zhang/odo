@@ -4101,6 +4101,138 @@ mark {
   background: color-mix(in srgb, var(--bg-run) 15%, transparent);
 }
 
+/* ---------- GUI Wave B: context meter + review-panel chip ---------- */
+
+/* Wave B #5: the meter button keeps the neutral badge chrome; only the
+   ring stroke and the inline percent tint by pressure tier. */
+.ctx-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ctx-meter.meter-ok { color: var(--ok); }
+.ctx-meter.meter-warn { color: var(--warn); }
+.ctx-meter.meter-err { color: var(--err); }
+
+/* Ring starts at 12 o'clock: unconsumed context is the neutral track. */
+.ctx-ring {
+  transform: rotate(-90deg);
+  flex-shrink: 0;
+}
+
+.ctx-ring-track {
+  fill: none;
+  stroke: var(--stroke-tertiary);
+  stroke-width: 2;
+}
+
+.ctx-ring-fill {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--dur) var(--ease-standard);
+}
+
+/* Popovers widen the shared .bg-runs-menu surface — right-anchored like
+   the run list so a long path never grows past the window edge. */
+.ctx-meter-popover,
+.panel-chip-popover {
+  min-width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+/* Section titles match the skills-list micro-caps convention. */
+.ctx-pop-title {
+  padding: 2px 4px 6px;
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ctx-layers-title {
+  padding-top: 6px;
+  border-top: 1px solid var(--stroke-tertiary);
+}
+
+.ctx-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px;
+  font-size: var(--text-micro);
+}
+
+.ctx-key {
+  flex-shrink: 0;
+  width: 64px;
+  color: var(--text-dim);
+}
+
+.ctx-val {
+  min-width: 0;
+  color: var(--text);
+}
+
+.ctx-dim {
+  color: var(--text-dim);
+}
+
+/* Verbatim receipt keys: one per line, scrollable when the daemon
+   injected many layers (the list IS the journal truth, never grouped). */
+.ctx-layers {
+  margin: 0;
+  padding: 0 4px;
+  list-style: none;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.ctx-layer {
+  padding: 1px 0;
+  font-size: var(--text-micro);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* Wave B #9: panel rows mirror .bg-run-row but are display-only (no
+   click target — the chip points at Settings for edits). */
+.panel-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+}
+
+.panel-model-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-micro);
+  color: var(--text);
+}
+
+.panel-model-provider {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* Wave B #8: per-turn stats strip — an extra span inside .run-header,
+   dimmer than the header's own facts (the header stays the narrative;
+   the strip is auxiliary telemetry). */
+.run-turn-stats {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+
 .status-adapter {
   background: var(--bg-input);
   border: 1px solid var(--border);

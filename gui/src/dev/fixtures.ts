@@ -232,6 +232,54 @@ export const events: OdoEvent[] = [
     action: "accept",
     diff_id: 4,
   }, 3),
+
+  // ---------- GUI Wave B: telemetry fixtures on CONVERSATION 3 ----------
+  // Turn 1 (billed-usage branch): NOTHING writes input/output tokens
+  // today — the OMP adapter drops stream usage. This fixture pre-exercises
+  // the defensive render (timed_out precedent): when a payload carries
+  // billed numbers the strip shows tokens + tok/s, not bytes.
+  ev("user_message", {
+    text: "One-line fix: pin the socket path in the launcher",
+    total_prompt_bytes: 20480,
+    prompt_sha16: "b2c3d4e5f6071829",
+  }, 3),
+  ev("agent_text", { text: "Pinned." }, 3),
+  ev("agent_done", {
+    summary: "Socket path pinned in the daemon launcher",
+    input_tokens: 5120,
+    output_tokens: 846,
+  }, 3),
+
+  // Turn 2 (byte-branch, NEWEST prompt → drives the meter at 86%): the
+  // user_message carries the full M18 W2 receipt closure —
+  // total_prompt_bytes, prompt_sha16, verbatim receipt keys, replay
+  // sub-receipt with a dropped window, recall_held_back. 1,204,000 bytes
+  // vs the fixture coding model (t9s/kimi-k3 → 350k tok × ~4 B/tok ≈
+  // 1,400,000 B) = ~86% → red tier, and the popover exercises every row.
+  ev("user_message", {
+    text: "Fold the fold-marker regression notes into the epoch summary",
+    total_prompt_bytes: 1204000,
+    prompt_sha16: "a1b2c3d4e5f60718",
+    recall_held_back: 3,
+    replay: { after_seq: 4, first_seq: 8, last_seq: 14, bytes: 62450, dropped_seqs: [5, 7] },
+    receipt: {
+      "~/.odo/user.md": "0123456789abcdef",
+      ".odo/memory.md": "1123456789abcdef",
+      ".odo/pins.md": "2123456789abcdef",
+      "wiki/index.md": "3123456789abcdef",
+      "odo#memory-map": "4123456789abcdef",
+      "journal#todo": "5123456789abcdef",
+      "wiki/fix-daemon-binary-epoch-1.md#open-loops": "6123456789abcdef",
+      "wiki/main-epoch-6.md": "7123456789abcdef",
+      "wiki/topics/auto-land-pipeline.md": "8123456789abcdef",
+      "~/.odo/skills/playwright.md": "9123456789abcdef",
+    },
+  }, 3),
+  ev("agent_text", { text: "Reading the fold markers first, then I'll draft the epoch summary." }, 3),
+  ev("agent_tool_call", { tool: "read_file", args: { path: "wiki/fix-daemon-binary-epoch-1.md" } }, 3),
+  ev("agent_tool_result", { tool: "read_file", result: "88 lines — fold marker regression notes" }, 3),
+  ev("agent_text", { text: "Drafted the summary — the regression was a stale last_seq on the legacy marker, fixed by the pinned window." }, 3),
+  ev("agent_done", { summary: "Folded fold-marker regression notes into the epoch summary" }, 3),
 ];
 
 // ---------- Diffs ----------

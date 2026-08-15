@@ -11,6 +11,7 @@ import {
   deleteWorkstream,
   distill,
   errorMessage,
+  getSettings,
   listAllPendingDiffs,
   listProjects,
   listTopics,
@@ -43,7 +44,8 @@ import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { notifyRunDone } from "./notify";
-import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Workstream } from "./types";
+import { deriveLastPrompt, parseReviewModels } from "./stats";
+import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -373,6 +375,37 @@ export default function App() {
   const pendingTotal = useMemo(
     () => Object.values(pendingCounts).reduce((a, b) => a + b, 0),
     [pendingCounts],
+  );
+
+  // GUI Wave B (#5 + #9): settings data the StatusBar needs — coding model
+  // (context-window denominator) and the review panel list. get_settings
+  // is a singleton IPC (daemon-merged prefs+defaults), fetched on project
+  // switch and after every SettingsPanel save. A failed/null read only
+  // hides the meter's model tag + panel chip — never blocks the bar.
+  const [appSettings, setAppSettings] = useState<DaemonSettings | null>(null);
+  const refreshSettings = useCallback(async () => {
+    const root = projectRootRef.current;
+    if (root == null) return;
+    try {
+      const resp = await getSettings(root);
+      if (projectRootRef.current !== root) return; // project switched mid-flight
+      setAppSettings(resp.ok ? (resp.settings ?? null) : null);
+    } catch {
+      setAppSettings(null);
+    }
+  }, []);
+  useEffect(() => {
+    setAppSettings(null);
+    void refreshSettings();
+  }, [project?.root_path, refreshSettings]);
+
+  // Wave B #5: the last prompt closure is journaled data the UI already
+  // holds — the meter reads the newest carrier (user_message send/slash or
+  // run_prompt continuation) straight off the event stream.
+  const lastPrompt = useMemo(() => deriveLastPrompt(events), [events]);
+  const reviewPanel = useMemo(
+    () => parseReviewModels(appSettings?.review_models ?? ""),
+    [appSettings],
   );
 
   // Background runs: daemon-reported running workstreams minus the one in
@@ -1369,7 +1402,7 @@ export default function App() {
         <SettingsPanel
           projectRoot={project?.root_path ?? null}
           onClose={() => setSettingsOpen(false)}
-          onSaved={() => {}}
+          onSaved={() => void refreshSettings()}
         />
       )}
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} initialActionId={paletteInitialAction} />}
@@ -1578,6 +1611,9 @@ export default function App() {
         backgroundRuns={backgroundRuns}
         bgNotice={bgNotice}
         onJumpWorkstream={(id) => void handleSwitchWorkstream(id)}
+        lastPrompt={lastPrompt}
+        codingModel={appSettings?.coding_model ?? null}
+        reviewPanel={reviewPanel}
         pendingDiffs={diffs.length}
         wikiNoteCount={wikiNoteCount}
         pendingMemoryProposals={pendingMemoryProposals}

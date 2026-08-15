@@ -108,6 +108,28 @@ export interface EventPayload {
   // blocks injected, keyed by the same path strings used in `recall` (M5
   // adds the .odo/pins.md and wiki/index.md fixed markers).
   receipt?: Record<string, string>;
+  // M18 W2 (prompt receipt closure): run-starting paths journal the
+  // assembled prompt's byte total + sha16, plus the recall cap's held-back
+  // count when >0, and the replay structural sub-receipt when a replay was
+  // injected. Rides user_message on send/slash and
+  // review_action{action:"run_prompt"} on continuations — the GUI's
+  // context-pressure meter reads the latest of these.
+  total_prompt_bytes?: number;
+  prompt_sha16?: string;
+  recall_held_back?: number;
+  replay?: {
+    after_seq: number;
+    first_seq: number;
+    last_seq: number;
+    bytes: number;
+    dropped_seqs?: number[];
+  };
+  // GUI Wave B (defensive): billed usage on agent_done. NOTHING writes
+  // these yet — the OMP adapter drops the stream's usage at the seam, so
+  // the stats strip derives sizes from journaled bytes and only upgrades
+  // to billed tokens when a payload carries them (timed_out precedent).
+  input_tokens?: number;
+  output_tokens?: number;
   // memory_update payload fields (M4, extended M5): which layer changed
   // (memory | user | learner | curator | index | pins), why
   // (apply | rotate | retract | failed | curate | pin), and a

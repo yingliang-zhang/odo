@@ -12,6 +12,8 @@ import {
 } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
+import { deriveTurnStats, formatBytes, formatTokens } from "../stats";
+import type { TurnStats } from "../stats";
 import type { AutoDistillCountdown, OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
 import PlanChip from "./PlanChip";
@@ -253,8 +255,27 @@ function PreviewBubble({ preview }: { preview: PreviewEvent }) {
   );
 }
 
+// Wave B #8: billed-usage branch — real token counts justify a real rate
+// (tok/s = billed output tokens over journaled wall seconds).
+function formatStatsWithTokens(stats: TurnStats): string {
+  const parts: string[] = [];
+  if (stats.inputTokens != null) parts.push(`in ${formatTokens(stats.inputTokens)}`);
+  if (stats.outputTokens != null) {
+    parts.push(`out ${formatTokens(stats.outputTokens)}`);
+    const secs = stats.wallMs / 1000;
+    if (secs > 0) parts.push(`${(stats.outputTokens / secs).toFixed(1)} tok/s`);
+  }
+  return parts.join(" · ");
+}
+
 // Run header: timestamp, tool call count, duration when the run journaled
 // agent_done, and a status icon (✓ done / ✗ error / ⟳ running).
+// Wave B #8: completed turns also carry a dim stats strip — wall time plus
+// input/output sizes derived from journaled facts (prompt receipt bytes
+// on the run's user_message; UTF-8 bytes of the agent_text bodies). When
+// the payload later carries billed usage (input_tokens/output_tokens),
+// the strip upgrades to tokens + tok/s — byte-only rows never show a
+// fabricated rate.
 function RunHeader({ group }: { group: RunGroup }) {
   const start = group.start;
   if (!start) return null;
@@ -269,12 +290,28 @@ function RunHeader({ group }: { group: RunGroup }) {
     : new Date(startMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const doneMs = done ? Date.parse(done.created_at) : NaN;
   const showDuration = done !== undefined && !Number.isNaN(startMs) && !Number.isNaN(doneMs);
+  const stats = deriveTurnStats(start, group.events, done);
   return (
     <div className="run-header">
       <span className={`run-status ${status}`}>{icon}</span>
       <span>{clock}</span>
       <span>{`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`}</span>
       {showDuration && <span>{formatElapsed(doneMs - startMs)}</span>}
+      {stats != null && (
+        <span
+          className="run-turn-stats"
+          title={
+            "in = journaled prompt bytes (receipt closure); out = agent text bytes." +
+            (stats.outputTokens != null ? " Tokens are usage billed by the provider." : "")
+          }
+        >
+          {stats.wallMs > 0 && stats.outputTokens != null
+            ? ` · ${formatStatsWithTokens(stats)}`
+            : stats.inputBytes != null
+              ? ` · in ${formatBytes(stats.inputBytes)} · out ${formatBytes(stats.outputBytes)}`
+              : ` · out ${formatBytes(stats.outputBytes)}`}
+        </span>
+      )}
     </div>
   );
 }
