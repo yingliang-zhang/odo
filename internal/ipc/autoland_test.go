@@ -17,8 +17,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 )
@@ -345,87 +347,148 @@ func TestAutoLandVerifyNoEvidence(t *testing.T) {
 	})
 }
 
-// TestAutoLandVisualGate (B5, m16 gate 12): a diff touching gui/src/**
-// never auto-lands regardless of panel outcome — blocked
-// human_gate_visual with the completed panel riding the row as advisory
-// evidence; the ladder never ticks; the diff stays pending for human
-// visual acceptance.
-func TestAutoLandVisualGate(t *testing.T) {
-	// visualRepo commits gui/src/ + the verify config so the new-top-dir
-	// and base-freshness gates pass for a gui diff.
-	visualRepo := func(t *testing.T) (root, sha string) {
-		root, _ = autolandRepo(t)
-		if err := os.MkdirAll(filepath.Join(root, "gui", "src"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, "gui", "src", "app.ts"), []byte("export const x = 1\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		gitIn(t, root, "add", ".")
-		gitIn(t, root, "commit", "-m", "gui + verify")
-		return root, gitOut(t, root, "rev-parse", "HEAD")
+// visualAutolandRepo commits gui/src/ + the verify config so the
+// new-top-dir and base-freshness gates pass for a gui diff.
+func visualAutolandRepo(t *testing.T) (root, sha string) {
+	t.Helper()
+	root, _ = autolandRepo(t)
+	if err := os.MkdirAll(filepath.Join(root, "gui", "src"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	setup := func(t *testing.T, reply func(call int64, model string) (int, string)) (autonomyFixture, *Server, store.Diff, string) {
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		writePrefs(t, home, "review: rm1@test\n")
-		startPanelStub(t, reply)
-		f := newAutonomyFixture(t)
-		root, sha := visualRepo(t)
-		s := &Server{store: f.st, projectRoot: root}
-		d := f.addDiff(t, "p.diff", patchSrc("gui/src/app.ts", 3, 1, false))
-		d.BaseSHA = &sha
-		return f, s, d, root
+	if err := os.WriteFile(filepath.Join(root, "gui", "src", "app.ts"), []byte("export const x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", ".")
+	gitIn(t, root, "commit", "-m", "gui + verify")
+	return root, gitOut(t, root, "rev-parse", "HEAD")
+}
 
-	t.Run("unanimous accept still blocks (advisory only)", func(t *testing.T) {
-		f, s, d, root := setup(t, func(call int64, model string) (int, string) {
-			return 200, "ACCEPT\nlooks correct"
-		})
-		s.autoLand(context.Background(), d, root, "goal", false, "")
-		sc := scanSettle(t, f.st, f.c.ID)
-		if got := sc.blockedReasons(); len(got) != 1 || got[0] != "human_gate_visual" {
-			t.Fatalf("blocked reasons = %v, want [human_gate_visual]", got)
-		}
-		row := sc.blocked[0]
-		if row["consensus_verdict"] != "accept" {
-			t.Errorf("consensus_verdict = %v, want accept riding as advisory evidence", row["consensus_verdict"])
-		}
-		reviews, _ := row["reviews"].([]interface{})
-		if len(reviews) != 1 {
-			t.Errorf("reviews = %v, want the 1-model panel attached", row["reviews"])
-		}
-		if detail, _ := row["detail"].(string); !strings.Contains(detail, "gui/src/app.ts") {
-			t.Errorf("detail = %q, want the visual path named", detail)
-		}
-		if len(sc.moaRows) != 0 || len(sc.accepts) != 0 {
-			t.Errorf("landing rows = %v moa %v accepts, want none (the blocked row is the only evidence)", sc.moaRows, sc.accepts)
-		}
-		got, err := f.st.GetDiff(context.Background(), d.ID)
-		if err != nil {
+// TestAutoLandVisualDiffUnanimousAcceptLands (visual-gate removal): a diff
+// touching gui/src/** with a unanimous ACCEPT panel lands through the same
+// pipeline as any daemon diff — one accept row, the diff DiffAccepted, zero
+// blocked rows, and no human_gate_visual anywhere in the journal.
+func TestAutoLandVisualDiffUnanimousAcceptLands(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\n")
+	calls := startPanelStub(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nlooks correct"
+	})
+	f := newAutonomyFixture(t)
+	root, _ := visualAutolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	// realPatch, not patchSrc: the accept path's git apply --3way
+	// adjudicates real content against the committed gui/src/app.ts.
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "gui", "src", "app.ts"), []byte("export const x = 2\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if got.Status != store.DiffPending {
-			t.Errorf("diff status = %q, want pending (human visual acceptance is the accept path)", got.Status)
-		}
-	})
+	}))
 
-	t.Run("needs_fixes blocks visually, never spawns a revise round", func(t *testing.T) {
-		f, s, d, root := setup(t, func(call int64, model string) (int, string) {
-			return 200, "NEEDS_FIXES\nthe layout regressed on narrow viewports"
-		})
-		s.autoLand(context.Background(), d, root, "goal", false, "")
-		sc := scanSettle(t, f.st, f.c.ID)
-		if got := sc.blockedReasons(); len(got) != 1 || got[0] != "human_gate_visual" {
-			t.Fatalf("blocked reasons = %v, want [human_gate_visual] (needs_fixes never reaches the ladder on a visual diff)", got)
+	s.autoLand(context.Background(), d, root, "goal", false, "")
+	if n := atomic.LoadInt64(calls); n != 1 {
+		t.Fatalf("panel calls = %d, want 1", n)
+	}
+	sc := scanSettle(t, f.st, f.c.ID)
+	if got := sc.blockedReasons(); len(got) != 0 {
+		t.Fatalf("blocked reasons = %v, want none — visual diffs land on a unanimous accept", got)
+	}
+	for _, p := range sc.reviewSeq {
+		if fmt.Sprint(p["reason"]) == "human_gate_visual" {
+			t.Fatalf("human_gate_visual journaled %v — the visual gate is removed", p)
 		}
-		if len(sc.rounds) != 0 || len(sc.markers) != 0 {
-			t.Errorf("ladder fired on a visual diff: rounds=%v markers=%v", sc.rounds, sc.markers)
-		}
+	}
+	if len(sc.moaRows) != 1 || sc.moaRows[0]["consensus_verdict"] != "accept" {
+		t.Errorf("moa_review rows = %v, want one unanimous-accept evidence row", sc.moaRows)
+	}
+	if len(sc.accepts) != 1 || sc.accepts[0]["actor"] != autoActor || sc.accepts[0]["diff_id"] != float64(d.ID) {
+		t.Errorf("accepts = %v, want exactly one auto_panel accept of diff %d", sc.accepts, d.ID)
+	}
+	if len(sc.rounds) != 0 || len(sc.markers) != 0 {
+		t.Errorf("ladder fired on a unanimous accept: rounds=%v markers=%v", sc.rounds, sc.markers)
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(root, "gui", "src", "app.ts")); rerr != nil || string(data) != "export const x = 2\n" {
+		t.Errorf("gui/src/app.ts = %q, %v — the visual diff must land in main", data, rerr)
+	}
+}
+
+// TestAutoLandVisualDiffNeedsFixesEntersLadder (visual-gate removal): a
+// GUI diff judged needs_fixes takes the same revise ladder a daemon diff
+// would — one round-1 marker + round row spawn, zero blocked rows.
+func TestAutoLandVisualDiffNeedsFixesEntersLadder(t *testing.T) {
+	root := settleRigRepo(t)
+	// A tracked GUI file so the stub run's diff touches gui/src/** and the
+	// new-top-dir gate passes (the base tree carries gui/).
+	if err := os.MkdirAll(filepath.Join(root, "gui", "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "gui", "src", "app.ts"), []byte("export const x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", ".")
+	gitIn(t, root, "commit", "-m", "gui fixture")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\nauto_apply: main\n")
+	startPanelStub(t, func(call int64, model string) (int, string) {
+		return 200, "NEEDS_FIXES\nthe accent token should come from the theme"
 	})
+	// guiStubWrapper modifies a tracked GUI file: the run's diff touches
+	// gui/src/**, exercising the post-removal pipeline stance on visual work.
+	const guiStubWrapper = `#!/bin/sh
+output_file="$3"
+sleep 1
+printf 'export const x = 99\n' > gui/src/app.ts
+printf 'updated the GUI accent color\n' > "$output_file"
+exit 0
+`
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, guiStubWrapper))
+	rig := startRig(t, root)
+	t.Cleanup(func() { rig.stop(t) })
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "update the GUI accent color"})
+	done := pollDone(t, rig, convID)
+	if done.Diff == nil {
+		t.Fatal("the GUI run produced no diff")
+	}
+	d0 := done.Diff.ID
+
+	// The needs_fixes GUI diff spawns revise round 1 exactly like a daemon
+	// diff would; the repair run is never polled (its drain would evaluate
+	// round 2's panel and muddy the round-1 assertions).
+	sc := waitSettle(t, rig.store, convID, "revise round 1 for the GUI diff", func(sc settleScan) bool {
+		return len(sc.markers) == 1 && len(sc.rounds) == 1
+	})
+	if got := sc.blockedReasons(); len(got) != 0 {
+		t.Fatalf("blocked reasons = %v, want none — a needs_fixes GUI diff enters the ladder", got)
+	}
+	if r := sc.rounds[0]; r["round"] != float64(1) || r["diff_id"] != float64(d0) {
+		t.Errorf("round row = %v, want round:1 on the GUI diff %d", r, d0)
+	}
+	for _, p := range sc.reviewSeq {
+		if fmt.Sprint(p["reason"]) == "human_gate_visual" {
+			t.Fatalf("human_gate_visual journaled %v — the visual gate is removed", p)
+		}
+	}
+	got, err := rig.store.GetDiff(context.Background(), d0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending (needs_fixes never lands)", got.Status)
+	}
 }
 
 // TestAutoLandFinalRefreshClean (P0a; supersedes fix-INT's
@@ -887,5 +950,203 @@ func TestAutoLandFinalRefreshConflict(t *testing.T) {
 	}
 	if unmerged := gitOut(t, root, "ls-files", "-u"); unmerged != "" {
 		t.Errorf("unmerged index entries after rollback:\n%s", unmerged)
+	}
+}
+
+// TestAutoLandParallelPipelines (P2): with autoLandMu gone, two pipelines
+// run concurrently — the panel stub's in-flight counter proves both legs
+// are live at once (serialization would cap it at 1). Both panels accept;
+// the acceptMu race resolves at land: the winner applies on a fresh base,
+// the loser re-adjudicates the moved HEAD at the final gate and lands via
+// a clean accept_apply refresh. Two accept rows, exactly one refresh row,
+// zero blocked, and no double-apply interleave.
+func TestAutoLandParallelPipelines(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
+	// Rendezvous: a leg waits until BOTH pipelines' legs have arrived.
+	// A bare counter latch lets the second arriver miss the peak (first
+	// decrements before second's first load) and pin the wait a whole
+	// deadline — a channel closed at 2 releases both deterministically.
+	// The 30s safety net releases a permanently serialized pipeline so a
+	// regression (autoLandMu restored) fails rather than hangs.
+	var inFlight, maxFlight int64
+	both := make(chan struct{})
+	calls := startPanelStub(t, func(call int64, model string) (int, string) {
+		cur := atomic.AddInt64(&inFlight, 1)
+		for {
+			old := atomic.LoadInt64(&maxFlight)
+			if cur <= old || atomic.CompareAndSwapInt64(&maxFlight, old, cur) {
+				break
+			}
+		}
+		if cur == 2 {
+			close(both)
+		} else {
+			select {
+			case <-both:
+			case <-time.After(30 * time.Second):
+			}
+		}
+		return 200, "ACCEPT\nlooks correct"
+	})
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: f.st, projectRoot: root}
+	preHead := gitOut(t, root, "rev-parse", "HEAD")
+	// Disjoint real patches: the loser's rebase against the moved HEAD
+	// must merge cleanly.
+	d1 := baseBoundDiff(t, f, root, "p1.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "first.go"), []byte("package src // first\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	d2 := baseBoundDiff(t, f, root, "p2.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "second.go"), []byte("package src // second\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); s.maybeAutoLand(d1, root, "goal", false, "") }()
+	go func() { defer wg.Done(); s.maybeAutoLand(d2, root, "goal", false, "") }()
+	wg.Wait()
+
+	if n := atomic.LoadInt64(calls); n != 2 {
+		t.Fatalf("panel calls = %d, want 2 (one leg per pipeline)", n)
+	}
+	if got := atomic.LoadInt64(&maxFlight); got != 2 {
+		t.Fatalf("max in-flight panel legs = %d, want 2 — the pipelines must overlap (autoLandMu is gone)", got)
+	}
+	sc := scanSettle(t, f.st, f.c.ID)
+	if got := sc.blockedReasons(); len(got) != 0 {
+		t.Fatalf("blocked reasons = %v, want none — both lands adjudicate cleanly", got)
+	}
+	if len(sc.moaRows) != 2 {
+		t.Errorf("moa_review rows = %d, want 2 (evidence before action, one per pipeline)", len(sc.moaRows))
+	}
+	if len(sc.accepts) != 2 {
+		t.Fatalf("accept rows = %d, want 2 (both pipelines land)", len(sc.accepts))
+	}
+	// Exactly one refresh_attempted{clean, accept_apply}: the winner saw
+	// a fresh base; the loser refreshed onto the moved HEAD.
+	var refreshes []map[string]interface{}
+	for _, p := range sc.reviewSeq {
+		if p["action"] == "refresh_attempted" {
+			refreshes = append(refreshes, p)
+		}
+	}
+	if len(refreshes) != 1 || refreshes[0]["outcome"] != "clean" || refreshes[0]["phase"] != "accept_apply" {
+		t.Fatalf("refresh rows = %v, want exactly one {clean, accept_apply}", refreshes)
+	}
+	if refreshes[0]["base_sha"] != preHead {
+		t.Errorf("refresh base_sha = %v, want the shared pre-pipeline HEAD %s", refreshes[0]["base_sha"], preHead)
+	}
+	// The refreshed accept names the panel-judged base; the winner's row
+	// carries no refresh marker. Both rows attest the same actor.
+	var withRefresh int
+	for _, a := range sc.accepts {
+		if a["actor"] != autoActor {
+			t.Errorf("accept actor = %v, want %s", a["actor"], autoActor)
+		}
+		if rs, ok := a["refreshed_from_sha"]; ok {
+			withRefresh++
+			if rs != preHead {
+				t.Errorf("refreshed_from_sha = %v, want %s", rs, preHead)
+			}
+		}
+	}
+	if withRefresh != 1 {
+		t.Errorf("accepts carrying refreshed_from_sha = %d, want exactly 1 (the acceptMu loser)", withRefresh)
+	}
+	for _, d := range []store.Diff{d1, d2} {
+		got, err := f.st.GetDiff(context.Background(), d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffAccepted {
+			t.Errorf("diff %d status = %q, want accepted", d.ID, got.Status)
+		}
+	}
+	for _, rel := range []string{"src/first.go", "src/second.go"} {
+		if _, serr := os.Stat(filepath.Join(root, rel)); serr != nil {
+			t.Errorf("%s missing after both lands: %v", rel, serr)
+		}
+	}
+}
+
+// TestAutoLandLadderNoFork (P2): two needs_fixes diffs from the SAME
+// conversation race the revise ladder. ladderMu serializes the whole
+// read-decide-spawn: the winner spawns round 1; the loser re-reads the
+// chain AFTER the round row exists and stops — revise_no_progress
+// (identical patch bytes) when its diff id is higher, revise_ambiguous
+// when the winner's is (the lineage id-order guard). Exactly one marker,
+// one round row, one blocked row — forked chains journal two round-1 rows.
+func TestAutoLandLadderNoFork(t *testing.T) {
+	rig := settleRig(t, func(call int64, model string) (int, string) {
+		return 200, "NEEDS_FIXES\ntighten the loop"
+	})
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
+	convID := boot.Conversation.ID
+	// A human ask grounds the chain's origin goal without running a send —
+	// a send's own drain would evaluate its diff first and pollute the
+	// rounds ledger before the fork scenario is staged.
+	if _, err := rig.store.AppendEvent(context.Background(), convID, store.EventUserMessage, mustJSON(map[string]interface{}{
+		"text": "the original instruction",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	head := gitOut(t, rig.root, "rev-parse", "HEAD")
+	dir := t.TempDir()
+	// Identical patch bytes in both diffs: the loser hits the no-progress
+	// stop on patch_sha16 (unless the id-order lineage guard fires first).
+	patch := patchSrc("src/a.go", 1, 1, false)
+	var diffs [2]store.Diff
+	for i, name := range []string{"p1.diff", "p2.diff"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := rig.store.InsertDiff(context.Background(), convID, path, head, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		diffs[i] = d
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for _, d := range diffs {
+		go func(d store.Diff) { defer wg.Done(); rig.server.maybeAutoLand(d, rig.root, "goal", false, "") }(d)
+	}
+	wg.Wait()
+
+	sc := scanSettle(t, rig.store, convID)
+	if len(sc.markers) != 1 || len(sc.rounds) != 1 {
+		t.Fatalf("markers=%d rounds=%d — the rounds chain forked; ladderMu must admit exactly ONE round-1 spawn", len(sc.markers), len(sc.rounds))
+	}
+	if sc.rounds[0]["round"] != float64(1) {
+		t.Errorf("round row = %v, want round:1", sc.rounds[0])
+	}
+	if got := sc.blockedReasons(); len(got) != 1 {
+		t.Fatalf("blocked reasons = %v, want exactly one (the loser pipeline)", got)
+	}
+	switch got := fmt.Sprint(sc.blocked[0]["reason"]); got {
+	case "revise_no_progress", "revise_ambiguous":
+	default:
+		t.Errorf("loser blocked reason = %q, want revise_no_progress (identical patch) or revise_ambiguous (lineage id guard) — a spawn failure means the loser SAW an empty chain", got)
+	}
+	for _, d := range diffs {
+		got, err := rig.store.GetDiff(context.Background(), d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffPending {
+			t.Errorf("diff %d status = %q, want pending (a needs_fixes evaluation never lands)", d.ID, got.Status)
+		}
 	}
 }

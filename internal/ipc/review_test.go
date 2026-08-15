@@ -177,39 +177,6 @@ func TestScrubBaseURL(t *testing.T) {
 	}
 }
 
-// TestDiffVisualPaths pins the B5 class parser: gui/src/ hits on EITHER
-// side of a file header count (a renamed-away gui file is still visual
-// work); derivation is from the diff text itself.
-func TestDiffVisualPaths(t *testing.T) {
-	cases := []struct {
-		name  string
-		patch string
-		want  int // count of visual paths; 0 = not visual
-	}{
-		{"b-side hit", patchSrc("gui/src/app.ts", 2, 1, false), 1},
-		{"mixed files still hit", patchSrc("src/a.go", 1, 1, false) + patchSrc("gui/src/view.tsx", 3, 0, false), 1},
-		{"no gui paths", patchSrc("src/a.go", 1, 1, false), 0},
-		{"gui outside src is not visual", patchSrc("gui/assets/logo.svg", 1, 0, false), 0},
-		{"deleted gui file (a-side only)",
-			"diff --git a/gui/src/old.ts b/gui/src/old.ts\ndeleted file mode 100644\n--- a/gui/src/old.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-line\n", 1},
-		{"user content inside a hunk never counts",
-			"diff --git a/docs/g.md b/docs/g.md\n--- a/docs/g.md\n+++ b/docs/g.md\n@@ -1 +1,2 @@\n+gui/src/ is mentioned here, not a header\n", 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := diffVisualPaths(tc.patch)
-			if len(got) != tc.want {
-				t.Errorf("diffVisualPaths = %v, want %d visual path(s)", got, tc.want)
-			}
-			for _, p := range got {
-				if !strings.HasPrefix(p, visualPathPrefix) {
-					t.Errorf("path %q outside the visual prefix", p)
-				}
-			}
-		})
-	}
-}
-
 // TestReviewWithModelJournals pins B2+B3 at the fanout boundary: every leg
 // carries the scrubbed endpoint; non-accept legs carry thinking_md —
 // gateway thinking blocks when present, else the full response text (the

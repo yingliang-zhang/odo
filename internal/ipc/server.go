@@ -111,15 +111,18 @@ type Server struct {
 	// acceptMu → mu and never reversed.
 	acceptMu sync.Mutex
 
-	// M16 (O-1 v2): auto-land. autoLandMu serializes ONE pipeline at a
-	// time (the final accept's apply/add/commit must not interleave, and
-	// verify/panel spend shouldn't pile up across conversations). NOT s.mu —
-	// the pipeline holds it for minutes and takes s.mu briefly in
-	// handleDiffAction — and takes s.acceptMu for the whole land section,
-	// including the final base-freshness check (nesting order:
-	// autoLandMu → acceptMu → mu, never reversed).
+	// M16 (O-1 v2): auto-land. Pipelines run CONCURRENTLY (isolated
+	// verify worktrees, stateless panel HTTP); only the accept critical
+	// section and the settle-revise ladder decision are serialized — a
+	// racing pipeline re-adjudicates base freshness under acceptMu
+	// (clean refresh or base_stale_at_land), never double-applies.
+	// Lock ordering: acceptMu → mu and ladderMu → mu, each never
+	// reversed; ladderMu and acceptMu are never held together.
+	// ladderMu serializes the settle-revise ladder decision daemon-wide —
+	// concurrent pipelines cannot fork the rounds chain
+	// (settle.go: settleRevise's read-decide-spawn).
 	// autoLandDone is the tests-only completion signal (nil in production).
-	autoLandMu   sync.Mutex
+	ladderMu     sync.Mutex
 	autoLandDone chan struct{}
 
 	// M12 (D-auto): daemon-side auto-distill state. All guarded by mu.

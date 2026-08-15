@@ -65,15 +65,7 @@ package ipc
 //	                 is byte-identical.
 //	unanimity       consensusVerdict == "accept" requires EVERY reviewer
 //	                 (the fail-open fix: a lone needs_fixes now blocks).
-//	visual class    M18 batch B: any diff path under gui/src/ (parsed
-//	                 from the diff TEXT, never journal metadata) NEVER
-//	                 auto-lands, regardless of panel outcome —
-//	                 {human_gate_visual}, the completed panel riding the
-//	                 blocked row as advisory evidence, the diff pending
-//	                 for human visual acceptance (the parked-queue
-//	                 precedent). Before the settlement read so the
-//	                 ladder never burns a revise round on a diff that
-//	                 cannot land.
+//	visual class    REMOVED — GUI diffs land through the same unanimous-panel pipeline as daemon diffs; the panel verdict is sufficient.
 //	settlement      M18 (settle.go): the four panel outcomes split —
 //	                 accept lands; unanimous reject blocks
 //	                 {panel_unanimous_reject} + transcript advisory (the
@@ -204,11 +196,10 @@ func (s *Server) maybeAutoLand(d store.Diff, worktreePath, goal string, runError
 	if adapter.ReadSettings().AutoApply != "main" {
 		return
 	}
-	// One auto-land pipeline at a time per daemon: the final accept's
-	// apply/add/commit must never interleave with another auto accept,
-	// and a later diff re-evaluates against the newer HEAD.
-	s.autoLandMu.Lock()
-	defer s.autoLandMu.Unlock()
+	// Pipelines run concurrently; the final handleDiffAction accept is
+	// serialized by acceptMu (the sole main-checkout mutex) — a racing
+	// pipeline re-adjudicates freshness there and refreshes or blocks
+	// (base_stale_at_land), so concurrent verdicts never double-apply.
 	if s.autoLandDone != nil { // test signal; nil in production
 		defer func() {
 			select {
@@ -369,22 +360,6 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 			"a review leg failed on transport/auth/timeout — infra failures are not verdicts", reviews, cv)
 		return
 	}
-	// Visual-class gate (M18 batch B, m16 gate 12): a diff touching
-	// gui/src/** NEVER auto-lands, regardless of panel outcome — the
-	// human is the visual inspector (the parked-queue precedent: evidence
-	// journaled, the pipeline continues, the human inspects async).
-	// Position, locked: after the infra gate, before the settlement read —
-	// the REAL completed panel rides the blocked row as advisory evidence,
-	// and the auto-revise ladder never burns a round on a diff that cannot
-	// land. The diff stays PENDING (visual gates never delete/reject —
-	// human visual acceptance is the accept action as usual).
-	if visual := diffVisualPaths(diffText); len(visual) > 0 {
-		s.journalAutoLandBlocked(ctx, d, "human_gate_visual",
-			fmt.Sprintf("visual-class diff (touches %s**: %s) — never auto-lands; the panel's verdict rides as advisory evidence for the human's visual acceptance",
-				visualPathPrefix, strings.Join(visual, ", ")),
-			reviews, cv)
-		return
-	}
 	switch settlementClass(cv, reviews) {
 	case "reject_unanimous":
 		// Every reviewer rejected the DIRECTION: the diff stays pending
@@ -403,8 +378,12 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	case "needs_fixes":
 		// Zero rejects + ≥1 needs_fixes: nobody said the direction is
 		// wrong, it's just not done — the auto-revise ladder decides
-		// (spawn a repair round, block to the human, or demote).
+		// (spawn a repair round, block to the human, or demote). ladderMu
+		// serializes the whole read-decide-spawn: two racing pipelines from
+		// the same conversation must not fork the rounds chain.
+		s.ladderMu.Lock()
 		s.settleRevise(ctx, d, diffText, reviews)
+		s.ladderMu.Unlock()
 		return
 	}
 	// settlementClass "accept" falls through to the M16 landing path.
@@ -433,8 +412,8 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		// FINAL gate's automatic refresh failed (conflict/error — its
 		// refresh_attempted row already precedes this one). The completed
 		// panel rides the blocked row as advisory evidence
-		// (human_gate_visual precedent) — the human re-runs or rejects
-		// with the verdict on record.
+		// (the blocked-row-as-evidence precedent) — the human re-runs or
+		// rejects with the verdict on record.
 		if errors.Is(err, errBaseStale) {
 			s.journalAutoLandBlocked(ctx, d, "base_stale_at_land",
 				err.Error()+" — the verify and panel attested the pre-drift tree; the diff stays pending for the human", reviews, cv)

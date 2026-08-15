@@ -20,10 +20,6 @@ package ipc
 //	scrubBaseURL           B3 provider honesty: the journal records the
 //	                       endpoint a review leg truly hit, with every
 //	                       trace of credential material stripped.
-//	diffVisualPaths        the B5 visual class: any diff path under
-//	                       gui/src/ (parsed from the diff TEXT — the
-//	                       artifact under review — never journal metadata)
-//	                       means human visual acceptance, never a landing.
 
 import (
 	"context"
@@ -229,19 +225,4 @@ func scrubBaseURL(raw string) string {
 	return u.String()
 }
 
-// visualPathPrefix marks the visual class (B5): a diff touching anything
-// under gui/src/ never auto-lands — the human is the visual inspector.
-const visualPathPrefix = "gui/src/"
 
-// diffVisualPaths returns the diff's touched paths under the visual-class
-// prefix, in file order. Paths are parsed from the diff TEXT itself (the
-// artifact under review), never from journal metadata.
-func diffVisualPaths(diffText string) []string {
-	var out []string
-	for _, p := range git.PatchPathsText(diffText) {
-		if strings.HasPrefix(p, visualPathPrefix) {
-			out = append(out, p)
-		}
-	}
-	return out
-}

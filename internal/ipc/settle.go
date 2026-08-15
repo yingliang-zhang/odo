@@ -360,8 +360,8 @@ func (s *Server) reviseLineage(ctx context.Context, conversationID, diffID int64
 // settleRevise is the needs_fixes-zone ladder decision (zero rejects, at
 // least one needs_fixes). Every exit fails closed: the diff stays pending
 // for the human; only a fully verified, in-budget chain spawns a repair
-// run. Called from autoLand with autoLandMu held — one pipeline at a
-// time, so the rounds chain cannot fork.
+// run. Called from autoLand with ladderMu held — one ladder decision at a
+// time daemon-wide, so the rounds chain cannot fork.
 func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string, reviews []ReviewResult) {
 	st, err := s.ladderState(ctx, d.ConversationID)
 	if err != nil {

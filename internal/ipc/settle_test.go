@@ -26,9 +26,10 @@ import (
 
 // startPanelStub installs a scripted MoA gateway: reply receives the
 // sequential call number (a panel round fans out exactly len(models)
-// calls and rounds never overlap — autoLandMu — so call-index windows are
-// deterministic: calls 1-3 = round 0, 4-6 = round 1, …) and the model
-// name. Non-200 statuses simulate transport failure.
+// calls and, in the settle fixtures, rounds never overlap — each driven
+// pipeline is drained before the next panel consults — so call-index
+// windows are deterministic: calls 1-3 = round 0, 4-6 = round 1, …) and
+// the model name. Non-200 statuses simulate transport failure.
 func startPanelStub(t *testing.T, reply func(call int64, model string) (int, string)) *int64 {
 	t.Helper()
 	calls := new(int64)
