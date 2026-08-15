@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1473,6 +1475,302 @@ func TestDistill(t *testing.T) {
 	if resp := rig.callExpectErr(t, Request{Cmd: CmdDistill, ConversationID: 424242}); resp.Error == "" {
 		t.Error("distill bogus conversation: want error")
 	}
+}
+
+// distillMoaCall is one moa request the stub captured: the model, and the
+// user content of the last message (the distill prompt, re-issued verbatim
+// on a budget escalation).
+type distillMoaCall struct {
+	model  string
+	maxTok int
+	prompt string
+}
+
+// startDistillMoaStub installs a moa-API stub that records every request
+// and answers: the first call with stop_reason=max_tokens (driving one
+// budget-escalation re-issue), later calls per truncateNote — end_turn
+// with noteText, or max_tokens again (the still-truncated failure). Wire
+// shape matches messageResponse (content blocks + stop_reason + usage).
+func startDistillMoaStub(t *testing.T, noteText string, truncateNote bool) (*httptest.Server, func() []distillMoaCall) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []distillMoaCall
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model    string `json:"model"`
+			MaxTok   int    `json:"max_tokens"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		var prompt string
+		if n := len(req.Messages); n > 0 {
+			prompt = req.Messages[n-1].Content
+		}
+		mu.Lock()
+		calls = append(calls, distillMoaCall{model: req.Model, maxTok: req.MaxTok, prompt: prompt})
+		first := len(calls) == 1
+		mu.Unlock()
+		stop := "end_turn"
+		outTok := 555
+		if first || truncateNote {
+			stop = "max_tokens"
+			outTok = 777
+		}
+		text := noteText
+		if first {
+			// The truncated attempt's text is discarded by the escalation.
+			text = ""
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": text}},
+			"stop_reason": stop,
+			"usage":       map[string]int{"output_tokens": outTok},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []distillMoaCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]distillMoaCall(nil), calls...)
+	}
+}
+
+// TestDistillViaMoa (R-W2) covers the prefs `distill_via: moa` route: the
+// fold prompt goes through one moa.Query — the exact wire request is
+// capturable and its receipts (via/model/prompt_sha16/output budget,
+// escalations) land additively on the distill marker — while absent,
+// explicit-"omp", and unknown values keep the OMP route byte-identical. A
+// truncated answer fails the fold closed: no note, no marker, one
+// journaled failed row.
+func TestDistillViaMoa(t *testing.T) {
+	t.Run("moa route journals the exact-request receipts", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+		noteText := "# Epoch 1\n\nCreated hello.txt as folded.\n\n## Open loops\nNone.\n"
+		srv, calls := startDistillMoaStub(t, noteText, false)
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		writePrefs(t, home, "distill_via: moa\norchestrator: orch-m3k@test\n")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+		rig.pollUntilDone(t, convID)
+
+		d := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+		wantPath := filepath.Join(root, "wiki", "main-epoch-1.md")
+		if d.WikiPath != wantPath || d.Epoch != 2 {
+			t.Fatalf("distill = (path %q, epoch %d)", d.WikiPath, d.Epoch)
+		}
+		note, err := os.ReadFile(wantPath)
+		if err != nil || string(note) != noteText {
+			t.Errorf("note = %q, %v — want the stub's answer verbatim", note, err)
+		}
+
+		// Route: exactly 2 moa calls (one max_tokens → one escalation
+		// re-issue at double the unknown-model fallback budget), serving
+		// the prefs orchestrator model with the self-contained prompt.
+		got := calls()
+		if len(got) != 2 {
+			t.Fatalf("moa calls = %d, want 2 (truncated + escalated)", len(got))
+		}
+		for i, c := range got {
+			if c.model != "orch-m3k" {
+				t.Errorf("call %d model = %q, want orch-m3k", i, c.model)
+			}
+			if !strings.Contains(c.prompt, "Summarize the key decisions") ||
+				!strings.Contains(c.prompt, "Create hello.txt") {
+				t.Errorf("call %d prompt missing distill instruction/events: %.120q", i, c.prompt)
+			}
+		}
+		if got[0].maxTok != 16384 || got[1].maxTok != 32768 {
+			t.Errorf("max_tokens escalation = %d → %d, want 16384 → 32768", got[0].maxTok, got[1].maxTok)
+		}
+		// The re-issued prompt is byte-identical: the receipt's prompt_sha16
+		// attests one exact request body, not two divergent attempts.
+		if got[0].prompt != got[1].prompt {
+			t.Error("escalated request's prompt differs from the first")
+		}
+
+		// Receipts on the fold marker (additive over the OMP-route shape).
+		events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+		last := events[len(events)-1]
+		if last.Type != store.EventReviewAction {
+			t.Fatalf("last event = %s, want review_action", last.Type)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(last.Payload, &payload); err != nil {
+			t.Fatalf("marker payload: %v", err)
+		}
+		if payload["via"] != "moa" || payload["model"] != "orch-m3k" {
+			t.Errorf("receipt route = %v/%v, want moa/orch-m3k", payload["via"], payload["model"])
+		}
+		if payload["prompt_sha16"] != sha16([]byte(got[1].prompt)) {
+			t.Errorf("prompt_sha16 = %v, want sha16 of the wire prompt", payload["prompt_sha16"])
+		}
+		if payload["budget"] != float64(32768) || payload["output_tokens"] != float64(555) {
+			t.Errorf("budget/output_tokens = %v/%v, want 32768/555", payload["budget"], payload["output_tokens"])
+		}
+		esc, ok := payload["escalations"].([]interface{})
+		if !ok || len(esc) != 1 {
+			t.Fatalf("escalations = %v, want one ledger entry", payload["escalations"])
+		}
+		e := esc[0].(map[string]interface{})
+		if e["from"] != float64(16384) || e["to"] != float64(32768) || e["output_tokens"] != float64(777) {
+			t.Errorf("escalation = %v, want 16384→32768 at 777 output tokens", e)
+		}
+
+		// No OMP process served the distill: the prompts dir carries the
+		// chat run and the learner one-shot, and nothing rendered the
+		// distill instruction through the wrapper.
+		matches, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
+		if err != nil || len(matches) != 2 {
+			t.Fatalf("prompt files = %v, err %v — want user + learner only", matches, err)
+		}
+		for _, m := range matches {
+			b, _ := os.ReadFile(m)
+			if strings.Contains(string(b), "Summarize the key decisions") {
+				t.Errorf("distill prompt %s went through the OMP wrapper on the moa route", m)
+			}
+		}
+	})
+
+	t.Run("truncated answer fails the fold closed", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+		srv, calls := startDistillMoaStub(t, "partial note that must never commit", true)
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		writePrefs(t, home, "distill_via: moa\norchestrator: orch-m3k@test\n")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+		rig.pollUntilDone(t, convID)
+
+		resp := rig.callExpectErr(t, Request{Cmd: CmdDistill, ConversationID: convID})
+		if !strings.Contains(resp.Error, "truncated at the 32768-token hard cap") ||
+			!strings.Contains(resp.Error, "fold not committed") {
+			t.Errorf("error = %q, want the truncation fail-closed message", resp.Error)
+		}
+		if got := len(calls()); got != 2 {
+			t.Errorf("moa calls = %d, want 2 (escalate once, still truncated)", got)
+		}
+		// No note, no fold marker, epoch unmoved; the manual failure is
+		// journaled (M12: an error toast alone leaves no durable trace).
+		if _, err := os.Stat(filepath.Join(root, "wiki", "main-epoch-1.md")); !os.IsNotExist(err) {
+			t.Errorf("truncated distill wrote a note: %v", err)
+		}
+		events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+		var failed, folded bool
+		for _, ev := range events {
+			if isDistillMarkerEvent(ev) {
+				folded = true
+			}
+			var p map[string]interface{}
+			if ev.Type == store.EventMemoryUpdate && json.Unmarshal(ev.Payload, &p) == nil &&
+				p["layer"] == "distill" && p["cause"] == "failed" {
+				failed = true
+			}
+		}
+		if folded {
+			t.Error("fold marker journaled after a truncated answer")
+		}
+		if !failed {
+			t.Error("memory_update{layer:distill,cause:failed} missing")
+		}
+		conv, err := rig.store.GetConversation(context.Background(), convID)
+		if err != nil || conv.Epoch != 1 {
+			t.Errorf("epoch = %d, want 1 (no fold committed)", conv.Epoch)
+		}
+	})
+
+	t.Run("absent, explicit omp, and unknown values keep the OMP route", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+		// A moa stub that FAILS the test if ever called proves no reroute.
+		var moaCalled atomic.Bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			moaCalled.Store(true)
+			w.WriteHeader(http.StatusTeapot)
+		}))
+		defer srv.Close()
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		markerCount := 0
+		distillOnce := func(label string) {
+			rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Work " + label})
+			rig.pollUntilDone(t, convID)
+			d := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+			if d.WikiPath == "" {
+				t.Fatalf("%s distill failed", label)
+			}
+			markerCount++
+			events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+			found := 0
+			for _, ev := range events {
+				if !isDistillMarkerEvent(ev) {
+					continue
+				}
+				found++
+				var p map[string]interface{}
+				if err := json.Unmarshal(ev.Payload, &p); err != nil {
+					t.Fatalf("marker payload: %v", err)
+				}
+				for _, key := range []string{"via", "model", "prompt_sha16", "output_tokens", "budget"} {
+					if _, present := p[key]; present {
+						t.Errorf("%s marker carries moa receipt key %q on the OMP route", label, key)
+					}
+				}
+			}
+			if found != markerCount {
+				t.Errorf("%s distill markers = %d, want %d", label, found, markerCount)
+			}
+		}
+		// No line at all: the dark-launch default is the OMP one-shot —
+		// its prompt goes through the wrapper like before R-W2.
+		distillOnce("absent")
+		writePrefs(t, home, "distill_via: omp\n")
+		distillOnce("explicit-omp")
+		writePrefs(t, home, "distill_via: warp\n")
+		distillOnce("unknown-value")
+		if moaCalled.Load() {
+			t.Error("moa gateway called on an OMP-route distill")
+		}
+		matches, err := filepath.Glob(filepath.Join(root, ".odo", "prompts", "*.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		distillPrompts := 0
+		for _, m := range matches {
+			b, _ := os.ReadFile(m)
+			if strings.Contains(string(b), "Summarize the key decisions") {
+				distillPrompts++
+			}
+		}
+		if distillPrompts != 3 {
+			t.Errorf("distill prompts via wrapper = %d, want 3", distillPrompts)
+		}
+	})
 }
 
 // TestDistillMarkerJournalsOmittedSeqs (M18 W2 item 2): when the 256 KiB

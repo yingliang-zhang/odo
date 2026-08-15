@@ -360,6 +360,18 @@ func retryDelay(n int, terr *Error) time.Duration {
 	return backoffDelay(n)
 }
 
+// TimeoutForModel returns the caller-side deadline one logical query at
+// model can legitimately need: a full worst-case attempt chain (first try
+// + backoff waits + retries) at the model's HARD output cap — the largest
+// single request the escalation policy can issue (1446s at the current
+// 64K catalog cap). Callers apply it as the outer ctx deadline; every
+// escalation re-issue is a fresh derived per-request deadline that races
+// this same outer bound, so a truncated-then-hung chain dies here with
+// the context's DeadlineExceeded instead of running away.
+func TimeoutForModel(model string) time.Duration {
+	return requestTimeout(modelspec.Lookup(model).MaxOutput)
+}
+
 // post sends one request body and returns the parsed response. The shared
 // transport for Query, QueryWithImages, and the tool loop. maxTok is the
 // request's max_tokens and sets the derived deadline, which bounds the

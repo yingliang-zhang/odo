@@ -24,15 +24,18 @@ use std::time::Duration;
 /// first call while the OS warms caches.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// `distill` runs a full summary-agent turn (bounded by the daemon's
-/// 10-minute `distillTimeout`) followed by the M4 learner one-shot (bounded
-/// by the 5-minute `learnerTimeout`) and the M9 tri-model skill gate
-/// (bounded by the 5-minute skill-gate HTTP client timeout) — all synchronously before
-/// the daemon answers. The older rationale cited the daemon serving "one
-/// connection at a time"; since M11 each call is a fresh connection served
-/// by its own goroutine, but the chain still runs synchronously per call,
-/// so the read timeout covers all three plus margin (10m + 5m + 5m + margin).
-const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(1900);
+/// `distill` runs a full summary-agent completion followed by the M4
+/// learner one-shot (bounded by the 5-minute `learnerTimeout`) and the M9
+/// tri-model skill gate (bounded by the 5-minute skill-gate HTTP client
+/// timeout) — all synchronously before the daemon answers. The distill
+/// turn is bounded by the daemon's 10-minute `distillTimeout` on the OMP
+/// route, or by one worst-case moa attempt chain (900s + 64K/120 ≈ 1446s)
+/// when prefs `distill_via: moa` is active (R-W2). The older rationale
+/// cited the daemon serving "one connection at a time"; since M11 each
+/// call is a fresh connection served by its own goroutine, but the chain
+/// still runs synchronously per call, so the read timeout covers all
+/// three plus margin (1446s + 5m + 5m + margin ≈ 2100s).
+const DISTILL_READ_TIMEOUT: Duration = Duration::from_secs(2100);
 
 /// `curate` runs the curator one-shot (bounded by the daemon's 10-minute
 /// `curatorTimeout`): it reads up to 50 epoch notes and rewrites every topic
@@ -473,7 +476,8 @@ async fn delete_workstream(
 #[tauri::command]
 async fn distill(conversation_id: i64, project_root: Option<String>) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    // The daemon's distillTimeout is 10 minutes and the chain runs
+    // The daemon bounds the distill turn at 10 minutes (OMP route) or one
+    // 1446s moa chain (`distill_via: moa`, R-W2), and the chain runs
     // synchronously before the daemon answers this call. ("One connection
     // at a time" was the pre-M11 rationale; today each call is a fresh
     // connection served by its own goroutine, but this call's response
