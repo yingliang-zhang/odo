@@ -165,6 +165,73 @@ export const events: OdoEvent[] = [
   // so dev mode and e2e see the QueueDock (and the sidebar pill) on first
   // paint. Conv 1's seq numbering stays gap-free (this is its seq 12).
   ev("user_message", { text: "Parked: sweep the flaky sidebar selector", park: true }),
+
+  // A-P0 #1 (Guardian risk taxonomy): one full story of review_action
+  // receipts on CONVERSATION 3 (seqs 8-14) — deliberate: conv 1's
+  // transcript must stay review-bubble-free or existing diff/inbox specs
+  // collide on `.badge-accept` / GetByText("Diff #N"). Rendered newest-
+  // first, so row order below is the reverse of what the Ledger panel
+  // shows. One auto-land cycle (review → conflict refresh → blocked →
+  // landed), then human rows covering clean, timed-out, and the pre-W5
+  // unrated gap. Each render branch has a row.
+  ev("review_action", {
+    action: "moa_review",
+    diff_id: 1,
+    actor: "auto_panel",
+    consensus_verdict: "accept",
+    risk_class: ["none"],
+    risk_classifier: "mechanical",
+  }, 3),
+  ev("review_action", {
+    action: "refresh_attempted",
+    diff_id: 1,
+    actor: "auto_panel",
+    outcome: "conflict",
+    phase: "pre_spend_probe",
+    base_sha: "abc123def4567890",
+    target_sha: "4567890abcdef123",
+  }, 3),
+  ev("review_action", {
+    action: "auto_land_blocked",
+    diff_id: 1,
+    actor: "auto_panel",
+    reason: "base_stale",
+    risk_class: ["credential_probe"],
+    risk_evidence: { credential_probe: "+process.env.OPENAI_API_KEY at gui/secrets.ts:7" },
+    risk_classifier: "mechanical",
+  }, 3),
+  ev("review_action", {
+    action: "accept",
+    diff_id: 2,
+    actor: "auto_panel",
+    risk_class: ["credential_probe", "supply_chain"],
+    risk_evidence: {
+      credential_probe: "+os.Getenv(\"AWS_SECRET_ACCESS_KEY\") at daemon/main.go:42",
+      supply_chain: "package-lock.json",
+    },
+    risk_classifier: "mechanical",
+  }, 3),
+  ev("review_action", {
+    action: "reject",
+    diff_id: 3,
+    risk_class: ["none"],
+    risk_classifier: "mechanical",
+  }, 3),
+  ev("review_action", {
+    action: "moa_review",
+    diff_id: 3,
+    consensus_verdict: "mixed",
+    timed_out: true,
+    risk_class: ["security_weakening"],
+    risk_evidence: { security_weakening: "+InsecureSkipVerify: true at net/client.go:88" },
+    risk_classifier: "mechanical",
+  }, 3),
+  // Pre-W5 shape: no risk receipt keys at all → the panel must render the
+  // honest "unrated" chip, never a false clean.
+  ev("review_action", {
+    action: "accept",
+    diff_id: 4,
+  }, 3),
 ];
 
 // ---------- Diffs ----------

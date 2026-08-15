@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { errorMessage, ledger } from "../api";
+import type { EventPayload, OdoEvent } from "../types";
 import LoadingInline from "./LoadingInline";
 
 // M9 P3: the ledger view, lifted out of the memory review modal into the
@@ -12,9 +13,133 @@ interface Props {
   // M11 P1: the ledger read routes to this project's daemon; null =
   // bridge default. App remounts the panel on project switch.
   projectRoot?: string | null;
+  // A-P0 #1 (Guardian risk taxonomy): the conversation's journaled events —
+  // App's bootstrap replay + poll appends are the ONLY source (no new IPC);
+  // the review_action rows are rendered below as decision cells (codex
+  // history_cell/approvals.rs parity: who decided, what, outcome).
+  events: OdoEvent[];
 }
 
-export default function LedgerPanel({ projectRoot }: Props) {
+// The review-decision actions this panel rows out of the journal. Memory
+// and queue bookkeeping rows (distill, curate, todo_merge, memory_propose,
+// memory_apply, run_prompt, parked_goal_dropped) keep their own surfaces —
+// Plan chip, MemoryPanel, transcript badges — and would only spam here.
+const REVIEW_DECISION_ACTIONS: Record<string, true> = {
+  accept: true,
+  reject: true,
+  auto_land_blocked: true,
+  moa_review: true,
+  auto_revise_round: true,
+  refresh_attempted: true,
+};
+
+// Receipt-eligible actions (risk.go: the W5 write sites). A missing
+// risk_class on one of these means a pre-W5 row — rendered honestly as
+// "unrated"; refresh_attempted is a rebase, not a verdict, so it never
+// rates and never shows the chip.
+const RISK_ELIGIBLE_ACTIONS: Record<string, true> = {
+  accept: true,
+  reject: true,
+  auto_land_blocked: true,
+  moa_review: true,
+  auto_revise_round: true,
+};
+
+// Severity ramp → the five CSS stops. Order mirrors risk.go's
+// leak-cost-ranked riskClassOrder: leaking a credential or a local file
+// tops it; supply-chain touches rate lowest (observational wave). A class
+// this table predates falls through to the neutral "clean" style — the
+// forward-compat posture ComputeAutonomy also takes.
+const RISK_LEVEL_STYLE: Record<string, string> = {
+  credential_probe: "critical",
+  data_exfil: "high",
+  destructive: "high",
+  security_weakening: "medium",
+  supply_chain: "low",
+  none: "clean",
+};
+
+// Outcome badge for one row: label + an existing badge-*/new outcome class.
+function actionBadge(p: EventPayload): { label: string; cls: string } {
+  switch (p.action) {
+    case "accept":
+      return { label: "Accepted", cls: "badge-accept" };
+    case "reject":
+      return { label: "Rejected", cls: "badge-reject" };
+    case "auto_land_blocked":
+      return { label: "Blocked", cls: "badge-blocked" };
+    case "refresh_attempted":
+      return { label: `Refresh ${p.outcome ?? "?"}`, cls: "badge-refresh" };
+    case "moa_review": {
+      const verdict = p.consensus_verdict ?? "?";
+      const cls =
+        verdict === "accept" ? "badge-accept" : verdict === "reject" ? "badge-reject" : "badge-other";
+      return { label: `Review · ${verdict}`, cls };
+    }
+    case "auto_revise_round":
+      return { label: `Revise round ${p.round ?? "?"}`, cls: "badge-other" };
+    // Forward-compat: a write site this panel predates still lists, plainly.
+    default:
+      return { label: p.action ?? "review", cls: "badge-other" };
+  }
+}
+
+function ReviewRow({ event }: { event: OdoEvent }) {
+  const p = event.payload ?? {};
+  const { label, cls } = actionBadge(p);
+  // The colored tail of one row: outcome evidence. Blocked rows name their
+  // reason; refresh rows name their phase; everything else stays silent.
+  const detail =
+    p.action === "auto_land_blocked" && p.reason
+      ? p.reason
+      : p.action === "refresh_attempted" && p.phase
+        ? p.phase
+        : null;
+  // auto_panel → "Auto"; the human click path journals no actor (the
+  // handleDiffAction contract) and revise rounds may carry actor:"human" —
+  // both render "Human".
+  const auto = p.actor === "auto_panel";
+  return (
+    <div className="ledger-review-row" data-action={p.action} data-seq={event.seq}>
+      <span className="ledger-review-seq mono">#{event.seq}</span>
+      <span className={`badge ${cls}`}>{label}</span>
+      {p.diff_id != null && <span className="ledger-review-diff">diff #{p.diff_id}</span>}
+      <span
+        className={`badge ${auto ? "badge-actor-auto" : "badge-actor-human"}`}
+        title={p.actor || "human review (no actor journaled)"}
+      >
+        {auto ? "Auto" : "Human"}
+      </span>
+      {p.risk_class != null ? (
+        p.risk_class.map((riskCls) => (
+          <span
+            key={riskCls}
+            className={`risk-badge risk-${RISK_LEVEL_STYLE[riskCls] ?? "clean"}`}
+            title={p.risk_evidence?.[riskCls] ?? (riskCls === "none" ? "rated clean" : "no evidence journaled")}
+          >
+            {riskCls === "none" ? "clean" : riskCls}
+          </span>
+        ))
+      ) : (
+        // Pre-W5 row (or an unreadable patch): absence is attested less,
+        // never a false "clean". Only receipt-eligible verdicts flag this.
+        RISK_ELIGIBLE_ACTIONS[p.action ?? ""] === true && (
+          <span className="risk-badge risk-unrated" title="pre-W5 row — no risk receipt journaled">
+            unrated
+          </span>
+        )
+      )}
+      {p.timed_out === true && (
+        <span className="risk-badge risk-timeout" title="the review timed out">
+          timed out
+        </span>
+      )}
+      {detail !== null && <span className="ledger-review-detail">{detail}</span>}
+    </div>
+  );
+}
+
+export default function LedgerPanel({ projectRoot, events }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -38,14 +163,37 @@ export default function LedgerPanel({ projectRoot }: Props) {
     };
   }, [projectRoot]);
 
+  // Newest first — the same scan ComputeAutonomy does, rendered.
+  const reviewRows = useMemo(
+    () =>
+      events
+        .filter((e) => e.type === "review_action" && REVIEW_DECISION_ACTIONS[e.payload?.action ?? ""] === true)
+        .sort((a, b) => b.seq - a.seq),
+    [events],
+  );
+
   return (
     <div className="mem-body">
       {loading && <LoadingInline />}
       {error && <div className="wiki-hint">read failed: {error}</div>}
-      {!loading && content !== null && (
+      {!loading && (
         <>
-          <div className="mem-section-title">ledger.md (daemon-written, verified metrics)</div>
-          <pre className="wiki-content mem-file">{content || "(empty — distill to write the first section)"}</pre>
+          {reviewRows.length > 0 && (
+            <>
+              <div className="mem-section-title">
+                review actions — journal receipts, newest first
+              </div>
+              {reviewRows.map((ev) => (
+                <ReviewRow key={ev.seq} event={ev} />
+              ))}
+            </>
+          )}
+          {content !== null && (
+            <>
+              <div className="mem-section-title">ledger.md (daemon-written, verified metrics)</div>
+              <pre className="wiki-content mem-file">{content || "(empty — distill to write the first section)"}</pre>
+            </>
+          )}
         </>
       )}
     </div>

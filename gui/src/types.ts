@@ -128,6 +128,30 @@ export interface EventPayload {
   // topic pages were rewritten and how many epoch notes were read.
   topics?: number;
   notes_read?: number;
+  // fix-INT W5 (Guardian risk taxonomy, internal/ipc/risk.go): receipt-
+  // eligible review_action rows (accept/reject/auto_land_blocked/moa_review/
+  // auto_revise_round) carry a PURE-MECHANICAL risk receipt —
+  // risk_class is severity-ranked multi-label (["none"] = explicitly rated
+  // clean); the key is ABSENT on pre-W5 rows (unrated, never a false clean)
+  // and when the patch was unreadable. risk_evidence (one trigger artifact
+  // per class) is omitted on clean rows; risk_classifier is the provenance
+  // constant ("mechanical" this wave).
+  risk_class?: string[];
+  risk_evidence?: Record<string, string>;
+  risk_classifier?: string;
+  // Review-decision result fields ridden by the auto-land pipeline (M16 +
+  // settle ladder): consensus_verdict on moa_review; reason on
+  // auto_land_blocked; round on auto_revise_round; outcome
+  // (clean|conflict|error) + phase (pre_spend_probe|accept_apply) on
+  // refresh_attempted (P0a — no risk receipt, it's a rebase, not a verdict).
+  consensus_verdict?: string;
+  reason?: string;
+  round?: number;
+  outcome?: string;
+  phase?: string;
+  // Timed-out review marker (codex ReviewDecision.TimedOut parity):
+  // defensive — rendered when the payload carries it, nothing writes it yet.
+  timed_out?: boolean;
   // M12 (D-todo): review_action when action == "todo_merge" — the full
   // post-merge live snapshot (open + not-yet-swept items), its origin, and
   // op bookkeeping. Derived stale/swept flags are recomputed by consumers

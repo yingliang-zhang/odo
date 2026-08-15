@@ -1514,6 +1514,9 @@ export default function App() {
             key={`${project?.root_path ?? "default"}:${conversation.id}`}
             conversationId={conversation.id}
             projectRoot={project?.root_path ?? null}
+            // A-P0 #1: the review-action cells read the same journaled
+            // events ChatSurface renders — live, no extra IPC.
+            events={events}
           />
         ) : (
           <div className="panel-empty">No active conversation.</div>
