@@ -193,6 +193,42 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// is open and before serving (NewServer is the only touchable init
 	// hook; main.go's wiring stays untouched).
 	s.recoverParkedGoals(context.Background())
+	// Re-trigger auto-land for pending diffs that were stranded by a
+	// daemon restart. maybeAutoLand is normally called from drainRun on
+	// run completion; a restart after the run drained but before the
+	// pipeline fired leaves the diff pending indefinitely. Scan all
+	// pending diffs for this project and spawn a goroutine per diff.
+	// Each goroutine's maybeAutoLand checks the pref and re-adjudicates
+	// base freshness (P0a refresh), so a stale diff auto-rebases or
+	// blocks base_stale — the same path as if the run had just finished.
+	// The worktree may have been reclaimed by the sweeper; pass an empty
+	// path (runVerify handles a missing worktree by blocking
+	// verify_unconfigured, which is the correct outcome — the user can
+	// re-run or reject).
+	go func() {
+		p, err := st.GetProjectByRoot(context.Background(), projectRoot)
+		if err != nil {
+			log.Printf("recover-pending-diffs: get project: %v", err)
+			return
+		}
+		rows, err := st.ListAllPendingDiffs(context.Background(), p.ID)
+		if err != nil {
+			log.Printf("recover-pending-diffs: list pending: %v", err)
+			return
+		}
+		for _, r := range rows {
+			wtPath := ""
+			if r.WorktreePath != nil {
+				wtPath = *r.WorktreePath
+			}
+			baseSHA := ""
+			if r.BaseSHA != nil {
+				baseSHA = *r.BaseSHA
+			}
+			log.Printf("recover-pending-diffs: re-triggering auto-land for diff #%d (conv %d, base %s)", r.ID, r.ConversationID, baseSHA)
+			go s.maybeAutoLand(r.Diff, wtPath, "", false, "")
+		}
+	}()
 	return s
 }
 
