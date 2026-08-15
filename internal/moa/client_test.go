@@ -1,10 +1,12 @@
 package moa
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -628,4 +630,132 @@ func TestRetryContextCancellation(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("requests = %d, want 1 — cancellation never retries", calls)
 	}
+}
+
+// TestRequestReceiptWireExact pins R-W1.5: Result.RequestSHA16/RequestBytes
+// attest the EXACT bytes the stub server observed on the wire — the single
+// body of a one-shot, the shared body of a retry chain, and the FINAL body
+// of an escalation re-issue or tool loop.
+func TestRequestReceiptWireExact(t *testing.T) {
+	okResp := `{"content":[{"type":"text","text":"ACCEPT"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`
+
+	assertReceipt := func(t *testing.T, res Result, want []byte) {
+		t.Helper()
+		if res.RequestSHA16 != sha16(want) || res.RequestBytes != len(want) {
+			t.Errorf("receipt = %q/%d bytes, want sha16+len of the final wire body (=%q/%d)",
+				res.RequestSHA16, res.RequestBytes, sha16(want), len(want))
+		}
+	}
+
+	t.Run("one-shot attests its single body", func(t *testing.T) {
+		var bodies [][]byte
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, b)
+			w.Write([]byte(okResp))
+		}))
+		defer srv.Close()
+		res, err := NewClient(srv.URL, "test-key").Query(context.Background(), "test-model", "sys", "prompt")
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(bodies) != 1 {
+			t.Fatalf("requests = %d, want 1", len(bodies))
+		}
+		assertReceipt(t, res, bodies[0])
+	})
+
+	t.Run("retry chain re-sends identical bytes — one receipt covers it", func(t *testing.T) {
+		recorderSleep(t)
+		var bodies [][]byte
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, b)
+			if len(bodies) == 1 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.Write([]byte(okResp))
+		}))
+		defer srv.Close()
+		res, err := NewClient(srv.URL, "test-key").Query(context.Background(), "test-model", "", "prompt")
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(bodies) != 2 {
+			t.Fatalf("requests = %d, want 2 (one retry)", len(bodies))
+		}
+		if !bytes.Equal(bodies[0], bodies[1]) {
+			t.Error("retry attempt carried different bytes — the receipt could not cover the chain")
+		}
+		assertReceipt(t, res, bodies[1])
+	})
+
+	t.Run("escalation re-issue attests the final body", func(t *testing.T) {
+		var bodies [][]byte
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, b)
+			if len(bodies) == 1 {
+				w.Write([]byte(`{"content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens","usage":{"input_tokens":10,"output_tokens":50}}`))
+				return
+			}
+			w.Write([]byte(okResp))
+		}))
+		defer srv.Close()
+		res, err := NewClient(srv.URL, "test-key").Query(context.Background(), "acme/pi-9", "", "prompt")
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(bodies) != 2 {
+			t.Fatalf("requests = %d, want 2 (one escalation)", len(bodies))
+		}
+		if bytes.Equal(bodies[0], bodies[1]) {
+			t.Fatalf("escalated bodies identical; want doubled max_tokens: %s", bodies[0])
+		}
+		// The receipt describes the final request (the usage ledger's
+		// convention) — the first body is visible only via Escalations.
+		assertReceipt(t, res, bodies[1])
+	})
+
+	t.Run("tool loop attests the final round's body", func(t *testing.T) {
+		var bodies [][]byte
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, b)
+			if len(bodies) == 1 {
+				w.Write([]byte(`{"content":[{"type":"tool_use","id":"t1","name":"read_file","input":{}}],"stop_reason":"tool_use"}`))
+				return
+			}
+			w.Write([]byte(okResp))
+		}))
+		defer srv.Close()
+		tools := []Tool{{Name: "read_file", Description: "read", InputSchema: map[string]interface{}{"type": "object"}}}
+		exec := func(ctx context.Context, call ToolCall) (string, error) { return "ok", nil }
+		res, _, err := NewClient(srv.URL, "test-key").QueryWithTools(context.Background(), "test-model", "", "prompt", tools, exec, 0)
+		if err != nil {
+			t.Fatalf("QueryWithTools: %v", err)
+		}
+		if len(bodies) != 2 {
+			t.Fatalf("requests = %d, want 2 (one tool round)", len(bodies))
+		}
+		if bytes.Equal(bodies[0], bodies[1]) {
+			t.Error("later rounds must carry grown message lists — identical bodies break the final-round receipt")
+		}
+		assertReceipt(t, res, bodies[1])
+	})
+
+	t.Run("error return carries no receipt", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		res, err := NewClient(srv.URL, "bad-key").Query(context.Background(), "test-model", "", "prompt")
+		if err == nil {
+			t.Fatal("want error for 401")
+		}
+		if res.RequestSHA16 != "" || res.RequestBytes != 0 {
+			t.Errorf("receipt = %q/%d, want empty on error (nothing shipped to attest)", res.RequestSHA16, res.RequestBytes)
+		}
+	})
 }

@@ -10,6 +10,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -293,6 +294,34 @@ func TestReviewWithModelJournals(t *testing.T) {
 		}
 		if rr.ThinkingMD != "" {
 			t.Error("infra leg must not journal thinking (no response bytes exist)")
+		}
+		// R-W1.5: no answer shipped, so no request receipt either —
+		// patch_sha16 carries the judged-content attestation alone.
+		if rr.RequestSHA16 != "" || rr.RequestBytes != 0 {
+			t.Errorf("infra leg receipt = %q/%d, want absent (nothing shipped to attest)", rr.RequestSHA16, rr.RequestBytes)
+		}
+	})
+
+	t.Run("verdict leg carries the wire-exact request receipt (R-W1.5)", func(t *testing.T) {
+		var captured []byte
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ACCEPT\nShip it."}],"stop_reason":"end_turn"}`))
+		}))
+		t.Cleanup(srv.Close)
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		rr := s.reviewWithModel(context.Background(), m, "prompt")
+		if rr.Verdict != "accept" {
+			t.Fatalf("verdict = %q, want accept", rr.Verdict)
+		}
+		if len(captured) == 0 {
+			t.Fatal("stub captured no request body")
+		}
+		if rr.RequestSHA16 != sha16(captured) || rr.RequestBytes != len(captured) {
+			t.Errorf("receipt = %q/%d, want sha16+len of the exact wire body (=%q/%d)",
+				rr.RequestSHA16, rr.RequestBytes, sha16(captured), len(captured))
 		}
 	})
 

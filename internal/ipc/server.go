@@ -2231,6 +2231,11 @@ func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt stri
 	}
 	rr := reviewVerdict(label, res.Text, res.Truncated)
 	rr.BaseURL = baseURL
+	// R-W1.5: the client's wire receipt rides every journaled moa_review /
+	// memory_propose row — sha16 of the exact request body whose verdict
+	// shipped. Infra legs return above the receipt, carrying none.
+	rr.RequestSHA16 = res.RequestSHA16
+	rr.RequestBytes = res.RequestBytes
 	if rr.Verdict != "accept" {
 		if res.Thinking != "" {
 			rr.ThinkingMD = capDetail(res.Thinking)
@@ -2376,6 +2381,7 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 				Model: label, Text: resp.Text, ToolCalls: calls,
 				Truncated: resp.Truncated, Budget: resp.Budget,
 				OutputTokens: resp.OutputTokens, Escalations: resp.Escalations,
+				RequestSHA16: resp.RequestSHA16, RequestBytes: resp.RequestBytes,
 			}
 		}()
 	}
@@ -2416,6 +2422,11 @@ type PanelResult struct {
 	Budget       int              `json:"budget,omitempty"`
 	OutputTokens int              `json:"output_tokens,omitempty"`
 	Escalations  []moa.Escalation `json:"escalations,omitempty"`
+	// Request receipt (R-W1.5): sha16 + length of the exact request body
+	// whose answer shipped (the final round for tool loops). Absent on
+	// error legs — no answer shipped, nothing to attest.
+	RequestSHA16 string `json:"request_sha16,omitempty"`
+	RequestBytes int    `json:"request_bytes,omitempty"`
 }
 
 // truncationMarker renders the visible badge appended to a flagged partial

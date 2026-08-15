@@ -15,7 +15,9 @@ package moa
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -372,42 +374,64 @@ func TimeoutForModel(model string) time.Duration {
 	return requestTimeout(modelspec.Lookup(model).MaxOutput)
 }
 
-// post sends one request body and returns the parsed response. The shared
-// transport for Query, QueryWithImages, and the tool loop. maxTok is the
-// request's max_tokens and sets the derived deadline, which bounds the
-// WHOLE attempt chain (first try + backoff waits + retries).
+// sha16 is the daemon journal's receipt digest (the internal/ipc
+// convention): hex of the first 8 sha256 bytes. Duplicated here because
+// moa must not import the daemon package — the shared contract is the
+// convention, not the helper.
+func sha16(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
+// requestReceipt attests the exact JSON body post() put on the wire
+// (R-W1.5): sha16 of the marshaled bytes and their length. It is computed
+// once per logical request — retry attempts re-send the SAME body, so the
+// receipt already covers the whole attempt chain. Escalation re-issues
+// build a new body, so callers keep only the final receipt (the usage
+// ledger's final-request convention).
+type requestReceipt struct {
+	sha16 string
+	bytes int
+}
+
+// post sends one request body and returns the parsed response plus that
+// body's wire receipt. The shared transport for Query, QueryWithImages,
+// and the tool loop. maxTok is the request's max_tokens and sets the
+// derived deadline, which bounds the WHOLE attempt chain (first try +
+// backoff waits + retries).
 //
 // Retry policy (R-W1): a typed Error in a recoverable class (429, 5xx,
 // transport, timeout) retries up to maxAttempts with jittered exponential
 // backoff, honoring a capped Retry-After hint; client_error never retries;
 // caller cancellation/deadline aborts immediately with the context error
 // preserved in the chain.
-func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*messageResponse, error) {
+func (c *Client) post(ctx context.Context, reqBody interface{}, maxTok int) (*messageResponse, requestReceipt, error) {
 	callerCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout(maxTok))
 	defer cancel()
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("moa: marshal request: %w", err)
+		return nil, requestReceipt{}, fmt.Errorf("moa: marshal request: %w", err)
 	}
+	rcpt := requestReceipt{sha16: sha16(body), bytes: len(body)}
 	url := c.BaseURL + "/v1/messages"
 	for attempt := 1; ; attempt++ {
 		msg, terr := c.attempt(ctx, url, body)
 		if terr == nil {
-			return msg, nil
+			return msg, rcpt, nil
 		}
 		if cerr := callerCtx.Err(); cerr != nil {
 			// Caller cancellation/deadline: never retry, and keep the
 			// context error in the chain so errors.Is keeps working.
-			return nil, fmt.Errorf("moa: request aborted: %w", cerr)
+			return nil, requestReceipt{}, fmt.Errorf("moa: request aborted: %w", cerr)
 		}
 		if attempt >= maxAttempts || !terr.retryable() {
-			return nil, terr
+			return nil, requestReceipt{}, terr
 		}
 		delay := retryDelay(attempt, terr)
 		log.Printf("moa: %s; retrying in %s (attempt %d of %d)", terr, delay, attempt+1, maxAttempts)
 		if err := sleepRetry(ctx, delay); err != nil {
-			return nil, fmt.Errorf("moa: retry wait aborted: %w", err)
+			return nil, requestReceipt{}, fmt.Errorf("moa: retry wait aborted: %w", err)
 		}
 	}
 }
@@ -538,6 +562,16 @@ type Result struct {
 	StopReason  string  `json:"stop_reason,omitempty"`
 	WallSeconds float64 `json:"wall_seconds,omitempty"`
 	TokPerSec   float64 `json:"tok_per_sec,omitempty"`
+
+	// Request receipt (R-W1.5). RequestSHA16/RequestBytes attest the exact
+	// request bytes whose answer shipped: sha16 of the final marshaled JSON
+	// body post() put on the wire, and its length. Transport retries
+	// re-send that SAME body, so one receipt covers the whole retry chain;
+	// budget escalations build a new body — like Budget and the usage
+	// ledger, the pair describes the FINAL request. Error returns carry no
+	// receipt (nothing shipped to attest).
+	RequestSHA16 string `json:"request_sha16,omitempty"`
+	RequestBytes int    `json:"request_bytes,omitempty"`
 }
 
 // finalUsage fills one Result's usage ledger from the response that
@@ -592,15 +626,17 @@ func (c *Client) oneShot(ctx context.Context, model string, mkBody func(model st
 	bud := outputBudget{now: spec.MaxTokens, cap: spec.MaxOutput}
 	start := time.Now()
 	for {
-		msg, err := c.post(ctx, mkBody(model, bud.now), bud.now)
+		msg, rcpt, err := c.post(ctx, mkBody(model, bud.now), bud.now)
 		if err != nil {
 			return Result{}, err
 		}
 		res := Result{
-			Text:        msg.text(),
-			Thinking:    msg.thinking(),
-			Budget:      bud.now,
-			Escalations: bud.esc,
+			Text:         msg.text(),
+			Thinking:     msg.thinking(),
+			Budget:       bud.now,
+			Escalations:  bud.esc,
+			RequestSHA16: rcpt.sha16,
+			RequestBytes: rcpt.bytes,
 		}
 		res.finalUsage(msg, start)
 		switch msg.classifyStop() {
@@ -684,18 +720,24 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 	bud := outputBudget{now: spec.MaxTokens, cap: spec.MaxOutput}
 	start := time.Now()
 	// result builds the loop's final Result from a response: budget ledger
-	// plus usage ledger. Thinking stays out (unlike oneShot): the loop's
-	// traces span rounds and the review journal is the only consumer that
-	// caps/keeps them — /panel never journals thinking.
+	// plus usage ledger, and the FINAL round's request receipt (R-W1.5 —
+	// the receipt attests the request whose answer shipped, as in oneShot).
+	// Thinking stays out (unlike oneShot): the loop's traces span rounds
+	// and the review journal is the only consumer that caps/keeps them —
+	// /panel never journals thinking.
+	var lastRcpt requestReceipt
 	result := func(msg *messageResponse) Result {
-		res := Result{Text: msg.text(), Budget: bud.now, Escalations: bud.esc}
+		res := Result{
+			Text: msg.text(), Budget: bud.now, Escalations: bud.esc,
+			RequestSHA16: lastRcpt.sha16, RequestBytes: lastRcpt.bytes,
+		}
 		res.finalUsage(msg, start)
 		return res
 	}
 	messages := []messageEntry{{Role: "user", Content: prompt}}
 	var audits []ToolAudit
 	for round := 1; ; round++ {
-		msg, err := c.post(ctx, messageRequest{
+		msg, rcpt, err := c.post(ctx, messageRequest{
 			Model:     model,
 			MaxTokens: bud.now,
 			System:    system,
@@ -705,6 +747,7 @@ func (c *Client) QueryWithTools(ctx context.Context, model, system, prompt strin
 		if err != nil {
 			return Result{}, audits, err
 		}
+		lastRcpt = rcpt
 		switch msg.classifyStop() {
 		case stopTruncated:
 			if bud.escalate(model, msg.Usage.OutputTokens) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1955,8 +1956,13 @@ func TestReviewDiff(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, reviewStubWrapper))
-	// Mock the MoA API: return verdicts based on the model name.
+	// Mock the MoA API: return verdicts based on the model name. Capture
+	// each leg's exact request body for the R-W1.5 wire receipt pins (the
+	// fanout is parallel → mutex-guarded).
+	var bodyMu sync.Mutex
+	bodies := map[string][]byte{}
 	moaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
 		var req struct {
 			Model    string `json:"model"`
 			Messages []struct {
@@ -1964,7 +1970,10 @@ func TestReviewDiff(t *testing.T) {
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		json.Unmarshal(raw, &req)
+		bodyMu.Lock()
+		bodies[req.Model] = raw
+		bodyMu.Unlock()
 		var text string
 		switch req.Model {
 		case "rm1":
@@ -2025,10 +2034,21 @@ func TestReviewDiff(t *testing.T) {
 	// verbatim); a non-accept leg journals thinking_md (this stub emits no
 	// thinking blocks, so the approximation = the leg's full response
 	// text); ACCEPT legs stay unjournaled.
-	if want := (ReviewResult{Model: "rm1@test", Verdict: "accept", Comments: "Ship it.", BaseURL: moaSrv.URL}); rev.Reviews[0] != want {
+	// R-W1.5: the response reviews carry the wire-exact request receipt —
+	// sha16 + byte count of the EXACT body the stub observed for that leg.
+	bodyMu.Lock()
+	b1, ok1 := bodies["rm1"]
+	b2, ok2 := bodies["rm2"]
+	bodyMu.Unlock()
+	if !ok1 || !ok2 {
+		t.Fatalf("stub captured bodies for %v, want both rm1 and rm2", [2]bool{ok1, ok2})
+	}
+	if want := (ReviewResult{Model: "rm1@test", Verdict: "accept", Comments: "Ship it.", BaseURL: moaSrv.URL,
+		RequestSHA16: sha16(b1), RequestBytes: len(b1)}); rev.Reviews[0] != want {
 		t.Errorf("review[0] = %+v, want %+v", rev.Reviews[0], want)
 	}
-	if want := (ReviewResult{Model: "rm2@test", Verdict: "reject", Comments: "Needs tests.", ThinkingMD: "REJECT\n\nNeeds tests.", BaseURL: moaSrv.URL}); rev.Reviews[1] != want {
+	if want := (ReviewResult{Model: "rm2@test", Verdict: "reject", Comments: "Needs tests.", ThinkingMD: "REJECT\n\nNeeds tests.", BaseURL: moaSrv.URL,
+		RequestSHA16: sha16(b2), RequestBytes: len(b2)}); rev.Reviews[1] != want {
 		t.Errorf("review[1] = %+v, want %+v", rev.Reviews[1], want)
 	}
 
@@ -2042,8 +2062,10 @@ func TestReviewDiff(t *testing.T) {
 		Action  string `json:"action"`
 		DiffID  int64  `json:"diff_id"`
 		Reviews []struct {
-			Model   string `json:"model"`
-			Verdict string `json:"verdict"`
+			Model        string `json:"model"`
+			Verdict      string `json:"verdict"`
+			RequestSHA16 string `json:"request_sha16"`
+			RequestBytes int    `json:"request_bytes"`
 		} `json:"reviews"`
 	}
 	if err := json.Unmarshal(last.Payload, &payload); err != nil {
@@ -2054,6 +2076,20 @@ func TestReviewDiff(t *testing.T) {
 	}
 	if len(payload.Reviews) != 2 {
 		t.Errorf("journaled reviews = %d, want 2", len(payload.Reviews))
+	}
+	// R-W1.5: the JOURNALED row carries the same wire-exact receipts —
+	// the moa_review evidence attests the exact bytes each leg received.
+	for _, rv := range payload.Reviews {
+		model := strings.SplitN(rv.Model, "@", 2)[0]
+		want, ok := bodies[model]
+		if !ok {
+			t.Errorf("journaled review %q: no captured body for model %q", rv.Model, model)
+			continue
+		}
+		if rv.RequestSHA16 != sha16(want) || rv.RequestBytes != len(want) {
+			t.Errorf("journaled review %q receipt = %q/%d, want sha16+len of the wire body (=%q/%d)",
+				rv.Model, rv.RequestSHA16, rv.RequestBytes, sha16(want), len(want))
+		}
 	}
 
 	// A4-lite: the review_action event carries a consensus_verdict.
@@ -2900,7 +2936,12 @@ func TestPanelTruncationFlagged(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 
+	// Capture the exact bodies the gateway observed (one model leg →
+	// sequential requests: initial budget + one escalation re-issue).
+	var bodies [][]byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, b)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"content":     []map[string]string{{"type": "text", "text": "partial panel answer"}},
@@ -2937,6 +2978,8 @@ func TestPanelTruncationFlagged(t *testing.T) {
 					From int `json:"from"`
 					To   int `json:"to"`
 				} `json:"escalations"`
+				RequestSHA16 string `json:"request_sha16"`
+				RequestBytes int    `json:"request_bytes"`
 			} `json:"models"`
 		}
 		if json.Unmarshal(ev.Payload, &p) != nil || !p.Panel {
@@ -2958,6 +3001,18 @@ func TestPanelTruncationFlagged(t *testing.T) {
 		}
 		if !strings.Contains(p.Text, "[output truncated at the 32768-token cap after 1 budget escalation(s)]") {
 			t.Errorf("rendered marker missing from text: %q", p.Text)
+		}
+		// R-W1.5: the journaled panel entry attests the FINAL request on
+		// the wire — the escalated re-issue's body (16384 → 32768).
+		if len(bodies) != 2 {
+			t.Fatalf("requests = %d, want 2 (one escalation re-issue)", len(bodies))
+		}
+		if m.RequestSHA16 != sha16(bodies[1]) || m.RequestBytes != len(bodies[1]) {
+			t.Errorf("panel receipt = %q/%d, want sha16+len of the final wire body (=%q/%d)",
+				m.RequestSHA16, m.RequestBytes, sha16(bodies[1]), len(bodies[1]))
+		}
+		if m.RequestSHA16 == sha16(bodies[0]) {
+			t.Error("panel receipt must track the escalated body, not the truncated first attempt")
 		}
 	}
 	if !found {

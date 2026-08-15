@@ -173,6 +173,13 @@ type ReviewResult struct {
 	// moa gateway — the journal must say where the leg truly went, not
 	// what the label implies.
 	BaseURL string `json:"base_url,omitempty"`
+	// RequestSHA16 / RequestBytes (R-W1.5) are the moa client's wire
+	// receipt: sha16 of the exact request body whose verdict shipped, and
+	// its length. Absent on infra legs — no answer shipped, nothing to
+	// attest (patch_sha16 covers the judged content; this pair covers the
+	// assembled request).
+	RequestSHA16 string `json:"request_sha16,omitempty"`
+	RequestBytes int    `json:"request_bytes,omitempty"`
 }
 
 // DiffInfo carries a diff record plus its file content to the client.

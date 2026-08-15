@@ -53,6 +53,7 @@ func TestPanelLive(t *testing.T) {
 				Model: label, Text: resp.Text, ToolCalls: calls,
 				Truncated: resp.Truncated, Budget: resp.Budget,
 				OutputTokens: resp.OutputTokens, Escalations: resp.Escalations,
+				RequestSHA16: resp.RequestSHA16, RequestBytes: resp.RequestBytes,
 			}
 		}()
 	}
