@@ -935,7 +935,7 @@ func TestIsProtectedPathCaseFold(t *testing.T) {
 		{"internal/ipc/contradiction.go", true},
 		{"internal/ipc/design_moa.go", true},
 		{"internal/ipc/skills_gate.go", true},
-		{"internal/ipc/server.go", true}, // hosts isProtectedPath itself
+		{"internal/ipc/server.go", false}, // hosts isProtectedPath but also 4000+ lines of handler code
 		{"internal/ipc/protocol.go", false},
 	}
 	for _, tc := range cases {

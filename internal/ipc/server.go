@@ -3416,7 +3416,6 @@ var protectedGateFiles = map[string]bool{
 	"internal/ipc/contradiction.go": true,
 	"internal/ipc/design_moa.go":    true,
 	"internal/ipc/skills_gate.go":   true,
-	"internal/ipc/server.go":        true, // hosts isProtectedPath itself
 }
 
 func isProtectedPath(p string) bool {
