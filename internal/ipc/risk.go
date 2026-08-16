@@ -274,6 +274,19 @@ func (s *riskScan) scanLine(line string) {
 func (s *riskScan) checkAddedContent(content string) {
 	at := s.evidenceAt()
 
+	// //nosec before the comment filter: it IS a comment, and it
+	// exempts code from gosec — exactly the weakening this wave names.
+	// Runs for ALL paths (including test fixtures).
+	if strings.Contains(content, "//nosec") {
+		s.record("security_weakening", snippet(content)+at)
+	}
+
+	// Comment filter runs for ALL paths — a comment mentioning rm -rf
+	// or DROP TABLE is not a destructive command.
+	if riskIsComment(content) {
+		return
+	}
+
 	// destructive (command shapes; file deletion recorded at the header).
 	// Runs even for test/fixture paths — a rm -rf in a test is still a risk.
 	for _, tok := range riskDestructiveTokens {
@@ -291,15 +304,6 @@ func (s *riskScan) checkAddedContent(content string) {
 	// security_weakening are content rules that false-positive on mock
 	// data in test files. destructive + supply_chain still run above.
 	if s.testFixture {
-		return
-	}
-
-	// //nosec before the comment filter: it IS a comment, and it
-	// exempts code from gosec — exactly the weakening this wave names.
-	if strings.Contains(content, "//nosec") {
-		s.record("security_weakening", snippet(content)+at)
-	}
-	if riskIsComment(content) {
 		return
 	}
 

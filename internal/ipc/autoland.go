@@ -511,11 +511,13 @@ func verifyCommand(worktreePath string, diffPaths []string) (string, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Check for glob-scoped line: "glob: command"
+		// Check for glob-scoped line: "glob: command" where glob
+		// must contain * or / (to distinguish from a bare command
+		// that happens to contain ": ").
 		if idx := strings.Index(line, ": "); idx > 0 {
 			glob := line[:idx]
 			cmd := line[idx+2:]
-			if glob != "" && cmd != "" && allPathsMatch(diffPaths, glob) {
+			if strings.ContainsAny(glob, "*/") && glob != "" && cmd != "" && allPathsMatch(diffPaths, glob) {
 				return cmd, nil
 			}
 			continue

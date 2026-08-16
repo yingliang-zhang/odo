@@ -61,6 +61,10 @@ type runMeta struct {
 	// panel otherwise sees up to 44KB of toolchain labeled "the user's
 	// original instruction, verbatim"). Empty on every non-revise run.
 	reviewGoal string
+	// originDiffID: non-zero for revise-chain runs — the chain root diff
+	// ID. Used by drainRun to journal an auto_revise_product event linking
+	// the product diff back to its chain (Fix B1).
+	originDiffID int64
 	// run_verdict (epoch-8, outstanding #1): mechanical output tallies for
 	// the terminal post-mortem. An exit-0 run is not proof of work — the
 	// kimi-k3 false stop produced exactly this shape (OMP exit 0, zero
@@ -118,7 +122,9 @@ type Server struct {
 	// racing pipeline re-adjudicates base freshness under acceptMu
 	// (clean refresh or base_stale_at_land), never double-applies.
 	// Lock ordering: acceptMu → mu and ladderMu → mu, each never
-	// reversed; ladderMu and acceptMu are never held together.
+	// reversed; ladderMu and acceptMu may be held together (majority-accept
+	// valve calls handleDiffAction while holding ladderMu), but always in
+	// this order (ladderMu → acceptMu), never reversed — no deadlock.
 	// ladderMu serializes the settle-revise ladder decision daemon-wide —
 	// concurrent pipelines cannot fork the rounds chain
 	// (settle.go: settleRevise's read-decide-spawn).
@@ -227,7 +233,9 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 				baseSHA = *r.BaseSHA
 			}
 			log.Printf("recover-pending-diffs: re-triggering auto-land for diff #%d (conv %d, base %s)", r.ID, r.ConversationID, baseSHA)
-			go s.maybeAutoLand(r.Diff, wtPath, "", false, "")
+			// Fix B4: derive the goal from the conversation's last non-revise
+			// user_message so the panel has the user's original instruction.
+			go s.maybeAutoLand(r.Diff, wtPath, s.originGoal(context.Background(), r.ConversationID), false, "")
 		}
 	}()
 	return s
@@ -1697,6 +1705,18 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	}
 	meta.finished = true // mark finished only after the diff row exists
 
+	// Fix B1: link product diff to its revise chain. When this run is a
+	// revise-chain run (originDiffID > 0), journal an auto_revise_product
+	// event so supersedeChain can find the product diff when it lands.
+	if meta.originDiffID > 0 {
+		s.store.AppendEvent(ctx, meta.conversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+			"action":          "auto_revise_product",
+			"actor":           autoActor,
+			"product_diff_id": newDiff.ID,
+			"origin_diff_id":  meta.originDiffID,
+		}))
+	}
+
 	// The diff-bearing path journals its verdict too (no_text here means the
 	// work is real but the answer died — the pipeline treats it as tainted).
 	if verdict != verdictNone {
@@ -1880,13 +1900,22 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	if err != nil {
 		return Response{}, err
 	}
-	if d.Status != store.DiffPending {
-		return Response{}, fmt.Errorf("%s_diff: diff %d already %s", action, diffID, d.Status)
-	}
 
 	// Q6 #6: one accept (or reject) at a time daemon-wide — see acceptMu.
 	s.acceptMu.Lock()
 	defer s.acceptMu.Unlock()
+
+	// Fix B2: re-read status under acceptMu to prevent TOCTOU race.
+	// Two concurrent callers (human vs pipeline, or recover-pending-diffs
+	// fan-out) can both read "pending" before either takes acceptMu; the
+	// loser must re-read the current status under the lock.
+	d, err = s.store.GetDiff(ctx, diffID)
+	if err != nil {
+		return Response{}, err
+	}
+	if d.Status != store.DiffPending {
+		return Response{}, fmt.Errorf("%s_diff: diff %d already %s", action, diffID, d.Status)
+	}
 
 	applied := false
 	// headSHA (fix-INT D5) is the main HEAD the action operated on,
@@ -2174,6 +2203,11 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 	d, err := s.store.GetDiff(ctx, req.DiffID)
 	if err != nil {
 		return Response{}, err
+	}
+	// N5 fix: don't run a panel on non-pending diffs — wastes spend and
+	// adds dead evidence rows.
+	if d.Status != store.DiffPending {
+		return Response{}, fmt.Errorf("review_diff: diff %d is %s (only pending diffs can be reviewed)", req.DiffID, d.Status)
 	}
 	content, err := os.ReadFile(d.PathOnDisk)
 	if err != nil {
@@ -3454,61 +3488,69 @@ func rejectProtectedPaths(paths []string) error {
 // pending diff that shares the same chain root (origin_diff_id) is
 // marked superseded — NOT rejected, just no longer actionable.
 func (s *Server) supersedeChain(ctx context.Context, landed store.Diff) {
-	// Find all auto_revise_round events in this conversation.
+	// Find all events in this conversation.
 	events, err := s.store.ListEvents(ctx, landed.ConversationID, 0)
 	if err != nil {
 		return
 	}
-	// Build the chain: auto_revise_round rows link diff_id (the diff
-	// being revised) and origin_diff_id (the chain root). When a diff
-	// lands, we need to find all other pending diffs in the same chain.
+	// Build the chain from two sources:
+	// 1. auto_revise_round rows: {diff_id (input), origin_diff_id (root)}
+	// 2. auto_revise_product rows: {product_diff_id, origin_diff_id}
 	//
-	// The landed diff may be the chain root (d0, appears as origin_diff_id
-	// in round rows), or a revise product (dN, appears as diff_id in the
-	// round that spawned it). We collect all diff IDs that share the same
-	// origin_diff_id, plus the origin_diff_id itself.
+	// The landed diff may be:
+	// - the chain root (d0): appears as origin_diff_id in round/product rows
+	// - a revise input (dN): appears as diff_id in a round row
+	// - a revise product (dN): appears as product_diff_id in a product row
 	chainIDs := map[int64]bool{landed.ID: true}
 	originRoot := int64(0)
+
+	// Find originRoot: check round rows and product rows for the landed diff
 	for _, e := range events {
 		if e.Type != store.EventReviewAction {
 			continue
 		}
 		var p struct {
-			Action       string `json:"action"`
-			DiffID       int64  `json:"diff_id"`
-			OriginDiffID int64  `json:"origin_diff_id"`
+			Action         string `json:"action"`
+			DiffID         int64  `json:"diff_id"`
+			OriginDiffID  int64  `json:"origin_diff_id"`
+			ProductDiffID int64  `json:"product_diff_id"`
 		}
 		if json.Unmarshal(e.Payload, &p) != nil {
 			continue
 		}
-		if p.Action != "auto_revise_round" {
-			continue
-		}
-		// If the landed diff is the origin root or a chain member,
-		// record the origin and link all chain members.
-		if p.DiffID == landed.ID || p.OriginDiffID == landed.ID {
+		if p.Action == "auto_revise_round" && (p.DiffID == landed.ID || p.OriginDiffID == landed.ID) {
 			originRoot = p.OriginDiffID
 			chainIDs[p.DiffID] = true
 			chainIDs[p.OriginDiffID] = true
 		}
+		if p.Action == "auto_revise_product" && (p.ProductDiffID == landed.ID || p.OriginDiffID == landed.ID) {
+			originRoot = p.OriginDiffID
+			chainIDs[p.ProductDiffID] = true
+			chainIDs[p.OriginDiffID] = true
+		}
 	}
-	// Second pass: now that we know the origin root, collect all chain
-	// members that share it.
+
+	// Collect ALL chain members sharing the origin root
 	if originRoot > 0 {
 		for _, e := range events {
 			if e.Type != store.EventReviewAction {
 				continue
 			}
 			var p struct {
-				Action       string `json:"action"`
-				DiffID       int64  `json:"diff_id"`
-				OriginDiffID int64  `json:"origin_diff_id"`
+				Action         string `json:"action"`
+				DiffID         int64  `json:"diff_id"`
+				OriginDiffID  int64  `json:"origin_diff_id"`
+				ProductDiffID int64  `json:"product_diff_id"`
 			}
 			if json.Unmarshal(e.Payload, &p) != nil {
 				continue
 			}
 			if p.Action == "auto_revise_round" && p.OriginDiffID == originRoot {
 				chainIDs[p.DiffID] = true
+				chainIDs[p.OriginDiffID] = true
+			}
+			if p.Action == "auto_revise_product" && p.OriginDiffID == originRoot {
+				chainIDs[p.ProductDiffID] = true
 				chainIDs[p.OriginDiffID] = true
 			}
 		}
@@ -3520,7 +3562,9 @@ func (s *Server) supersedeChain(ctx context.Context, landed store.Diff) {
 		return
 	}
 	for _, d := range diffs {
-		if d.ID == landed.ID || d.Status != store.DiffPending {
+		// N2 fix: only supersede OLDER pending diffs (ID < landed.ID).
+		// A newer product diff should not be killed by an older one landing.
+		if d.ID >= landed.ID || d.Status != store.DiffPending {
 			continue
 		}
 		if !chainIDs[d.ID] {

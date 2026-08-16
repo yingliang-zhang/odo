@@ -368,6 +368,13 @@ func (s *Server) reviseLineage(ctx context.Context, conversationID, diffID int64
 // run. Called from autoLand with ladderMu held — one ladder decision at a
 // time daemon-wide, so the rounds chain cannot fork.
 func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string, reviews []ReviewResult) {
+	// Fix B3: re-check diff status — a concurrent accept/reject/supersede
+	// may have changed it between autoLand's read and this call.
+	if current, err := s.store.GetDiff(ctx, d.ID); err == nil && current.Status != store.DiffPending {
+		s.journalAutoLandBlocked(ctx, d, "diff_not_pending",
+			"diff "+strconv.FormatInt(d.ID, 10)+" is "+current.Status+" (concurrent action)", reviews, "needs_fixes")
+		return
+	}
 	st, err := s.ladderState(ctx, d.ConversationID)
 	if err != nil {
 		s.journalAutoLandBlocked(ctx, d, "revise_ambiguous", "cannot derive ladder state from the journal: "+err.Error(), reviews, "needs_fixes")
@@ -416,7 +423,15 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 				"consensus_verdict": "majority_accept",
 				"patch_sha16":       sha16([]byte(diffText)),
 			}
-			s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(moaPayload))
+			mountRiskReceipt(moaPayload, riskReceiptKeys(diffText))
+		if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(moaPayload)); err != nil {
+			// N1 fix: evidence-before-action — a broken journal means no
+			// landing, same as the unanimous path.
+			log.Printf("settle: majority-accept journal failed for diff %d: %v (NOT landing)", d.ID, err)
+			s.journalAutoLandBlocked(ctx, d, "majority_accept_journal_failed",
+				err.Error(), reviews, "majority_accept")
+			return
+		}
 			if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor); err != nil {
 				// Landing failed (base drift, protected path, etc.) —
 				// fall through to suspension so the human can intervene.
@@ -672,6 +687,7 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 		worktreePath:   wtPath,
 		goal:           prompt,     // the synthesized repair prompt — the run's truthful trigger
 		reviewGoal:     originGoal, // the panel judges against the user's original words
+		originDiffID:   originID,   // chain root for product linking (Fix B1)
 	}
 	s.byConv[d.ConversationID] = runID
 	return true, ""
