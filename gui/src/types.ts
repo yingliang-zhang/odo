@@ -171,6 +171,11 @@ export interface EventPayload {
   round?: number;
   outcome?: string;
   phase?: string;
+  // auto_revise_round chains the row to the diff being repaired
+  // (settle.go:598): round 1 carries diff_id == origin_diff_id (chain
+  // start), later rounds carry the just-evaluated product's id with the
+  // SAME origin — the GUI resolves chain membership from this pair.
+  origin_diff_id?: number;
   // Timed-out review marker (codex ReviewDecision.TimedOut parity):
   // defensive — rendered when the payload carries it, nothing writes it yet.
   timed_out?: boolean;

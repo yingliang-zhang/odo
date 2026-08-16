@@ -4224,6 +4224,72 @@ mark {
   font-size: 10px;
 }
 
+/* ---------- Auto-land pipeline chip (design lock: GUI-only Phase 1) ---------- */
+
+/* Neutral badge chrome like the panel chip; only the phase tint differs.
+   Active phases keep the spinner icon — no background noise while working. */
+.auto-land-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Landed is a brief green flash (≤4s), same posture as .bg-flash-done. */
+.auto-land-chip.is-landed {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: rgba(63, 163, 95, 0.15);
+  animation: overlay-fade 0.15s var(--ease-standard);
+}
+
+.auto-land-chip.is-blocked {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.auto-land-chip.is-suspended {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* Popover: one clickable row per tracked diff (Review tab is the jump
+   target). Row chrome reuses .bg-run-row; the phase tint lives on the
+   icon and the trailing detail. */
+.auto-land-popover {
+  min-width: 240px;
+}
+
+.auto-land-row-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.auto-land-row.is-blocked .auto-land-row-icon,
+.auto-land-row.is-blocked .auto-land-row-detail {
+  color: var(--err);
+}
+
+.auto-land-row.is-suspended .auto-land-row-icon,
+.auto-land-row.is-suspended .auto-land-row-detail {
+  color: var(--warn);
+}
+
+.auto-land-row.is-landed .auto-land-row-icon,
+.auto-land-row.is-landed .auto-land-row-detail {
+  color: var(--ok);
+}
+
+.auto-land-row-detail {
+  flex-shrink: 0;
+  margin-left: auto;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+}
+
 /* Wave B #8: per-turn stats strip — an extra span inside .run-header,
    dimmer than the header's own facts (the header stays the narrative;
    the strip is auxiliary telemetry). */

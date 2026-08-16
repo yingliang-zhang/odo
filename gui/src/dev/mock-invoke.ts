@@ -146,7 +146,9 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
           conversations_scanned: 1,
           resolutions: 0,
           unreadable_diffs: 0,
-          auto_apply: "off",
+          // Mirror the prefs fixture — the DiffViewer's rung-0 one-liner
+          // displays the same auto_apply the settings round-trip serves.
+          auto_apply: fx.defaultSettings.auto_apply,
           current_rung: 0,
           rung_thresholds: { rung_1: 10, rung_2: 30 },
           revert_check: "heuristic: >=80% mirrored lines, >=1 shared path, within 7d",
@@ -163,9 +165,18 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- Settings ----------
     case "get_settings": {
-      return { ok: true, settings: fx.defaultSettings };
+      // Return a COPY — daemon parity (every fetch unmarshals fresh), and
+      // Object.is bail-out safety: sharing the fixture reference would let
+      // a save mutate the very object React holds, so the refetch's
+      // setAppSettings would compare equal and skip the re-render.
+      return { ok: true, settings: { ...fx.defaultSettings } };
     }
     case "update_settings": {
+      // Mock parity: the daemon persists the prefs blob, so a save is
+      // observable by the next get_settings (SettingsPanel → App refetch).
+      if (args?.settings && typeof args.settings === "object") {
+        Object.assign(fx.defaultSettings, args.settings);
+      }
       return { ok: true };
     }
 

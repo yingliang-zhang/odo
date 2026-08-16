@@ -3,7 +3,7 @@
 // the sidebar.
 
 import { useEffect, useRef, useState } from "react";
-import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes } from "lucide-react";
+import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban } from "lucide-react";
 import {
   BYTES_PER_TOKEN,
   contextWindowTokens,
@@ -11,6 +11,8 @@ import {
   formatTokens,
 } from "../stats";
 import type { PanelModel, PromptSnapshot } from "../stats";
+import type { PipelinePhase, PipelineState } from "../pipeline";
+import type { PanelTab } from "./ContextPanel";
 
 // One background run as reported by the daemon's pending_counts —
 // workstreams with a live run that is NOT the one in view.
@@ -48,11 +50,19 @@ interface Props {
   // Wave B #9: coding model (window denominator) + review panel list.
   codingModel: string | null;
   reviewPanel: PanelModel[];
-  // Clickable badges → open panel on the matching tab
+  // Auto-land pipeline (design lock Phase 1): per-diff status derived from
+  // the journaled auto_panel rows — ONLY states with something to show
+  // right now (expired flashes are dropped in derivation). Empty = pref
+  // off / nothing tracked → the chip is absent.
+  pipelineStates: PipelineState[];
+  // Clickable badges → open panel on the matching tab. PanelTab (single
+  // source in ContextPanel) already includes "review", so the pipeline
+  // chip's row-jump needs no cast and no caller change — tsc enforces
+  // every call site.
   pendingDiffs: number;
   wikiNoteCount: number | null;
   pendingMemoryProposals: number;
-  onBadgeClick: (tab: "changes" | "wiki" | "memory") => void;
+  onBadgeClick: (tab: PanelTab) => void;
 }
 
 // One click-away + Escape closer for every StatusBar popover (bg-runs
@@ -239,6 +249,140 @@ function PanelChip({ models }: { models: PanelModel[] }) {
   );
 }
 
+// Auto-land pipeline chip (design lock pipeline-indicator-lock, Phase 1):
+// current per-diff pipeline status, derived journal-only in pipeline.ts.
+// Chip copy is the dominant tracked state; the popover lists every tracked
+// diff and jumps to the Review tab. The ≤4s landed flash is gated by the
+// journaled created_at, re-evaluated by a local clock tick that dies with
+// the last flash — a clock is not a latch: no pipeline fact ever caches
+// here, only its journaled expiry crossed against now (derivation drops
+// already-expired flashes itself; this tick covers the render-lag window
+// between re-derivations, which happen on the ~1.5s poll cadence).
+const PIPELINE_PRIORITY: Record<PipelinePhase, number> = {
+  blocked: 0,
+  suspended: 1,
+  revise: 2,
+  landing: 3,
+  in_flight: 4,
+  landed: 5,
+  queued: 6,
+  hidden: 7,
+};
+
+const ACTIVE_PHASES: Record<PipelinePhase, boolean> = {
+  queued: true,
+  in_flight: true,
+  landing: true,
+  revise: true,
+  blocked: false,
+  suspended: false,
+  landed: false,
+  hidden: false,
+};
+
+function pipelineLabel(s: PipelineState): string {
+  switch (s.phase) {
+    case "queued":
+      return "auto-land queued…";
+    case "in_flight":
+      return s.refreshed ? "refreshed — verify → panel…" : "verify → panel…";
+    case "landing":
+      return "landing…";
+    case "landed":
+      return "landed";
+    case "blocked":
+      return `blocked: ${s.reason ?? "unknown"}`;
+    case "suspended":
+      return "auto-land suspended";
+    case "revise":
+      return `repair round ${s.round ?? "?"}`;
+    default:
+      return s.phase;
+  }
+}
+
+// Icon vocabulary shared by the chip and its popover rows so a phase reads
+// the same in both surfaces: spinner for active phases, Check landed,
+// AlertCircle blocked, Ban suspended.
+function pipelineIcon(phase: PipelinePhase) {
+  if (ACTIVE_PHASES[phase]) return <LoaderCircle size={11} className="spin" aria-hidden="true" />;
+  if (phase === "landed") return <Check size={11} aria-hidden="true" />;
+  if (phase === "blocked") return <AlertCircle size={11} aria-hidden="true" />;
+  return <Ban size={11} aria-hidden="true" />;
+}
+
+function PipelineChip({
+  states,
+  onOpenReview,
+}: {
+  states: PipelineState[];
+  onOpenReview: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  useCloseOnClickAway(open, wrapRef, () => setOpen(false));
+
+  // Clock only — gates the transient landed window. One-shot timer armed
+  // at the nearest expiry; when no flash remains, nothing ticks.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const pending = states
+      .filter((s) => s.phase === "landed" && (s.landedUntil ?? 0) > Date.now())
+      .map((s) => s.landedUntil!);
+    if (pending.length === 0) return;
+    const t = window.setTimeout(
+      () => setNow(Date.now()),
+      Math.min(...pending) - Date.now() + 25,
+    );
+    return () => window.clearTimeout(t);
+  }, [states, now]);
+
+  const visible = states.filter(
+    (s) => s.phase !== "landed" || (s.landedUntil ?? 0) > now,
+  );
+  if (visible.length === 0) return null;
+  const dominant = visible.reduce((a, b) =>
+    PIPELINE_PRIORITY[a.phase] <= PIPELINE_PRIORITY[b.phase] ? a : b,
+  );
+
+  return (
+    <span className="bg-runs-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className={`status-badge auto-land-chip is-${dominant.phase}`}
+        title={visible.map((s) => `diff ${s.diffId}: ${pipelineLabel(s)}`).join(" · ")}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {pipelineIcon(dominant.phase)}
+        {pipelineLabel(dominant)}
+      </button>
+      {open && (
+        <div className="bg-runs-menu auto-land-popover" role="dialog" aria-label="Auto-land pipeline">
+          <div className="ctx-pop-title">auto-land — current status</div>
+          {visible.map((s) => (
+            <button
+              key={s.diffId}
+              type="button"
+              className={`bg-run-row auto-land-row is-${s.phase}`}
+              title={pipelineLabel(s)}
+              onClick={() => {
+                setOpen(false);
+                onOpenReview();
+              }}
+            >
+              <span className="auto-land-row-icon" aria-hidden="true">{pipelineIcon(s.phase)}</span>
+              <span className="bg-run-name">Diff #{s.diffId}</span>
+              <span className="auto-land-row-detail">{pipelineLabel(s)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
 export default function StatusBar({
   workstreamName,
   conversationId,
@@ -251,6 +395,7 @@ export default function StatusBar({
   lastPrompt,
   codingModel,
   reviewPanel,
+  pipelineStates,
   pendingDiffs,
   wikiNoteCount,
   pendingMemoryProposals,
@@ -339,6 +484,12 @@ export default function StatusBar({
         <ContextMeter snapshot={lastPrompt} codingModel={codingModel} />
       )}
       {reviewPanel.length > 0 && <PanelChip models={reviewPanel} />}
+      {/* Auto-land pipeline: between the panel peek and the actionable
+          badges; derivation hands over only currently-visible states, so
+          "any states" IS the render gate (design lock). */}
+      {pipelineStates.length > 0 && (
+        <PipelineChip states={pipelineStates} onOpenReview={() => onBadgeClick("review")} />
+      )}
       {/* Right: clickable badges */}
       {pendingDiffs > 0 && (
         <button

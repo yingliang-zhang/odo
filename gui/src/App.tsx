@@ -44,6 +44,7 @@ import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { notifyRunDone } from "./notify";
+import { derivePipelineStates } from "./pipeline";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
 import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
 
@@ -406,6 +407,16 @@ export default function App() {
   const reviewPanel = useMemo(
     () => parseReviewModels(appSettings?.review_models ?? ""),
     [appSettings],
+  );
+
+  // Auto-land pipeline chip (design lock Phase 1): pure re-derivation off
+  // the ACTIVE conversation's journaled stream (conversation scope is the
+  // daemon's poll/bootstrap contract — pipeline.ts documents it) + the
+  // pending-diff list. No latch: the memo's inputs are exactly the two
+  // surfaces those facts arrive on.
+  const pipelineStates = useMemo(
+    () => derivePipelineStates(events, diffs.map((d) => d.id), appSettings?.auto_apply === "main"),
+    [events, diffs, appSettings],
   );
 
   // Background runs: daemon-reported running workstreams minus the one in
@@ -1614,6 +1625,7 @@ export default function App() {
         lastPrompt={lastPrompt}
         codingModel={appSettings?.coding_model ?? null}
         reviewPanel={reviewPanel}
+        pipelineStates={pipelineStates}
         pendingDiffs={diffs.length}
         wikiNoteCount={wikiNoteCount}
         pendingMemoryProposals={pendingMemoryProposals}

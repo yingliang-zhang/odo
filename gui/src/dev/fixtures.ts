@@ -200,17 +200,26 @@ export const events: OdoEvent[] = [
     risk_evidence: { credential_probe: "+process.env.OPENAI_API_KEY at gui/secrets.ts:7" },
     risk_classifier: "mechanical",
   }, 3),
-  ev("review_action", {
-    action: "accept",
-    diff_id: 2,
-    actor: "auto_panel",
-    risk_class: ["credential_probe", "supply_chain"],
-    risk_evidence: {
-      credential_probe: "+os.Getenv(\"AWS_SECRET_ACCESS_KEY\") at daemon/main.go:42",
-      supply_chain: "package-lock.json",
-    },
-    risk_classifier: "mechanical",
-  }, 3),
+  {
+    // Pre-aged created_at: ev() backdates by id, so rows past id 24 drift
+    // into the FUTURE at page load — and a stand-in auto accept inside the
+    // pipeline chip's ≤4s landed window would wrongly flash on boot (as
+    // would this one). This row is history; stamp it real-time, outside
+    // the window. Ledger order is unaffected: LedgerPanel sorts review
+    // rows by per-conversation seq (LedgerPanel.tsx), never created_at.
+    ...ev("review_action", {
+      action: "accept",
+      diff_id: 2,
+      actor: "auto_panel",
+      risk_class: ["credential_probe", "supply_chain"],
+      risk_evidence: {
+        credential_probe: "+os.Getenv(\"AWS_SECRET_ACCESS_KEY\") at daemon/main.go:42",
+        supply_chain: "package-lock.json",
+      },
+      risk_classifier: "mechanical",
+    }, 3),
+    created_at: new Date(Date.now() - 10 * 60000).toISOString(),
+  },
   ev("review_action", {
     action: "reject",
     diff_id: 3,
@@ -280,6 +289,63 @@ export const events: OdoEvent[] = [
   ev("agent_tool_result", { tool: "read_file", result: "88 lines — fold marker regression notes" }, 3),
   ev("agent_text", { text: "Drafted the summary — the regression was a stale last_seq on the legacy marker, fixed by the pinned window." }, 3),
   ev("agent_done", { summary: "Folded fold-marker regression notes into the epoch summary" }, 3),
+
+  // ---------- Pipeline chip (design lock Phase 1): M18 settle-ladder tail ----------
+  // Daemon-true chain shape (settle.go): EACH round row names the diff it
+  // just evaluated; round 1 carries diff_id == origin_diff_id (chain
+  // start), later rounds the product id with the SAME origin. A fresh id
+  // family (8-11) keeps the chain disjoint from the earlier diff 1-4
+  // story. The 4th evaluation (diff 11) hits needs_fixes at the round cap:
+  // the ladder journals its suspension marker FIRST (memory_update —
+  // conversation-scoped, not a Ledger review row) and then the
+  // blocked{ladder_suspended} echo on the evaluated diff (blocked rows
+  // carry only that diff — no origin).
+  ev("review_action", {
+    action: "auto_revise_round",
+    diff_id: 8,
+    origin_diff_id: 8,
+    actor: "auto_panel",
+    round: 1,
+    patch_sha16: "0123456789abcdef",
+    comments_sha16: "fedcba9876543210",
+    risk_class: ["none"],
+    risk_classifier: "mechanical",
+  }, 3),
+  ev("review_action", {
+    action: "auto_revise_round",
+    diff_id: 9,
+    origin_diff_id: 8,
+    actor: "auto_panel",
+    round: 2,
+    patch_sha16: "10abcdef01234567",
+    comments_sha16: "ef012345679abcde",
+    risk_class: ["none"],
+    risk_classifier: "mechanical",
+  }, 3),
+  ev("review_action", {
+    action: "auto_revise_round",
+    diff_id: 10,
+    origin_diff_id: 8,
+    actor: "auto_panel",
+    round: 3,
+    patch_sha16: "0123abcdef012345",
+    comments_sha16: "cdef012345679abc",
+    risk_class: ["none"],
+    risk_classifier: "mechanical",
+  }, 3),
+  ev("memory_update", {
+    layer: "auto_land",
+    cause: "ladder_suspended",
+    detail: "3 consecutive revise rounds ended without landing; ladder suspended until a human accept (diff 11 pending)",
+  }, 3),
+  ev("review_action", {
+    action: "auto_land_blocked",
+    diff_id: 11,
+    actor: "auto_panel",
+    reason: "ladder_suspended",
+    risk_class: ["none"],
+    risk_classifier: "mechanical",
+  }, 3),
 ];
 
 // ---------- Diffs ----------
@@ -384,7 +450,12 @@ export const defaultSettings: Settings = {
   auto_distill: "on_idle",
   auto_distill_idle_seconds: "120",
   max_concurrent_runs: "3",
-  auto_apply: "off",
+  // Pipeline-chip dev surface (design lock: GUI-only Phase 1; lock rule 6
+  // hides it unless main). The daemon pref default stays "off"; fixtures
+  // run "main" so the auto-land status chip is visible in npm run dev —
+  // the e2e's pref-off case is the exercised deviation. The mock's
+  // get/update_settings round-trip this key.
+  auto_apply: "main",
 };
 
 // ---------- Memory ----------
