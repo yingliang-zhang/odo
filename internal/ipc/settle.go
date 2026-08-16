@@ -424,14 +424,14 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 				"patch_sha16":       sha16([]byte(diffText)),
 			}
 			mountRiskReceipt(moaPayload, riskReceiptKeys(diffText))
-		if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(moaPayload)); err != nil {
-			// N1 fix: evidence-before-action — a broken journal means no
-			// landing, same as the unanimous path.
-			log.Printf("settle: majority-accept journal failed for diff %d: %v (NOT landing)", d.ID, err)
-			s.journalAutoLandBlocked(ctx, d, "majority_accept_journal_failed",
-				err.Error(), reviews, "majority_accept")
-			return
-		}
+			if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(moaPayload)); err != nil {
+				// N1 fix: evidence-before-action — a broken journal means no
+				// landing, same as the unanimous path.
+				log.Printf("settle: majority-accept journal failed for diff %d: %v (NOT landing)", d.ID, err)
+				s.journalAutoLandBlocked(ctx, d, "majority_accept_journal_failed",
+					err.Error(), reviews, "majority_accept")
+				return
+			}
 			if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor); err != nil {
 				// Landing failed (base drift, protected path, etc.) —
 				// fall through to suspension so the human can intervene.

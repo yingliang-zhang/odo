@@ -107,7 +107,7 @@ func TestAutoLandCheck(t *testing.T) {
 
 func TestVerifyCommand(t *testing.T) {
 	t.Run("missing file is fail-closed", func(t *testing.T) {
-		if _, err := verifyCommand(t.TempDir()); err == nil {
+		if _, err := verifyCommand(t.TempDir(), nil); err == nil {
 			t.Fatal("no .odo-verify: want error")
 		}
 	})
@@ -116,7 +116,7 @@ func TestVerifyCommand(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ".odo-verify"), []byte("# nothing\n\n  \n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := verifyCommand(dir); err == nil {
+		if _, err := verifyCommand(dir, nil); err == nil {
 			t.Fatal("comment-only .odo-verify: want error")
 		}
 	})
@@ -125,7 +125,7 @@ func TestVerifyCommand(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ".odo-verify"), []byte("# comment\n\ngo test ./...\n# later\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		cmd, err := verifyCommand(dir)
+		cmd, err := verifyCommand(dir, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

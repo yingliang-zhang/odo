@@ -1709,12 +1709,14 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// revise-chain run (originDiffID > 0), journal an auto_revise_product
 	// event so supersedeChain can find the product diff when it lands.
 	if meta.originDiffID > 0 {
-		s.store.AppendEvent(ctx, meta.conversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		if _, err := s.store.AppendEvent(ctx, meta.conversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
 			"action":          "auto_revise_product",
 			"actor":           autoActor,
 			"product_diff_id": newDiff.ID,
 			"origin_diff_id":  meta.originDiffID,
-		}))
+		})); err != nil {
+			log.Printf("drainRun: auto_revise_product journal failed for diff %d: %v (supersedeChain may not find this product)", newDiff.ID, err)
+		}
 	}
 
 	// The diff-bearing path journals its verdict too (no_text here means the
@@ -3510,8 +3512,8 @@ func (s *Server) supersedeChain(ctx context.Context, landed store.Diff) {
 			continue
 		}
 		var p struct {
-			Action         string `json:"action"`
-			DiffID         int64  `json:"diff_id"`
+			Action        string `json:"action"`
+			DiffID        int64  `json:"diff_id"`
 			OriginDiffID  int64  `json:"origin_diff_id"`
 			ProductDiffID int64  `json:"product_diff_id"`
 		}
@@ -3537,8 +3539,8 @@ func (s *Server) supersedeChain(ctx context.Context, landed store.Diff) {
 				continue
 			}
 			var p struct {
-				Action         string `json:"action"`
-				DiffID         int64  `json:"diff_id"`
+				Action        string `json:"action"`
+				DiffID        int64  `json:"diff_id"`
 				OriginDiffID  int64  `json:"origin_diff_id"`
 				ProductDiffID int64  `json:"product_diff_id"`
 			}
