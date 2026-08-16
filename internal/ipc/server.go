@@ -3395,10 +3395,36 @@ func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response,
 // (memory.md, memory-archive.md, pins.md, ledger.md, journal.sqlite,
 // worktrees) and wiki/ (epoch notes, topics, index.md — derived artifacts
 // owned by the daemon, not the agent).
+//
+// Self-improving safety extension (2026-08-15, tri-model 3/3): the gate
+// mechanism source files are also protected — autoland.go, autonomy.go,
+// learner.go, review.go, settle.go, ledger.go, risk.go, contradiction.go,
+// design_moa.go. These files implement the auto-land and self-improving
+// gates; a diff that weakens a gate must never auto-land (it would be
+// the judged modifying its own judge). Changes to these files require
+// explicit human review via the normal accept path.
+//
 // Case-insensitive: macOS APFS/HFS+ resolve .ODO/ and Wiki/ identically.
+var protectedGateFiles = map[string]bool{
+	"internal/ipc/autoland.go":      true,
+	"internal/ipc/autonomy.go":      true,
+	"internal/ipc/learner.go":       true,
+	"internal/ipc/review.go":        true,
+	"internal/ipc/settle.go":        true,
+	"internal/ipc/ledger.go":        true,
+	"internal/ipc/risk.go":          true,
+	"internal/ipc/contradiction.go": true,
+	"internal/ipc/design_moa.go":    true,
+	"internal/ipc/skills_gate.go":   true,
+	"internal/ipc/server.go":        true, // hosts isProtectedPath itself
+}
+
 func isProtectedPath(p string) bool {
 	lp := strings.ToLower(p)
-	return strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/")
+	if strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/") {
+		return true
+	}
+	return protectedGateFiles[lp]
 }
 
 // rejectProtectedPaths errs when any patch path is protected. Callers pass

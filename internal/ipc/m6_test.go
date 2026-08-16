@@ -924,6 +924,19 @@ func TestIsProtectedPathCaseFold(t *testing.T) {
 		{"README.md", false},
 		{".odo", false}, // no trailing slash — not a path under .odo/
 		{"wiki", false}, // same
+		// Self-improving safety: gate source files are protected
+		{"internal/ipc/autoland.go", true},
+		{"internal/ipc/settle.go", true},
+		{"internal/ipc/learner.go", true},
+		{"internal/ipc/review.go", true},
+		{"internal/ipc/autonomy.go", true},
+		{"internal/ipc/ledger.go", true},
+		{"internal/ipc/risk.go", true},
+		{"internal/ipc/contradiction.go", true},
+		{"internal/ipc/design_moa.go", true},
+		{"internal/ipc/skills_gate.go", true},
+		{"internal/ipc/server.go", true}, // hosts isProtectedPath itself
+		{"internal/ipc/protocol.go", false},
 	}
 	for _, tc := range cases {
 		if got := isProtectedPath(tc.path); got != tc.want {
