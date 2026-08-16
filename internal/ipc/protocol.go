@@ -171,6 +171,11 @@ type ReviewResult struct {
 	// Infra to fail the round closed as panel_infra instead of mistaking
 	// an error string for dissent.
 	Infra bool `json:"infra,omitempty"`
+	// Truncated marks a leg whose response was cut at the output token
+	// cap (reviewVerdict degrades it to needs_fixes). The majority-accept
+	// valve (Fix 1) vetoes truncated legs: a truncated review could have
+	// ended in reject — outvoting it is fail-open.
+	Truncated bool `json:"truncated,omitempty"`
 	// ThinkingMD (M18 batch B) journals the leg's reasoning text, capped
 	// at 4KB, ONLY for non-accept verdicts (accept legs stay unjournaled —
 	// journal noise discipline). Real data: the moa client's thinking

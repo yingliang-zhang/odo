@@ -272,14 +272,27 @@ func (s *riskScan) scanLine(line string) {
 // checkAddedContent applies every added-line content rule at the
 // scanner's current file:line position.
 func (s *riskScan) checkAddedContent(content string) {
-	// Fixture-path exemption (Fix 4): skip content rules for test/fixture
-	// paths. credential_probe, data_exfil, security_weakening are content
-	// rules — supply_chain and destructive are path-independent and still
-	// run (checked in scanLine/scanDelPath, not here).
+	at := s.evidenceAt()
+
+	// destructive (command shapes; file deletion recorded at the header).
+	// Runs even for test/fixture paths — a rm -rf in a test is still a risk.
+	for _, tok := range riskDestructiveTokens {
+		if strings.Contains(content, tok) {
+			s.record("destructive", snippet(content)+at)
+			break
+		}
+	}
+	if strings.Contains(strings.ToUpper(content), "DROP TABLE") {
+		s.record("destructive", snippet(content)+at)
+	}
+
+	// Fixture-path exemption (Fix 4): skip the remaining content rules
+	// for test/fixture paths. credential_probe, data_exfil,
+	// security_weakening are content rules that false-positive on mock
+	// data in test files. destructive + supply_chain still run above.
 	if s.testFixture {
 		return
 	}
-	at := s.evidenceAt()
 
 	// //nosec before the comment filter: it IS a comment, and it
 	// exempts code from gosec — exactly the weakening this wave names.
@@ -336,17 +349,6 @@ func (s *riskScan) checkAddedContent(content string) {
 	}
 	if riskCorsWildcard(lower) || riskAuthDisable(lower) {
 		s.record("security_weakening", snippet(content)+at)
-	}
-
-	// destructive (command shapes; file deletion recorded at the header).
-	for _, tok := range riskDestructiveTokens {
-		if strings.Contains(content, tok) {
-			s.record("destructive", snippet(content)+at)
-			break
-		}
-	}
-	if strings.Contains(strings.ToUpper(content), "DROP TABLE") {
-		s.record("destructive", snippet(content)+at)
 	}
 }
 

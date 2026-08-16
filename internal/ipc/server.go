@@ -2304,6 +2304,7 @@ func reviewVerdict(label, text string, truncated bool) ReviewResult {
 	rr := parseVerdict(label, text)
 	if truncated {
 		rr.Verdict = "needs_fixes"
+		rr.Truncated = true
 		rr.Comments = "[review truncated at the model's hard output cap — verdict forced fail-closed] " + rr.Comments
 	}
 	return rr
@@ -3458,29 +3459,58 @@ func (s *Server) supersedeChain(ctx context.Context, landed store.Diff) {
 	if err != nil {
 		return
 	}
-	// Build the chain: collect all diff IDs that appear as diff_id or
-	// origin_diff_id in auto_revise_round rows involving the landed diff.
+	// Build the chain: auto_revise_round rows link diff_id (the diff
+	// being revised) and origin_diff_id (the chain root). When a diff
+	// lands, we need to find all other pending diffs in the same chain.
+	//
+	// The landed diff may be the chain root (d0, appears as origin_diff_id
+	// in round rows), or a revise product (dN, appears as diff_id in the
+	// round that spawned it). We collect all diff IDs that share the same
+	// origin_diff_id, plus the origin_diff_id itself.
 	chainIDs := map[int64]bool{landed.ID: true}
+	originRoot := int64(0)
 	for _, e := range events {
 		if e.Type != store.EventReviewAction {
 			continue
 		}
-		var p map[string]interface{}
+		var p struct {
+			Action       string `json:"action"`
+			DiffID       int64  `json:"diff_id"`
+			OriginDiffID int64  `json:"origin_diff_id"`
+		}
 		if json.Unmarshal(e.Payload, &p) != nil {
 			continue
 		}
-		if p["action"] != "auto_revise_round" {
+		if p.Action != "auto_revise_round" {
 			continue
 		}
-		did, hasD := p["diff_id"].(float64)
-		oid, hasO := p["origin_diff_id"].(float64)
-		if !hasD || !hasO {
-			continue
+		// If the landed diff is the origin root or a chain member,
+		// record the origin and link all chain members.
+		if p.DiffID == landed.ID || p.OriginDiffID == landed.ID {
+			originRoot = p.OriginDiffID
+			chainIDs[p.DiffID] = true
+			chainIDs[p.OriginDiffID] = true
 		}
-		di, oi := int64(did), int64(oid)
-		if chainIDs[di] || chainIDs[oi] {
-			chainIDs[di] = true
-			chainIDs[oi] = true
+	}
+	// Second pass: now that we know the origin root, collect all chain
+	// members that share it.
+	if originRoot > 0 {
+		for _, e := range events {
+			if e.Type != store.EventReviewAction {
+				continue
+			}
+			var p struct {
+				Action       string `json:"action"`
+				DiffID       int64  `json:"diff_id"`
+				OriginDiffID int64  `json:"origin_diff_id"`
+			}
+			if json.Unmarshal(e.Payload, &p) != nil {
+				continue
+			}
+			if p.Action == "auto_revise_round" && p.OriginDiffID == originRoot {
+				chainIDs[p.DiffID] = true
+				chainIDs[p.OriginDiffID] = true
+			}
 		}
 	}
 	// Get all diffs in this conversation and supersede pending ones in

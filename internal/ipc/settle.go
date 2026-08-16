@@ -390,7 +390,7 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 		// The dissent was given 3 repair rounds to converge; if 2/3
 		// still accept after that, the remaining needs_fixes is most
 		// likely a false positive or a style nit, not a latent defect.
-		accepts, rejects, infra := 0, 0, 0
+		accepts, rejects, infra, truncated := 0, 0, 0, 0
 		for _, r := range reviews {
 			switch r.Verdict {
 			case "accept":
@@ -401,8 +401,11 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 			if r.Infra {
 				infra++
 			}
+			if r.Truncated {
+				truncated++
+			}
 		}
-		if accepts > 0 && rejects == 0 && infra == 0 && accepts*3 >= 2*len(reviews) {
+		if accepts > 0 && rejects == 0 && infra == 0 && truncated == 0 && accepts*3 >= 2*len(reviews) {
 			// Majority accept: journal moa_review with majority_accept
 			// verdict, then land via the same handleDiffAction path.
 			moaPayload := map[string]interface{}{
@@ -419,6 +422,8 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 				// fall through to suspension so the human can intervene.
 				s.journalAutoLandBlocked(ctx, d, "majority_accept_landed_failed",
 					err.Error(), reviews, "majority_accept")
+				s.journalLadder(ctx, d.ConversationID, "ladder_suspended",
+					"majority accept landed failed: "+err.Error())
 			}
 			return
 		}
