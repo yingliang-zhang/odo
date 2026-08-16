@@ -125,6 +125,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -304,7 +305,10 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		s.journalRefreshAttempt(ctx, d, "pre_spend_probe", "clean", base, head, nil)
 	}
 
-	verifyCmd, err := verifyCommand(worktreePath)
+	// Path-scoped verify: pass diff paths so GUI-only diffs can use a
+	// lighter verify command (tsc + playwright instead of go test).
+	verifyPaths, _ := git.PatchPaths(d.PathOnDisk)
+	verifyCmd, err := verifyCommand(worktreePath, verifyPaths)
 	if err != nil {
 		s.journalAutoLandBlocked(ctx, d, "verify_unconfigured",
 			"no usable "+verifyCmdFile+" at the repo root — the verify gate is mandatory for auto-land", nil, "")
@@ -486,17 +490,74 @@ func (s *Server) autoLandCheck(d store.Diff) (reason, detail string) {
 // non-# line is the shell command the verify gate runs at the worktree
 // root. Absent or contentless means the gate cannot run (blocked,
 // fail-closed).
-func verifyCommand(worktreePath string) (string, error) {
+//
+// Path-scoped verify (Fix 3, zero-manual-accept): lines starting with
+// "glob:" define a path-scoped command. If ALL diff paths match the glob,
+// that command is used instead of the bare fallback line. Example:
+//
+//	gui/**: cd gui && npx tsc --noEmit && npx playwright test --reporter=line
+//	go build ./... && go vet ./... && go test ./...
+//
+// The bare fallback line (no glob prefix) runs for any diff that doesn't
+// match a glob. Supply-chain gate blocks .odo-verify self-modification.
+func verifyCommand(worktreePath string, diffPaths []string) (string, error) {
 	data, err := os.ReadFile(worktreePath + string(os.PathSeparator) + verifyCmdFile)
 	if err != nil {
 		return "", err
 	}
+	var fallback string
 	for _, line := range strings.Split(string(data), "\n") {
-		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
-			return line, nil
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Check for glob-scoped line: "glob: command"
+		if idx := strings.Index(line, ": "); idx > 0 {
+			glob := line[:idx]
+			cmd := line[idx+2:]
+			if glob != "" && cmd != "" && allPathsMatch(diffPaths, glob) {
+				return cmd, nil
+			}
+			continue
+		}
+		// First bare line is the fallback
+		if fallback == "" {
+			fallback = line
 		}
 	}
+	if fallback != "" {
+		return fallback, nil
+	}
 	return "", fmt.Errorf("%s has no command line", verifyCmdFile)
+}
+
+// allPathsMatch reports whether every path in paths matches the glob
+// pattern using filepath.Match semantics (with ** support via path.Match).
+func allPathsMatch(paths []string, glob string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !pathMatch(p, glob) {
+			return false
+		}
+	}
+	return true
+}
+
+// pathMatch checks a single path against a glob, supporting ** for
+// recursive directory matching.
+func pathMatch(p, glob string) bool {
+	// Normalize: strip leading a/ or b/ from git diff paths
+	p = strings.TrimPrefix(p, "a/")
+	p = strings.TrimPrefix(p, "b/")
+	// Convert ** to a simple prefix match (gui/** → gui/)
+	if strings.HasSuffix(glob, "/**") {
+		prefix := strings.TrimSuffix(glob, "/**")
+		return strings.HasPrefix(p, prefix+"/") || p == prefix
+	}
+	matched, _ := filepath.Match(glob, p)
+	return matched
 }
 
 // runVerify executes cmd via sh -c at the worktree root under a hard

@@ -2031,6 +2031,13 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	if err := s.store.UpdateDiffStatus(ctx, diffID, status); err != nil {
 		return Response{}, err
 	}
+	// Supersede older pending diffs in the same revise chain (Fix 2,
+	// zero-manual-accept): when this diff lands, mark all older pending
+	// diffs in the same chain as superseded so they stop blocking the
+	// pending queue. The chain is derived from auto_revise_round rows.
+	if action == "accept" {
+		s.supersedeChain(ctx, d)
+	}
 	// fix-INT D5 (additive): the adjudicated tree rides every resolution
 	// row — base_sha is the diff's stored base ("" = grandfathered pre-v2
 	// row), head_sha the main HEAD at the action. Consumers ignore unknown
@@ -3437,6 +3444,70 @@ func rejectProtectedPaths(paths []string) error {
 		}
 	}
 	return nil
+}
+
+// supersedeChain marks older pending diffs in the same revise chain as
+// superseded when one diff in the chain lands. The chain is derived from
+// auto_revise_round journal rows: each round links diff_id and
+// origin_diff_id, forming a lineage. When a diff lands, every other
+// pending diff that shares the same chain root (origin_diff_id) is
+// marked superseded — NOT rejected, just no longer actionable.
+func (s *Server) supersedeChain(ctx context.Context, landed store.Diff) {
+	// Find all auto_revise_round events in this conversation.
+	events, err := s.store.ListEvents(ctx, landed.ConversationID, 0)
+	if err != nil {
+		return
+	}
+	// Build the chain: collect all diff IDs that appear as diff_id or
+	// origin_diff_id in auto_revise_round rows involving the landed diff.
+	chainIDs := map[int64]bool{landed.ID: true}
+	for _, e := range events {
+		if e.Type != store.EventReviewAction {
+			continue
+		}
+		var p map[string]interface{}
+		if json.Unmarshal(e.Payload, &p) != nil {
+			continue
+		}
+		if p["action"] != "auto_revise_round" {
+			continue
+		}
+		did, hasD := p["diff_id"].(float64)
+		oid, hasO := p["origin_diff_id"].(float64)
+		if !hasD || !hasO {
+			continue
+		}
+		di, oi := int64(did), int64(oid)
+		if chainIDs[di] || chainIDs[oi] {
+			chainIDs[di] = true
+			chainIDs[oi] = true
+		}
+	}
+	// Get all diffs in this conversation and supersede pending ones in
+	// the chain except the landed one.
+	diffs, err := s.store.ListDiffs(ctx, landed.ConversationID)
+	if err != nil {
+		return
+	}
+	for _, d := range diffs {
+		if d.ID == landed.ID || d.Status != store.DiffPending {
+			continue
+		}
+		if !chainIDs[d.ID] {
+			continue
+		}
+		if err := s.store.UpdateDiffStatus(ctx, d.ID, store.DiffSuperseded); err != nil {
+			log.Printf("supersedeChain: mark diff %d superseded: %v", d.ID, err)
+			continue
+		}
+		s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+			"action":        "superseded",
+			"actor":         autoActor,
+			"diff_id":       d.ID,
+			"superseded_by": landed.ID,
+			"reason":        "superseded_by_revise_chain_landing",
+		}))
+	}
 }
 
 // handleListWiki lists the distilled wiki notes for the conversation's

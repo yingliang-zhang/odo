@@ -36,6 +36,10 @@ const (
 	// the diff stays out of the review queue; the run's worktree is
 	// retired by the sweeper rules like any concluded row.
 	DiffConflict = "conflict"
+	// DiffSuperseded: a newer diff in the same revise chain landed,
+	// making this older pending diff obsolete. NOT rejected — the diff
+	// stays on disk for audit; it's just no longer actionable.
+	DiffSuperseded = "superseded"
 )
 
 // Conversation states.

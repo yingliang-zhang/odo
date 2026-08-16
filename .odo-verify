@@ -3,4 +3,8 @@
 # worktree root; a diff may land without a human only if it exits 0.
 # Diffs touching THIS file are blocked by the supply-chain gate (self-
 # modification always requires a human).
+#
+# Path-scoped verify (Fix 3): glob-prefixed lines run when ALL diff paths
+# match the glob. The bare fallback line runs for any other diff.
+gui/**: cd gui && npx tsc --noEmit && npx playwright test --reporter=line
 go build ./... && go vet ./... && go test ./...

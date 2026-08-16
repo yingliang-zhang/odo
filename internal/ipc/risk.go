@@ -157,6 +157,30 @@ type riskScan struct {
 	hRead, hEgress string
 	hEgressPath    string
 	hEgressLine    int
+
+	// testFixture: current path is a test/fixture/dev file — content
+	// rules are skipped (supply_chain + destructive still run).
+	testFixture bool
+}
+
+// isTestFixturePath reports whether a diff path is a test/fixture/dev
+// file where credential-shaped strings are expected (mock data, not
+// real secrets). Supply-chain and destructive rules still run on these
+// paths — only content rules (credential_probe, data_exfil,
+// security_weakening) are exempted.
+func isTestFixturePath(p string) bool {
+	if strings.Contains(p, "/dev/") ||
+		strings.Contains(p, "/fixtures") ||
+		strings.Contains(p, "/__mocks__/") ||
+		strings.Contains(p, "/e2e/") ||
+		strings.HasSuffix(p, "_test.go") ||
+		strings.HasSuffix(p, ".test.ts") ||
+		strings.HasSuffix(p, ".test.tsx") ||
+		strings.HasSuffix(p, ".spec.ts") ||
+		strings.HasSuffix(p, ".spec.tsx") {
+		return true
+	}
+	return false
 }
 
 // classifyRisk walks diffText and returns the severity-ranked risk
@@ -217,6 +241,7 @@ func (s *riskScan) scanLine(line string) {
 			// Post-image name wins (renames): the change is reviewed
 			// under the new path (PatchStats precedent).
 			s.path = p
+			s.testFixture = isTestFixturePath(p)
 			s.checkSupplyChain(p)
 		}
 		return
@@ -247,6 +272,13 @@ func (s *riskScan) scanLine(line string) {
 // checkAddedContent applies every added-line content rule at the
 // scanner's current file:line position.
 func (s *riskScan) checkAddedContent(content string) {
+	// Fixture-path exemption (Fix 4): skip content rules for test/fixture
+	// paths. credential_probe, data_exfil, security_weakening are content
+	// rules — supply_chain and destructive are path-independent and still
+	// run (checked in scanLine/scanDelPath, not here).
+	if s.testFixture {
+		return
+	}
 	at := s.evidenceAt()
 
 	// //nosec before the comment filter: it IS a comment, and it

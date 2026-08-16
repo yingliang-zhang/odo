@@ -383,6 +383,45 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 		return
 	}
 	if len(st.rounds) >= settleMaxReviseRounds {
+		// 3 consecutive revise rounds ended without a landing.
+		// Majority-accept valve (2026-08-16, tri-model 3/3): if ≥2/3
+		// models accept AND zero rejects AND zero infra/truncated legs,
+		// auto-land with a majority_accept marker instead of suspending.
+		// The dissent was given 3 repair rounds to converge; if 2/3
+		// still accept after that, the remaining needs_fixes is most
+		// likely a false positive or a style nit, not a latent defect.
+		accepts, rejects, infra := 0, 0, 0
+		for _, r := range reviews {
+			switch r.Verdict {
+			case "accept":
+				accepts++
+			case "reject":
+				rejects++
+			}
+			if r.Infra {
+				infra++
+			}
+		}
+		if accepts > 0 && rejects == 0 && infra == 0 && accepts*3 >= 2*len(reviews) {
+			// Majority accept: journal moa_review with majority_accept
+			// verdict, then land via the same handleDiffAction path.
+			moaPayload := map[string]interface{}{
+				"action":            "moa_review",
+				"diff_id":           d.ID,
+				"actor":             autoActor,
+				"reviews":           reviews,
+				"consensus_verdict": "majority_accept",
+				"patch_sha16":       sha16([]byte(diffText)),
+			}
+			s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(moaPayload))
+			if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor); err != nil {
+				// Landing failed (base drift, protected path, etc.) —
+				// fall through to suspension so the human can intervene.
+				s.journalAutoLandBlocked(ctx, d, "majority_accept_landed_failed",
+					err.Error(), reviews, "majority_accept")
+			}
+			return
+		}
 		// 3 consecutive revise rounds ended without a landing — demote.
 		// The transition journals BOTH the ledger marker (the durable
 		// suspension every later evaluation consults) and the blocked row
