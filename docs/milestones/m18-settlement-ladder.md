@@ -47,7 +47,7 @@ grouped by model + a demotion directive — and spawns a FRESH repair run
 gates: active run / concurrency cap / distill). Its diff re-enters the
 pipeline at the top.
 
-- **Round cap 2.** At most 2 revise spawns between landings (the original
+- **Round cap 3.** At most 2 revise spawns between landings (the original
   run is round 0). Both the cap and the counters are derived from the
   journal — NO in-memory state, so a daemon restart cannot amnesia-reset
   a suspension (a restart-amnesic demotion would be fail-open).
@@ -55,12 +55,12 @@ pipeline at the top.
   round's, or the fresh panel's comment-set sha16 repeats the previous
   round's byte-for-byte → `auto_land_blocked{revise_no_progress}` →
   human. The loop pays spend for evidence or it pays nothing.
-- **Content caps (locked numbers).** Previous diff > 32KB, or grouped
-  comments > 12KB, or the origin goal > 32KB →
+- **Content caps (locked numbers).** Previous diff > 64KB, or grouped
+  comments > 16KB, or the origin goal > 64KB →
   `auto_land_blocked{repair_prompt_too_large}` → human. A truncated
   previous diff makes the repair model hallucinate the missing part; an
   over-long comment set is unfaithable; an uncapped many-KB ask smuggles
-  the bundle over the same 32KB line (P0 review DSF). No silent
+  the bundle over the same 64KB line (P0 review DSF). No silent
   truncation, ever. Diff/comments caps evaluate even when no origin goal
   is derivable (caps are a property of the artifacts in hand).
 - **Infra ≠ verdict.** `reviewWithModel` now marks transport/auth/timeout
@@ -161,8 +161,8 @@ misses its filters. Pinned by the regression test below.
    time).
 3. `TestSettleNoProgress` — byte-identical repair patch →
    `revise_no_progress`, no further run.
-4. `TestSettleRepairPromptTooLarge` — table: previous diff >32KB, or
-   grouped comments >12KB → `repair_prompt_too_large`, no run.
+4. `TestSettleRepairPromptTooLarge` — table: previous diff >64KB, or
+   grouped comments >16KB → `repair_prompt_too_large`, no run.
 5. `TestSettlePanelInfra` — transport failure in the post-revise panel →
    `panel_infra`; not counted as a verdict round (no tick, no demotion).
 6. `TestSettleUnanimousRejectBlocks` — `panel_unanimous_reject` +
@@ -185,12 +185,12 @@ misses its filters. Pinned by the regression test below.
 12. `TestCollectReplayTurnsSkipsReviseMarkers` + `TestReviseLineageHuman
     Interleave` — consumer-side marker filtering and the lineage
     fail-closed path on human input mid-chain. Test 4 also gains the
-    origin-goal-over-32KB subcase; test 2 gains the post-suspension
+    origin-goal-over-64KB subcase; test 2 gains the post-suspension
     suspended-branch exercise leg.
 
 Plus discipline tables: `TestSettlementClass` (the four-outcome fold,
 infra detection), `TestParseLedgerRound`, and the locked constants
-(cap 2 rounds / 32KB / 12KB).
+(cap 3 rounds / 64KB / 16KB).
 
 ## Verification
 

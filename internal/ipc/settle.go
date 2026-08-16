@@ -118,7 +118,7 @@ const (
 	settleDiffCapBytes     = 64 * 1024
 	settleCommentsCapBytes = 16 * 1024
 	// settleGoalCapBytes caps the origin goal riding into the repair
-	// prompt. The lock's 32KB is about the prompt bundle: an uncapped
+	// prompt. The lock's 64KB is about the prompt bundle: an uncapped
 	// many-KB human ask would smuggle the bundle over exactly the same
 	// cap (P0 review DSF).
 	settleGoalCapBytes = settleDiffCapBytes

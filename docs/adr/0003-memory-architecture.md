@@ -18,7 +18,7 @@ journal-anchored architecture instead.
 
 | Layer | Path | Scope | Writer | Injected | Cap |
 |---|---|---|---|---|---|
-| journal | `.odo/journal.db` | project | daemon | never | — |
+| journal | `.odo/journal.sqlite` | project | daemon | never | — |
 | epoch notes | `wiki/<ws>-epoch-N.md` | workstream | distiller | selected, ≤12 KB newest-first (M3) | — |
 | topic pages | `wiki/topics/*.md` (M5) | project | curator | via index | — |
 | `index.md` | `wiki/index.md` (M5) | project | curator | always (M5+) | ≤2 KB |

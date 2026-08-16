@@ -166,7 +166,7 @@
 
 > **Invariant 8 (proposed): Self-improving loops measure with human ground truth and actuate through reviewed rules, never through metrics.** The measurement half (audit → ledger) is pull-only and never injected; the actuation half (retraction proposal → apply_memory) is a human-reviewed rule, never an auto-applied metric. Auto-land's own outcomes never grade the loop.
 
-> **Protected-path extension (proposed):** Add safety-mechanism source files to the C0 never-auto-land set. Today only `.odo/` and `wiki/` are protected; the gate code is not, so a small in-scope edit weakening a gate could auto-land. The loop may improve agent behavior but cannot auto-land changes to its own gates.
+> **Protected-path extension (landed `a817ddc`, 2026-08-16):** Add safety-mechanism source files to the C0 never-auto-land set. Today only `.odo/` and `wiki/` are protected; the gate code is not, so a small in-scope edit weakening a gate could auto-land. The loop may improve agent behavior but cannot auto-land changes to its own gates.
 
 ### 实施排序（each independently reversible）
 

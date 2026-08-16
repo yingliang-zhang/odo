@@ -57,18 +57,18 @@ Legend: cost S <1d / M 1–3d / L >3d. Status: ✈ in flight · ⏳ queued ·
 | 0 | fix-INT W1 | accept TOCTOU / `base_stale_at_land` / bridge REVIEW 330→900s | prior session | — | — | ✅ `86b2351` |
 | 1 | fix-INT W2 | fold allowlist / cap-drop journaling / #14 memory-pins + **send-closure assertion** | ledger | — | — | ✅ `f17da7b` |
 | 1a | fix-INT W4 | `moa_fs_deny` replace→union merge (ADR-0004) | ledger | — | — | ✅ `8ad385c` |
-| 2 | **R-W1 moa resilience** | bounded retry (≤3, jitter, Retry-After; never 4xx) + typed `Error{Status,Class}` + `Result{InputTokens,Wall,TokPerSec}`; hermetic httptest pins | run 4 #1–3 | S | none — client-internal | ◎ |
+| 2 | **R-W1 moa resilience** | bounded retry (≤3, jitter, Retry-After; never 4xx) + typed `Error{Status,Class}` + `Result{InputTokens,Wall,TokPerSec}`; hermetic httptest pins | run 4 #1–3 | S | none — client-internal | ✅ diff #19 (`e2f8b61`) |
 | 3 | R-W1.5 receipts fill | panel/review payloads += `request_sha16`+`request_bytes` | run 3 §4 | S | ~~fix-INT~~ **unblocked** (W1/W2 landed) | ✅ worktree `6a802429` — receipt computed at the moa client's marshal point (the prompt's R-W1 premise was absent; see thread), final-request convention, wire-exact pins in `TestRequestReceiptWireExact`/`TestReviewDiff`/`TestPanelTruncationFlagged` |
 | 4 | A-P0 #1 Guardian taxonomy + ledger cells | risk classes + actor/outcome/TimedOut on every `review_action`; aggregate in `odo autonomy audit`; GUI renders the cells (LedgerPanel) | run 1 §5#1 + run 2 #3 | S | own tri-model design round | ⏳ |
 | 5 | A-P0 #2 visible⟺logged assert | daemon-side pre-send assertion on the send path | run 1 §5#2 | S | — | ⚠ partially landed via fix-INT W2's send-closure assertion (`f17da7b`) — residual coverage needs a 5-min code check before scheduling anything |
 | 6 | A-P0 #3 durable steer inbox + queue dock | journal `steer/queued/spliced` + ChatSurface QueueDock (auto-drain, send-now chord) | run 1 §5#3 + run 2 #4 | S–M + M | park-and-switch design session | ✅ daemon impl landed (W6); GUI dock = future GUI wave |
 | 7 | **R-W2 distill → moa** | behind prefs flag `distill_via: omp`; deadline policy for 1446s worst case; modelspec entry precondition | run 3 §4 + run 4 §2 | S | **2** (resilience first) | ◎ |
 | 8 | R-W3 learner/curator → moa | parsers/vet untouched; ADR-0003 inv7 wording | run 3 §4 | S | 7 telemetry | ✅ behind prefs `learner_via:`/`curator_via:` (default `omp`); shared `resolveVia` + `runMoaOneShot`; `request_sha16`/`request_bytes` receipts on fold (`learner_*`) + curate markers; ADR-0003 inv7 amended |
-| 9 | R-W4 Design-MoA | consolidator (`moa.Query`, `design_lock` event, strict truncation) + blind legs (`QueryWithTools`, round-cap decoupling, per-round context accounting, executor root param) | run 3 §4 + run 4 #4–6 | M | 2, 7, 8 | ⏳ |
-| 10 | GUI Wave A | background-task registry + StatusBar "still running" + attention-ordered Sidebar workstreams (never steal focus) | run 2 #1–2 | M | daemon task registry substrate; rows ride #4's schema for ledger cells | ⏳ |
-| 11 | GUI Wave B | context-pressure meter; plan per-line comments (opt-in per workstream); session-scoped edit grant (post-reviewer only); per-turn stats strip; MoA panel picker | run 2 #5–9 | S–M | 10 | ⏳ |
+| 9 | R-W4 Design-MoA | consolidator (`moa.Query`, `design_lock` event, strict truncation) + blind legs (`QueryWithTools`, round-cap decoupling, per-round context accounting, executor root param) | run 3 §4 + run 4 #4–6 | M | 2, 7, 8 | ✅ diff #26 (`4be49d3`) |
+| 10 | GUI Wave A | background-task registry + StatusBar "still running" + attention-ordered Sidebar workstreams (never steal focus) | run 2 #1–2 | M | daemon task registry substrate; rows ride #4's schema for ledger cells | ✅ diff #22 (`be9c08f`) |
+| 11 | GUI Wave B | context-pressure meter; plan per-line comments (opt-in per workstream); session-scoped edit grant (post-reviewer only); per-turn stats strip; MoA panel picker | run 2 #5–9 | S–M | 10 | ✅ diff #24 (`fb72872`) |
 | 12 | Backlog P1/P2 | declarative rules file (can-only-tighten); OMP structured-verdict flag check; turn-fork store op (+ GUI fork action, P2); hybrid journal recall; paste-chips / compaction disclosure / FTS / statusline items / git-action buttons / `/loop`-`monitor` | runs 1–2 §lists | varies | per item | ⇢ |
-| 13 | R-W0 ADR-0005 | model-routing boundary rule as ADR; file upstream asks (echo/schema/compaction events) | run 3 §3 | S (doc) | user's GO on run 3 | ◎ |
+| 13 | R-W0 ADR-0006 | model-routing boundary rule as ADR; file upstream asks (echo/schema/compaction events) | run 3 §3 | S (doc) | user's GO on run 3 | ✅ `docs/adr/0006-model-routing-boundary.md` |
 
 ### Immediate next three actions (my recommendation)
 
