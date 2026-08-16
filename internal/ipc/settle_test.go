@@ -581,8 +581,10 @@ func TestSettleNeedsFixesReviseLands(t *testing.T) {
 	}
 	d0row, _ = rig.store.GetDiff(context.Background(), d0)
 	d1row, _ := rig.store.GetDiff(context.Background(), d1)
-	if d0row.Status != store.DiffPending || d1row.Status != store.DiffAccepted {
-		t.Errorf("diff statuses = %q/%q, want pending (superseded, human-decidable)/accepted", d0row.Status, d1row.Status)
+	// Fix B1+B2: when the repair product (d1) lands, the chain root (d0)
+	// is automatically superseded — NOT pending anymore.
+	if d0row.Status != store.DiffSuperseded || d1row.Status != store.DiffAccepted {
+		t.Errorf("diff statuses = %q/%q, want superseded/accepted", d0row.Status, d1row.Status)
 	}
 }
 
