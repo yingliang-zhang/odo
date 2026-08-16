@@ -184,13 +184,26 @@ interface RunGroup {
 }
 
 // The latest distill's fold, derived from the journal events in memory.
-// count comes from the marker's explicit window when present (the daemon
-// journals first_seq/last_seq/note_sha), else from the derived boundary
-// arithmetic — identical because per-conversation seqs are gap-free.
 interface Fold {
   boundarySeq: number; // visibility split: the marker's payload last_seq when carried (pinned schema — events ≤ it are folded), else the marker's own seq (legacy); mirrors the daemon's foldBoundary
   markerSeq: number; // the marker's own seq: per-fold identity (expansion key — consecutive folds can share a boundarySeq)
-  count: number; // events folded out of view
+  // Folded epoch for the chip label ("epoch N · M events folded"). The
+  // marker journals the POST-distill counter (the daemon increments before
+  // writing), so the folded note's epoch is one less; undefined only when
+  // the marker carries no epoch at all.
+  epoch?: number;
+  // Seq of the newest user_message at or below the boundary: its run stays
+  // visible above the chip — the fold must never hide the most recent
+  // agent run, or the user returns to bare bookkeeping rows with no
+  // context. null = no user_message below the boundary → everything there
+  // is folded (pre-fix behavior).
+  newestUserSeq: number | null;
+  // Events the fold actually hides: seq ≤ boundary, older than the kept
+  // run. Older distill markers inside that range count too — the collapsed
+  // surface hides them and Expand reveals them, so leaving them out would
+  // under-report. The fold's own marker does NOT count: it is the chip's
+  // subject, not its content.
+  count: number;
   notePath?: string; // folded epoch's wiki note, when the marker names one
   noteName?: string; // its basename without .md, for display
 }
@@ -616,11 +629,13 @@ export default function ChatSurface({
     }
   };
 
-  // M1 epoch filtering + epoch-fold provenance (root fix): the latest
-  // distill review_action marks the fold boundary. The marker journals the
-  // folded window [first_seq, last_seq] explicitly; legacy markers derive
-  // it from journal order (previous marker seq+1 … marker seq−1). If no
-  // distill has happened there is no fold and everything shows.
+  // M1 epoch filtering + epoch-fold provenance (root fix) + fold blind-spot
+  // fix: the latest distill review_action marks the fold boundary. The
+  // marker journals the folded window [first_seq, last_seq] explicitly;
+  // legacy markers bound at the marker's own seq. If no distill has
+  // happened there is no fold and everything shows. The newest run below
+  // the boundary always stays visible (newestUserSeq): folding it away
+  // would leave the user staring at bare bookkeeping rows with no context.
   const fold = useMemo<Fold | null>(() => {
     let latestIdx = -1;
     for (let i = events.length - 1; i >= 0; i--) {
@@ -632,21 +647,12 @@ export default function ChatSurface({
     }
     if (latestIdx < 0) return null;
     const marker = events[latestIdx];
-    let first = marker.payload?.first_seq;
-    let last = marker.payload?.last_seq;
+    const first = marker.payload?.first_seq;
+    const last = marker.payload?.last_seq;
     let boundary: number;
     if (first == null || last == null) {
-      // Legacy marker (no journaled window): derive the window from
-      // journal order and bound at the marker's own seq.
-      first = 1;
-      for (let i = latestIdx - 1; i >= 0; i--) {
-        const e = events[i];
-        if (e.type === "review_action" && e.payload?.action === "distill") {
-          first = e.seq + 1;
-          break;
-        }
-      }
-      last = marker.seq - 1;
+      // Legacy marker (no journaled window): bound at the marker's own
+      // seq — everything journaled before it is folded.
       boundary = marker.seq;
     } else {
       // Pinned schema (K3): the fold claims exactly [first_seq, last_seq].
@@ -657,15 +663,46 @@ export default function ChatSurface({
     }
     const notePath = marker.payload?.wiki_path || undefined;
     const noteName = notePath ? basename(notePath).replace(/\.md$/, "") : undefined;
+    // The marker journals the post-distill counter; the folded note's
+    // epoch is one less.
+    const epoch = typeof marker.payload?.epoch === "number" ? marker.payload.epoch - 1 : undefined;
+    // Blind-spot fix: the boundary alone would hide the newest run below
+    // it too — the user returns to bare bookkeeping rows with no context.
+    // newestUserSeq keeps that run above the chip. Find it by MAX seq, not
+    // by array position: journal order is not guaranteed seq-ascending
+    // (committed-phase rows journal after the marker, above last_seq), and
+    // a positional scan could miss the true newest user_message.
+    let newestUserSeq: number | null = null;
+    for (const e of events) {
+      if (e.seq > boundary) continue;
+      if (e.type === "user_message" && (newestUserSeq == null || e.seq > newestUserSeq)) {
+        newestUserSeq = e.seq;
+      }
+    }
+    // Count only what the fold actually hides: seq ≤ boundary, older than
+    // the kept run. Older distill markers in that range count — Expand
+    // reveals them, so skipping them would under-report. The fold's own
+    // marker (seq === marker.seq, reachable when a legacy boundary equals
+    // it) is the chip's subject, not its content.
+    let count = 0;
+    for (const e of events) {
+      if (e.seq > boundary) continue;
+      if (e.seq === marker.seq) continue;
+      if (newestUserSeq != null && e.seq >= newestUserSeq) continue;
+      count++;
+    }
     return {
       boundarySeq: boundary,
       markerSeq: marker.seq,
-      count: Math.max(0, last - first + 1),
+      epoch,
+      newestUserSeq,
+      count,
       notePath,
       noteName,
     };
   }, [events]);
   const lastDistillSeq = fold?.boundarySeq ?? 0;
+  const foldKeepSeq = fold?.newestUserSeq ?? null;
 
   // Fold expansion is remembered per (conversation, boundary): a new
   // distill moves the boundary and re-collapses, and a workstream switch
@@ -674,19 +711,22 @@ export default function ChatSurface({
   const foldKey = fold ? `${conversationId ?? "default"}:${fold.markerSeq}` : null;
   const expanded = foldKey !== null && expandedKey === foldKey;
 
-  // Collapsed = above the fold boundary. Distill markers themselves are
-  // filtered too — bookkeeping, never window content (the daemon's
-  // windowEvents does the same): a pinned marker's own seq sits above its
-  // last_seq, and the fold chip is its collapsed surface. Expanded shows
-  // the raw journal, markers included.
+  // Collapsed = above the fold boundary, PLUS the newest run at or below
+  // it (foldKeepSeq) so the fold never blanks the latest agent run from
+  // view. Distill markers themselves are filtered too — bookkeeping, never
+  // window content (the daemon's windowEvents does the same): a pinned
+  // marker's own seq sits above its last_seq, and the fold chip is its
+  // collapsed surface. Expanded shows the raw journal, markers included.
   const visibleEvents = useMemo(
     () =>
       expanded
         ? events
         : events.filter(
-            (e) => e.seq > lastDistillSeq && !(e.type === "review_action" && e.payload?.action === "distill"),
+            (e) =>
+              (e.seq > lastDistillSeq || (foldKeepSeq != null && e.seq >= foldKeepSeq)) &&
+              !(e.type === "review_action" && e.payload?.action === "distill"),
           ),
-    [events, lastDistillSeq, expanded],
+    [events, lastDistillSeq, foldKeepSeq, expanded],
   );
 
   // Belt C (§Fix 1): group the visible events into runs — each
@@ -867,8 +907,8 @@ export default function ChatSurface({
         {fold && (
           <div className="fold-chip" role="note">
             <span className="fold-chip-text" title={fold.notePath}>
-              {fold.count} event{fold.count === 1 ? "" : "s"} folded
-              {fold.noteName ? ` → ${fold.noteName}` : ""}
+              {fold.epoch != null ? `epoch ${fold.epoch} · ` : ""}
+              {fold.count} event{fold.count === 1 ? "" : "s"} folded{!expanded && " · click to expand"}
             </span>
             <button
               type="button"

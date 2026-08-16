@@ -71,8 +71,9 @@ export const workstreams: Record<string, Workstream[]> = {
 
 export const conversations: Record<number, Conversation> = {
   1: { id: 1, workstream_id: 1, epoch: 2, state: "active", base_commit_sha: "abc123", created_at: "2026-07-20T10:01:00Z" },
-  // Epochs are post-distill (a marker bumped each of 2 and 3 to 2).
-  2: { id: 2, workstream_id: 2, epoch: 2, state: "active", created_at: "2026-08-05T09:00:00Z" },
+  // Epochs are post-distill (a marker bumped 3 to 2; conv 2 went through
+  // two distills, below, so it sits at 3).
+  2: { id: 2, workstream_id: 2, epoch: 3, state: "active", created_at: "2026-08-05T09:00:00Z" },
   3: { id: 3, workstream_id: 3, epoch: 2, state: "active", created_at: "2026-08-06T15:00:00Z" },
   10: { id: 10, workstream_id: 10, epoch: 1, state: "active", created_at: "2026-08-01T14:01:00Z" },
 };
@@ -128,20 +129,33 @@ export const events: OdoEvent[] = [
     snapshot_sha: "deadbeefcafe0123",
   }),
 
-  // ---------- Events (conversation 2) — everything folded ----------
-  // Legacy marker (no first_seq/last_seq): the UI derives the window from
-  // journal order. Covers the folded-all empty state.
+  // ---------- Events (conversation 2) — two-distill legacy fold ----------
+  // Full history: an epoch-1 distill folded the sketch run, then a second
+  // (legacy schema — no first_seq/last_seq) distill folded everything
+  // before its marker. The newest run below the boundary stays above the
+  // chip (fold blind-spot fix); the older sketch run and BOTH markers are
+  // hidden — and the chip counts the older marker too, because Expand
+  // reveals it (3 hidden). The subject marker is the chip itself, not
+  // counted. Markers carry post-distill counters, so badges read
+  // epoch 2 (first) and epoch 3 (subject).
+  ev("user_message", { text: "Sketch the sidebar sections" }, 2),
+  ev("agent_done", { summary: "Sidebar sections sketched" }, 2),
+  ev("review_action", { action: "distill", epoch: 2 }, 2),
   ev("user_message", { text: "Initial sidebar tree layout" }, 2),
   ev("agent_done", { summary: "Sidebar tree landed" }, 2),
   ev("review_action", {
     action: "distill",
-    epoch: 2,
-    wiki_path: "/Users/yingliangzhang/Projects/odo/wiki/feat-sidebar-tree-epoch-1.md",
+    epoch: 3,
+    wiki_path: "/Users/yingliangzhang/Projects/odo/wiki/feat-sidebar-tree-epoch-2.md",
   }, 2),
 
   // ---------- Events (conversation 3) — partial fold, epoch 2 active ----------
   // Explicit schema marker (first_seq/last_seq/note_sha): the UI prefers
-  // the journaled window. Post-fold activity stays visible.
+  // the journaled window. Post-fold activity stays visible. Two runs sit
+  // inside the pinned window: the older shim run is hidden by the fold,
+  // the newest (patch) run stays above the chip (fold blind-spot fix).
+  ev("user_message", { text: "Bootstrap the daemon shims" }, 3),
+  ev("agent_done", { summary: "Daemon shims bootstrapped" }, 3),
   ev("user_message", { text: "Patch the daemon launch path" }, 3),
   ev("agent_done", { summary: "Daemon launch path patched" }, 3),
   // Committed-phase shape (K3): this message journaled while the fold's
@@ -154,7 +168,7 @@ export const events: OdoEvent[] = [
     epoch: 2,
     wiki_path: "/Users/yingliangzhang/Projects/odo/wiki/fix-daemon-binary-epoch-1.md",
     first_seq: 1,
-    last_seq: 2,
+    last_seq: 4,
     note_sha: "c3d4e5f60718293a",
   }, 3),
   ev("user_message", { text: "Now fix the socket perms" }, 3),
@@ -167,7 +181,7 @@ export const events: OdoEvent[] = [
   ev("user_message", { text: "Parked: sweep the flaky sidebar selector", park: true }),
 
   // A-P0 #1 (Guardian risk taxonomy): one full story of review_action
-  // receipts on CONVERSATION 3 (seqs 8-14) — deliberate: conv 1's
+  // receipts on CONVERSATION 3 (seqs 10-16) — deliberate: conv 1's
   // transcript must stay review-bubble-free or existing diff/inbox specs
   // collide on `.badge-accept` / GetByText("Diff #N"). Rendered newest-
   // first, so row order below is the reverse of what the Ledger panel
@@ -270,7 +284,7 @@ export const events: OdoEvent[] = [
     total_prompt_bytes: 1204000,
     prompt_sha16: "a1b2c3d4e5f60718",
     recall_held_back: 3,
-    replay: { after_seq: 4, first_seq: 8, last_seq: 14, bytes: 62450, dropped_seqs: [5, 7] },
+    replay: { after_seq: 6, first_seq: 10, last_seq: 16, bytes: 62450, dropped_seqs: [7, 9] },
     receipt: {
       "~/.odo/user.md": "0123456789abcdef",
       ".odo/memory.md": "1123456789abcdef",

@@ -38,7 +38,7 @@ test("meter popover lists the journaled composition, verbatim", async ({ page })
   await expect(pop).toContainText("sha16 a1b2c3d4e5f60718");
   await expect(pop).toContainText("~350.0k tok");
   await expect(pop).toContainText("61.0 KB");
-  await expect(pop).toContainText("odo journal range 5 7");
+  await expect(pop).toContainText("odo journal range 7 9");
   await expect(pop).toContainText("3 recall notes");
 
   // The layer list is the receipt's key set, ungrouped — including the
@@ -54,14 +54,19 @@ test("meter popover lists the journaled composition, verbatim", async ({ page })
 });
 
 test("per-turn stats strip: byte-derived sizes, then billed tokens+tok/s", async ({ page }) => {
-  // Three completed runs stay visible (the "Patch" run is folded): the
-  // pre-receipt socket run (out-only size), then the two Wave B turns.
+  // Four completed runs stay visible: the once-folded "Patch" run (fold
+  // blind-spot fix — the newest run below the fold boundary is never
+  // hidden), the pre-receipt socket run, then the two Wave B turns.
   const strips = page.locator(".run-turn-stats");
-  await expect(strips).toHaveCount(3);
+  await expect(strips).toHaveCount(4);
+
+  // The kept run leads: it journaled no agent_text → an honest out 0 B.
+  await expect(strips.nth(0)).toContainText("out 0 B");
+  await expect(strips.nth(0)).not.toContainText("in ");
 
   // Pre-receipt runs: out bytes only — the input number is never fabricated.
-  await expect(strips.nth(0)).toContainText(/out \d+ B/);
-  await expect(strips.nth(0)).not.toContainText("in ");
+  await expect(strips.nth(1)).toContainText(/out \d+ B/);
+  await expect(strips.nth(1)).not.toContainText("in ");
 
   // Billed branch: real token counts → real tok/s over journaled wall time.
   const billed = page.locator(".run-header", { hasText: "out 846 tok" });
