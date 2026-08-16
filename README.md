@@ -68,7 +68,7 @@ M0–M15 complete. 208 commits, ~44K lines (≈29.6K Go incl. tests + ≈14.0K T
 ### Features
 
 - **Conversation-centric**: every run journals typed events (`user_message`, `agent_text`, `agent_tool_call`, `agent_tool_result`, `agent_done`, `agent_error`, `review_action`, `memory_update`) to an append-only SQLite store
-- **Journal tooling** (read-only CLIs, no LLM): `odo journal` folded/range/tail/search replay; `odo recall audit` recall-miss telemetry; `odo skills audit` skill receipt×outcome join + flags; `odo autonomy audit` per-class accept streaks
+- **Journal tooling** (read-only CLIs, no LLM): `odo journal` folded/range/tail/search replay; `odo recall audit` recall-miss telemetry; `odo skills audit` skill receipt×outcome join + flags; `odo autonomy audit` per-class accept streaks; `odo rules audit` memory-rule receipt×outcome join + harmful/effective flags (journaled + ledger.md sinks; self-improving Wave 1 measure step)
 - **Live streaming**: OMP `--mode json` JSONL stream tailed with byte-offset cursor; preview bubble shows in-flight block with pulsing caret; adaptive poll (350ms running / 1500ms idle)
 - **Memory architecture**: 6-layer (journal → epoch notes → topic pages → memory.md → user.md → ledger.md), one-way promotion, contradiction detection + retraction
 - **Diff review**: unified + split view, Accept applies the diff to the project repo and commits, Reject discards the worktree

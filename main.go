@@ -43,10 +43,11 @@ func main() {
 	// `odo journal <sub>` is the read-only rehydration CLI for folded
 	// events; `odo recall audit` (M12 Batch 3a) is the read-only recall
 	// miss-rate report; `odo skills audit` / `odo autonomy audit` (M15)
-	// are read-only outcome-observability reports; `odo unretract <note>`
-	// (M17 F3) is the one WRITE CLI — it journals a false-positive
-	// retraction repair via the store's own write open. Any other
-	// invocation without a subcommand runs the daemon.
+	// are read-only outcome-observability reports; `odo rules audit`
+	// (Wave 1 of the self-improving MVP) is the memory-rule outcome audit
+	// with flag sinks; `odo unretract <note>` (M17 F3) and the rules-audit
+	// sinks are the WRITE CLIs — they journal via the store's own write
+	// open. Any other invocation without a subcommand runs the daemon.
 	if args := flag.Args(); len(args) > 0 {
 		switch args[0] {
 		case "wiki":
@@ -63,6 +64,8 @@ func main() {
 			os.Exit(runSkillsCLI(args[1:]))
 		case "autonomy":
 			os.Exit(runAutonomyCLI(args[1:]))
+		case "rules":
+			os.Exit(runRulesCLI(args[1:]))
 		case "unretract":
 			os.Exit(runUnretractCLI(args[1:]))
 		}

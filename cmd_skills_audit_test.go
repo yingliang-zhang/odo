@@ -24,10 +24,11 @@ import (
 // auditStep is one journaled row of a scripted conversation.
 type auditStep struct {
 	sec     int               // second offset inside the fixture minute
-	kind    string            // "msg" | "done" | "err" | "paneldone" | "accept" | "reject" | "moarej" | "diff"
-	text    string            // msg text
+	kind    string            // "msg" | "done" | "err" | "paneldone" | "accept" | "reject" | "moarej" | "diff" | "snap"
+	text    string            // msg text; snap kind: cohort content
 	receipt map[string]string // msg receipt (path -> block hash)
 	patch   string            // diff kind only: patch content written to disk
+	sha     string            // snap kind only: cohort hash
 }
 
 func (s auditStep) at() time.Time {
@@ -78,6 +79,11 @@ func seedAuditConv(t *testing.T, st *store.Store, projectID int64, wsName string
 			}
 			b, _ := json.Marshal(p)
 			payload = string(b)
+		case "snap":
+			// memory.md cohort row (rules-audit fixtures; journalRuleSnapshots'
+			// exact injected bytes per change).
+			payload = fmt.Sprintf(`{"layer":"memory","cause":"snapshot","source":".odo/memory.md","content":%q,"sha":%q}`,
+				step.text, step.sha)
 		case "done":
 			payload = `{}`
 		case "err":
@@ -98,6 +104,7 @@ func seedAuditConv(t *testing.T, st *store.Store, projectID int64, wsName string
 			"err": store.EventAgentError, "paneldone": store.EventAgentDone,
 			"accept": store.EventReviewAction, "reject": store.EventReviewAction,
 			"moarej": store.EventReviewAction, "autoaccept": store.EventReviewAction,
+			"snap": store.EventMemoryUpdate,
 		}[step.kind]
 		ev, err := st.AppendEvent(ctx, c.ID, typ, payload)
 		if err != nil {
