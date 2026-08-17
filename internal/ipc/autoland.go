@@ -329,7 +329,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// diff stays pending — fail closed, escalation to the human.
 	if !verifyHasPassEvidence(verifyTail) {
 		s.journalAutoLandBlocked(ctx, d, "verify_no_evidence",
-			"verify exit 0 (`"+verifyCmd+"`) but the output tail carries zero test evidence (no PASS token, no ok line, no N-passed count) — a verify that ran no tests proves nothing",
+			capDetail("verify exit 0 (`"+verifyCmd+"`) but the output tail carries zero test evidence (no PASS token, no ok line, no N-passed count) — a verify that ran no tests proves nothing\n\n"+verifyTail),
 			nil, "")
 		return
 	}
@@ -404,6 +404,12 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		"reviews":           reviews,
 		"consensus_verdict": cv,
 		"patch_sha16":       sha16(data),
+		// Tri-model right sidebar gap (read-only run/verify log): the
+		// verify that attested this landing was previously ephemeral —
+		// it rode only the review prompt. Journal it (capped like blocked
+		// details) so the landed row carries its own run output.
+		"verify_cmd":  verifyCmd,
+		"verify_tail": capDetail(verifyTail),
 	}
 	// W5: the risk receipt for exactly the bytes the panel judged.
 	mountRiskReceipt(moaPayload, riskReceiptKeys(diffText))

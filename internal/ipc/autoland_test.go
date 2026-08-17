@@ -220,6 +220,33 @@ func blockedReasons(t *testing.T, st *store.Store, convID int64) []string {
 	return reasons
 }
 
+// blockedDetails returns every auto_land_blocked detail journaled for the
+// conversation, in order (parallel to blockedReasons).
+func blockedDetails(t *testing.T, st *store.Store, convID int64) []string {
+	t.Helper()
+	events, err := st.ListEvents(context.Background(), convID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var details []string
+	for _, e := range events {
+		if e.Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action string `json:"action"`
+			Detail string `json:"detail"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("event %d: %v", e.ID, err)
+		}
+		if p.Action == "auto_land_blocked" {
+			details = append(details, p.Detail)
+		}
+	}
+	return details
+}
+
 func TestAutoLandBlockedPaths(t *testing.T) {
 	// Each case drives s.autoLand to one blocked exit and asserts the
 	// journal row. Cases needing the panel without network isolate HOME so
@@ -320,6 +347,11 @@ func TestAutoLandVerifyNoEvidence(t *testing.T) {
 		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "verify_no_evidence" {
 			t.Errorf("reasons = %v, want [verify_no_evidence]", got)
 		}
+		// Run/verify log: the blocked detail carries the verify output
+		// tail (previously message-only) — the fixture echoes build-only-done.
+		if got := blockedDetails(t, f.st, f.c.ID); len(got) != 1 || !strings.Contains(got[0], "build-only-done") {
+			t.Errorf("details = %v, want one row containing the verify tail (build-only-done)", got)
+		}
 		// Fail closed: the diff stays pending for the human.
 		got, err := f.st.GetDiff(context.Background(), d.ID)
 		if err != nil {
@@ -403,6 +435,15 @@ func TestAutoLandVisualDiffUnanimousAcceptLands(t *testing.T) {
 	}
 	if len(sc.moaRows) != 1 || sc.moaRows[0]["consensus_verdict"] != "accept" {
 		t.Errorf("moa_review rows = %v, want one unanimous-accept evidence row", sc.moaRows)
+	}
+	// Run/verify log (tri-model right sidebar gap): the landed moa_review
+	// journals the verify that attested it — command + capped output tail.
+	// The fixture's .odo-verify is `echo PASS`, so the tail is "PASS\n".
+	if sc.moaRows[0]["verify_cmd"] != "echo PASS" {
+		t.Errorf("moa_review verify_cmd = %v, want 'echo PASS'", sc.moaRows[0]["verify_cmd"])
+	}
+	if !strings.Contains(fmt.Sprint(sc.moaRows[0]["verify_tail"]), "PASS") {
+		t.Errorf("moa_review verify_tail = %v, want the verify output containing PASS", sc.moaRows[0]["verify_tail"])
 	}
 	if len(sc.accepts) != 1 || sc.accepts[0]["actor"] != autoActor || sc.accepts[0]["diff_id"] != float64(d.ID) {
 		t.Errorf("accepts = %v, want exactly one auto_panel accept of diff %d", sc.accepts, d.ID)

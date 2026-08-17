@@ -95,6 +95,16 @@ function ReviewRow({ event }: { event: OdoEvent }) {
       : p.action === "refresh_attempted" && p.phase
         ? p.phase
         : null;
+  // Tri-model right sidebar gap (read-only run/verify log): full verify
+  // output where journaled — blocked rows carry it in `detail` (capped),
+  // landed moa_review rows in verify_cmd/verify_tail. Rendered collapsed
+  // so the ledger stays scannable and the run log stays one click away.
+  const runLog: { cmd?: string; output: string } | null =
+    p.action === "auto_land_blocked" && typeof p.detail === "string" && p.detail !== ""
+      ? { output: p.detail }
+      : p.action === "moa_review" && typeof p.verify_tail === "string" && p.verify_tail !== ""
+        ? { cmd: typeof p.verify_cmd === "string" ? p.verify_cmd : undefined, output: p.verify_tail }
+        : null;
   // auto_panel → "Auto"; the human click path journals no actor (the
   // handleDiffAction contract) and revise rounds may carry actor:"human" —
   // both render "Human".
@@ -135,6 +145,14 @@ function ReviewRow({ event }: { event: OdoEvent }) {
         </span>
       )}
       {detail !== null && <span className="ledger-review-detail">{detail}</span>}
+      {runLog !== null && (
+        <details className="ledger-run-log">
+          <summary>
+            run output{runLog.cmd != null && <code className="ledger-run-cmd">{runLog.cmd}</code>}
+          </summary>
+          <pre className="ledger-run-log-pre">{runLog.output}</pre>
+        </details>
+      )}
     </div>
   );
 }

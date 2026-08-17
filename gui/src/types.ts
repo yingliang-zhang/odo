@@ -171,6 +171,12 @@ export interface EventPayload {
   round?: number;
   outcome?: string;
   phase?: string;
+  // Read-only run/verify log (tri-model right sidebar gap): moa_review rows
+  // from the auto-land pipeline carry the verify that attested the landing —
+  // the command and its capped output tail (previously prompt-ephemeral
+  // only). Blocked rows already carry theirs inside `detail`.
+  verify_cmd?: string;
+  verify_tail?: string;
   // auto_revise_round chains the row to the diff being repaired
   // (settle.go:598): round 1 carries diff_id == origin_diff_id (chain
   // start), later rounds carry the just-evaluated product's id with the
