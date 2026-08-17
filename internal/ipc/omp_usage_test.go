@@ -175,12 +175,12 @@ func TestHandleOmpUsageGracefulDegradation(t *testing.T) {
 		t.Fatalf("unmarshal merged: %v", err)
 	}
 
-	// Both sections should be nil (failed).
-	if merged["usage"] != nil {
-		t.Errorf("expected nil usage, got %v", merged["usage"])
+	// Both sections should be absent (failed, omitempty).
+	if _, ok := merged["usage"]; ok {
+		t.Errorf("expected usage absent (omitempty), got %v", merged["usage"])
 	}
-	if merged["grievances"] != nil {
-		t.Errorf("expected nil grievances, got %v", merged["grievances"])
+	if _, ok := merged["grievances"]; ok {
+		t.Errorf("expected grievances absent (omitempty), got %v", merged["grievances"])
 	}
 
 	// Errors array should have 2 entries.
@@ -222,11 +222,11 @@ func TestHandleOmpUsageOmpNotFound(t *testing.T) {
 		t.Fatalf("unmarshal merged: %v", err)
 	}
 
-	// Both should be nil, errors should be present.
-	if merged["usage"] != nil {
-		t.Errorf("expected nil usage, got %v", merged["usage"])
+	// Both should be absent (omitempty), errors should be present.
+	if _, ok := merged["usage"]; ok {
+		t.Errorf("expected usage absent, got %v", merged["usage"])
 	}
-	if merged["grievances"] != nil {
+	if _, ok := merged["grievances"]; ok {
 		t.Errorf("expected nil grievances, got %v", merged["grievances"])
 	}
 	errs, ok := merged["errors"].([]interface{})
@@ -259,9 +259,9 @@ func TestHandleOmpUsageInvalidJSON(t *testing.T) {
 		t.Fatalf("unmarshal merged: %v", err)
 	}
 
-	// Usage should be nil (invalid JSON), grievances should still work.
-	if merged["usage"] != nil {
-		t.Errorf("expected nil usage (invalid JSON), got %v", merged["usage"])
+	// Usage should be absent (invalid JSON → omitted), grievances should still work.
+	if _, ok := merged["usage"]; ok {
+		t.Errorf("expected usage absent (invalid JSON), got %v", merged["usage"])
 	}
 	grievances, ok := merged["grievances"].([]interface{})
 	if !ok {
@@ -334,8 +334,8 @@ echo "should not reach here"
 	if err := json.Unmarshal(resp.OmpUsage, &merged); err != nil {
 		t.Fatalf("unmarshal merged: %v", err)
 	}
-	// With context cancelled during omp exec, both should be nil.
-	if merged["usage"] != nil {
-		t.Errorf("expected nil usage (context cancelled), got %v", merged["usage"])
+	// With context cancelled during omp exec, usage should be absent (omitempty).
+	if _, ok := merged["usage"]; ok {
+		t.Errorf("expected usage absent (context cancelled), got %v", merged["usage"])
 	}
 }

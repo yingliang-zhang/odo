@@ -435,11 +435,15 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
     }
   }, [projectRoot]);
 
-  // Fetch on mount and every 60s — only while the popover is open (lazy).
-  // When closed, the chip shows a stale summary from the last fetch.
+  // One-time fetch on mount + on projectRoot change, so the chip
+  // summary (provider count, grievance badge) is visible without a click.
+  // The 60s poll runs only while the popover is open (lazy poll).
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
   useEffect(() => {
     if (!open) return;
-    fetchData();
     const timer = window.setInterval(fetchData, OMP_POLL_INTERVAL);
     return () => window.clearInterval(timer);
   }, [open, fetchData]);
@@ -447,9 +451,9 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
   // Derive chip summary: total providers + total grievances.
   const reports = data?.usage?.reports ?? [];
   const grievances = data?.grievances ?? null;
-  const grievanceCount = grievances?.length ?? 0;
+  const grievanceCount = Array.isArray(grievances) ? grievances.length : 0;
   const hasData = reports.length > 0 || grievances != null;
-  const hasErrors = (data?.errors?.length ?? 0) > 0;
+  const hasErrors = (data?.errors?.length ?? 0) > 0 || error != null;
   const unavailable = !hasData && hasErrors;
 
   if (unavailable && !open) {
@@ -487,8 +491,8 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
       {open && (
         <div className="bg-runs-menu omp-usage-popover" role="dialog" aria-label="OMP usage and grievances">
           <div className="ctx-pop-title">OMP usage — read-only (never journaled)</div>
-          {loading && <div className="omp-section omp-loading">loading…</div>}
-          {error && <div className="omp-section omp-error-text">error: {error}</div>}
+          {loading && data == null && <div className="omp-section omp-loading">loading…</div>}
+          {error && data == null && <div className="omp-section omp-error-text">error: {error}</div>}
           {hasErrors && data?.errors && (
             <div className="omp-section omp-error-text">
               {data.errors.map((e, i) => (
@@ -503,13 +507,17 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
             <div key={report.provider} className="omp-provider-group">
               <div className="omp-provider-name mono">{report.provider}</div>
               {(report.limits ?? []).map((limit: OmpUsageLimit) => {
-                const pct = Math.round(limit.amount.usedFraction * 100);
+                const rawPct = Number.isFinite(limit.amount.usedFraction) ? limit.amount.usedFraction * 100 : 0;
+                const pct = Math.round(Math.min(100, Math.max(0, rawPct)));
+                const used = Number.isFinite(limit.amount.used) ? limit.amount.used : 0;
+                const limitVal = Number.isFinite(limit.amount.limit) ? limit.amount.limit : 0;
+                const remaining = Number.isFinite(limit.amount.remaining) ? limit.amount.remaining : 0;
                 return (
                   <div key={limit.id} className="omp-limit-row">
                     <div className="omp-limit-header">
                       <span className="omp-limit-label">{limit.label}</span>
                       <span className="omp-limit-value mono">
-                        {limit.amount.used}/{limit.amount.limit} {limit.amount.unit}
+                        {used}/{limitVal} {limit.amount.unit ?? ""}
                         <span className="omp-limit-pct"> · {pct}%</span>
                       </span>
                     </div>
@@ -520,7 +528,7 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
                       />
                     </div>
                     <div className="omp-limit-resets omp-dim mono">
-                      {limit.amount.remaining} remaining · {formatResetsAt(limit.window.resetsAt)}
+                      {remaining} remaining · {formatResetsAt(limit.window?.resetsAt ?? 0)}
                       {limit.status !== "ok" && <span className="omp-limit-status"> · {limit.status}</span>}
                     </div>
                   </div>

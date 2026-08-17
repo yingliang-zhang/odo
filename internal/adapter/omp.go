@@ -121,7 +121,7 @@ func defaultWrapperPath() string {
 	return filepath.Join(home, ".hermes", "profiles", "orchestrator", "scripts", "omp_with_timeout.sh")
 }
 
-// enrichedEnv returns os.Environ() with a PATH that includes common
+// EnrichedEnv returns os.Environ() with a PATH that includes common
 // tool locations missing when the daemon is launched from a .app bundle
 // (macOS GUI apps get a minimal PATH like /usr/bin:/bin:/usr/sbin:/sbin).
 // Adds homebrew, ~/.local/bin, ~/.cargo/bin, ~/.omp/bin, ~/.hermes/node/bin,
@@ -130,7 +130,7 @@ func defaultWrapperPath() string {
 // Also injects SUDO_CODING_KEY from ~/.zshrc — OMP's models.yml references
 // it by env-var name, and the .app launch environment doesn't source shell
 // profiles so it's missing.
-func enrichedEnv() []string {
+func EnrichedEnv() []string {
 	env := os.Environ()
 	home, _ := os.UserHomeDir()
 	extraPaths := []string{
@@ -302,7 +302,7 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 	args = append(args, prewalkArgs(a.prewalkModel)...)
 	cmd := exec.Command(a.wrapperPath, args...)
 	cmd.Dir = workdir
-	cmd.Env = enrichedEnv()
+	cmd.Env = EnrichedEnv()
 	cmd.Stdout = nil // transcript goes to outputFile via the wrapper
 	stderr := &tailBuffer{}
 	cmd.Stderr = stderr

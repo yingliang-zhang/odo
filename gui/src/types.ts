@@ -746,11 +746,13 @@ export interface OmpUsageData {
 export type OmpGrievance = Record<string, unknown>;
 
 // Merged response from the daemon's omp_usage handler:
-//   { usage: <omp usage JSON | null>, grievances: <array | null>,
+//   { usage: <omp usage JSON>, grievances: <array>,
 //     errors?: string[] }
+// Fields are omitempty on the Go side — absent (undefined) when the
+// corresponding omp command failed, present when it succeeded.
 export interface OmpUsageMerged {
-  usage: OmpUsageData | null;
-  grievances: OmpGrievance[] | null;
+  usage?: OmpUsageData | null;
+  grievances?: OmpGrievance[] | null;
   errors?: string[];
 }
 
