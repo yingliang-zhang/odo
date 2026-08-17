@@ -30,7 +30,13 @@ export default function SkillsPanel({ projectRoot }: Props) {
   // Unmount guard: every async path below checks this before touching
   // state so a late resolution can't setState on a dead component.
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  // Mirrored in MemoryPanel: setup body resets the flag so StrictMode's
+  // double-invoke (setup → cleanup → setup) leaves it true for the second
+  // pass; a cleanup-only guard would stay false and starve every load.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -197,6 +203,7 @@ export default function SkillsPanel({ projectRoot }: Props) {
               <button
                 type="button"
                 className="skill-cancel-btn"
+                aria-label="Cancel edit"
                 disabled={saving}
                 onClick={() => {
                   setEditing(false);

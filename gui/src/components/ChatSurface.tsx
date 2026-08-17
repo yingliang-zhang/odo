@@ -757,16 +757,18 @@ export default function ChatSurface({
     }
     // Listbox keyboard model: ArrowUp/Down move the active row, Enter picks
     // it (instead of sending the "/…" or "@…" draft as a chat message).
-    if (atMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    // IME guard: during CJK composition, arrow keys move the caret in the
+    // candidate window — don't hijack them (K3 final review S2).
+    if ((atMenu || (slashMenuOpen && slashItems.length > 0)) && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       e.preventDefault();
-      const n = atMenu.items.length;
-      setAtIndex((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i + n - 1) % n));
-      return;
-    }
-    if (slashMenuOpen && slashItems.length > 0 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-      e.preventDefault();
-      const n = slashItems.length;
-      setSlashIndex((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i + n - 1) % n));
+      if (atMenu) {
+        const n = atMenu.items.length;
+        setAtIndex((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i + n - 1) % n));
+      } else {
+        const n = slashItems.length;
+        setSlashIndex((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i + n - 1) % n));
+      }
       return;
     }
     if (atMenu && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {

@@ -156,7 +156,13 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
   // Unmount guard: every async fetch below checks this before touching
   // state so a late resolution can't setState on a dead component.
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  // Reset in the setup so React StrictMode's dev double-invoke
+  // (setup → cleanup → setup) leaves the ref true for the second pass;
+  // a cleanup-only effect would stay false and starve every async load.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // (Re-)load the pending batch. Nothing pending (epoch absent/0 or no
   // proposals after the daemon's evidence veto) reads as the empty state —

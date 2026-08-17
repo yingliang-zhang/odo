@@ -1848,14 +1848,14 @@ body {
   color: var(--text);
 }
 .todo-check.checked {
-  color: var(--ok, #3fa35f);
+  color: var(--ok-text);
 }
 
 .todo-glyph {
   pointer-events: none;
 }
 .todo-glyph-done {
-  color: var(--ok, #3fa35f);
+  color: var(--ok-text);
 }
 .todo-glyph-struck {
   color: var(--err, #c34a4a);
@@ -4204,8 +4204,8 @@ body {
 .md-alert-note .md-alert-label { color: var(--link); }
 .md-alert-warning, .md-alert-important { border-left-color: var(--warn); background: rgba(204, 167, 66, 0.06); }
 .md-alert-warning .md-alert-label, .md-alert-important .md-alert-label { color: var(--warn); }
-.md-alert-tip { border-left-color: var(--ok, #3fa35f); background: rgba(63, 163, 95, 0.06); }
-.md-alert-tip .md-alert-label { color: var(--ok, #3fa35f); }
+.md-alert-tip { border-left-color: var(--ok-text); background: rgba(63, 163, 95, 0.06); }
+.md-alert-tip .md-alert-label { color: var(--ok-text); }
 .md-alert-caution { border-left-color: var(--err, #c34a4a); background: rgba(195, 74, 74, 0.06); }
 .md-alert-caution .md-alert-label { color: var(--err, #c34a4a); }
 
@@ -4218,7 +4218,7 @@ body {
 }
 .md-task-item input[type="checkbox"] {
   margin: 0;
-  accent-color: var(--ok, #3fa35f);
+  accent-color: var(--ok-text);
 }
 .md-task-done {
   text-decoration: line-through;
@@ -4951,7 +4951,7 @@ mark {
   margin-left: 4px;
 }
 .run-diff-outcome.accept {
-  color: var(--ok, #3fa35f);
+  color: var(--ok-text);
   background: rgba(63, 163, 95, 0.1);
 }
 .run-diff-outcome.reject {
@@ -5599,6 +5599,12 @@ mark {
   background: var(--bg-raised);
   margin-bottom: 6px;
   overflow: hidden;
+}
+/* Expanded DiffViewer inside an inbox row — must fill the row width
+   so the diff body scrolls instead of clipping (K3 final review S2). */
+.inbox-row > .diff-card {
+  width: 100%;
+  min-width: 0;
 }
 
 .inbox-row-head {
