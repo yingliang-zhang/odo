@@ -18,7 +18,7 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-M0–M15 complete. 208 commits, ~44K lines (≈29.6K Go incl. tests + ≈14.0K TS/CSS/Rust).
+M0–M18 complete. 274 commits, ~67K lines (≈49K Go incl. tests + ≈16K TS/CSS + ≈1.3K Rust).
 
 | Milestone | What it delivers | Tests |
 |---|---|---|
@@ -48,29 +48,44 @@ M0–M15 complete. 208 commits, ~44K lines (≈29.6K Go incl. tests + ≈14.0K T
 | M15 Outcome Loops | `odo skills audit` (receipt×outcome join, flag-only), `odo autonomy audit` (per-class streaks, rung-0 instrumentation, `auto_apply` pref parse), M11 comment truth, OMP memory probe (docs-only) | 15 Go + 47 E2E |
 | M16 Auto-Land | Pref-gated (`auto_apply: main`) unanimous-panel landing: protected-path / supply-chain / new-topdir / test-weakening mechanical gates, mandatory `.odo-verify` re-run, 87K-token cost breaker, one shared adversarial prompt for manual+auto review (batch B), `consensusVerdict` unanimity (fail-open fix), journaled `auto_land_blocked` + `actor:"auto_panel"` audit (streak-excluded). Batch B: verify-evidence + visual-class gates, per-leg `base_url`/`thinking_md` journal honesty, autonomy audit settle header | 7 Go + skip-gated live harness |
 | fix-INT W1–W7 | Integration audit triage: accept TOCTOU + base_stale_at_land (W1), fold allowlist + cap-drop journaling + send-closure assertion (W2), moa_fs_deny replace→merge ADR-0004 (W4), Guardian risk taxonomy + structured review receipts (W5), goal-queue park-and-switch ADR-0005 — durable per-conversation FIFO (cap 8), 3-site auto-dequeue, journal-derived recovery (W6), OMP output-schema flag check (W7) | Go + 10 W6 tests |
+| P0a Stale-Diff Refresh | Rebase/refresh mechanism: pending diffs auto-rebase to current HEAD before verify (P0a), reject blocks on stale base | Go tests |
+| P0b QueueDock | Park/drop/resume parked goals + parked-goal visibility chip; durable per-conversation FIFO | Go + E2E |
+| P1a Review Inbox | Cross-workstream pending-diff inbox (all pending across active workstreams, labeled) | Go + E2E |
+| P1+P2 Auto-Land Polish | Human-gate visual removed (all diffs auto-land by default), parallelized autoLandMu | Go tests |
+| Self-Improving Wave 1 | `odo rules audit` CLI: memory-rule receipt×outcome join, harmful/effective flags; measure → identify → propose → review (MoA) → land → re-measure loop; gate source files protected from auto-land (C0 extension) | Go + ledger sinks |
+| Auto-Land Zero-Manual-Accept | 4 fixes for zero manual intervention: (1) 2/3 majority accept at round cap, (2) supersede old chain diffs on land, (3) path-scoped verify (GUI diffs → tsc+playwright, Go diffs → go test), (4) fixture-path exemption in risk classifier | Go tests |
+| Auto-Land Pipeline Indicator | GUI StatusBar chip: per-diff pipeline status derived from journaled auto_panel rows; Phase 1 GUI-only derivation | tsc + E2E |
+| M17 Detached Curate | Auto-curate runs detached (curateWG); fail-open evaluation; recover-pending-diffs on daemon restart | Go tests |
+| M18 Review Honesty | Per-leg wire receipts (request_sha16 + request_bytes), thinking_md journaling (non-accept only, 4KB cap), base_url provider honesty, truncated veto in majority-accept valve, auto-revise ladder (3 rounds, 64KB diff cap / 16KB comments cap), settle chain derivation, contradiction scan, risk classifier fixture-path exemption | Go tests |
+| OMP Feature Integration | astGrep XS integration, prewalk cost lever (opt-in), `omp bench` CLI, image `@path` separator, moa semaphore | Go + tsc |
+| P2 OMP Stats Panel | StatusBar read-only chip: provider usage limits (progress bars) + grievances count; `omp usage --json` + `omp grievances --json` via daemon IPC (10s timeout, graceful degradation, 60s lazy poll); data never journaled | 6 Go tests + tsc |
 
 ### Planned
 
-- **A1 earned-autonomy ratchet** — rung-0 instrumentation shipped (M15); main-path auto-land shipped pref-gated with unanimous-panel review (M16). Still open: branch-rung landing (`odo/auto-<ws>` batch flow), data-gated on real streak + override-rate numbers from `odo autonomy audit`
+- **Self-improving waves 2–4** — Wave 1 (`odo rules audit` CLI) shipped. Wave 2+: skill proposal quality scoring, retrieval effectiveness, prompt-layer cost analysis; each follows the measure → identify → propose → review (MoA) → land → re-measure loop
+- **D-semantic recall spike** — FTS5 → bge-m3 embedding-based recall; pre-registered thresholds; reads the miss-audit pool from `odo recall audit` (~2 weeks of dogfood data needed first)
 - **Tool-bearing skills** — skill directories (`SKILL.md` + `references/` + `scripts/`) scanned and receipted by directory content hash; agent-authorable scripts stay behind the human apply gate (B-strategy-2)
-- **Design-MoA for nontrivial tasks** — 3 blind design proposals → consolidator → journaled DESIGN LOCK (human amend/veto) → single implementer → existing MoA review; mechanical fixes stay single-model (B-strategy-2)
-- **Auto-register semantics** — projects must not auto-register on connect (real pain observed: probe/scratch dirs got registered during a test run); explicit consent or git-root gate
-- **Cross-examiner** — one-shot mid-discussion second opinion at decision points (DEFER until a concrete decision-point pain is demonstrated; `/panel` already covers manual second opinions)
+- **Design-MoA for nontrivial tasks** — 3 blind design proposals → consolidator → journaled DESIGN LOCK (human amend/veto) → single implementer → existing MoA review; mechanical fixes stay single-model (B-strategy-2). Shipped as R-W4 (`design_moa` IPC, opt-in `prefs design_via: moa`)
+- **GLM gateway thinking-replay investigation** — GLM-5.2 thinking blocks dropped at gateway (verified: E2 probe, 742→42/429). OMP-side replay is correct; residual risk is gateway/upstream transport. Separate workstream.
 - **Per-run diff lock** — move `ExtractDiff` out of `s.mu` to avoid blocking concurrent conversations during git subprocess calls (DEFER until accept latency is observed blocking another conversation)
-- **Split-view comments in split mode** — 💬 comment button exists in both inline and split views; if split-view commenting becomes a daily need, add comment affordance to split view (currently done)
 
 ### WONTFIX (removed from roadmap)
 
 - ~~Experiment ledger~~ — redundant for a single-user app; git history + memory/log.md + ledger.md already capture experiment outcomes
 - ~~P2 polish (contrast audit, palette fuzzy search, combobox wiring)~~ — contrast passes WCAG AA at normal sizes; palette uses substring filter (sufficient); combobox ARIA already present in CommandPalette
 - ~~Vision auto-screenshot finishing layer~~ — premature; core `/vision` route ships with K3 image blocks; the finishing layer needs a demonstrated pain point
+- ~~Cross-examiner~~ — `/panel` already covers manual second opinions; no demonstrated decision-point pain
+- ~~Auto-register semantics~~ — registry guardrail shipped: `isOdoWorktreePath` structurally refuses worktree paths; phantom-project accident path closed
 
 ### Features
 
 - **Conversation-centric**: every run journals typed events (`user_message`, `agent_text`, `agent_tool_call`, `agent_tool_result`, `agent_done`, `agent_error`, `review_action`, `memory_update`) to an append-only SQLite store
 - **Journal tooling** (read-only CLIs, no LLM): `odo journal` folded/range/tail/search replay; `odo recall audit` recall-miss telemetry; `odo skills audit` skill receipt×outcome join + flags; `odo autonomy audit` per-class accept streaks; `odo rules audit` memory-rule receipt×outcome join + harmful/effective flags (journaled + ledger.md sinks; self-improving Wave 1 measure step)
 - **Live streaming**: OMP `--mode json` JSONL stream tailed with byte-offset cursor; preview bubble shows in-flight block with pulsing caret; adaptive poll (350ms running / 1500ms idle)
+- **Auto-land pipeline**: pref-gated (`auto_apply: main`) zero-manual-intervention landing — verify (path-scoped) → 3-model blind panel → unanimous accept → auto-land, or needs_fixes → auto-revise ladder (≤3 rounds) → majority accept (≥2/3) → auto-land; supersede old chain diffs; journaled `auto_land_blocked` + `auto_revise_round` audit
 - **Memory architecture**: 6-layer (journal → epoch notes → topic pages → memory.md → user.md → ledger.md), one-way promotion, contradiction detection + retraction
+- **Self-improving**: measure → identify → propose → review (MoA) → land → re-measure loop; gate source files protected from auto-land (C0 extension); Wave 1 `odo rules audit` shipped
+- **OMP stats panel**: read-only StatusBar chip showing provider usage limits (progress bars) + grievances count; 60s lazy poll, graceful degradation
 - **Diff review**: unified + split view, Accept applies the diff to the project repo and commits, Reject discards the worktree
 - **Sidebar**: 48px collapsed icon rail, 4 sections (Workstreams, Capture, Knowledge, System), ⌘B toggle
 - **Command palette** (⌘K): distill, curate, pin, open wiki, settings, switch workstream
@@ -90,13 +105,15 @@ event, every injected prompt layer (sha16 receipt + byte counts), and every
 verdict lives. Anything derived — memory, skills, autonomy — is rebuildable
 from it, and anything injected is attributable ("what exactly did run N see?").
 
-Three pillars compound on top of that single audit trail:
+Five pillars compound on top of that single audit trail:
 
 | Pillar | Holds | Today |
 |---|---|---|
 | **Memory** | context — epoch notes, topics, memory.md/user.md, durable todo, replay | full lifecycle: auto-distill/fold/curate, CJK recall, receipted injection, miss telemetry (`odo recall audit`) |
 | **Skills** | procedure — how tasks get done | CRUD + keyword-matched injection + distillation gate + outcome telemetry (`odo skills audit`, flag-only) |
-| **Orchestrator** | verdicts → autonomy | journaled accept loop + MoA review; earned-autonomy instrumentation at rung 0 (`odo autonomy audit`) |
+| **Orchestrator** | verdicts → autonomy | journaled accept loop + MoA review; earned-autonomy instrumentation at rung 0 (`odo autonomy audit`); auto-land zero-manual-accept pipeline |
+| **MoA** | 3-model blind review panel, auto-revise ladder, settlement, auto-land | replaces human review; majority-accept valve at round cap; path-scoped verify; supersede old chain diffs |
+| **Self-improving** | agent evolves its own capabilities; linked to memory design pattern | measure → identify → propose → review (MoA) → land → re-measure; Wave 1 `odo rules audit` shipped; gate source files protected from auto-land |
 
 The flywheel: receipts × outcomes → sharper injections → cleaner accepts →
 earned autonomy → more evidence. Models are external and swappable; the
@@ -177,6 +194,8 @@ visibly relieved. The orchestrator can never mark its own milestone complete.
 │  │          │ │  json    │ │ Learner (M4)        │ │
 │  │          │ │ ↗stream  │ │ Ledger (M6)         │ │
 │  │          │ │          │ │ Skill Gate (M9)     │ │
+│  │          │ │          │ │ Auto-Land (M16)     │ │
+│  │          │ │          │ │ Self-Improving (W1) │ │
 │  └──────────┘ └──────────┘ └────────────────────┘ │
 │       │            │                               │
 │       │            ▼                               │
