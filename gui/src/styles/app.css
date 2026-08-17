@@ -2408,6 +2408,14 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   transition: filter 0.15s var(--ease-standard);
 }
 
+/* Send button — same height as the textarea min-height (38px) for visual
+   consistency with park-toggle and model pill. The generic .chat-input > button
+   rule above still applies for base styling; this tightens the padding. */
+.chat-input > button.send-btn {
+  padding: 8px 18px;
+  white-space: nowrap;
+}
+
 .chat-input > button:hover:not(:disabled) {
   filter: brightness(1.1);
 }
@@ -2446,7 +2454,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--text-dim);
-  padding: 7px 8px;
+  padding: 8px 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;

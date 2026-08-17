@@ -1303,7 +1303,7 @@ export default function ChatSurface({
           >
             <Archive size={14} />
           </button>
-          <button type="submit" disabled={sendDisabled || sending || distillLocked || !canSend}>
+          <button type="submit" className="send-btn" disabled={sendDisabled || sending || distillLocked || !canSend}>
             {parkArmed ? strings.composer.park : agentRunning ? strings.composer.steer : strings.composer.send}
           </button>
           <ModelPill

@@ -4,6 +4,7 @@ import { errorMessage } from "../api";
 import { ChevronLeft, ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
 import WorkstreamContextMenu from "./WorkstreamContextMenu";
+import ProjectContextMenu from "./ProjectContextMenu";
 import { strings } from "../strings";
 
 // Phase 3.1: Status dot priority reducer (inspired by Hermes session-row-state.ts).
@@ -146,11 +147,20 @@ export default function Sidebar({
     y: number;
   } | null>(null);
 
+  // Project header context menu state.
+  const [projCtxMenu, setProjCtxMenu] = useState<{
+    root: string;
+    name: string;
+    isActive: boolean;
+    x: number;
+    y: number;
+  } | null>(null);
+
   // GLM Q6c: close the context menu when the sidebar collapses —
   // the menu is position:fixed outside .sidebar-sections and would
   // survive the collapse, floating over the 48px rail.
   useEffect(() => {
-    if (collapsed) setCtxMenu(null);
+    if (collapsed) { setCtxMenu(null); setProjCtxMenu(null); }
   }, [collapsed]);
   // pattern as workstream delete — no native dialogs).
   const [removingRoot, setRemovingRoot] = useState<string | null>(null);
@@ -445,6 +455,10 @@ export default function Sidebar({
           type="button"
           className={clsx("proj-row", isActive && "proj-row-active")}
           aria-expanded={isExpanded}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setProjCtxMenu({ root: p.root, name: p.name, isActive, x: e.clientX, y: e.clientY });
+          }}
           onClick={() => {
             if (!isActive) {
               onSwitchProject(p.root);
@@ -633,6 +647,23 @@ export default function Sidebar({
           onDelete={() => {
             // In-place: arm delete confirm for this row without switching.
             setDeletingId({ root: ctxMenu.projectRoot, id: ctxMenu.ws.id });
+          }}
+        />
+      )}
+      {projCtxMenu && (
+        <ProjectContextMenu
+          name={projCtxMenu.name}
+          isActive={projCtxMenu.isActive}
+          x={projCtxMenu.x}
+          y={projCtxMenu.y}
+          onClose={() => setProjCtxMenu(null)}
+          onSwitch={() => {
+            if (!projCtxMenu.isActive) onSwitchProject(projCtxMenu.root);
+            setProjCtxMenu(null);
+          }}
+          onRemove={() => {
+            setRemovingRoot(projCtxMenu.root);
+            setProjCtxMenu(null);
           }}
         />
       )}
