@@ -1154,7 +1154,7 @@ func TestSettleAutoAcceptNeverResumes(t *testing.T) {
 
 	// Auto accept the latest pending diff (the M16 path when the NEXT
 	// panel is unanimous): lands, but the demotion ledger never moves.
-	if _, err := rig.server.handleDiffAction(context.Background(), d3, "accept", autoActor); err != nil {
+	if _, err := rig.server.handleDiffAction(context.Background(), d3, "accept", autoActor, ""); err != nil {
 		t.Fatalf("auto accept on suspended conversation: %v", err)
 	}
 	settleQuiet(t, rig.store, convID, 1500*time.Millisecond, "a ladder_resumed row after the auto accept", func(sc settleScan) bool {

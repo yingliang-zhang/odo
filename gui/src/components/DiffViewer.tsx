@@ -8,7 +8,7 @@ interface Props {
   diff: Diff;
   // M11 P1: review routes to this project's daemon; null = bridge default.
   projectRoot?: string | null;
-  onAccept: (diffId: number) => Promise<void>;
+  onAccept: (diffId: number, commitMessage?: string) => Promise<void>;
   onReject: (diffId: number) => Promise<void>;
   // D2: cosmetic guard — the daemon's retireRun already refuses to kill a
   // live run; disabling here just makes the safe state visible/click-proof.
@@ -365,6 +365,11 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   const [split, setSplit] = useState(false);
   // File-ref context menu state for file chips.
   const [fileRefMenu, setFileRefMenu] = useState<{ path: string; x: number; y: number } | null>(null);
+  // Tri-model right sidebar gap: editable commit message on manual Accept.
+  // Accept click opens an inline editor prefilled with the daemon default so
+  // the user can see (and veto) the message before it lands.
+  const [commitEditing, setCommitEditing] = useState(false);
+  const [commitMsg, setCommitMsg] = useState("");
   // P1-3: inline diff comments — Map<lineIndex, comment text>
   const [comments, setComments] = useState<Map<number, string>>(new Map());
   const [openLine, setOpenLine] = useState<number | null>(null);
@@ -623,8 +628,11 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
             <button
               className="btn-accept"
               disabled={acting || hasReject || agentRunning}
-              title={agentRunning ? "Agent is running — review after it finishes" : undefined}
-              onClick={() => void act(onAccept)}
+              title={agentRunning ? "Agent is running — review after it finishes" : "Accept with editable commit message"}
+              onClick={() => {
+                setCommitMsg(`odo: accept diff #${diff.id}`);
+                setCommitEditing(true);
+              }}
             >
               Accept
             </button>
@@ -643,6 +651,47 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           </span>
         )}
       </header>
+      {/* Tri-model right sidebar gap: editable commit message on Accept.
+          User sees the exact message before it lands; empty input falls
+          back to the daemon default. */}
+      {commitEditing && (
+        <div className="diff-commit-editor">
+          <input
+            type="text"
+            className="diff-commit-input"
+            value={commitMsg}
+            autoFocus
+            aria-label="Commit message"
+            onChange={(e) => setCommitMsg(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                setCommitEditing(false);
+                void act((id) => onAccept(id, commitMsg.trim() || undefined));
+              } else if (e.key === "Escape") {
+                setCommitEditing(false);
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="btn-accept"
+            disabled={acting}
+            onClick={() => {
+              setCommitEditing(false);
+              void act((id) => onAccept(id, commitMsg.trim() || undefined));
+            }}
+          >
+            Accept
+          </button>
+          <button
+            type="button"
+            className="btn-reject"
+            onClick={() => setCommitEditing(false)}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
       {/* Tri-model: aggregate churn summary bar — +N −M across all files */}
       {(totalAdds > 0 || totalDels > 0) && (
         <div className="diff-churn-bar" aria-label="Diff summary">

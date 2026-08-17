@@ -16,7 +16,7 @@ import type { DiffInfoEx } from "../types";
 
 interface Props {
   rows: DiffInfoEx[];
-  onAccept: (diffId: number) => Promise<void>;
+  onAccept: (diffId: number, commitMessage?: string) => Promise<void>;
   onReject: (diffId: number) => Promise<void>;
   // M11 P1: review routes to this project's daemon; null = bridge default.
   projectRoot?: string | null;

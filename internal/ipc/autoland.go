@@ -411,7 +411,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		log.Printf("auto-land: journal panel verdict for diff %d: %v (NOT landing)", d.ID, err)
 		return
 	}
-	if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor); err != nil {
+	if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor, ""); err != nil {
 		// Drift mid-pipeline (HEAD moved after the entry probe): the
 		// FINAL gate's automatic refresh failed (conflict/error — its
 		// refresh_attempted row already precedes this one). The completed

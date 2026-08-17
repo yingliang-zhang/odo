@@ -638,7 +638,7 @@ func TestHandleDiffActionStaleRefusalIsSentinel(t *testing.T) {
 	gitIn(t, root, "commit", "-m", "user drift")
 	head := gitOut(t, root, "rev-parse", "HEAD")
 
-	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", autoActor)
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", autoActor, "")
 	if !errors.Is(err, errBaseStale) {
 		t.Fatalf("err = %v, want errors.Is(err, errBaseStale)", err)
 	}

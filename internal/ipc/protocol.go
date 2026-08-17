@@ -37,11 +37,11 @@ const (
 	// across all active workstreams of the project, labeled with the owning
 	// workstream — the aggregate review tab's data source.
 	CmdListAllPendingDiffs = "list_all_pending_diffs"
-	CmdListWiki         = "list_wiki"
-	CmdReadWiki         = "read_wiki"
-	CmdReadMemory       = "read_memory"
-	CmdMemoryProposals  = "memory_proposals"
-	CmdApplyMemory      = "apply_memory"
+	CmdListWiki            = "list_wiki"
+	CmdReadWiki            = "read_wiki"
+	CmdReadMemory          = "read_memory"
+	CmdMemoryProposals     = "memory_proposals"
+	CmdApplyMemory         = "apply_memory"
 	// M5 (Curation): curate rewrites topic pages + wiki/index.md from the full
 	// epoch-note set; pin/read_pins manage the human-owned .odo/pins.md;
 	// list_topics lists wiki/topics/*.md for the browser's Topics tab.
@@ -91,31 +91,40 @@ const (
 	// merged into one JSON blob. Read-only display — the data is
 	// never journaled as facts.
 	CmdOmpUsage = "omp_usage"
+	// read_file: inline file preview (tri-model right sidebar gap). Reads a
+	// project-contained text file with the same containment rule as the
+	// GUI's open_path (canonicalize-then-prefix-check); binary files and
+	// escape attempts are rejected. Capped at readFileMaxBytes.
+	CmdReadFile = "read_file"
 )
 
 // Request is one command line on the socket.
 type Request struct {
-	Cmd            string    `json:"cmd"`
-	ProjectRoot    string    `json:"project_root,omitempty"`
-	ConversationID int64     `json:"conversation_id,omitempty"`
-	WorkstreamID   int64     `json:"workstream_id,omitempty"`
-	Name           string    `json:"name,omitempty"`
-	Text           string    `json:"text,omitempty"`
-	Attachments    []string  `json:"attachments,omitempty"`
-	AfterSeq       int       `json:"after_seq,omitempty"`
-	DiffID         int64     `json:"diff_id,omitempty"`
-	Steer          bool      `json:"steer,omitempty"`
+	Cmd            string   `json:"cmd"`
+	ProjectRoot    string   `json:"project_root,omitempty"`
+	ConversationID int64    `json:"conversation_id,omitempty"`
+	WorkstreamID   int64    `json:"workstream_id,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	Text           string   `json:"text,omitempty"`
+	Attachments    []string `json:"attachments,omitempty"`
+	AfterSeq       int      `json:"after_seq,omitempty"`
+	DiffID         int64    `json:"diff_id,omitempty"`
+	// Tri-model right sidebar gap: optional custom commit message for
+	// accept_diff. When non-empty, overrides the daemon's default
+	// "odo: accept diff #N" message so the user can edit before landing.
+	CommitMessage string `json:"commit_message,omitempty"`
+	Steer         bool   `json:"steer,omitempty"`
 	// W6 (ADR-0005): Park journals user_message{park:true} — the durable
 	// queued goal — instead of starting a run; steer and park are mutually
 	// exclusive (refused pre-journal). GoalSeq selects one parked goal for
 	// resume_parked_goal / drop_parked_goal (0 = the queue head).
-	Park    bool `json:"park,omitempty"`
-	GoalSeq int  `json:"goal_seq,omitempty"`
-	Adapter        string    `json:"adapter,omitempty"`
-	Settings       *Settings `json:"settings,omitempty"`
-	Path           string    `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename
-	Scope          string    `json:"scope,omitempty"` // update_skill: "global" | "project" (M8)
-	Epoch          int       `json:"epoch,omitempty"`
+	Park     bool      `json:"park,omitempty"`
+	GoalSeq  int       `json:"goal_seq,omitempty"`
+	Adapter  string    `json:"adapter,omitempty"`
+	Settings *Settings `json:"settings,omitempty"`
+	Path     string    `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename
+	Scope    string    `json:"scope,omitempty"` // update_skill: "global" | "project" (M8)
+	Epoch    int       `json:"epoch,omitempty"`
 	// A1: save_attachment writes a base64-encoded file to .odo/attachments/.
 	Data     string         `json:"data,omitempty"`     // save_attachment: base64-encoded file content
 	Accepted []MemoryAccept `json:"accepted,omitempty"` // apply_memory: accepted proposals
@@ -212,13 +221,13 @@ type ReviewResult struct {
 // the consolidator) — keeps its receipts, drops its text, and marks Error
 // (+ Truncated when the cause was the output cap).
 type DesignProposal struct {
-	Model        string          `json:"model"`
-	Text         string          `json:"text,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	Truncated    bool            `json:"truncated,omitempty"`
-	ToolCalls    []moa.ToolAudit `json:"tool_calls,omitempty"`
-	Budget       int             `json:"budget,omitempty"`
-	OutputTokens int             `json:"output_tokens,omitempty"`
+	Model        string           `json:"model"`
+	Text         string           `json:"text,omitempty"`
+	Error        string           `json:"error,omitempty"`
+	Truncated    bool             `json:"truncated,omitempty"`
+	ToolCalls    []moa.ToolAudit  `json:"tool_calls,omitempty"`
+	Budget       int              `json:"budget,omitempty"`
+	OutputTokens int              `json:"output_tokens,omitempty"`
 	Escalations  []moa.Escalation `json:"escalations,omitempty"`
 	// R-W1.5: sha16 + length of the exact request body whose answer
 	// shipped (the final tool-loop round). Present even on failed legs
@@ -332,4 +341,11 @@ type Response struct {
 	// StatusBar's read-only stats chip. Raw JSON passthrough — the
 	// daemon does not parse or journal this data.
 	OmpUsage json.RawMessage `json:"omp_usage,omitempty"`
+	// read_file: inline file preview (tri-model right sidebar gap). Content
+	// capped at readFileMaxBytes; truncated=true when the cap was hit.
+	// Binary files return an error; req.Path/journal are untouched (the
+	// same containment rule as open_path: canonicalize-then-prefix-check).
+	FileContent   string `json:"file_content,omitempty"`
+	FileResolved  string `json:"file_resolved,omitempty"`
+	FileTruncated bool   `json:"file_truncated,omitempty"`
 }

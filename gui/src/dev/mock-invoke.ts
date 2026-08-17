@@ -43,6 +43,15 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       console.log("[mock] open_path:", args?.path, args?.reveal ? "(reveal)" : "(open)");
       return args?.path ?? "";
     }
+    case "read_file": {
+      // Browser dev mode: return the fixture root path with a short stub
+      // content so the preview dialog renders in dev.
+      return {
+        file_content: `// mock preview of ${args?.path ?? ""}\nexport const devModeStub = true;\n`,
+        file_resolved: `${fx.projects[0].root}/${args?.path ?? ""}`,
+        file_truncated: false,
+      };
+    }
 
     // ---------- Workstreams ----------
     case "list_workstreams": {

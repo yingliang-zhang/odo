@@ -99,6 +99,24 @@ export async function openPath(
   });
 }
 
+// Inline file preview — daemon-side read with the same containment rule as
+// open_path (canonicalize-then-prefix-check). Binary files and escapes are
+// rejected daemon-side; content is capped at 512 KiB (FileTruncated).
+export interface ReadFileResponse {
+  file_content?: string;
+  file_resolved?: string;
+  file_truncated?: boolean;
+}
+export async function readFile(
+  path: string,
+  projectRoot?: string | null,
+): Promise<ReadFileResponse> {
+  return invoke<ReadFileResponse>("read_file", {
+    path,
+    projectRoot: projectRoot ?? null,
+  });
+}
+
 // M11 F1: open a native folder picker; if the user selects a folder, the
 // bridge ensures the daemon is running (auto-registers the project) and
 // returns the new entry. Returns null when the user cancels.
@@ -239,8 +257,14 @@ export function pollEvents(
   });
 }
 
-export function acceptDiff(diffId: number, projectRoot?: string): Promise<AcceptDiffResponse> {
-  return invoke<AcceptDiffResponse>("accept_diff", { diffId, projectRoot: projectRoot ?? null });
+export function acceptDiff(diffId: number, projectRoot?: string, commitMessage?: string): Promise<AcceptDiffResponse> {
+  return invoke<AcceptDiffResponse>("accept_diff", {
+    diffId,
+    projectRoot: projectRoot ?? null,
+    // Tri-model right sidebar gap: user-editable commit message on Accept.
+    // Empty string → daemon default "odo: accept diff #N".
+    commitMessage: commitMessage ?? null,
+  });
 }
 
 export function rejectDiff(diffId: number, projectRoot?: string): Promise<RejectDiffResponse> {

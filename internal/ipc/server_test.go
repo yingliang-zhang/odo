@@ -652,7 +652,7 @@ func TestAcceptStaleBaseRefreshConflict(t *testing.T) {
 	gitIn(t, root, "commit", "-m", "user drift")
 	head := gitOut(t, root, "rev-parse", "HEAD")
 
-	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
 	if err == nil {
 		t.Fatal("accept on a stale, conflicting base: want error")
 	}
@@ -719,7 +719,7 @@ func TestAcceptStaleBaseRefreshClean(t *testing.T) {
 	oldBase := *d.BaseSHA
 	head := driftMain(t, root, "src/drift.go") // disjoint new-file drift
 
-	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
 	if err != nil {
 		t.Fatalf("accept on a stale but disjoint base: %v", err)
 	}
@@ -779,7 +779,7 @@ func TestAcceptFreshBaseNoRefresh(t *testing.T) {
 		}
 	}))
 
-	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", ""); err != nil {
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", ""); err != nil {
 		t.Fatalf("accept on a fresh base: %v", err)
 	}
 	rows := reviewActionRowsFor(t, f, d)
@@ -805,7 +805,7 @@ func TestAcceptFreshBaseProceeds(t *testing.T) {
 		}
 	}))
 
-	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
 	if err != nil {
 		t.Fatalf("accept on a fresh base: %v", err)
 	}
@@ -847,7 +847,7 @@ func TestAcceptNilBaseGrandfathered(t *testing.T) {
 	}))
 	head := gitOut(t, root, "rev-parse", "HEAD")
 
-	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "")
+	resp, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
 	if err != nil {
 		t.Fatalf("accept on a grandfathered (nil base) diff: %v", err)
 	}
@@ -873,7 +873,7 @@ func TestRejectIgnoresStaleBase(t *testing.T) {
 	d := baseBoundDiff(t, f, root, "p.diff", patchSrc("src/a.go", 1, 1, false)) // reject never consults the patch
 	head := driftMain(t, root, "src/drift.go")
 
-	if _, err := s.handleDiffAction(context.Background(), d.ID, "reject", ""); err != nil {
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "reject", "", ""); err != nil {
 		t.Fatalf("reject on a stale base: %v", err)
 	}
 	got, err := f.st.GetDiff(context.Background(), d.ID)
@@ -918,7 +918,7 @@ func TestStackedPendingDiffsSharedBaseSecondRefreshes(t *testing.T) {
 		t.Fatalf("setup bug: bases differ (%s vs %s), want one shared base", *d2.BaseSHA, base)
 	}
 
-	if _, err := s.handleDiffAction(context.Background(), d1.ID, "accept", ""); err != nil {
+	if _, err := s.handleDiffAction(context.Background(), d1.ID, "accept", "", ""); err != nil {
 		t.Fatalf("accept #1 on the shared base: %v", err)
 	}
 	head := gitOut(t, root, "rev-parse", "HEAD")
@@ -926,7 +926,7 @@ func TestStackedPendingDiffsSharedBaseSecondRefreshes(t *testing.T) {
 		t.Fatal("accept #1 must move HEAD (the path-scoped accept commit)")
 	}
 
-	resp, err := s.handleDiffAction(context.Background(), d2.ID, "accept", "")
+	resp, err := s.handleDiffAction(context.Background(), d2.ID, "accept", "", "")
 	if err != nil {
 		t.Fatalf("accept #2 on the now-stale shared base: %v — disjoint diffs must refresh, not refuse", err)
 	}
@@ -2780,6 +2780,112 @@ func TestReadWiki(t *testing.T) {
 		if !strings.Contains(resp.Error, "only files under wiki/ or ~/.odo/user.md are readable") {
 			t.Errorf("read_wiki %s: error = %q", p, resp.Error)
 		}
+	}
+}
+
+// TestReadFile covers the inline file preview IPC (tri-model right sidebar
+// gap): project-relative and absolute paths inside the root round-trip with
+// exact content, ~/.odo is reachable, binary files and escape attempts
+// (absolute outside, ../ traversal, symlink escape) are rejected, and a
+// large file truncates at readFileMaxBytes.
+func TestReadFile(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+
+	// Project file, read via a relative path.
+	target := filepath.Join(root, "src", "main.go")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "package main\n\n// 你好 — unicode stays intact\n"
+	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The daemon canonicalizes (EvalSymlinks) — macOS t.TempDir() under
+	// /var symlinks through /private/var, so compare resolved forms.
+	targetResolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rig.call(t, Request{Cmd: CmdReadFile, Path: "src/main.go"})
+	if got.FileContent != content {
+		t.Errorf("relative read = %q, want %q", got.FileContent, content)
+	}
+	if got.FileResolved != targetResolved {
+		t.Errorf("resolved = %q, want %q", got.FileResolved, targetResolved)
+	}
+	if got.FileTruncated {
+		t.Error("small file unexpectedly truncated")
+	}
+
+	// Same file via its absolute path.
+	got = rig.call(t, Request{Cmd: CmdReadFile, Path: target})
+	if got.FileContent != content {
+		t.Errorf("absolute read = %q, want %q", got.FileContent, content)
+	}
+
+	// ~/.odo is the second allowed tree.
+	secret := filepath.Join(home, ".odo", "notes.md")
+	if err := os.MkdirAll(filepath.Dir(secret), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("secret notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got = rig.call(t, Request{Cmd: CmdReadFile, Path: "~/.odo/notes.md"})
+	if got.FileContent != "secret notes\n" {
+		t.Errorf("~/.odo read = %q, want 'secret notes\\n'", got.FileContent)
+	}
+
+	// Binary file: a NUL in the first 8 KiB is rejected as non-previewable.
+	bin := filepath.Join(root, "blob.bin")
+	if err := os.WriteFile(bin, []byte{'P', 'K', 0, 3}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := rig.callExpectErr(t, Request{Cmd: CmdReadFile, Path: "blob.bin"})
+	if !strings.Contains(resp.Error, "binary") {
+		t.Errorf("binary error = %q, want 'binary'", resp.Error)
+	}
+
+	// Escapes are rejected: absolute outside, ../ traversal, symlink out.
+	outside := filepath.Join(root, "sub", "..", "..", "etc-passwd")
+	for _, p := range []string{
+		"/etc/hosts",
+		filepath.Join(root, "..", "..", "escape.txt"),
+		outside,
+	} {
+		resp := rig.callExpectErr(t, Request{Cmd: CmdReadFile, Path: p})
+		if !strings.Contains(resp.Error, "outside project root") && !strings.Contains(resp.Error, "no such file") {
+			t.Errorf("escape %s: error = %q, want containment/not-found", p, resp.Error)
+		}
+	}
+
+	// Symlink inside the project pointing outside is rejected.
+	link := filepath.Join(root, "evil-link")
+	if err := os.Symlink("/etc", link); err == nil {
+		resp := rig.callExpectErr(t, Request{Cmd: CmdReadFile, Path: "evil-link/hosts"})
+		if !strings.Contains(resp.Error, "outside project root") {
+			t.Errorf("symlink escape: error = %q, want containment", resp.Error)
+		}
+	}
+
+	// A >512KB file truncates at readFileMaxBytes with the flag set.
+	big := filepath.Join(root, "big.txt")
+	bigContent := strings.Repeat("x", readFileMaxBytes+1024)
+	if err := os.WriteFile(big, []byte(bigContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got = rig.call(t, Request{Cmd: CmdReadFile, Path: "big.txt"})
+	if !got.FileTruncated {
+		t.Error("big file: truncated flag missing")
+	}
+	if len(got.FileContent) != readFileMaxBytes {
+		t.Errorf("big file content = %d bytes, want %d", len(got.FileContent), readFileMaxBytes)
 	}
 }
 

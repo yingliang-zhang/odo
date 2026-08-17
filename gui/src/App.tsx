@@ -877,6 +877,9 @@ export default function App() {
         if (document.querySelector(".queue-popover") != null) return;
         // Workstream context menu — same pattern as above.
         if (document.querySelector(".ws-context-menu") != null) return;
+        // File preview overlay — its own Esc listener closes it; without
+        // this gate a bare Esc would also cancel the agent.
+        if (document.querySelector(".file-preview-overlay") != null) return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;
@@ -1239,9 +1242,9 @@ export default function App() {
     [pushToast],
   );
 
-  const handleAccept = useCallback(async (diffId: number) => {
+  const handleAccept = useCallback(async (diffId: number, commitMessage?: string) => {
     try {
-      const resp = unwrap(await acceptDiff(diffId, projectRootRef.current ?? undefined));
+      const resp = unwrap(await acceptDiff(diffId, projectRootRef.current ?? undefined, commitMessage));
       if (resp.applied) {
         setDiff((d) => (d && d.id === diffId ? { ...d, status: "accepted" } : d));
         // P1a: the inbox row resolves instantly (accept works cross-

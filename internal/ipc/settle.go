@@ -432,7 +432,7 @@ func (s *Server) settleRevise(ctx context.Context, d store.Diff, diffText string
 					err.Error(), reviews, "majority_accept")
 				return
 			}
-			if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor); err != nil {
+			if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor, ""); err != nil {
 				// Landing failed (base drift, protected path, etc.) —
 				// fall through to suspension so the human can intervene.
 				s.journalAutoLandBlocked(ctx, d, "majority_accept_landed_failed",

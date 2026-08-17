@@ -505,9 +505,13 @@ async fn poll_events(
 }
 
 #[tauri::command]
-async fn accept_diff(diff_id: i64, project_root: Option<String>) -> Result<Value, String> {
+async fn accept_diff(
+    diff_id: i64,
+    project_root: Option<String>,
+    commit_message: Option<String>,
+) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
-    let req = json!({"cmd": "accept_diff", "diff_id": diff_id});
+    let req = json!({"cmd": "accept_diff", "diff_id": diff_id, "commit_message": commit_message.unwrap_or_default()});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -558,6 +562,15 @@ async fn list_wiki(conversation_id: i64, project_root: Option<String>) -> Result
 async fn read_wiki(path: String, project_root: Option<String>) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     let req = json!({"cmd": "read_wiki", "path": path});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// Tri-model right sidebar gap: inline file preview — daemon-side read with
+// the same containment rule as open_path (canonicalize-then-prefix-check).
+#[tauri::command]
+async fn read_file(path: String, project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "read_file", "path": path});
     run_command(root, req, READ_TIMEOUT).await
 }
 
@@ -1414,6 +1427,7 @@ pub fn run() {
             add_project,
             remove_project,
             open_path,
+            read_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

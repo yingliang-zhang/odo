@@ -2,11 +2,16 @@
 // Right-click context menu for file-path references in chat and diffs.
 // Mirrors the WorkstreamContextMenu pattern: positioned at click coords,
 // viewport-clamped via useLayoutEffect, dismissed on outside-click/Escape/
-// sidebar-scroll. Actions: Open (default app) + Reveal in Folder.
+// sidebar-scroll. Actions: Preview (in-app), Open (default app),
+// Reveal in Folder. The preview renders through the daemon's read_file IPC
+// (same containment rule as open_path) via a self-contained FilePreview —
+// selecting Preview hides the menu and mounts the overlay; closing the
+// overlay ends the whole interaction.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FolderOpen, Eye } from "lucide-react";
+import { FolderOpen, Eye, BookOpen } from "lucide-react";
 import { openPath } from "../api";
+import FilePreview from "./FilePreview";
 
 interface Props {
   /** Relative or absolute path to the file. */
@@ -26,6 +31,10 @@ export default function FileRefContextMenu({
   onClose,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
+  // Preview follows the menu: selecting Preview swaps the context menu for
+  // the overlay (menu dismissed first so its Esc/outside-click handlers die
+  // cleanly); the overlay's own Esc-gated close ends the interaction.
+  const [previewing, setPreviewing] = useState(false);
 
   // Viewport-clamp position (useLayoutEffect = no flash, same as WorkstreamContextMenu).
   const [pos, setPos] = useState({ x, y });
@@ -40,6 +49,7 @@ export default function FileRefContextMenu({
 
   // Dismiss on outside-click, Escape, or sidebar scroll.
   useEffect(() => {
+    if (previewing) return; // the overlay owns dismissal while mounted
     const onDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
@@ -59,7 +69,7 @@ export default function FileRefContextMenu({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
     };
-  }, [onClose]);
+  }, [onClose, previewing]);
 
   const handleOpen = (reveal: boolean) => {
     void openPath(path, reveal, projectRoot).catch((e) => {
@@ -68,7 +78,18 @@ export default function FileRefContextMenu({
     onClose();
   };
 
+  if (previewing) {
+    return (
+      <FilePreview
+        path={path}
+        projectRoot={projectRoot}
+        onClose={onClose}
+      />
+    );
+  }
+
   const items = [
+    { label: "Preview", icon: <BookOpen size={12} />, onClick: () => setPreviewing(true) },
     { label: "Open", icon: <Eye size={12} />, onClick: () => handleOpen(false) },
     { label: "Reveal in Folder", icon: <FolderOpen size={12} />, onClick: () => handleOpen(true) },
   ];

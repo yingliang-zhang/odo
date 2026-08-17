@@ -342,9 +342,9 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	case CmdPollEvents:
 		resp, err = s.handlePollEvents(ctx, req)
 	case CmdAcceptDiff:
-		resp, err = s.handleDiffAction(ctx, req.DiffID, "accept", "")
+		resp, err = s.handleDiffAction(ctx, req.DiffID, "accept", "", req.CommitMessage)
 	case CmdRejectDiff:
-		resp, err = s.handleDiffAction(ctx, req.DiffID, "reject", "")
+		resp, err = s.handleDiffAction(ctx, req.DiffID, "reject", "", "")
 	case CmdReviewDiff:
 		resp, err = s.handleReviewDiff(ctx, req)
 	case CmdAutonomyStatus:
@@ -407,6 +407,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleSaveAttachment(ctx, req)
 	case CmdOmpUsage:
 		resp, err = s.handleOmpUsage(ctx, req)
+	case CmdReadFile:
+		resp, err = s.handleReadFile(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -1921,7 +1923,7 @@ func (s *Server) journalRefreshAttempt(ctx context.Context, d store.Diff, phase,
 // actor is "" for the human click path; the auto-land pipeline passes
 // autoActor so the journaled resolution carries its provenance (and stays
 // out of the human streaks — ComputeAutonomy).
-func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, actor string) (Response, error) {
+func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, actor, commitMessage string) (Response, error) {
 	if diffID == 0 {
 		return Response{}, fmt.Errorf("%s_diff: diff_id is required", action)
 	}
@@ -2071,7 +2073,11 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		// committed don't appear in new worktrees, and the agent can't
 		// modify them in isolation. Unrelated changes the user staged or
 		// left dirty in the main checkout are never swept in.
-		if err := git.CommitPaths(s.projectRoot, fmt.Sprintf("odo: accept diff #%d", diffID), patchPaths); err != nil {
+		commitMsg := fmt.Sprintf("odo: accept diff #%d", diffID)
+		if commitMessage != "" {
+			commitMsg = commitMessage
+		}
+		if err := git.CommitPaths(s.projectRoot, commitMsg, patchPaths); err != nil {
 			// Non-fatal: the file is already applied to the working tree.
 			// The commit just ensures worktree freshness for future runs.
 			log.Printf("accept_diff: auto-commit failed (non-fatal): %v", err)
@@ -3703,6 +3709,98 @@ func (s *Server) handleReadWiki(_ context.Context, req Request) (Response, error
 		return Response{WikiContent: string(b)}, nil
 	}
 	return Response{}, fmt.Errorf("read_wiki: only files under wiki/ or ~/.odo/user.md are readable, got %q", req.Path)
+}
+
+// readFileMaxBytes caps one file's preview payload (tri-model right sidebar
+// gap: inline file preview). 512 KiB keeps a worst-case response under ~1 MiB
+// of JSON, matching the READ_TIMEOUT headroom for poll_events.
+const readFileMaxBytes = 512 * 1024
+
+// handleReadFile returns a text file's content for the GUI's inline preview.
+// Containment mirrors the GUI's open_path rule: relative paths join against
+// the daemon's bound root, ~ expands to $HOME, the candidate is canonicalized
+// (symlinks resolved) and must land inside the project root or ~/.odo.
+// Binary files (NUL in the first 8 KiB) and any escape are rejected.
+// Read-only: no journal writes.
+func (s *Server) handleReadFile(_ context.Context, req Request) (Response, error) {
+	p := req.Path
+	if p == "" {
+		return Response{}, fmt.Errorf("read_file: path is required")
+	}
+	// Resolve: ~ and relative paths → absolute under the bound root.
+	if strings.HasPrefix(p, "~/") || p == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Response{}, fmt.Errorf("read_file: home: %w", err)
+		}
+		p = filepath.Join(home, p[1:])
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(s.projectRoot, p)
+	}
+	canonical, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return Response{}, fmt.Errorf("read_file: %s: %w", p, err)
+	}
+	// Containment: project root (resolved) or ~/.odo — component-wise, so
+	// a symlink pointing out of the project is rejected like for open_path.
+	resolvedRoot := s.resolvedRoot
+	if resolvedRoot == "" {
+		resolvedRoot = s.projectRoot
+	}
+	allowed := canonical == resolvedRoot ||
+		strings.HasPrefix(canonical, resolvedRoot+string(filepath.Separator))
+	if !allowed {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			odoDir := filepath.Join(home, ".odo")
+			if real, rerr := filepath.EvalSymlinks(odoDir); rerr == nil {
+				odoDir = real
+			}
+			allowed = canonical == odoDir ||
+				strings.HasPrefix(canonical, odoDir+string(filepath.Separator))
+		}
+	}
+	if !allowed {
+		return Response{}, fmt.Errorf("read_file: path outside project root: %q", req.Path)
+	}
+	// Binary guard: NUL in the first 8 KiB marks it non-previewable.
+	head := make([]byte, 8192)
+	fh, err := os.Open(canonical)
+	if err != nil {
+		return Response{}, fmt.Errorf("read_file: %w", err)
+	}
+	n, rerr := fh.Read(head)
+	fh.Close()
+	if rerr != nil && rerr != io.EOF {
+		return Response{}, fmt.Errorf("read_file: %w", rerr)
+	}
+	if strings.IndexByte(string(head[:n]), 0) >= 0 {
+		return Response{}, fmt.Errorf("read_file: binary file (not previewable): %q", req.Path)
+	}
+	// Cap: read the whole file only when it fits, else truncate at the cap.
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return Response{}, fmt.Errorf("read_file: %w", err)
+	}
+	var content []byte
+	truncated := false
+	if info.Size() > readFileMaxBytes {
+		content, err = os.ReadFile(canonical)
+		if err == nil && len(content) > readFileMaxBytes {
+			content = content[:readFileMaxBytes]
+			truncated = true
+		}
+	} else {
+		content, err = os.ReadFile(canonical)
+	}
+	if err != nil {
+		return Response{}, fmt.Errorf("read_file: %w", err)
+	}
+	return Response{
+		FileContent:   string(content),
+		FileResolved:  canonical,
+		FileTruncated: truncated,
+	}, nil
 }
 
 // handleReadMemory returns the contents of the three canonical memory files
