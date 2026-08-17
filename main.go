@@ -68,6 +68,8 @@ func main() {
 			os.Exit(runRulesCLI(args[1:]))
 		case "unretract":
 			os.Exit(runUnretractCLI(args[1:]))
+		case "models":
+			os.Exit(runModelsCLI(args[1:]))
 		}
 	}
 

@@ -965,6 +965,14 @@ func (ml *memoryLayers) journalRecall() []interface{} {
 // read-back map, the R4 resume card (cold start only), the M12 durable plan
 // block, the R1 journal replay, attachment hints, and the user's text last
 // (cache-friendly stable prefix).
+// isImageFile reports whether a path has an image file extension.
+func isImageFile(path string) bool {
+	p := strings.ToLower(path)
+	return strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".jpg") ||
+		strings.HasSuffix(p, ".jpeg") || strings.HasSuffix(p, ".webp") ||
+		strings.HasSuffix(p, ".gif")
+}
+
 func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 	var b strings.Builder
 	if ml.user != "" {
@@ -1024,8 +1032,25 @@ func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 		b.WriteString("\n\n---\n\n")
 	}
 	if len(attachments) > 0 {
-		fmt.Fprintf(&b, "Attached files: %s. Read them before proceeding.\n\n",
-			strings.Join(attachments, ", "))
+		// P1: image attachments use @path so OMP injects them as vision
+		// content blocks (agent can see pasted screenshots/diagrams).
+		// Non-image files stay as text mentions (agent reads via read tool).
+		var imagePaths, otherPaths []string
+		for _, p := range attachments {
+			if isImageFile(p) {
+				imagePaths = append(imagePaths, "@"+p)
+			} else {
+				otherPaths = append(otherPaths, p)
+			}
+		}
+		if len(otherPaths) > 0 {
+			fmt.Fprintf(&b, "Attached files: %s. Read them before proceeding.\n\n",
+				strings.Join(otherPaths, ", "))
+		}
+		if len(imagePaths) > 0 {
+			fmt.Fprintf(&b, "Attached images: %s\n\n",
+				strings.Join(imagePaths, ", "))
+		}
 	}
 	b.WriteString(text)
 	return b.String()

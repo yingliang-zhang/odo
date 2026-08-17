@@ -34,6 +34,11 @@ type Settings struct {
 	// stay parsed-and-displayed only. Fail-closed parse unchanged: a
 	// typo must never silently widen apply scope.
 	AutoApply string `json:"auto_apply"`
+	// Prewalk: opt-in cheap model for implementation phase after plan.
+	// Empty = off (use coding model for entire run). When set, the adapter
+	// passes --prewalk --prewalk-into=<model> to OMP, switching to the
+	// smol model after the plan's todo list exists.
+	PrewalkModel string `json:"prewalk_model"`
 }
 
 // autoApplyValues are the valid auto_apply pref values (rung-0 contract).
@@ -147,6 +152,7 @@ func ReadSettings() Settings {
 	if !ValidAutoApply(s.AutoApply) {
 		s.AutoApply = "off"
 	}
+	s.PrewalkModel = LoadPrefsRaw("prewalk_model")
 	return s
 }
 

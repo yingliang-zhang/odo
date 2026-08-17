@@ -29,6 +29,7 @@ import (
 	"context"
 	"log"
 
+	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
@@ -60,7 +61,7 @@ func (s *Server) journalRunAdvisory(ctx context.Context, conversationID int64, m
 // A journal failure is logged (never wedges the drain tail, same posture
 // as journalAuto).
 func (s *Server) journalRunVerdict(ctx context.Context, meta *runMeta, verdict string, retryFired bool) {
-	if _, err := s.store.AppendEvent(ctx, meta.conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+	row := map[string]interface{}{
 		"layer":       "run_verdict",
 		"verdict":     verdict,
 		"texts":       meta.texts,
@@ -68,7 +69,18 @@ func (s *Server) journalRunVerdict(ctx context.Context, meta *runMeta, verdict s
 		"thinkings":   meta.thinkings,
 		"is_retry":    meta.isRetry,
 		"retry_fired": retryFired,
-	})); err != nil {
+	}
+	// P0 (prewalk): journal model identity so the audit trail knows which
+	// model produced the run. When prewalk is active, this records both
+	// the main and prewalk models.
+	if meta.goal != "" {
+		settings := adapter.ReadSettings()
+		row["model"] = settings.CodingModel
+		if settings.PrewalkModel != "" {
+			row["prewalk_model"] = settings.PrewalkModel
+		}
+	}
+	if _, err := s.store.AppendEvent(ctx, meta.conversationID, store.EventMemoryUpdate, mustJSON(row)); err != nil {
 		log.Printf("run-verdict: journal %s for conversation %d: %v", verdict, meta.conversationID, err)
 	}
 }

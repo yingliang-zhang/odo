@@ -98,6 +98,10 @@ type Client struct {
 	BaseURL string
 	APIKey  string
 	HTTP    *http.Client
+	// P2: per-provider concurrency semaphore. Caps simultaneous in-flight
+	// requests to prevent 429 storms when reviewFanout fires 3+ legs at
+	// once. nil = unlimited (backward compatible).
+	sem chan struct{}
 }
 
 // NewClient creates a client from explicit parameters.
@@ -112,7 +116,32 @@ func NewClient(baseURL, apiKey string) *Client {
 		// the output budget (a fixed 300s cap would cut off the very
 		// large-budget requests the escalation policy creates).
 		HTTP: &http.Client{},
+		sem:  make(chan struct{}, defaultMaxInFlight),
 	}
+}
+
+// defaultMaxInFlight caps concurrent requests per client (per provider).
+// 5 = headroom for 3 panel legs + 1 producing run + 1 design-MoA leg.
+const defaultMaxInFlight = 5
+
+// acquire reserves a semaphore slot; release returns it.
+func (c *Client) acquire(ctx context.Context) error {
+	if c.sem == nil {
+		return nil // unlimited (tests)
+	}
+	select {
+	case c.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) release() {
+	if c.sem == nil {
+		return
+	}
+	<-c.sem
 }
 
 // NewClientFromEnv creates a client using the standard env/config defaults.
@@ -670,6 +699,10 @@ func (c *Client) oneShot(ctx context.Context, model string, mkBody func(model st
 // up to the model's hard cap; a still-truncated answer returns the partial
 // text with Result.Truncated set instead of an error.
 func (c *Client) Query(ctx context.Context, model, system, prompt string) (Result, error) {
+	if err := c.acquire(ctx); err != nil {
+		return Result{}, fmt.Errorf("moa: concurrency gate: %w", err)
+	}
+	defer c.release()
 	return c.oneShot(ctx, model, func(model string, maxTok int) interface{} {
 		return messageRequest{
 			Model:     model,
@@ -840,6 +873,10 @@ func ImageMediaType(path string) string {
 // images arrive pre-read (see VisionImage) and are base64-encoded and sent
 // as Anthropic image content blocks before the text prompt.
 func (c *Client) QueryWithImages(ctx context.Context, model, system, prompt string, images []VisionImage) (Result, error) {
+	if err := c.acquire(ctx); err != nil {
+		return Result{}, fmt.Errorf("moa: concurrency gate: %w", err)
+	}
+	defer c.release()
 	// Build content blocks: images first, then text. Same truncation policy
 	// as Query (escalate, then flagged partial).
 	var contentBlocks []map[string]interface{}

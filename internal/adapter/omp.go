@@ -56,6 +56,7 @@ type OMP struct {
 	stateDir    string // <project>/.odo; prompt/session/output files live here
 	timeout     string
 	prefsKey    string // prefs.md key to read model from ("coding" or "orchestrator")
+	prewalkModel string // prefs.md `prewalk_model` — empty = off
 
 	mu           sync.Mutex // guards runs + configLogged; run results sync via done channel
 	runs         map[string]*ompRun
@@ -214,11 +215,12 @@ func NewOMP(stateDir string) *OMP {
 		wrapper = defaultWrapperPath()
 	}
 	return &OMP{
-		wrapperPath: wrapper,
-		stateDir:    stateDir,
-		timeout:     defaultTimeoutSeconds,
-		prefsKey:    "coding",
-		runs:        make(map[string]*ompRun),
+		wrapperPath:  wrapper,
+		stateDir:     stateDir,
+		timeout:      defaultTimeoutSeconds,
+		prefsKey:     "coding",
+		prewalkModel: LoadPrefsRaw("prewalk_model"),
+		runs:         make(map[string]*ompRun),
 	}
 }
 
@@ -295,6 +297,9 @@ func (a *OMP) Start(ctx context.Context, workdir string, prompt string) (string,
 		"--mode", "json",
 	}
 	args = compactionOverlayArgs(model, sessionDir, args)
+	// P0: prewalk opt-in — pass --prewalk flags when a smol model is
+	// configured in prefs (`prewalk_model` key). Empty = off.
+	args = append(args, prewalkArgs(a.prewalkModel)...)
 	cmd := exec.Command(a.wrapperPath, args...)
 	cmd.Dir = workdir
 	cmd.Env = enrichedEnv()
@@ -344,12 +349,22 @@ func compactionOverlayArgs(model, sessionDir string, args []string) []string {
 		return args
 	}
 	overlay := filepath.Join(sessionDir, "odo-compaction.yml")
-	content := fmt.Sprintf("compaction:\n  thresholdTokens: %d\n  thresholdPercent: -1\n", threshold)
+	// Enable astGrep (P0: free AST search for the agent; OMP default is off).
+	content := fmt.Sprintf("compaction:\n  thresholdTokens: %d\n  thresholdPercent: -1\nastGrep:\n  enabled: true\n", threshold)
 	if err := os.WriteFile(overlay, []byte(content), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "odo: compaction overlay for %s: %v (falling back to global omp config)\n", model, err)
 		return args
 	}
 	return append(args, "--config="+overlay)
+}
+
+// prewalkArgs appends --prewalk flags when a prewalk model is configured.
+// The prewalk model is read from prefs (`prewalk_model` key); empty = off.
+func prewalkArgs(prewalkModel string) []string {
+	if prewalkModel == "" {
+		return nil
+	}
+	return []string{"--prewalk", "--prewalk-into=" + prewalkModel}
 }
 
 // Send implements Adapter. Since M1 it appends the steering message to
