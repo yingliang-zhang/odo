@@ -8,9 +8,26 @@ interface Props {
 
 const MAX_ARGS_LEN = 80;
 
+// GLM B5: use the same key:value summary as MessageBubble so the live
+// ticker and the journaled bubble show the same format. Parse string
+// args (daemon journals as JSON string) to match the bubble path.
 function briefArgs(args: unknown): string {
   if (args == null) return "";
-  const raw = typeof args === "string" ? args : JSON.stringify(args);
+  let parsed = args;
+  if (typeof parsed === "string") {
+    try { parsed = JSON.parse(parsed); } catch { /* keep raw */ }
+  }
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    if (entries.length === 0) return "";
+    const parts = entries.slice(0, 3).map(([k, v]) => {
+      const sv = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+      return `${k}: ${sv.slice(0, MAX_ARGS_LEN)}`;
+    });
+    const suffix = entries.length > 3 ? ` +${entries.length - 3}` : "";
+    return parts.join(" · ") + suffix;
+  }
+  const raw = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
   return raw.length > MAX_ARGS_LEN ? raw.slice(0, MAX_ARGS_LEN) + "…" : raw;
 }
 
@@ -40,9 +57,10 @@ export default function ToolTicker({ running, events }: Props) {
         <ul className="tool-ticker-list" ref={listRef}>
           {toolCalls.map((ev) => (
             <li key={ev.seq}>
-              → <span className="tool-name">{ev.payload?.tool ?? "tool"}</span>
+              <span className="tool-arrow" aria-hidden>→</span>{" "}
+              <span className="tool-name">{ev.payload?.tool ?? "tool"}</span>
               {ev.payload?.args != null && (
-                <span className="tool-args">: {briefArgs(ev.payload.args)}</span>
+                <span className="tool-args"> {briefArgs(ev.payload.args)}</span>
               )}
             </li>
           ))}

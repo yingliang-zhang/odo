@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { basename } from "../files";
@@ -103,6 +103,8 @@ function recallTooltip(recall: RecallItem[]): string {
 // data-seq jump anchor without disturbing the flex layout (display: contents).
 export default memo(function MessageBubble({ event, highlight }: { event: OdoEvent; highlight?: string }) {
   const p = event.payload ?? {};
+  // GLM B4: copy feedback for tool results (mirrors CodeBlock pattern).
+  const [copied, setCopied] = useState(false);
 
   let body: ReactNode;
   switch (event.type) {
@@ -244,11 +246,13 @@ export default memo(function MessageBubble({ event, highlight }: { event: OdoEve
                 className="tool-result-copy"
                 title="Copy full result"
                 onClick={() => {
-                  // DSF: ?.catch chain would TypeError — use optional call
-                  navigator.clipboard?.writeText(resultText)?.catch(() => {});
+                  navigator.clipboard?.writeText(resultText)?.then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                  })?.catch(() => {});
                 }}
               >
-                Copy full ({resultBytes.toLocaleString()} chars)
+                {copied ? <Check size={10} aria-hidden /> : `Copy full (${resultBytes.toLocaleString()} chars)`}
               </button>
             )}
           </details>
