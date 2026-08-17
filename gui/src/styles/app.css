@@ -3180,11 +3180,17 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 /* ---------- Belt C: run grouping (spec §Fix 1) ---------- */
 
 /* Run group: must be a flex column so child bubbles retain their
-   align-self (left/right) alignment from .message-list's flex context. */
+   align-self (left/right) alignment from .message-list's flex context.
+   Item 4: content-visibility:auto lets the browser skip layout/paint
+   for scrolled-away groups without unmounting them (preserves search
+   scroll-to-match via data-seq). The newest run-group is always
+   rendered normally because stick-to-bottom keeps it in view. */
 .run-group {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
 }
 
 /* Run separator: a thin line with the run metadata line sitting on top
