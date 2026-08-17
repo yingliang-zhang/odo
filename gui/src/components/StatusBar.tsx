@@ -29,6 +29,11 @@ function estimateLiveDelta(events: readonly OdoEvent[], sinceSeq: number): numbe
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.seq <= sinceSeq) break;
+    // GLM: only count events that are actually injected into the running
+    // agent's context — skip user_message (parked goals are queued, not
+    // injected), review_action, memory_update, etc.
+    if (ev.type !== "agent_text" && ev.type !== "agent_thinking" &&
+        ev.type !== "agent_tool_call" && ev.type !== "agent_tool_result") continue;
     const p = ev.payload ?? {};
     // agent_text: the model's streaming output
     if (typeof p.text === "string") bytes += utf8.encode(p.text).length;
@@ -611,6 +616,8 @@ export default function StatusBar({
   // click jumps. Click-away + Escape close it (TopBar overflow precedent).
   const [runsOpen, setRunsOpen] = useState(false);
   const runsRef = useRef<HTMLSpanElement>(null);
+  // GLM: clipboard copy feedback (2s Check, matches MessageBubble convention).
+  const [pathCopied, setPathCopied] = useState(false);
   useCloseOnClickAway(runsOpen, runsRef, () => setRunsOpen(false));
 
   // A run finishing empties the list — keep the flash clickable target
@@ -633,13 +640,17 @@ export default function StatusBar({
       <button
         type="button"
         className="status-item status-fact-btn"
-        title={projectRoot ? `Click to copy: ${projectRoot}` : "No project loaded"}
+        title={pathCopied ? "Copied!" : projectRoot ? `Click to copy: ${projectRoot}` : "No project loaded"}
         onClick={() => {
           if (projectRoot) {
-            navigator.clipboard?.writeText(projectRoot)?.catch(() => {});
+            navigator.clipboard?.writeText(projectRoot)?.then(() => {
+              setPathCopied(true);
+              setTimeout(() => setPathCopied(false), 2000);
+            })?.catch(() => {});
           }
         }}
       >
+        {pathCopied && <Check size={10} aria-hidden />}
         {workstreamName ?? "—"}
         {conversationId != null && ` · #${conversationId}`}
         {` · epoch ${epoch}`}
