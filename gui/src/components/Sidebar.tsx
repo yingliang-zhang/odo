@@ -97,6 +97,9 @@ interface Props {
   onToggleCollapsed: () => void;
   // Phase 3.7: lazy-fetch workstreams for non-active projects
   onFetchWorkstreams?: (root: string) => Promise<Workstream[]>;
+  // K3 sidebar review: refresh a foreign project's workstream list
+  // after an in-place rename/delete so the remote row updates/disappears.
+  onRefreshRemoteWorkstreams?: (root: string) => Promise<Workstream[]>;
 }
 
 export default function Sidebar({
@@ -121,6 +124,7 @@ export default function Sidebar({
   collapsed,
   onToggleCollapsed,
   onFetchWorkstreams,
+  onRefreshRemoteWorkstreams,
 }: Props) {
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -300,7 +304,17 @@ export default function Sidebar({
             onSubmit={(e) => {
               e.preventDefault();
               const name = (e.currentTarget.elements.namedItem("name") as HTMLInputElement)?.value?.trim();
-              if (name) void onRenameWorkstream(w.id, name, projectRoot);
+              if (name) {
+                void onRenameWorkstream(w.id, name, projectRoot).then(() => {
+                  // K3: refresh the remote workstream list so the renamed row
+                  // shows the new name. Active project is refreshed by App.
+                  if (projectRoot !== activeProjectRoot && onRefreshRemoteWorkstreams) {
+                    void onRefreshRemoteWorkstreams(projectRoot).then((list) => {
+                      setRemoteWorkstreams(prev => ({ ...prev, [projectRoot]: list }));
+                    });
+                  }
+                });
+              }
               setRenamingId(null);
             }}
           >
@@ -355,7 +369,16 @@ export default function Sidebar({
                     onClick={(e) => {
                       e.stopPropagation();
                       setDeletingId(null);
-                      void onDeleteWorkstream(w.id, projectRoot);
+                      void onDeleteWorkstream(w.id, projectRoot).then(() => {
+                        // K3: refresh the remote workstream list so the
+                        // deleted row disappears. Active project is handled
+                        // by App (switch to first remaining or clear).
+                        if (projectRoot !== activeProjectRoot && onRefreshRemoteWorkstreams) {
+                          void onRefreshRemoteWorkstreams(projectRoot).then((list) => {
+                            setRemoteWorkstreams(prev => ({ ...prev, [projectRoot]: list }));
+                          });
+                        }
+                      });
                     }}
                   >
                     <Trash2 size={12} />

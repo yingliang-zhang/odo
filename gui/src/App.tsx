@@ -1453,6 +1453,7 @@ export default function App() {
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onFetchWorkstreams={handleFetchWorkstreams}
+        onRefreshRemoteWorkstreams={handleFetchWorkstreams}
       />
       {settingsOpen && (
         <SettingsPanel
