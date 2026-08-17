@@ -439,8 +439,12 @@ export default function ChatSurface({
   // Slash command autocomplete menu state.
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
+  // Keyboard-driven active row for the slash menu (0 = first).
+  const [slashIndex, setSlashIndex] = useState(0);
   // P3 @-mention completion popup: resolved items for the live @query.
   const [atMenu, setAtMenu] = useState<{ items: CompletionItem[]; query: string } | null>(null);
+  // Keyboard-driven active row for the @ popup.
+  const [atIndex, setAtIndex] = useState(0);
   // Debounce timer + staleness seq for async @ resolution.
   const atTimerRef = useRef<number | null>(null);
   const atSeqRef = useRef(0);
@@ -654,6 +658,7 @@ export default function ChatSurface({
           q === ""
             ? items
             : items.filter((it) => it.label.toLowerCase().includes(q) || it.insert.toLowerCase().includes(q));
+        setAtIndex(0);
         setAtMenu(filtered.length > 0 ? { items: filtered, query } : null);
       });
     }, 100);
@@ -700,6 +705,7 @@ export default function ChatSurface({
     // Slash command autocomplete: show menu when typing /word (no space yet)
     if (val.startsWith("/") && !val.includes(" ") && val.indexOf("/") === 0) {
       setSlashFilter(val.slice(1));
+      setSlashIndex(0);
       setSlashMenuOpen(true);
     } else {
       setSlashMenuOpen(false);
@@ -710,6 +716,31 @@ export default function ChatSurface({
     if (atQuery != null) queueAtResolve(atQuery);
     else closeAtMenu();
   };
+
+  // Slash commands matching the current filter — single source for the
+  // menu render, the active-row clamp, and the Enter pick.
+  const slashItems = SLASH_COMMANDS.filter(
+    (c) => slashFilter === "" || c.cmd.startsWith("/" + slashFilter),
+  );
+
+  // Apply a slash command (mouse or Enter): replace the draft, close the
+  // menu, and park the caret right after the command word.
+  const pickSlash = (cmd: string, args: string) => {
+    setDraft(cmd + args);
+    setSlashMenuOpen(false);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      const pos = cmd.length;
+      textareaRef.current?.setSelectionRange(pos, pos);
+    });
+  };
+
+  // Keep the keyboard-active row visible when arrowing through a long menu.
+  useEffect(() => {
+    document
+      .querySelector(".slash-menu .slash-item.selected, .at-menu .at-item.selected")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [slashIndex, atIndex]);
 
   const handleComposerKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (atMenu && e.key === "Escape") {
@@ -722,6 +753,34 @@ export default function ChatSurface({
       e.preventDefault();
       e.stopPropagation();
       setSlashMenuOpen(false);
+      return;
+    }
+    // Listbox keyboard model: ArrowUp/Down move the active row, Enter picks
+    // it (instead of sending the "/…" or "@…" draft as a chat message).
+    if (atMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      const n = atMenu.items.length;
+      setAtIndex((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i + n - 1) % n));
+      return;
+    }
+    if (slashMenuOpen && slashItems.length > 0 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      const n = slashItems.length;
+      setSlashIndex((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i + n - 1) % n));
+      return;
+    }
+    if (atMenu && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+      e.preventDefault();
+      const item = atMenu.items[Math.min(atIndex, atMenu.items.length - 1)];
+      if (item) pickAtItem(item);
+      return;
+    }
+    if (slashMenuOpen && slashItems.length > 0 && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+      e.preventDefault();
+      const c = slashItems[Math.min(slashIndex, slashItems.length - 1)];
+      if (c) pickSlash(c.cmd, c.args);
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
@@ -1209,9 +1268,9 @@ export default function ChatSurface({
                 <button
                   key={`${item.category ?? "item"}:${item.insert}:${i}`}
                   type="button"
-                  className="at-item"
+                  className={`at-item${i === Math.min(atIndex, atMenu.items.length - 1) ? " selected" : ""}`}
                   role="option"
-                  aria-selected="false"
+                  aria-selected={i === Math.min(atIndex, atMenu.items.length - 1)}
                   onMouseDown={(e) => {
                     e.preventDefault(); // don't blur the textarea
                     pickAtItem(item);
@@ -1225,25 +1284,17 @@ export default function ChatSurface({
             </div>
           )}
           {slashMenuOpen && (
-            <div className="slash-menu">
-              {SLASH_COMMANDS
-                .filter((c) => slashFilter === "" || c.cmd.startsWith("/" + slashFilter))
-                .map((c) => (
+            <div className="slash-menu" role="listbox" aria-label="Slash commands">
+              {slashItems.map((c, i) => (
                   <button
                     key={c.cmd}
                     type="button"
-                    className="slash-item"
+                    role="option"
+                    aria-selected={i === Math.min(slashIndex, slashItems.length - 1)}
+                    className={`slash-item${i === Math.min(slashIndex, slashItems.length - 1) ? " selected" : ""}`}
                     onMouseDown={(e) => {
                       e.preventDefault(); // don't blur the textarea
-                      const newText = c.cmd + c.args;
-                      setDraft(newText);
-                      setSlashMenuOpen(false);
-                      // Focus textarea and put cursor after the command
-                      requestAnimationFrame(() => {
-                        textareaRef.current?.focus();
-                        const pos = c.cmd.length;
-                        textareaRef.current?.setSelectionRange(pos, pos);
-                      });
+                      pickSlash(c.cmd, c.args);
                     }}
                   >
                     <span className="slash-cmd">{c.cmd}</span>

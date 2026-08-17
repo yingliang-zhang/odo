@@ -32,6 +32,10 @@ export default function FileRefContextMenu({
   onClose,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
+  // Captured before the first menu item steals focus via autoFocus, so
+  // closing returns focus to the element that opened the menu.
+  const prevFocusRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
+  useEffect(() => () => prevFocusRef.current?.focus(), []);
   // Preview follows the menu: selecting Preview swaps the context menu for
   // the overlay (menu dismissed first so its Esc/outside-click handlers die
   // cleanly); the overlay's own Esc-gated close ends the interaction.

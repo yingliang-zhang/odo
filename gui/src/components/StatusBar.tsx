@@ -534,7 +534,7 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
       >
         <Activity size={11} aria-hidden="true" />
         OMP{reports.length > 0 && ` · ${reports.length}p`}
-        {grievanceCount > 0 && <span className="omp-grievance-badge">{grievanceCount}</span>}
+        {grievanceCount > 0 && <span className="omp-grievance-badge" aria-label={`${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}`}>{grievanceCount}</span>}
       </button>
       {open && (
         <div className="bg-runs-menu omp-usage-popover" role="dialog" aria-label="OMP usage and grievances">
@@ -749,6 +749,7 @@ export default function StatusBar({
         <button
           type="button"
           className="status-badge"
+          aria-label={`${pendingDiffs} pending diff${pendingDiffs > 1 ? "s" : ""}`}
           title={`${pendingDiffs} pending diff${pendingDiffs > 1 ? "s" : ""}`}
           onClick={() => onBadgeClick("changes")}
         >
@@ -759,6 +760,7 @@ export default function StatusBar({
         <button
           type="button"
           className="status-badge"
+          aria-label={`${wikiNoteCount} wiki notes`}
           title={`${wikiNoteCount} wiki notes`}
           onClick={() => onBadgeClick("wiki")}
         >
@@ -769,6 +771,7 @@ export default function StatusBar({
         <button
           type="button"
           className="status-badge"
+          aria-label={`${pendingMemoryProposals} pending memory proposals`}
           title={`${pendingMemoryProposals} pending memory proposals`}
           onClick={() => onBadgeClick("memory")}
         >

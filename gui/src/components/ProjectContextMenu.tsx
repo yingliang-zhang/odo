@@ -28,6 +28,10 @@ export default function ProjectContextMenu({
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
+  // Captured before the first menu item steals focus via autoFocus, so
+  // closing returns focus to the element that opened the menu.
+  const prevFocusRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
+  useEffect(() => () => prevFocusRef.current?.focus(), []);
 
   useLayoutEffect(() => {
     const menu = menuRef.current;

@@ -234,7 +234,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
 
     case "agent_tool_result": {
       const toolName = p.tool ?? "result";
-      const resultText = typeof p.result === "string" ? p.result : JSON.stringify(p.result, null, 2);
+      const resultText = typeof p.result === "string" ? p.result : JSON.stringify(p.result ?? "", null, 2);
       // Item 8: clamp display to 2000 chars; full text via copy button.
       const resultBytes = resultText.length;
       const clamped = resultBytes > RESULT_CLAMP

@@ -82,6 +82,8 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
         type="button"
         className={`model-pill${open ? " open" : ""}`}
         title={`Coding model: ${model}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
         <span className="model-pill-label">{shortLabel}</span>
@@ -93,6 +95,7 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
             <button
               key={m}
               type="button"
+              role="menuitem"
               className={`model-pill-item${m === model ? " active" : ""}`}
               onClick={() => void selectModel(m)}
             >
@@ -128,6 +131,7 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
           ) : (
             <button
               type="button"
+              role="menuitem"
               className="model-pill-item model-pill-other"
               onClick={() => {
                 setCustomMode(true);

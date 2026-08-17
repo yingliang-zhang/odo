@@ -58,7 +58,6 @@ import type {
   ReviewDiffResponse,
   SendMessageRequest,
   SendMessageResponse,
-  SearchEventsResponse,
   Settings,
   UpdateSettingsRequest,
   UpdateSettingsResponse,
@@ -432,17 +431,6 @@ export async function contradictions(
 ): Promise<ContradictionsResponse> {
   return unwrap(await invoke<ContradictionsResponse>("contradictions", {
     conversationId,
-    projectRoot: projectRoot ?? null,
-  }));
-}
-
-// E P2: cross-conversation search
-export async function searchEvents(
-  text: string,
-  projectRoot?: string,
-): Promise<SearchEventsResponse> {
-  return unwrap(await invoke<SearchEventsResponse>("search_events", {
-    text,
     projectRoot: projectRoot ?? null,
   }));
 }

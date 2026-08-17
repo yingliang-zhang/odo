@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { BookMarked, Plus, Pencil, Trash2, X } from "lucide-react";
 import { listSkills, readSkill, updateSkill, deleteSkill, errorMessage } from "../api";
 import type { SkillInfo } from "../types";
@@ -27,18 +27,23 @@ export default function SkillsPanel({ projectRoot }: Props) {
   const [newScope, setNewScope] = useState<"project" | "global">("project");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Unmount guard: every async path below checks this before touching
+  // state so a late resolution can't setState on a dead component.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const resp = await listSkills(projectRoot ?? undefined);
+      if (!mountedRef.current) return;
       setSkills(resp.skills ?? []);
       setError(null);
     } catch (e) {
-      setError(errorMessage(e));
+      if (mountedRef.current) setError(errorMessage(e));
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, [projectRoot]);
 
@@ -53,11 +58,12 @@ export default function SkillsPanel({ projectRoot }: Props) {
     setContentLoading(true);
     try {
       const resp = await readSkill(skill.path, projectRoot ?? undefined);
+      if (!mountedRef.current) return;
       setContent(resp.skill_content ?? "");
     } catch {
-      setContent("");
+      if (mountedRef.current) setContent("");
     } finally {
-      setContentLoading(false);
+      if (mountedRef.current) setContentLoading(false);
     }
   };
 
@@ -83,17 +89,19 @@ export default function SkillsPanel({ projectRoot }: Props) {
       const name = nameMatch?.[1]?.trim() ?? "untitled";
       const scope = selected?.scope ?? newScope;
       await updateSkill(name, editText, scope, selected?.path, projectRoot ?? undefined);
+      if (!mountedRef.current) return;
       setEditing(false);
       setContent(editText);
       if (selected) {
         setSelected({ ...selected, name });
       }
       await refresh();
+      if (!mountedRef.current) return;
       setError(null);
     } catch (e) {
-      setError(errorMessage(e));
+      if (mountedRef.current) setError(errorMessage(e));
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
   };
 
@@ -102,15 +110,17 @@ export default function SkillsPanel({ projectRoot }: Props) {
     setDeleting(true);
     try {
       await deleteSkill(selected.name, selected.scope, projectRoot ?? undefined);
+      if (!mountedRef.current) return;
       setConfirmingDelete(false);
       setSelected(null);
       setContent("");
       await refresh();
+      if (!mountedRef.current) return;
       setError(null);
     } catch (e) {
-      setError(errorMessage(e));
+      if (mountedRef.current) setError(errorMessage(e));
     } finally {
-      setDeleting(false);
+      if (mountedRef.current) setDeleting(false);
     }
   };
 
@@ -149,6 +159,7 @@ export default function SkillsPanel({ projectRoot }: Props) {
               key={`${s.scope}:${s.name}`}
               type="button"
               className={`skill-row${selected?.name === s.name ? " active" : ""}`}
+              aria-pressed={selected?.name === s.name}
               onClick={() => void selectSkill(s)}
             >
               <span className={`skill-scope-dot scope-${s.scope}`} title={s.scope} />
@@ -201,6 +212,7 @@ export default function SkillsPanel({ projectRoot }: Props) {
               <button
                 type="button"
                 className={`skill-scope-opt${newScope === "project" ? " active" : ""}`}
+                aria-pressed={newScope === "project"}
                 onClick={() => setNewScope("project")}
               >
                 <span className="skill-scope-dot scope-project" /> Project
@@ -209,6 +221,7 @@ export default function SkillsPanel({ projectRoot }: Props) {
               <button
                 type="button"
                 className={`skill-scope-opt${newScope === "global" ? " active" : ""}`}
+                aria-pressed={newScope === "global"}
                 onClick={() => setNewScope("global")}
               >
                 <span className="skill-scope-dot scope-global" /> Global

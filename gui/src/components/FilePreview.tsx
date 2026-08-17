@@ -6,10 +6,11 @@
 // click closes; the overlay is registered in App.tsx's Esc gate so a bare
 // Esc never cancels the agent.
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { readFile, errorMessage } from "../api";
 import { languageFromPath, tokenize } from "../highlight";
+import { useFocusTrap } from "../focusTrap";
 
 interface Props {
   path: string; // project-root-relative OR absolute — daemon resolves
@@ -23,6 +24,10 @@ export default function FilePreview({ path, projectRoot, onClose }: Props) {
   const [content, setContent] = useState("");
   const [resolved, setResolved] = useState("");
   const [truncated, setTruncated] = useState(false);
+  // Modal focus: the trap moves focus into the dialog on open (the close
+  // button is the first focusable) and restores it to the trigger on close.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef);
 
   useEffect(() => {
     let alive = true;
@@ -65,11 +70,14 @@ export default function FilePreview({ path, projectRoot, onClose }: Props) {
     <div
       className="file-preview-overlay"
       role="dialog"
+      aria-modal="true"
       aria-label={`Preview of ${path}`}
       onClick={onClose}
     >
       <div
         className="file-preview-dialog"
+        ref={dialogRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="file-preview-head">

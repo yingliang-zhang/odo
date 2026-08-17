@@ -561,9 +561,6 @@ function getMockSkills(): SkillInfo[] {
   }
   return mockSkills;
 }
-export function resetMockSkills() {
-  mockSkills = null;
-}
 export function getMockSkillsList(): SkillInfo[] {
   return getMockSkills();
 }

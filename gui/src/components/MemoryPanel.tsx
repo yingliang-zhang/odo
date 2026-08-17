@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult } from "../types";
 import LoadingInline from "./LoadingInline";
@@ -153,6 +153,10 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
   const [pins, setPins] = useState<string | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
+  // Unmount guard: every async fetch below checks this before touching
+  // state so a late resolution can't setState on a dead component.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   // (Re-)load the pending batch. Nothing pending (epoch absent/0 or no
   // proposals after the daemon's evidence veto) reads as the empty state —
@@ -160,6 +164,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
   const refreshBatch = useCallback(async () => {
     try {
       const resp = await memoryProposals(conversationId, projectRoot ?? undefined);
+      if (!mountedRef.current) return;
       if ((resp.epoch ?? 0) > 0 && (resp.proposals?.length ?? 0) > 0) {
         setBatch({
           epoch: resp.epoch ?? 0,
@@ -180,10 +185,11 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
       }
       setError(null);
     } catch (e) {
+      if (!mountedRef.current) return;
       setError(`memory proposals failed: ${errorMessage(e)}`);
       setBatch(null);
     } finally {
-      setBatchLoading(false);
+      if (mountedRef.current) setBatchLoading(false);
     }
   }, [conversationId, projectRoot]);
 
@@ -201,13 +207,14 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
         readMemory(projectRoot ?? undefined),
         readPins(projectRoot ?? undefined),
       ]);
+      if (!mountedRef.current) return;
       setFiles(mem);
       setPins(pinsResp.memory_content ?? "");
       setFilesError(null);
     } catch (e) {
-      setFilesError(errorMessage(e));
+      if (mountedRef.current) setFilesError(errorMessage(e));
     } finally {
-      setFilesLoading(false);
+      if (mountedRef.current) setFilesLoading(false);
     }
   }, [projectRoot]);
 
@@ -241,6 +248,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
         projectRoot ?? undefined,
       );
       if (!resp.applied) throw new Error("daemon did not confirm the apply");
+      if (!mountedRef.current) return;
       const memCount = accepted.filter((a) => a.target === "memory.md").length;
       const skillCount = accepted.filter((a) => a.target === "skills").length;
       const userCount = accepted.length - memCount - skillCount;
@@ -265,9 +273,9 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
     } catch (e) {
       // A refusal (e.g. user.md would overflow) leaves the batch pending —
       // the rows stay editable for a retry.
-      setError(`apply failed: ${errorMessage(e)}`);
+      if (mountedRef.current) setError(`apply failed: ${errorMessage(e)}`);
     } finally {
-      setApplyBusy(false);
+      if (mountedRef.current) setApplyBusy(false);
     }
   };
 

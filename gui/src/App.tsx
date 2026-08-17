@@ -255,6 +255,9 @@ export default function App() {
   // auto-open the panel on pre-existing pending diffs.
   const prevDiffsCountRef = useRef(0);
   const bootstrappedRef = useRef(false);
+  // Project/workstream switch sequence: a newer switch bumps this so a
+  // slower in-flight bootstrap can't resolve last and clobber newer state.
+  const switchSeqRef = useRef(0);
   // Read inside callbacks that must stay referentially stable (recordEvents
   // is a poll-effect dependency; a state dep would rebuild the interval).
   const workstreamNameRef = useRef<string | null>(null);
@@ -286,6 +289,8 @@ export default function App() {
   const ledgerChipTimer = useRef<number | undefined>(undefined);
   // Sequence for toast ids (App-level confirmations plus the chips).
   const toastSeqRef = useRef(0);
+  // Pending auto-dismiss timers, tracked so unmount cancels them.
+  const toastTimersRef = useRef<Set<number>>(new Set());
 
   const recordEvents = useCallback((incoming: OdoEvent[]) => {
     if (incoming.length === 0) return;
@@ -723,7 +728,9 @@ export default function App() {
             );
       timer = window.setTimeout(() => {
         if (!alive) return;
-        void tick().then(schedule);
+        // Re-check `alive` after the await: the effect may have been
+        // cleaned up while the tick was in flight.
+        void tick().then(() => { if (alive) schedule(); });
       }, delay);
     };
     // M12 (D-todo): the Plan popover triggers an immediate re-poll after
@@ -737,7 +744,7 @@ export default function App() {
     pollNowRef.current = () => {
       if (!alive || inFlight) return;
       window.clearTimeout(timer);
-      void tick().then(schedule);
+      void tick().then(() => { if (alive) schedule(); });
     };
     schedule();
     return () => { alive = false; window.clearTimeout(timer); };
@@ -999,8 +1006,12 @@ export default function App() {
     async (workstreamId: number, projectRoot?: string) => {
       const root = projectRoot ?? project?.root_path;
       if (workstreamId === workstream?.id && projectRoot === undefined) return;
+      const seq = ++switchSeqRef.current;
       try {
         const resp = unwrap(await bootstrap(root, workstreamId));
+        // A newer switch started while this bootstrap was in flight — its
+        // state is newer, so drop this response entirely.
+        if (seq !== switchSeqRef.current) return;
         // Phase 5: when switching to a foreign project's workstream, adopt
         // the new project state BEFORE applyBootstrap so poll loop and all
         // daemon calls target the correct daemon. Without this, projectRootRef
@@ -1014,10 +1025,12 @@ export default function App() {
         applyBootstrap(resp);
         if (projectRoot && projectRoot !== activeProjectRoot && resp.project) {
           const list = unwrap(await listWorkstreams(resp.project.root_path));
+          if (seq !== switchSeqRef.current) return;
           setWorkstreams(list.workstreams ?? []);
         }
         setError(null);
       } catch (e) {
+        if (seq !== switchSeqRef.current) return;
         setError(`switch failed: ${errorMessage(e)}`);
       }
     },
@@ -1032,18 +1045,24 @@ export default function App() {
   const handleSwitchProject = useCallback(
     async (root: string) => {
       if (root === activeProjectRoot) return;
+      const seq = ++switchSeqRef.current;
       try {
         const resp = unwrap(await bootstrap(root));
+        // A newer switch started while this bootstrap was in flight — its
+        // state is newer, so drop this response entirely.
+        if (seq !== switchSeqRef.current) return;
         setActiveProjectRoot(root);
         setProject(resp.project ?? null);
         projectRootRef.current = resp.project?.root_path ?? null;
         applyBootstrap(resp);
         if (resp.project) {
           const list = unwrap(await listWorkstreams(resp.project.root_path));
+          if (seq !== switchSeqRef.current) return;
           setWorkstreams(list.workstreams ?? []);
         }
         setError(null);
       } catch (e) {
+        if (seq !== switchSeqRef.current) return;
         setError(`project switch failed: ${errorMessage(e)}`);
       }
     },
@@ -1194,9 +1213,22 @@ export default function App() {
     (toast: ToastPayload) => {
       const id = ++toastSeqRef.current;
       setToasts((prev) => [...prev, { ...toast, id }]);
-      window.setTimeout(() => dismissToast(id), TOAST_MS);
+      // Track the timer so unmount cancels it — otherwise a pending toast
+      // dismissal fires setState on a dead component (GLM Event S2).
+      const timer = window.setTimeout(() => {
+        toastTimersRef.current.delete(timer);
+        dismissToast(id);
+      }, TOAST_MS);
+      toastTimersRef.current.add(timer);
     },
     [dismissToast],
+  );
+  useEffect(
+    () => () => {
+      for (const t of toastTimersRef.current) window.clearTimeout(t);
+      toastTimersRef.current.clear();
+    },
+    [],
   );
 
   // M9 P4: owns the full distill UX — the TopBar's busy flag and the

@@ -344,6 +344,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   const [consensus, setConsensus] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
   // M15 (O-1 rung-0): the muted header one-liner — auto-apply pref plus
   // per-class streaks, computed daemon-side when the card opens.
   const [autonomy, setAutonomy] = useState<AutonomyReport | null>(null);
@@ -411,10 +412,15 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
       .join("\n");
     if (body === "" || !onSendComments) return;
     setSendingComments(true);
+    setSendError(null);
     try {
       await onSendComments(`Diff #${diff.id} feedback:\n${body}`);
       setComments(new Map());
       setOpenLine(null);
+    } catch (e) {
+      // Was an unhandled rejection (the call site fires `void sendComments()`);
+      // surface the failure next to the review error instead.
+      setSendError(errorMessage(e));
     } finally {
       setSendingComments(false);
     }
@@ -707,6 +713,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         </div>
       )}
       {reviewError && <div className="review-error">{reviewError}</div>}
+      {sendError && <div className="review-error">Failed to send comments: {sendError}</div>}
       {reviews && (
         <div className="review-results">
           {reviews.length === 0 && (

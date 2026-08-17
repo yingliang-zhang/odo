@@ -38,6 +38,10 @@ export default function WorkstreamContextMenu({
   onDelete,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
+  // Captured before the first menu item steals focus via autoFocus, so
+  // closing returns focus to the element that opened the menu.
+  const prevFocusRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
+  useEffect(() => () => prevFocusRef.current?.focus(), []);
 
   // Adjust position to stay in viewport (useLayoutEffect = no flash).
   const [pos, setPos] = useState({ x, y });
