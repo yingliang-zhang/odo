@@ -20,8 +20,6 @@ export interface ContextMenuItem {
 
 interface Props {
   workstream: Workstream;
-  projectRoot: string;
-  isActiveProject: boolean;
   x: number;
   y: number;
   onClose: () => void;
@@ -106,12 +104,12 @@ export default function WorkstreamContextMenu({
       role="group"
       aria-label={`Actions for ${workstream.name}`}
     >
-      {items.map((item) => (
+      {items.map((item, i) => (
         <button
           key={item.label}
           type="button"
           className={`ws-context-item${item.danger ? " danger" : ""}`}
-          role="menuitem"
+          autoFocus={i === 0}
           onClick={item.onClick}
         >
           {item.icon}

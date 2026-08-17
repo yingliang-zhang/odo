@@ -141,7 +141,12 @@ export default function Sidebar({
     y: number;
   } | null>(null);
 
-  // M11 F8: project-row removal arm state (two-step inline confirm, same
+  // GLM Q6c: close the context menu when the sidebar collapses —
+  // the menu is position:fixed outside .sidebar-sections and would
+  // survive the collapse, floating over the 48px rail.
+  useEffect(() => {
+    if (collapsed) setCtxMenu(null);
+  }, [collapsed]);
   // pattern as workstream delete — no native dialogs).
   const [removingRoot, setRemovingRoot] = useState<string | null>(null);
 
@@ -584,8 +589,6 @@ export default function Sidebar({
       {ctxMenu && (
         <WorkstreamContextMenu
           workstream={ctxMenu.ws}
-          projectRoot={ctxMenu.projectRoot}
-          isActiveProject={ctxMenu.isActiveProject}
           x={ctxMenu.x}
           y={ctxMenu.y}
           onClose={() => setCtxMenu(null)}
