@@ -19,7 +19,11 @@ import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent } from "..
 // Tri-model header gap analysis: estimate bytes accumulated since the last
 // receipted prompt (agent_text + tool_call args + tool_result bodies). This
 // is an estimate — the daemon's true context is only known at the next send.
-// ~4 bytes/char for UTF-8 text (includes tool JSON overhead).
+// Uses TextEncoder for exact UTF-8 byte counts (same pattern as stats.ts).
+const utf8 = new TextEncoder();
+const LIVE_RESULT_CAP = 5000; // bytes — tool results can be huge
+const LIVE_ARGS_CAP = 5000; // bytes — patch payloads can be large
+
 function estimateLiveDelta(events: readonly OdoEvent[], sinceSeq: number): number {
   let bytes = 0;
   for (let i = events.length - 1; i >= 0; i--) {
@@ -27,13 +31,13 @@ function estimateLiveDelta(events: readonly OdoEvent[], sinceSeq: number): numbe
     if (ev.seq <= sinceSeq) break;
     const p = ev.payload ?? {};
     // agent_text: the model's streaming output
-    if (typeof p.text === "string") bytes += p.text.length * 4;
+    if (typeof p.text === "string") bytes += utf8.encode(p.text).length;
     // agent_tool_call: args JSON
-    if (typeof p.args === "string") bytes += p.args.length * 4;
-    else if (p.args != null) bytes += JSON.stringify(p.args).length * 4;
-    // agent_tool_result: result text
-    if (typeof p.result === "string") bytes += Math.min(p.result.length, 5000) * 4;
-    else if (p.result != null) bytes += Math.min(JSON.stringify(p.result).length, 5000) * 4;
+    if (typeof p.args === "string") bytes += utf8.encode(p.args).slice(0, LIVE_ARGS_CAP).length;
+    else if (p.args != null) bytes += Math.min(utf8.encode(JSON.stringify(p.args)).length, LIVE_ARGS_CAP);
+    // agent_tool_result: result text (capped — a single huge result shouldn't dominate)
+    if (typeof p.result === "string") bytes += Math.min(utf8.encode(p.result).length, LIVE_RESULT_CAP);
+    else if (p.result != null) bytes += Math.min(utf8.encode(JSON.stringify(p.result)).length, LIVE_RESULT_CAP);
   }
   return bytes;
 }

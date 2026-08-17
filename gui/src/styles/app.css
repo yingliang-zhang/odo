@@ -486,7 +486,7 @@ body {
   transition: background 0.15s;
 }
 .status-fact-btn:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--bg-input, rgba(255, 255, 255, 0.05));
 }
 
 .status-spacer {
