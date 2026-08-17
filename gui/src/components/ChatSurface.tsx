@@ -297,8 +297,14 @@ function RunHeader({ group }: { group: RunGroup }) {
   const toolCalls = group.events.filter((e) => e.type === "agent_tool_call").length;
   const done = group.events.find((e) => e.type === "agent_done");
   const failed = group.events.find((e) => e.type === "agent_error");
+  // Item 10: surface the diff review outcome in the run header.
+  const reviewAction = group.events.find(
+    (e) => e.type === "review_action" && (e.payload?.action === "accept" || e.payload?.action === "reject"),
+  );
+  const diffOutcome = reviewAction?.payload?.action as string | undefined;
+  const diffId = reviewAction?.payload?.diff_id as number | undefined;
   const status = failed ? "error" : done ? "done" : "running";
-  const icon = failed ? <X size={11} /> : done ? <Check size={11} /> : <LoaderCircle size={11} className="spin" />;
+  const icon = failed ? <X size={11} aria-hidden /> : done ? <Check size={11} aria-hidden /> : <LoaderCircle size={11} aria-hidden className="spin" />;
   const startMs = Date.parse(start.created_at);
   const clock = Number.isNaN(startMs)
     ? "?"
@@ -312,6 +318,11 @@ function RunHeader({ group }: { group: RunGroup }) {
       <span>{clock}</span>
       <span>{`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`}</span>
       {showDuration && <span>{formatElapsed(doneMs - startMs)}</span>}
+      {diffOutcome && (
+        <span className={`run-diff-outcome ${diffOutcome}`}>
+          {diffOutcome === "accept" ? "✓" : "✗"} diff #{diffId ?? "?"} {diffOutcome === "accept" ? "accepted" : "rejected"}
+        </span>
+      )}
       {stats != null && (
         <span
           className="run-turn-stats"
@@ -424,14 +435,15 @@ export default function ChatSurface({
 
   // Auto-follow only while stuck; otherwise surface the pill. New events
   // while scrolled up are exactly the case the pill exists for.
+  // Item 9: early-return when !stickRef to avoid the scrollHeight DOM read
+  // on every 350ms poll when the user has scrolled up (tri-model perf).
   useEffect(() => {
-    const el = listRef.current;
-    if (!el) return;
-    if (stickRef.current) {
-      el.scrollTop = el.scrollHeight;
-    } else {
+    if (!stickRef.current) {
       setNewOutput(true);
+      return;
     }
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
     // Preview changes poll-by-poll without touching events.length, so it
     // joins the follow-the-tail trigger too.
   }, [events.length, preview]);

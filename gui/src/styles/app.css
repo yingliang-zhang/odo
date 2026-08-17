@@ -4626,6 +4626,23 @@ mark {
   font-size: 10px;
 }
 
+/* Item 10: diff review outcome badge in the run header. */
+.run-diff-outcome {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 4px;
+}
+.run-diff-outcome.accept {
+  color: var(--ok, #3fa35f);
+  background: rgba(63, 163, 95, 0.1);
+}
+.run-diff-outcome.reject {
+  color: var(--err, #c34a4a);
+  background: rgba(195, 74, 74, 0.1);
+}
+
 
 .status-adapter {
   background: var(--bg-input);
