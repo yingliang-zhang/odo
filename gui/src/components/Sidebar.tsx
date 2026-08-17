@@ -126,9 +126,12 @@ export default function Sidebar({
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
-  const [renamingId, setRenamingId] = useState<number | null>(null);
+  // DSF: root-keyed armed state — ws ids collide across projects.
+  // Without the root prefix, a slow/failed switch could arm rename/delete
+  // on the wrong project's same-id row.
+  const [renamingId, setRenamingId] = useState<{ root: string; id: number } | null>(null);
   // P2: inline delete confirm — replaces native window.confirm
-  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<{ root: string; id: number } | null>(null);
   // Context menu state: which workstream + position + project root.
   const [ctxMenu, setCtxMenu] = useState<{
     ws: Workstream;
@@ -240,13 +243,13 @@ export default function Sidebar({
   };
 
   // Phase 3.6: workstream actions as data (inspired by Hermes useProjectActions)
-  const workstreamActions = (w: Workstream) => [
+  const workstreamActions = (w: Workstream, projectRoot: string) => [
     {
       label: "Rename",
       icon: <Pencil size={12} />,
       onClick: (e: React.MouseEvent) => {
         e.stopPropagation();
-        setRenamingId(w.id);
+        setRenamingId({ root: projectRoot, id: w.id });
       },
     },
     {
@@ -254,7 +257,7 @@ export default function Sidebar({
       icon: <Trash2 size={12} />,
       onClick: (e: React.MouseEvent) => {
         e.stopPropagation();
-        setDeletingId(w.id);
+        setDeletingId({ root: projectRoot, id: w.id });
       },
     },
   ];
@@ -286,7 +289,7 @@ export default function Sidebar({
           setCtxMenu({ ws: w, projectRoot, isActiveProject, x: e.clientX, y: e.clientY });
         }}
       >
-        {renamingId === w.id && isActiveProject ? (
+        {renamingId != null && renamingId.id === w.id && renamingId.root === projectRoot && isActiveProject ? (
           <form
             className="ws-rename-form"
             onSubmit={(e) => {
@@ -337,7 +340,7 @@ export default function Sidebar({
             </span>
           </button>
             {isActiveProject && (
-              deletingId === w.id ? (
+              deletingId != null && deletingId.id === w.id && deletingId.root === projectRoot ? (
                 <span className="ws-delete-confirm">
                   <span className="ws-delete-confirm-text">Delete?</span>
                   <button
@@ -368,7 +371,7 @@ export default function Sidebar({
                 </span>
               ) : (
                 <span className="ws-actions">
-                  {workstreamActions(w).map((action) => (
+                  {workstreamActions(w, projectRoot).map((action) => (
                     <button
                       key={action.label}
                       type="button"
@@ -597,21 +600,20 @@ export default function Sidebar({
             }
           }}
           onRename={() => {
-            // For remote projects, switch first then enter rename mode.
             if (!ctxMenu.isActiveProject) {
               if (onOpenForeignWorkstream) onOpenForeignWorkstream(ctxMenu.projectRoot, ctxMenu.ws.id);
               else { onSwitchProject(ctxMenu.projectRoot); onSwitchWorkstream(ctxMenu.ws.id); }
             }
-            // Defer setRenamingId so the switch + re-render lands first.
-            setTimeout(() => setRenamingId(ctxMenu.ws.id), 50);
+            // Arm root-keyed rename — the render guard checks both root+id,
+            // so the form only appears once the target project's rows render.
+            setRenamingId({ root: ctxMenu.projectRoot, id: ctxMenu.ws.id });
           }}
           onDelete={() => {
-            // For remote projects, switch first then arm delete confirm.
             if (!ctxMenu.isActiveProject) {
               if (onOpenForeignWorkstream) onOpenForeignWorkstream(ctxMenu.projectRoot, ctxMenu.ws.id);
               else { onSwitchProject(ctxMenu.projectRoot); onSwitchWorkstream(ctxMenu.ws.id); }
             }
-            setTimeout(() => setDeletingId(ctxMenu.ws.id), 50);
+            setDeletingId({ root: ctxMenu.projectRoot, id: ctxMenu.ws.id });
           }}
         />
       )}

@@ -869,6 +869,8 @@ export default function App() {
         // but without this gate a bare Esc would also cancel the agent.
         if (document.querySelector(".model-pill-menu") != null) return;
         if (document.querySelector(".queue-popover") != null) return;
+        // Workstream context menu — same pattern as above.
+        if (document.querySelector(".ws-context-menu") != null) return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;

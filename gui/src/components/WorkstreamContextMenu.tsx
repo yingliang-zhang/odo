@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Pencil, Trash2, ClipboardCopy, ArrowRightLeft } from "lucide-react";
 import type { Workstream } from "../types";
 
@@ -41,9 +41,9 @@ export default function WorkstreamContextMenu({
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Adjust position to stay in viewport.
+  // Adjust position to stay in viewport (useLayoutEffect = no flash).
   const [pos, setPos] = useState({ x, y });
-  useEffect(() => {
+  useLayoutEffect(() => {
     const menu = menuRef.current;
     if (!menu) return;
     const rect = menu.getBoundingClientRect();
@@ -103,7 +103,7 @@ export default function WorkstreamContextMenu({
       ref={menuRef}
       className="ws-context-menu"
       style={{ left: pos.x, top: pos.y }}
-      role="menu"
+      role="group"
       aria-label={`Actions for ${workstream.name}`}
     >
       {items.map((item) => (
