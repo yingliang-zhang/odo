@@ -1676,6 +1676,184 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border-color: var(--accent, var(--border));
 }
 
+/* Hermes-style inline todo stack — renders above the composer as a
+   collapsible card showing live todo items with status glyphs. */
+.todo-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  background: var(--bg-raised);
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.todo-stack-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 2px 0;
+  width: 100%;
+  text-align: left;
+}
+.todo-stack-header:hover {
+  color: var(--text);
+}
+
+.todo-stack-label {
+  flex: 1;
+}
+
+.todo-stack-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.todo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.todo-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.todo-row.busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.todo-row.struck .todo-text {
+  text-decoration: line-through;
+  color: var(--text-dim);
+}
+.todo-row.stale .todo-text {
+  color: var(--text-dim);
+}
+
+.todo-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.todo-check:hover {
+  color: var(--text);
+}
+.todo-check.checked {
+  color: var(--ok, #3fa35f);
+}
+
+.todo-glyph {
+  pointer-events: none;
+}
+.todo-glyph-done {
+  color: var(--ok, #3fa35f);
+}
+.todo-glyph-struck {
+  color: var(--err, #c34a4a);
+}
+.todo-glyph-open {
+  opacity: 0.5;
+}
+.todo-glyph-stale {
+  opacity: 0.3;
+}
+
+.todo-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todo-stale-mark {
+  color: var(--text-dim);
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+.todo-strike {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 2px 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.todo-row:hover .todo-strike,
+.todo-strike:focus-visible {
+  opacity: 1;
+}
+.todo-strike:hover {
+  color: var(--err, #c34a4a);
+}
+
+.todo-add {
+  display: flex;
+  padding: 2px 4px;
+}
+
+.todo-add input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 8px;
+  outline: none;
+}
+.todo-add input:focus {
+  border-color: var(--accent, var(--border));
+}
+
+.todo-add-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.todo-add-btn:hover {
+  color: var(--text);
+}
+
 /* W6 (goal queue): the composer "Queue · N" chip and its popover — the
    parked-goal FIFO. Same hairline chip + anchored popover family as the
    Plan chip (shared classes carry the base geometry); these rules add the
