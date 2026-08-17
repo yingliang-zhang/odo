@@ -93,7 +93,7 @@ const INLINE_SOURCE = String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|
 // Tri-model open file: conservative path detection for inline code spans.
 // Gate loosely (JS) — the Rust side validates existence + containment.
 // Matches: src/main.go, src/main.go:42, /abs/path/x.ts, ~/path, wiki/note.md
-// Rejects: URLs (https://), package names (encoding/json), bare words.
+// Rejects: URLs (https://), Go package names (encoding/json), bare words.
 const FILE_EXT = /\.(go|rs|ts|tsx|js|jsx|py|md|json|toml|yaml|yml|sh|sql|css|html|txt|lock|mod|sum|proto|gradle)$/i;
 function looksLikeFilePath(text: string): boolean {
   const t = text.trim();
@@ -102,8 +102,13 @@ function looksLikeFilePath(text: string): boolean {
   if (/^[a-z]+:\/\//i.test(t)) return false;
   // Strip trailing :line or :line-range.
   const stripped = t.replace(/:\d+(-\d+)?$/, "");
-  // Must contain / or ~, OR have a known file extension.
-  if (stripped.includes("/") || stripped.startsWith("~")) return true;
+  // Anchored paths: absolute, home-relative, or explicit relative (./ ../).
+  if (stripped.startsWith("/") || stripped.startsWith("~") ||
+      stripped.startsWith("./") || stripped.startsWith("../")) return true;
+  // Slash-containing paths: require a known file extension to avoid
+  // false positives like Go import paths (encoding/json, net/http).
+  if (stripped.includes("/") && FILE_EXT.test(stripped)) return true;
+  // Bare filenames with known extensions (go.mod, package.json).
   if (FILE_EXT.test(stripped)) return true;
   return false;
 }
@@ -463,11 +468,11 @@ function renderBlock(block: Block, index: number, highlight: string | undefined,
               return (
                 <li key={ii} className="md-task-item">
                   <input type="checkbox" checked={checked} readOnly aria-label={`Task: ${taskMatch[2]}`} />
-                  <span className={checked ? "md-task-done" : ""}>{parseInline(taskMatch[2], highlight, `${key}-${ii}`)}</span>
+                  <span className={checked ? "md-task-done" : ""}>{parseInline(taskMatch[2], highlight, `${key}-${ii}`, projectRoot)}</span>
                 </li>
               );
             }
-            return <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`)}</li>;
+            return <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`, projectRoot)}</li>;
           })}
         </ul>
       );
@@ -475,7 +480,7 @@ function renderBlock(block: Block, index: number, highlight: string | undefined,
       return (
         <ol key={key}>
           {block.items.map((item, ii) => (
-            <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`)}</li>
+            <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`, projectRoot)}</li>
           ))}
         </ol>
       );
