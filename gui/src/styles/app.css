@@ -1156,7 +1156,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   min-width: 160px;
   background: var(--bg-elevated, var(--bg-raised));
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 4px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
@@ -1170,7 +1170,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text);
   font-size: 12px;
   padding: 5px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
 }
@@ -2136,7 +2136,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   gap: 3px;
   background: var(--bg-input);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   color: var(--text-dim);
   font-size: 11px;
   padding: 3px 8px;
@@ -2163,7 +2163,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   min-width: 200px;
   background: var(--bg-elevated, var(--bg-raised));
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 4px;
   z-index: 100;
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
@@ -2178,7 +2178,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text-dim);
   font-size: 12px;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
 }
@@ -2414,6 +2414,18 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .chat-input > button.send-btn {
   padding: 8px 18px;
   white-space: nowrap;
+}
+
+/* Composer control height contract: all controls in the chat-input row
+   share a 38px min-height so bottoms align AND tops align.
+   Tri-model sizing audit 3/3 consensus: send=39px, park=32px, pill=20px
+   before this fix. min-height + border-box makes them all 38px. */
+.chat-input > button.send-btn,
+.chat-input > button.stop-btn,
+.chat-input > button.park-toggle,
+.chat-input .model-pill {
+  min-height: 38px;
+  box-sizing: border-box;
 }
 
 .chat-input > button:hover:not(:disabled) {
@@ -2869,7 +2881,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 
 .btn-accept,
 .btn-reject {
-  border: none;
+  border: 1px solid transparent;
   border-radius: 6px;
   color: #fff;
   padding: 6px 14px;
@@ -2963,8 +2975,8 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border: none;
   color: var(--text-dim);
   font: inherit;
-  font-size: 12px;
-  padding: 3px 10px;
+  font-size: 13px;
+  padding: 6px 14px;
   cursor: pointer;
 }
 
@@ -3900,7 +3912,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text-dim);
-  padding: 4px 12px;
+  padding: 5px 12px;
   font: inherit;
   font-size: 12px;
   cursor: pointer;
