@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, memo, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 import { tokenize, type Language } from "../highlight";
 
@@ -355,11 +355,11 @@ function renderBlock(block: Block, index: number, highlight: string | undefined)
   }
 }
 
-export default function Markdown({ content, className, highlight }: Props) {
+export default memo(function Markdown({ content, className, highlight }: Props) {
   const blocks = parseBlocks(content);
   return (
     <div className={className !== undefined ? `markdown ${className}` : "markdown"}>
       {blocks.map((b, bi) => renderBlock(b, bi, highlight))}
     </div>
   );
-}
+});

@@ -597,8 +597,24 @@ export default function App() {
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
         // M7: transient in-flight block preview — replaced wholesale per
-        // poll; renders as the dimmed preview bubble.
-        setPreview(resp.preview ?? null);
+        // poll; renders as the dimmed preview bubble. Only update state
+        // when the preview actually changed (reference equality from the
+        // daemon's JSON is already stable within a poll; the tri-model
+        // review found setPreview on every poll caused unnecessary
+        // re-renders of the entire runGroups.map tree).
+        const nextPreview = resp.preview ?? null;
+        setPreview((prev) => {
+          if (prev === nextPreview) return prev;
+          // Shallow-compare type + text/tool to catch semantically-identical
+          // previews that arrive as different object references.
+          if (prev != null && nextPreview != null &&
+              prev.type === nextPreview.type &&
+              prev.payload?.text === nextPreview.payload?.text &&
+              prev.payload?.tool === nextPreview.payload?.tool) {
+            return prev;
+          }
+          return nextPreview;
+        });
         // The daemon always reports the latest diff (any status); only a
         // pending one is actionable in the UI.
         if (resp.diff) setDiff(resp.diff);

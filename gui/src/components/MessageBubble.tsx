@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { basename } from "../files";
@@ -94,7 +95,7 @@ function recallTooltip(recall: RecallItem[]): string {
 // Belt B: agent_text renders as markdown; `highlight` wraps occurrences of
 // the chat-search query in <mark>. The .bubble-mount wrapper carries the
 // data-seq jump anchor without disturbing the flex layout (display: contents).
-export default function MessageBubble({ event, highlight }: { event: OdoEvent; highlight?: string }) {
+export default memo(function MessageBubble({ event, highlight }: { event: OdoEvent; highlight?: string }) {
   const p = event.payload ?? {};
 
   let body: ReactNode;
@@ -277,4 +278,4 @@ export default function MessageBubble({ event, highlight }: { event: OdoEvent; h
       {body}
     </div>
   );
-}
+});
