@@ -2122,8 +2122,9 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 /* Model pill in the composer (tri-model gap analysis feature 3). */
 .model-pill-wrap {
   position: relative;
-  align-self: center;
+  align-self: flex-end;
   margin-left: 4px;
+  margin-bottom: 1px;
 }
 .model-pill {
   display: flex;
