@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -140,6 +141,9 @@ func lastReviewAction(events []store.Event, action string) *store.Event {
 //   - proposals: the length of the proposals array on the learner's
 //     memory_propose event; "0 (no memory_propose event)" when the learner
 //     proposed nothing (the absence is the record).
+//   - learner vetoes: kept/dropped counts from the memory_propose event's
+//     stats field (memory_kept/dropped, user_kept/dropped) — the ratio
+//     exposes learner quality without a separate audit.
 //   - recall notes: recallCount (from lastRecallCount), citing the
 //     user_message whose recall array was measured.
 func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCount int, distillEpoch int) []ledgerMetric {
@@ -160,6 +164,7 @@ func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCou
 	if pe := lastReviewActionByEpoch(events, "memory_propose", distillEpoch); pe != nil {
 		var pp struct {
 			Proposals []json.RawMessage `json:"proposals"`
+			Stats     vetoStats         `json:"stats"`
 		}
 		_ = json.Unmarshal(pe.Payload, &pp)
 		metrics = append(metrics, ledgerMetric{
@@ -168,6 +173,21 @@ func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCou
 			event: "review_action/memory_propose",
 			seq:   pe.Seq,
 		})
+		// Learner veto breakdown: shows how many of the learner's
+		// raw proposals survived daemon-side evidence vetting.
+		totalKept := pp.Stats.MemoryKept + pp.Stats.UserKept + pp.Stats.ProceduresKept
+		totalDropped := pp.Stats.MemoryDropped + pp.Stats.UserDropped + pp.Stats.ProceduresDropped
+		if totalKept > 0 || totalDropped > 0 {
+			metrics = append(metrics, ledgerMetric{
+				label: "learner vetoes",
+				value: fmt.Sprintf("kept: %d, dropped: %d (mem %d/%d, user %d/%d)",
+					totalKept, totalDropped,
+					pp.Stats.MemoryKept, pp.Stats.MemoryDropped,
+					pp.Stats.UserKept, pp.Stats.UserDropped),
+				event: "review_action/memory_propose",
+				seq:   pe.Seq,
+			})
+		}
 	} else {
 		metrics = append(metrics, ledgerMetric{label: "proposals", value: "0", event: "memory_propose"})
 	}
@@ -194,6 +214,75 @@ func applyLedgerMetrics(applyEv store.Event) []ledgerMetric {
 		event: "review_action/memory_apply",
 		seq:   applyEv.Seq,
 	}}
+}
+
+// journalCurateLedger writes a curate section to ledger.md after a
+// successful curate pass. Best-effort like journalDistillLedger: a
+// write failure journals memory_update{layer:ledger,cause:write_failed}
+// and never blocks the curate pipeline.
+func (s *Server) journalCurateLedger(ctx context.Context, conversationID int64, curateEv store.Event) {
+	wsName := "unknown"
+	if conv, err := s.store.GetConversation(ctx, conversationID); err == nil {
+		if ws, err := s.store.GetWorkstream(ctx, conv.WorkstreamID); err == nil {
+			wsName = ws.Name
+		}
+	}
+	if err := appendLedger(s.projectRoot, fmt.Sprintf("%s/curate", wsName),
+		curateLedgerMetrics(curateEv)); err != nil {
+		_, _ = s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "ledger",
+			"cause":  "write_failed",
+			"detail": "curate: " + err.Error(),
+		}))
+	}
+}
+
+// curateLedgerMetrics builds the curate section's rows from the curate
+// review_action event's payload:
+//
+//   - topics: how many topic pages were rewritten
+//   - notes read: how many epoch notes fed the curator
+//   - stripped citations: ghost-cited lines removed (M17 F4)
+//   - trigger: manual / auto_notes / auto_age
+func curateLedgerMetrics(curateEv store.Event) []ledgerMetric {
+	var p struct {
+		Topics            int             `json:"topics"`
+		NotesRead         []json.RawMessage `json:"notes_read"`
+		StrippedCitations []string        `json:"stripped_citations"`
+		Trigger           string          `json:"trigger"`
+	}
+	_ = json.Unmarshal(curateEv.Payload, &p)
+	metrics := []ledgerMetric{
+		{
+			label: "topics rewritten",
+			value: strconv.Itoa(p.Topics),
+			event: "review_action/curate",
+			seq:   curateEv.Seq,
+		},
+		{
+			label: "notes read",
+			value: strconv.Itoa(len(p.NotesRead)),
+			event: "review_action/curate",
+			seq:   curateEv.Seq,
+		},
+	}
+	if len(p.StrippedCitations) > 0 {
+		metrics = append(metrics, ledgerMetric{
+			label: "ghost citations stripped",
+			value: strconv.Itoa(len(p.StrippedCitations)),
+			event: "review_action/curate",
+			seq:   curateEv.Seq,
+		})
+	}
+	if p.Trigger != "" {
+		metrics = append(metrics, ledgerMetric{
+			label: "trigger",
+			value: p.Trigger,
+			event: "review_action/curate",
+			seq:   curateEv.Seq,
+		})
+	}
+	return metrics
 }
 
 // verifyLedgerQuote is the inv-4 substring gate: quote must be a verbatim

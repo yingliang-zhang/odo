@@ -174,6 +174,21 @@ func TestCurateRewritesTopicPages(t *testing.T) {
 	if u["detail"] != "rewrote 2 topics + index" {
 		t.Errorf("memory_update detail = %v, want \"rewrote 2 topics + index\"", u["detail"])
 	}
+
+	// Ledger: curate section should be appended with topics/notes/trigger.
+	ledger := readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
+	if !strings.Contains(ledger, "## main/curate — ") {
+		t.Errorf("ledger missing '## main/curate — ' section:\n%s", ledger)
+	}
+	if !strings.Contains(ledger, "topics rewritten: 2") {
+		t.Errorf("ledger missing 'topics rewritten: 2':\n%s", ledger)
+	}
+	if !strings.Contains(ledger, "notes read: 3") {
+		t.Errorf("ledger missing 'notes read: 3':\n%s", ledger)
+	}
+	if !strings.Contains(ledger, "trigger: manual") {
+		t.Errorf("ledger missing 'trigger: manual':\n%s", ledger)
+	}
 }
 
 // TestCurateGeneration2Rule: a pre-existing wiki/topics/old.md is removed on

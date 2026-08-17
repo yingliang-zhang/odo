@@ -695,9 +695,12 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 	if rec != nil {
 		rec.journal(marker, "")
 	}
-	if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(marker)); err != nil {
+	curateEv, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(marker))
+	if err != nil {
 		return err
 	}
+	// Ledger: curate section (best-effort, never blocks the pipeline).
+	s.journalCurateLedger(ctx, convID, curateEv)
 	if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 		"layer":      "index",
 		"cause":      "curate",
