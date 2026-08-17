@@ -16,6 +16,10 @@ interface Props {
   children: ReactNode;
   // Changing this key resets the boundary (re-mounts children clean).
   resetKey: string;
+  // Context-specific suffix for the fallback message.
+  // Default: "other runs are unaffected" (chat context).
+  // ContextPanel passes "other tabs are unaffected".
+  fallbackNote?: string;
 }
 
 interface State {
@@ -46,11 +50,12 @@ export default class RunGroupBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       // Render a degraded fallback showing the error, so the rest of the
       // UI stays visible and the user can still interact.
+      const note = this.props.fallbackNote ?? "other runs are unaffected";
       return (
         <div className="bubble bubble-error run-boundary-fallback">
           <span className="bubble-icon">⚠</span>{" "}
           <details>
-            <summary>This section failed to render — other tabs are unaffected</summary>
+            <summary>This section failed to render — {note}</summary>
             <pre>{this.state.error?.message ?? "Unknown error"}</pre>
           </details>
         </div>

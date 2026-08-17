@@ -125,7 +125,7 @@ export default function ContextPanel({
         </button>
       </div>
       <div className="panel-body">
-        <RunGroupBoundary resetKey={activeTab}>
+        <RunGroupBoundary resetKey={activeTab} fallbackNote="other tabs are unaffected">
           {children ?? (
             <div className="panel-empty">Select a tab to view content.</div>
           )}
