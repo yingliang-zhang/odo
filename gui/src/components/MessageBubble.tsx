@@ -5,6 +5,12 @@ import { basename } from "../files";
 import type { OdoEvent, RecallItem } from "../types";
 import Markdown, { highlightText } from "./Markdown";
 
+// Display limits for tool call/result rendering (K3 F3: named consts
+// instead of magic numbers scattered in the switch arm).
+const INLINE_ARG_MAX = 80;   // chars per arg value in inline mode
+const DETAIL_ARG_MAX = 200;   // chars per arg value in collapsible details
+const RESULT_CLAMP = 2000;    // chars of tool result shown; full via copy
+
 const REVIEW_LABEL: Record<string, string> = {
   accept: "Accepted",
   reject: "Rejected",
@@ -143,35 +149,111 @@ export default memo(function MessageBubble({ event, highlight }: { event: OdoEve
       );
       break;
 
-    case "agent_tool_call":
+    case "agent_tool_call": {
+      // Tri-model review Item 3: render tool args as key:value pairs
+      // instead of raw JSON.stringify for readability.
+      // DSF finding: daemon journals args as a JSON string, not object —
+      // parse it first so the key:value path is reachable in production.
+      const toolName = p.tool ?? "tool";
+      let args: unknown = p.args;
+      if (typeof args === "string") {
+        try { args = JSON.parse(args); } catch { /* keep raw string */ }
+      }
+      let argsSummary: ReactNode;
+      if (args == null) {
+        argsSummary = null;
+      } else if (typeof args === "object" && !Array.isArray(args)) {
+        // Object args: render key:value pairs
+        const entries = Object.entries(args as Record<string, unknown>);
+        if (entries.length === 0) {
+          argsSummary = null;
+        } else if (entries.length <= 3) {
+          // Short: inline "key: value · key: value"
+          argsSummary = entries.map(([k, v], i) => {
+            // K3 F1: String(v) on objects yields [object Object] — use JSON.stringify
+            const sv = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+            const truncated = sv.slice(0, INLINE_ARG_MAX);
+            const ellipsis = sv.length > INLINE_ARG_MAX ? "…" : "";
+            return (
+              <span key={k}>
+                {i > 0 && " · "}
+                <span className="tool-arg-key">{k}</span>: <span className="tool-arg-val">{highlightText(truncated + ellipsis, highlight, `ta${i}`)}</span>
+              </span>
+            );
+          });
+        } else {
+          // Long: show count + collapsible
+          argsSummary = (
+            <details className="tool-args-details">
+              <summary>{entries.length} args</summary>
+              <div className="tool-args-list">
+                {entries.map(([k, v], i) => {
+                  const sv = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+                  return (
+                    <div key={k} className="tool-arg-row" title={sv}>
+                      <span className="tool-arg-key">{k}</span>
+                      <span className="tool-arg-val">{highlightText(sv.slice(0, DETAIL_ARG_MAX), highlight, `ta${i}`)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          );
+        }
+      } else {
+        // Non-object (string, array): render verbatim, not re-encoded
+        const rawStr = typeof args === "string" ? args : JSON.stringify(args);
+        argsSummary = <span className="tool-arg-raw">{highlightText(rawStr.slice(0, INLINE_ARG_MAX), highlight, "ta")}</span>;
+      }
       body = (
         <div className="bubble bubble-tool">
-          <code>
-            → {highlightText(p.tool ?? "tool", highlight, "tc")}{" "}
-            {highlightText(p.args != null ? JSON.stringify(p.args) : "", highlight, "ta")}
+          <code className="tool-call-line">
+            <span className="tool-arrow" aria-hidden>→</span>{" "}
+            <span className="tool-name">{highlightText(toolName, highlight, "tc")}</span>
+            {argsSummary != null && <span className="tool-args"> {argsSummary}</span>}
           </code>
         </div>
       );
       break;
+    }
 
-    case "agent_tool_result":
+    case "agent_tool_result": {
+      const toolName = p.tool ?? "result";
+      const resultText = typeof p.result === "string" ? p.result : JSON.stringify(p.result, null, 2);
+      // Item 8: clamp display to 2000 chars; full text via copy button.
+      const resultBytes = resultText.length;
+      const clamped = resultBytes > RESULT_CLAMP
+        ? resultText.slice(0, RESULT_CLAMP) + `\n… (${(resultBytes - RESULT_CLAMP).toLocaleString()} more chars)`
+        : resultText;
       body = (
         <div className="bubble bubble-tool">
           <details>
             <summary>
-              <code>← {highlightText(p.tool ?? "result", highlight, "tr")}</code>
+              <code>
+                <span className="tool-arrow" aria-hidden>←</span>{" "}
+                {highlightText(toolName, highlight, "tr")}
+                {resultBytes > 0 && <span className="tool-result-size"> · {(resultBytes > 1024 ? `${(resultBytes / 1024).toFixed(1)} KB` : `${resultBytes} B`)}</span>}
+              </code>
             </summary>
-            <pre>
-              {highlightText(
-                typeof p.result === "string" ? p.result : JSON.stringify(p.result, null, 2),
-                highlight,
-                "tb",
-              )}
-            </pre>
+            <pre>{highlightText(clamped, highlight, "tb")}</pre>
+            {resultBytes > RESULT_CLAMP && (
+              <button
+                type="button"
+                className="tool-result-copy"
+                title="Copy full result"
+                onClick={() => {
+                  // DSF: ?.catch chain would TypeError — use optional call
+                  navigator.clipboard?.writeText(resultText)?.catch(() => {});
+                }}
+              >
+                Copy full ({resultBytes.toLocaleString()} chars)
+              </button>
+            )}
           </details>
         </div>
       );
       break;
+    }
 
     case "agent_done":
       body = (

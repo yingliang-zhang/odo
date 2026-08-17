@@ -2197,6 +2197,79 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   padding: 8px;
 }
 
+/* Item 3: tool call one-line card + key:value args.
+   Scoped under .bubble-tool to avoid bleeding onto ToolTicker
+   which also uses .tool-name/.tool-args (DSF finding). */
+.bubble-tool .tool-call-line {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.bubble-tool .tool-arrow {
+  color: var(--text-dim);
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+.bubble-tool .tool-name {
+  color: var(--tok-fn, var(--link));
+  font-weight: 500;
+}
+.bubble-tool .tool-args {
+  color: var(--text-dim);
+}
+.bubble-tool .tool-arg-key {
+  color: var(--tok-keyword, #c08ae0);
+}
+.bubble-tool .tool-arg-val {
+  color: var(--tok-string, #d8a657);
+}
+.bubble-tool .tool-arg-raw {
+  color: var(--text-dim);
+}
+.bubble-tool .tool-args-details {
+  display: inline;
+}
+.bubble-tool .tool-args-details > summary {
+  display: inline;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.bubble-tool .tool-args-list {
+  margin: 4px 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bubble-tool .tool-arg-row {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+}
+.bubble-tool .tool-arg-row .tool-arg-key {
+  flex-shrink: 0;
+  min-width: 60px;
+}
+.bubble-tool .tool-result-size {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.bubble-tool .tool-result-copy {
+  margin-top: 4px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.bubble-tool .tool-result-copy:hover {
+  color: var(--text);
+  border-color: var(--accent, var(--border));
+}
+
 .bubble-done {
   align-self: flex-start;
   background: transparent;
