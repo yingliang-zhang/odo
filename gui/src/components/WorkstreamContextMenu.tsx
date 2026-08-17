@@ -58,7 +58,24 @@ export default function WorkstreamContextMenu({
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    const onScroll = () => onClose();
+    const onScroll = (e: Event) => {
+      // K3: only dismiss on scrolls originating from the sidebar scroller,
+      // not from ChatSurface's programmatic auto-scroll during streaming.
+      // The menu's highest-value moment is renaming/deleting a workstream
+      // while an agent runs — auto-scroll fires on every token batch and
+      // would otherwise dismiss the menu immediately.
+      const target = e.target as Node | null;
+      if (target && menuRef.current && !menuRef.current.contains(target) && !target.contains(menuRef.current)) {
+        // Scroll in an unrelated container — only close if the user
+        // scrolled the sidebar itself (where the rows live).
+        const sidebar = document.querySelector(".sidebar-sections");
+        if (sidebar && (sidebar === target || sidebar.contains(target))) {
+          onClose();
+        }
+      } else if (target === document) {
+        onClose();
+      }
+    };
     document.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
