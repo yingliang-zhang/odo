@@ -1674,6 +1674,7 @@ export default function App() {
         bgNotice={bgNotice}
         onJumpWorkstream={(id) => void handleSwitchWorkstream(id)}
         lastPrompt={lastPrompt}
+        events={events}
         codingModel={appSettings?.coding_model ?? null}
         reviewPanel={reviewPanel}
         pipelineStates={pipelineStates}

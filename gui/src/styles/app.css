@@ -474,6 +474,20 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Clickable session-facts button (tri-model header gap analysis: CWD copy). */
+.status-fact-btn {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.status-fact-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
 
 .status-spacer {
   flex: 1;

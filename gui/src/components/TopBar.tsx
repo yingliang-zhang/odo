@@ -211,7 +211,7 @@ export default function TopBar({
           <button
             type="button"
             className="topbar-action topbar-action-icon-only"
-            title="More actions"
+            title="More actions (⌘K for command palette)"
             aria-label="More actions"
             aria-haspopup="menu"
             aria-expanded={overflowOpen}

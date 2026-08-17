@@ -14,7 +14,29 @@ import type { PanelModel, PromptSnapshot } from "../stats";
 import type { PipelinePhase, PipelineState } from "../pipeline";
 import type { PanelTab } from "./ContextPanel";
 import { ompUsage } from "../api";
-import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit } from "../types";
+import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent } from "../types";
+
+// Tri-model header gap analysis: estimate bytes accumulated since the last
+// receipted prompt (agent_text + tool_call args + tool_result bodies). This
+// is an estimate — the daemon's true context is only known at the next send.
+// ~4 bytes/char for UTF-8 text (includes tool JSON overhead).
+function estimateLiveDelta(events: readonly OdoEvent[], sinceSeq: number): number {
+  let bytes = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.seq <= sinceSeq) break;
+    const p = ev.payload ?? {};
+    // agent_text: the model's streaming output
+    if (typeof p.text === "string") bytes += p.text.length * 4;
+    // agent_tool_call: args JSON
+    if (typeof p.args === "string") bytes += p.args.length * 4;
+    else if (p.args != null) bytes += JSON.stringify(p.args).length * 4;
+    // agent_tool_result: result text
+    if (typeof p.result === "string") bytes += Math.min(p.result.length, 5000) * 4;
+    else if (p.result != null) bytes += Math.min(JSON.stringify(p.result).length, 5000) * 4;
+  }
+  return bytes;
+}
 
 // One background run as reported by the daemon's pending_counts —
 // workstreams with a live run that is NOT the one in view.
@@ -49,6 +71,8 @@ interface Props {
   // events. Null before any receipted send — the meter hides rather than
   // fabricate occupancy.
   lastPrompt: PromptSnapshot | null;
+  // Tri-model header gap: events for live context delta estimation.
+  events: readonly OdoEvent[];
   // Wave B #9: coding model (window denominator) + review panel list.
   codingModel: string | null;
   reviewPanel: PanelModel[];
@@ -108,19 +132,31 @@ const METER_TIERS = [
 // prompt vs the coding model's context window (window tokens × ~4
 // bytes/token, an estimate, hence "~"). Click expands the journaled
 // composition: replay window and the receipt's verbatim layer list.
+//
+// Tri-model header gap analysis: the ring was frozen at last-prompt bytes
+// during a running turn — exactly when the user most needs to see they're
+// approaching the window limit. Now accepts an optional `liveDelta` that
+// adds an in-flight estimate (bytes accumulated since the last receipted
+// prompt) so the ring creeps upward during long tool-heavy turns.
 function ContextMeter({
   snapshot,
   codingModel,
+  liveDelta = 0,
 }: {
   snapshot: PromptSnapshot;
   codingModel: string | null;
+  liveDelta?: number;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLSpanElement>(null);
   useCloseOnClickAway(open, wrapRef, () => setOpen(false));
 
   const windowBytes = contextWindowTokens(codingModel) * BYTES_PER_TOKEN;
-  const pct = Math.min(999, Math.round((snapshot.bytes / windowBytes) * 100));
+  // Tri-model: add liveDelta (bytes accumulated since the last receipted
+  // prompt) so the ring creeps upward during a running turn instead of
+  // freezing at the last send. Capped at 999% to match the old clamp.
+  const liveBytes = snapshot.bytes + liveDelta;
+  const pct = Math.min(999, Math.round((liveBytes / windowBytes) * 100));
   const tier = METER_TIERS.find((t) => pct < t.max)!.cls;
 
   // SVG ring: r=6 in a 14px box, circumference ≈ 37.7.
@@ -132,7 +168,7 @@ function ContextMeter({
       <button
         type="button"
         className={`status-badge ctx-meter ${tier}`}
-        title={`Last prompt: ${formatBytes(snapshot.bytes)} of ~${formatTokens(windowBytes / BYTES_PER_TOKEN)} window${codingModel ? ` (${codingModel})` : ""} — click for composition`}
+        title={`Context: ${formatBytes(liveBytes)} of ~${formatTokens(windowBytes / BYTES_PER_TOKEN)} window${codingModel ? ` (${codingModel})` : ""}${liveDelta > 0 ? " · ~live estimate" : ""} — click for composition`}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
@@ -238,7 +274,7 @@ function PanelChip({ models }: { models: PanelModel[] }) {
         <div className="bg-runs-menu panel-chip-popover" role="dialog" aria-label="Review panel">
           <div className="ctx-pop-title">review panel — read-only (⌘, to change)</div>
           {models.map((m) => (
-            <div key={`${m.model}@${m.provider}`} className="panel-model-row">
+             <div key={`${m.model}@${m.provider}`} className="panel-model-row">
               <span className="panel-model-name mono" title={`${m.model}@${m.provider}`}>
                 {m.model}
               </span>
@@ -558,6 +594,7 @@ export default function StatusBar({
   bgNotice,
   onJumpWorkstream,
   lastPrompt,
+  events,
   codingModel,
   reviewPanel,
   pipelineStates,
@@ -588,13 +625,22 @@ export default function StatusBar({
 
   return (
     <footer className="app-statusbar">
-      {/* Left: session facts */}
-      <span className="status-item" title={projectRoot ?? undefined}>
+      {/* Left: session facts — click to copy project root path */}
+      <button
+        type="button"
+        className="status-item status-fact-btn"
+        title={projectRoot ? `Click to copy: ${projectRoot}` : "No project loaded"}
+        onClick={() => {
+          if (projectRoot) {
+            navigator.clipboard?.writeText(projectRoot)?.catch(() => {});
+          }
+        }}
+      >
         {workstreamName ?? "—"}
         {conversationId != null && ` · #${conversationId}`}
         {` · epoch ${epoch}`}
         {rootShort && ` · ${rootShort}`}
-      </span>
+      </button>
       <span className="status-spacer" />
       {/* Center-right: run indicators — foreground spinner, then the
           background chip (the only surface for runs outside the view). */}
@@ -646,7 +692,11 @@ export default function StatusBar({
       {/* Wave B: last-prompt pressure meter + review-panel peek, ahead of
           the actionable badges. */}
       {lastPrompt != null && (
-        <ContextMeter snapshot={lastPrompt} codingModel={codingModel} />
+        <ContextMeter
+          snapshot={lastPrompt}
+          codingModel={codingModel}
+          liveDelta={agentRunning ? estimateLiveDelta(events, lastPrompt.seq) : 0}
+        />
       )}
       {reviewPanel.length > 0 && <PanelChip models={reviewPanel} />}
       {/* Auto-land pipeline: between the panel peek and the actionable
