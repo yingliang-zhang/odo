@@ -77,12 +77,12 @@ func runModelsList() int {
 // settingsStub mirrors adapter.Settings for the CLI path (avoids importing
 // the adapter package which creates a daemon dependency).
 type settingsStub struct {
-	CodingModel           string `json:"coding_model"`
-	CodingProvider        string `json:"coding_provider"`
-	OrchestratorModel     string `json:"orchestrator_model"`
-	OrchestratorProvider  string `json:"orchestrator_provider"`
-	ReviewModels          string `json:"review_models"`
-	PrewalkModel          string `json:"prewalk_model"`
+	CodingModel          string `json:"coding_model"`
+	CodingProvider       string `json:"coding_provider"`
+	OrchestratorModel    string `json:"orchestrator_model"`
+	OrchestratorProvider string `json:"orchestrator_provider"`
+	ReviewModels         string `json:"review_models"`
+	PrewalkModel         string `json:"prewalk_model"`
 }
 
 func readModelsSettings() settingsStub {

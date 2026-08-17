@@ -1049,7 +1049,7 @@ func buildPrompt(text string, attachments []string, ml memoryLayers) string {
 		}
 		if len(imagePaths) > 0 {
 			fmt.Fprintf(&b, "Attached images: %s\n\n",
-				strings.Join(imagePaths, ", "))
+				strings.Join(imagePaths, "\n"))
 		}
 	}
 	b.WriteString(text)

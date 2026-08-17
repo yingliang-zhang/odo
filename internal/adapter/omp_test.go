@@ -117,7 +117,7 @@ func TestCompactionOverlayArgs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "compaction:\n  thresholdTokens: 315000\n  thresholdPercent: -1\n"
+		want := "compaction:\n  thresholdTokens: 315000\n  thresholdPercent: -1\nastGrep:\n  enabled: true\n"
 		if string(data) != want {
 			t.Errorf("overlay = %q, want %q", data, want)
 		}

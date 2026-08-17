@@ -52,10 +52,10 @@ const (
 
 // OMP is the M0 Adapter backed by the Hermes OMP wrapper script.
 type OMP struct {
-	wrapperPath string
-	stateDir    string // <project>/.odo; prompt/session/output files live here
-	timeout     string
-	prefsKey    string // prefs.md key to read model from ("coding" or "orchestrator")
+	wrapperPath  string
+	stateDir     string // <project>/.odo; prompt/session/output files live here
+	timeout      string
+	prefsKey     string // prefs.md key to read model from ("coding" or "orchestrator")
 	prewalkModel string // prefs.md `prewalk_model` — empty = off
 
 	mu           sync.Mutex // guards runs + configLogged; run results sync via done channel
