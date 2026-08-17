@@ -121,6 +121,10 @@ export default function App() {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [events, setEvents] = useState<OdoEvent[]>([]);
   const [agentRunning, setAgentRunning] = useState(false);
+  // Skeleton: true during bootstrap (conversation switch / first load),
+  // false once events arrive. Tri-model gap analysis: Hermes has
+  // skeletons.tsx; Odo had only a spinner.
+  const [chatLoading, setChatLoading] = useState(true);
   // J: spinner for /panel and /vision while the daemon consults models.
   const [panelThinking, setPanelThinking] = useState(false);
   // M7: transient streaming preview (never journaled), rebuilt every poll.
@@ -273,6 +277,7 @@ export default function App() {
   const recordEvents = useCallback((incoming: OdoEvent[]) => {
     if (incoming.length === 0) return;
     setEvents((prev) => mergeEvents(prev, incoming));
+    setChatLoading(false); // events arrived — hide skeleton
     lastSeqRef.current = Math.max(lastSeqRef.current, ...incoming.map((e) => e.seq));
     // M3 (spec §3b): finished runs notify when the window is hidden. Only
     // freshly polled events land here — bootstrap replaces wholesale — so
@@ -511,6 +516,7 @@ export default function App() {
       const evs = resp.events ?? [];
       lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
       setEvents(evs);
+      setChatLoading(evs.length === 0); // hide skeleton if history exists
       setAgentRunning(resp.agent_running ?? false);
       setPreview(null); // bootstrap carries no preview; the next poll restores it
       setDiff(resp.diff ?? null);
@@ -520,6 +526,7 @@ export default function App() {
       bootstrappedRef.current = false;
       prevDiffsCountRef.current = 0;
       setWikiFocus(null);
+      setChatLoading(true); // skeleton until events arrive
       const cid = resp.conversation?.id;
       if (cid != null) {
         void refreshWikiCount(cid);
@@ -1541,6 +1548,7 @@ export default function App() {
           onModelChanged={() => {
             void refreshSettings();
           }}
+          loading={chatLoading}
           // W6 (goal queue): the composer park toggle and the QueueDock's
           // Resume/Drop; rows derive from `events` (already passed above).
           onResumeParked={handleResumeParked}

@@ -26,6 +26,7 @@ import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown, Archive } fr
 import ToolTicker from "./ToolTicker";
 import RunGroupBoundary from "./RunGroupBoundary";
 import ModelPill from "./ModelPill";
+import { ChatSkeleton } from "./LoadingInline";
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
 // minute ("35s").
@@ -93,6 +94,8 @@ interface Props {
   // the user switch per-message without opening Settings.
   codingModel?: string | null;
   onModelChanged?: () => void;
+  // Skeleton: show content-shaped placeholder while conversation loads.
+  loading?: boolean;
 }
 
 // AutoDistillChip discloses the daemon's auto-distill state above the
@@ -401,7 +404,18 @@ export default function ChatSurface({
   onTodoError,
   codingModel = null,
   onModelChanged,
+  loading = false,
 }: Props) {
+  // Message edit: refill the composer with the original text and focus.
+  const handleEditMessage = useCallback((text: string) => {
+    setDraft(text);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      // Place cursor at end.
+      const len = text.length;
+      textareaRef.current?.setSelectionRange(len, len);
+    });
+  }, []);
   // M12 (D-todo): the plan layer's read side — derived from the journaled
   // event history already in memory (bootstrap replay + poll appends).
   const todoItems = useMemo(() => deriveTodoState(events), [events]);
@@ -950,7 +964,8 @@ export default function ChatSurface({
             )}
           </div>
         )}
-        {visibleEvents.length === 0 && (fold ? (
+        {loading && visibleEvents.length === 0 && <ChatSkeleton />}
+        {visibleEvents.length === 0 && !loading && (fold ? (
           <div className="empty-state">
             <h2>Everything here is folded</h2>
             <p className="dim">
@@ -1019,7 +1034,7 @@ export default function ChatSurface({
               <RunHeader group={group} />
               {runRenderItems(group.events).map((item) =>
                 item.kind === "bubble" ? (
-                  <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} />
+                  <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} />
                 ) : (
                   // Tool calls default-collapsed; an active ⌘F search
                   // forces them open so jump-to-match still reaches tool
@@ -1033,7 +1048,7 @@ export default function ChatSurface({
                       {item.calls} tool call{item.calls === 1 ? "" : "s"}
                     </summary>
                     {item.events.map((ev) => (
-                      <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} />
+                      <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} />
                     ))}
                   </details>
                 ),

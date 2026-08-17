@@ -673,6 +673,41 @@ body {
   font-size: 12px;
 }
 
+/* Chat skeleton: content-shaped placeholder while conversation loads. */
+.chat-skeleton {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.chat-skeleton-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chat-skeleton-header {
+  width: 120px;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+.chat-skeleton-bubble {
+  height: 16px;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+  animation-delay: 0.1s;
+}
+.chat-skeleton-bubble.short {
+  height: 12px;
+  animation-delay: 0.2s;
+}
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
 /* ---------- Sidebar ---------- */
 
 .sidebar {
@@ -1961,6 +1996,28 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   outline: none;
 }
 .model-pill-custom input:focus {
+  border-color: var(--accent, var(--border));
+}
+
+/* Message edit button (tri-model gap analysis: message actuation). */
+.bubble-edit-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  margin-top: 4px;
+  align-self: flex-end;
+}
+.bubble-user:hover .bubble-edit-btn {
+  opacity: 1;
+}
+.bubble-edit-btn:hover {
+  color: var(--text);
   border-color: var(--accent, var(--border));
 }
 

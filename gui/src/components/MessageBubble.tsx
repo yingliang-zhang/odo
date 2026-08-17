@@ -101,7 +101,7 @@ function recallTooltip(recall: RecallItem[]): string {
 // Belt B: agent_text renders as markdown; `highlight` wraps occurrences of
 // the chat-search query in <mark>. The .bubble-mount wrapper carries the
 // data-seq jump anchor without disturbing the flex layout (display: contents).
-export default memo(function MessageBubble({ event, highlight }: { event: OdoEvent; highlight?: string }) {
+export default memo(function MessageBubble({ event, highlight, onEditUserMessage }: { event: OdoEvent; highlight?: string; onEditUserMessage?: (text: string) => void }) {
   const p = event.payload ?? {};
   // GLM B4: copy feedback for tool results (mirrors CodeBlock pattern).
   const [copied, setCopied] = useState(false);
@@ -125,6 +125,17 @@ export default memo(function MessageBubble({ event, highlight }: { event: OdoEve
             <div className="recall-chip" title={recallTooltip(normalizeRecall(p.recall))}>
               {recallChipLabel(normalizeRecall(p.recall))}
             </div>
+          )}
+          {onEditUserMessage && (p.text ?? "") !== "" && (
+            <button
+              type="button"
+              className="bubble-edit-btn"
+              aria-label="Edit and resend this message"
+              title="Edit and resend"
+              onClick={() => onEditUserMessage(p.text ?? "")}
+            >
+              Edit
+            </button>
           )}
         </div>
       );
