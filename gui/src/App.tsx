@@ -121,6 +121,8 @@ export default function App() {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [events, setEvents] = useState<OdoEvent[]>([]);
   const [agentRunning, setAgentRunning] = useState(false);
+  // Tri-model header gap: turn start timestamp for live duration display.
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   // Skeleton: true during bootstrap (conversation switch / first load),
   // false once events arrive. Tri-model gap analysis: Hermes has
   // skeletons.tsx; Odo had only a spinner.
@@ -518,6 +520,8 @@ export default function App() {
       setEvents(evs);
       setChatLoading(false); // history loaded (empty or not) — show welcome or content
       setAgentRunning(resp.agent_running ?? false);
+      if (resp.agent_running) setTurnStartedAt(Date.now());
+      else setTurnStartedAt(null);
       setPreview(null); // bootstrap carries no preview; the next poll restores it
       setDiff(resp.diff ?? null);
       setDiffs([]);
@@ -606,6 +610,8 @@ export default function App() {
         if (conversationRef.current !== cid || projectRootRef.current !== root) return; // switched mid-flight
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
+        if (resp.agent_running) setTurnStartedAt(Date.now());
+        else setTurnStartedAt(null);
         // M7: transient in-flight block preview — replaced wholesale per
         // poll; renders as the dimmed preview bubble. Only update state
         // when the preview actually changed (reference equality from the
@@ -764,7 +770,7 @@ export default function App() {
         // Steering journals a message for the running agent; parking only
         // queues a goal — neither starts a new run here. (A park on a free
         // conversation may auto-dequeue daemon-side; the poll reconciles.)
-        if (!steer && !park) setAgentRunning(true);
+        if (!steer && !park) { setAgentRunning(true); setTurnStartedAt(Date.now()); }
         // W6: prompt reconcile — the sidebar's parked pill is sourced from
         // pending_counts, so re-read after the daemon's depth changed
         // rather than waiting for the poll loop's every-4th-tick cadence.
@@ -1670,6 +1676,7 @@ export default function App() {
         epoch={conversation?.epoch ?? 1}
         projectRoot={project?.root_path ?? null}
         agentRunning={agentRunning}
+        turnStartedAt={turnStartedAt}
         backgroundRuns={backgroundRuns}
         bgNotice={bgNotice}
         onJumpWorkstream={(id) => void handleSwitchWorkstream(id)}

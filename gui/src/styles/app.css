@@ -488,6 +488,12 @@ body {
 .status-fact-btn:hover {
   background: var(--bg-input, rgba(255, 255, 255, 0.05));
 }
+/* Tri-model header gap: live turn duration in status bar */
+.status-turn-duration {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  margin-left: 2px;
+}
 
 .status-spacer {
   flex: 1;

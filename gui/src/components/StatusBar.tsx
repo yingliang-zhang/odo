@@ -70,6 +70,8 @@ interface Props {
   epoch: number;
   projectRoot: string | null;
   agentRunning: boolean;
+  // Tri-model header gap: turn start timestamp for live duration display.
+  turnStartedAt: number | null;
   // Runs in other workstreams of the active project. The chip is the only
   // surface for activity the user cannot see (panel sessions, other ws) —
   // opening it lists every run, clicking a row jumps straight to it.
@@ -599,6 +601,7 @@ export default function StatusBar({
   epoch,
   projectRoot,
   agentRunning,
+  turnStartedAt,
   backgroundRuns,
   bgNotice,
   onJumpWorkstream,
@@ -618,6 +621,13 @@ export default function StatusBar({
   const runsRef = useRef<HTMLSpanElement>(null);
   // GLM: clipboard copy feedback (2s Check, matches MessageBubble convention).
   const [pathCopied, setPathCopied] = useState(false);
+  // Tri-model header gap: live turn duration tick.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!agentRunning || turnStartedAt == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [agentRunning, turnStartedAt]);
   useCloseOnClickAway(runsOpen, runsRef, () => setRunsOpen(false));
 
   // A run finishing empties the list — keep the flash clickable target
@@ -662,6 +672,16 @@ export default function StatusBar({
       {agentRunning && (
         <span className="status-item status-run">
           <LoaderCircle size={11} className="spin" /> running
+          {turnStartedAt != null && (
+            <span className="status-turn-duration">
+              {(() => {
+                const secs = Math.floor((now - turnStartedAt) / 1000);
+                const m = Math.floor(secs / 60);
+                const s = secs % 60;
+                return ` ${m}:${s.toString().padStart(2, "0")}`;
+              })()}
+            </span>
+          )}
         </span>
       )}
       {finished.length > 0 && (
