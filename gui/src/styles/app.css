@@ -2809,6 +2809,12 @@ body {
   overflow: hidden;
 }
 
+/* Settings theme toggle fills its field column like the text inputs. */
+.theme-toggle {
+  display: flex;
+  width: 100%;
+}
+
 .diff-toggle button,
 .theme-toggle button {
   background: none;
@@ -2818,6 +2824,12 @@ body {
   font-size: 13px;
   padding: 6px 14px;
   cursor: pointer;
+}
+
+/* Each segment takes an equal share instead of content width. */
+.theme-toggle button {
+  flex: 1;
+  text-align: center;
 }
 
 .diff-toggle button + button,
@@ -3092,7 +3104,7 @@ body {
 
 .settings-panel {
   position: relative;
-  width: 560px;
+  width: 480px;
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 64px);
   overflow: auto;
@@ -3125,7 +3137,7 @@ body {
   display: grid;
   grid-template-columns: 160px 1fr;
   gap: 0;
-  min-height: 280px;
+  min-height: auto;
 }
 
 .settings-sidebar {
@@ -3163,6 +3175,7 @@ body {
 
 .settings-detail {
   padding-left: 20px;
+  padding-bottom: 8px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -3251,6 +3264,7 @@ body {
 .settings-actions {
   display: flex;
   gap: 8px;
+  justify-content: flex-end;
   margin-top: 6px;
   grid-column: 1 / -1;
 }
