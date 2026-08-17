@@ -1027,8 +1027,8 @@ export default function ChatSurface({
         )}
           {runGroups.map((group) => (
             <RunGroupBoundary
-              key={group.start?.seq ?? "preamble"}
-              resetKey={String(group.start?.seq ?? "preamble")}
+              key={`${conversationId ?? "none"}:${group.start?.seq ?? "preamble"}`}
+              resetKey={String(conversationId ?? "none") + ":" + String(group.start?.seq ?? "preamble")}
             >
             <div className="run-group">
               <RunHeader group={group} />

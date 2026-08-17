@@ -526,7 +526,10 @@ export default function App() {
       bootstrappedRef.current = false;
       prevDiffsCountRef.current = 0;
       setWikiFocus(null);
-      setChatLoading(true); // skeleton until events arrive
+      // chatLoading was set to false at line 519 — the skeleton is gone
+      // once bootstrap delivers the event history (empty or not).
+      // DO NOT re-arm it here; that would overwrite the false and latch
+      // the skeleton permanently (DSF final review finding).
       const cid = resp.conversation?.id;
       if (cid != null) {
         void refreshWikiCount(cid);
@@ -859,6 +862,9 @@ export default function App() {
           setPaletteOpen(false);
           return;
         }
+        // Image lightbox (ZoomableImage) — its own Esc listener closes it,
+        // but without this gate a bare Esc would also cancel the agent.
+        if (document.querySelector(".md-img-lightbox") != null) return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;
