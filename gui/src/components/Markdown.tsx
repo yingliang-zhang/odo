@@ -35,6 +35,16 @@ const FENCE_LANGS: Record<string, Language> = {
   cjs: "ts",
   py: "python",
   python: "python",
+  bash: "bash",
+  sh: "bash",
+  shell: "bash",
+  zsh: "bash",
+  json: "json",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "yaml",
+  sql: "yaml",  // close enough for keyword highlighting
+  dockerfile: "bash",
 };
 
 // Wrap occurrences of `query` (case-insensitive) in <mark>. Shared with
@@ -61,13 +71,13 @@ export function highlightText(
   return <Fragment key={keyPrefix}>{out}</Fragment>;
 }
 
-// Combined inline alternation: **bold** | *italic* | `code` | [text](url).
+// Combined inline alternation: **bold** | *italic* | ~~strike~~ | `code` | [text](url).
 // Bold runs first so `*` inside bold is parsed by the recursive call.
 // A shared /g regex would be corrupted by the recursion (a nested call
 // resets lastIndex while an outer exec loop is mid-scan) — each call
 // gets a fresh instance.
 const INLINE_SOURCE =
-  String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(\`[^\`\n]+\`)|(\[([^\]\n]+)\]\(([^)\s]+)\))`;
+  String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|(` + "`" + `[^` + "`" + `\n]+` + "`" + `)|(\[([^]\n]+)\]\([^)\s]+\))`;
 
 function parseInline(text: string, highlight: string | undefined, keyPrefix: string): ReactNode[] {
   const re = new RegExp(INLINE_SOURCE, "g");
@@ -85,13 +95,16 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
     } else if (m[2] !== undefined) {
       nodes.push(<em key={key}>{parseInline(m[2].slice(1, -1), highlight, key)}</em>);
     } else if (m[3] !== undefined) {
+      // ~~strikethrough~~
+      nodes.push(<del key={key}>{parseInline(m[3].slice(2, -2), highlight, key)}</del>);
+    } else if (m[4] !== undefined) {
       nodes.push(
         <code key={key} className="bubble-inline-code">
-          {highlightText(m[3].slice(1, -1), highlight, key)}
+          {highlightText(m[4].slice(1, -1), highlight, key)}
         </code>,
       );
     } else {
-      nodes.push(renderLink(m[5], m[6], highlight, key));
+      nodes.push(renderLink(m[6], m[7], highlight, key));
     }
     last = m.index + m[0].length;
   }
@@ -124,6 +137,7 @@ type Block =
   | { kind: "ul"; items: string[] }
   | { kind: "ol"; items: string[] }
   | { kind: "quote"; text: string }
+  | { kind: "alert"; alertType: string; text: string }
   | { kind: "hr" }
   | { kind: "table"; headers: string[]; rows: string[][] }
   | { kind: "para"; text: string };
@@ -240,7 +254,15 @@ function parseBlocks(content: string): Block[] {
         qlines.push(q[1]);
         i++;
       }
-      blocks.push({ kind: "quote", text: qlines.join("\n") });
+      // GFM alert: first line matches > [!NOTE] / [!WARNING] / [!TIP] / [!IMPORTANT] / [!CAUTION]
+      const alertMatch = qlines[0]?.match(/^\s*\[!(NOTE|WARNING|TIP|IMPORTANT|CAUTION)\s*\]\s*$/i);
+      if (alertMatch) {
+        const alertType = alertMatch[1].toLowerCase();
+        const alertText = qlines.slice(1).join("\n");
+        blocks.push({ kind: "alert", alertType, text: alertText });
+      } else {
+        blocks.push({ kind: "quote", text: qlines.join("\n") });
+      }
       continue;
     }
     const para: string[] = [];
@@ -311,9 +333,20 @@ function renderBlock(block: Block, index: number, highlight: string | undefined)
     case "ul":
       return (
         <ul key={key}>
-          {block.items.map((item, ii) => (
-            <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`)}</li>
-          ))}
+          {block.items.map((item, ii) => {
+            // GFM task list: - [ ] or - [x]
+            const taskMatch = item.match(/^\[([ x])\]\s+(.*)$/i);
+            if (taskMatch) {
+              const checked = taskMatch[1].toLowerCase() === "x";
+              return (
+                <li key={ii} className="md-task-item">
+                  <input type="checkbox" checked={checked} readOnly aria-label={`Task: ${taskMatch[2]}`} />
+                  <span className={checked ? "md-task-done" : ""}>{parseInline(taskMatch[2], highlight, `${key}-${ii}`)}</span>
+                </li>
+              );
+            }
+            return <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`)}</li>;
+          })}
         </ul>
       );
     case "ol":
@@ -326,6 +359,15 @@ function renderBlock(block: Block, index: number, highlight: string | undefined)
       );
     case "quote":
       return <blockquote key={key}>{parseInline(block.text, highlight, key)}</blockquote>;
+    case "alert": {
+      // GFM alert callout: colored left-border box matching the alert type.
+      return (
+        <div key={key} className={`md-alert md-alert-${block.alertType}`}>
+          <div className="md-alert-label">{block.alertType.toUpperCase()}</div>
+          <div className="md-alert-body">{parseInline(block.text, highlight, key)}</div>
+        </div>
+      );
+    }
     case "hr":
       return <hr key={key} />;
     case "table": {

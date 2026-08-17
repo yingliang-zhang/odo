@@ -3,7 +3,7 @@
 // alternative wins, so comments beat strings and strings beat keywords.
 // Token classes map onto the .tok-* CSS rules in styles/app.css.
 
-export type Language = "go" | "rust" | "ts" | "python";
+export type Language = "go" | "rust" | "ts" | "python" | "bash" | "json" | "yaml";
 
 export type TokenClass =
   | "tok-comment"
@@ -22,6 +22,9 @@ const KEYWORDS: Record<Language, string[]> = {
   rust: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split(" "),
   ts: "abstract any as async await boolean break case catch class const continue debugger declare default delete do else enum export extends false finally for from function get if implements import in instanceof interface keyof let namespace never new null number of private protected public readonly return set static string super unknown switch this throw true try type typeof undefined var void while with yield".split(" "),
   python: "False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield".split(" "),
+  bash: "break case continue do done elif else esac exit fi for function if in return then until while".split(" "),
+  json: [],  // JSON has no keywords — only strings, numbers, booleans
+  yaml: "true false null yes no on off".split(" "),
 };
 
 // Per-language pattern fragments. Order in the alternation is precedence.
@@ -50,6 +53,24 @@ const PARTS: Record<Language, Record<Exclude<TokenClass, "tok-keyword">, string>
     "tok-string": String.raw`"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'`,
     "tok-number": String.raw`\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b`,
     "tok-fn": String.raw`\b[A-Za-z_]\w*(?=\s*\()`,
+  },
+  bash: {
+    "tok-comment": String.raw`#[^\n]*`,
+    "tok-string": String.raw`"(?:\\.|[^"\\\n])*"|'(?:[^'\\\n])*'`,
+    "tok-number": String.raw`\b\d+(?:\.\d+)?\b`,
+    "tok-fn": String.raw`\b[A-Za-z_]\w*(?=\s*\()`,
+  },
+  json: {
+    "tok-comment": String.raw``,  // JSON has no comments
+    "tok-string": String.raw`"(?:\\.|[^"\\\n])*"`,
+    "tok-number": String.raw`\b(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)\b`,
+    "tok-fn": String.raw``,
+  },
+  yaml: {
+    "tok-comment": String.raw`#[^\n]*`,
+    "tok-string": String.raw`"(?:\\.|[^"\\\n])*"|'(?:[^'\\\n])*'`,
+    "tok-number": String.raw`\b\d+(?:\.\d+)?\b`,
+    "tok-fn": String.raw``,
   },
 };
 
@@ -87,6 +108,13 @@ const EXT_TO_LANGUAGE: Record<string, Language> = {
   ".cjs": "ts",
   ".py": "python",
   ".pyi": "python",
+  ".sh": "bash",
+  ".bash": "bash",
+  ".zsh": "bash",
+  ".json": "json",
+  ".yaml": "yaml",
+  ".yml": "yaml",
+  ".toml": "yaml",  // close enough for keyword highlighting
 };
 
 // Language hint from a file path (diff `+++ b/path` or `diff --git` lines).

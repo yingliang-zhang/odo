@@ -3907,6 +3907,53 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   margin: 8px 0;
 }
 
+/* GFM alert callouts (Item 7). */
+.md-alert {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border-left: 3px solid var(--border);
+}
+.md-alert-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.md-alert-body {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.md-alert-note { border-left-color: var(--link); background: rgba(122, 162, 247, 0.06); }
+.md-alert-note .md-alert-label { color: var(--link); }
+.md-alert-warning, .md-alert-important { border-left-color: var(--warn); background: rgba(204, 167, 66, 0.06); }
+.md-alert-warning .md-alert-label, .md-alert-important .md-alert-label { color: var(--warn); }
+.md-alert-tip { border-left-color: var(--ok, #3fa35f); background: rgba(63, 163, 95, 0.06); }
+.md-alert-tip .md-alert-label { color: var(--ok, #3fa35f); }
+.md-alert-caution { border-left-color: var(--err, #c34a4a); background: rgba(195, 74, 74, 0.06); }
+.md-alert-caution .md-alert-label { color: var(--err, #c34a4a); }
+
+/* GFM task lists (Item 7). */
+.md-task-item {
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.md-task-item input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--ok, #3fa35f);
+}
+.md-task-done {
+  text-decoration: line-through;
+  color: var(--text-dim);
+}
+
+/* Strikethrough (Item 7). */
+.markdown del {
+  color: var(--text-dim);
+}
+
 .markdown a {
   color: var(--link);
 }

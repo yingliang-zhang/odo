@@ -16,6 +16,7 @@ import { deriveTurnStats, formatBytes, formatTokens } from "../stats";
 import type { TurnStats } from "../stats";
 import type { AutoDistillCountdown, OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
+import Markdown from "./Markdown";
 import PlanChip from "./PlanChip";
 import QueueDock from "./QueueDock";
 import { saveAttachment } from "../api";
@@ -263,7 +264,7 @@ function PreviewBubble({ preview }: { preview: PreviewEvent }) {
   if (text === "") return null;
   return (
     <div className="bubble bubble-agent bubble-preview" aria-live="polite" aria-busy="true">
-      {text}
+      <Markdown content={text} />
       <span className="preview-caret" aria-hidden="true" />
     </div>
   );

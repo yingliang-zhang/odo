@@ -143,7 +143,9 @@ export default memo(function MessageBubble({ event, highlight }: { event: OdoEve
         <div className="bubble bubble-thinking">
           <details>
             <summary>Thinking…</summary>
-            <div className="bubble-thinking-text">{highlightText(p.text ?? "", highlight, "th")}</div>
+            <div className="bubble-thinking-text">
+              <Markdown content={p.text ?? ""} highlight={highlight} />
+            </div>
           </details>
         </div>
       );
