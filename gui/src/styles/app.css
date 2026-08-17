@@ -1110,6 +1110,41 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--err);
 }
 
+/* Workstream context menu (tri-model sidebar gap analysis). */
+.ws-context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 160px;
+  background: var(--bg-elevated, var(--bg-raised));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.ws-context-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+.ws-context-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.ws-context-item.danger {
+  color: var(--err, #c34a4a);
+}
+.ws-context-item.danger:hover {
+  background: rgba(195, 74, 74, 0.1);
+}
+
 /* P2: inline delete confirm — replaces native window.confirm */
 .ws-delete-confirm {
   display: flex;

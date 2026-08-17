@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { errorMessage } from "../api";
 import { ChevronLeft, ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
+import WorkstreamContextMenu from "./WorkstreamContextMenu";
 
 // Phase 3.1: Status dot priority reducer (inspired by Hermes session-row-state.ts).
 // One mutually-exclusive state per workstream row, resolved from boolean signals.
@@ -128,6 +129,14 @@ export default function Sidebar({
   const [renamingId, setRenamingId] = useState<number | null>(null);
   // P2: inline delete confirm — replaces native window.confirm
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  // Context menu state: which workstream + position + project root.
+  const [ctxMenu, setCtxMenu] = useState<{
+    ws: Workstream;
+    projectRoot: string;
+    isActiveProject: boolean;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // M11 F8: project-row removal arm state (two-step inline confirm, same
   // pattern as workstream delete — no native dialogs).
@@ -272,6 +281,10 @@ export default function Sidebar({
       <li
         key={w.id}
         className={clsx("ws-row", active && "ws-row-active")}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setCtxMenu({ ws: w, projectRoot, isActiveProject, x: e.clientX, y: e.clientY });
+        }}
       >
         {renamingId === w.id && isActiveProject ? (
           <form
@@ -565,6 +578,43 @@ export default function Sidebar({
           </ul>
         </div>
       </div>
+      {ctxMenu && (
+        <WorkstreamContextMenu
+          workstream={ctxMenu.ws}
+          projectRoot={ctxMenu.projectRoot}
+          isActiveProject={ctxMenu.isActiveProject}
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onClose={() => setCtxMenu(null)}
+          onSwitch={() => {
+            if (ctxMenu.isActiveProject) {
+              onSwitchWorkstream(ctxMenu.ws.id);
+            } else if (onOpenForeignWorkstream) {
+              onOpenForeignWorkstream(ctxMenu.projectRoot, ctxMenu.ws.id);
+            } else {
+              onSwitchProject(ctxMenu.projectRoot);
+              onSwitchWorkstream(ctxMenu.ws.id);
+            }
+          }}
+          onRename={() => {
+            // For remote projects, switch first then enter rename mode.
+            if (!ctxMenu.isActiveProject) {
+              if (onOpenForeignWorkstream) onOpenForeignWorkstream(ctxMenu.projectRoot, ctxMenu.ws.id);
+              else { onSwitchProject(ctxMenu.projectRoot); onSwitchWorkstream(ctxMenu.ws.id); }
+            }
+            // Defer setRenamingId so the switch + re-render lands first.
+            setTimeout(() => setRenamingId(ctxMenu.ws.id), 50);
+          }}
+          onDelete={() => {
+            // For remote projects, switch first then arm delete confirm.
+            if (!ctxMenu.isActiveProject) {
+              if (onOpenForeignWorkstream) onOpenForeignWorkstream(ctxMenu.projectRoot, ctxMenu.ws.id);
+              else { onSwitchProject(ctxMenu.projectRoot); onSwitchWorkstream(ctxMenu.ws.id); }
+            }
+            setTimeout(() => setDeletingId(ctxMenu.ws.id), 50);
+          }}
+        />
+      )}
     </aside>
   );
 }
