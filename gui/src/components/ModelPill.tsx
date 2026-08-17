@@ -45,8 +45,18 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
         setCustomMode(false);
       }
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        setCustomMode(false);
+      }
+    };
     document.addEventListener("mousedown", onDocDown);
-    return () => document.removeEventListener("mousedown", onDocDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocDown);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   const selectModel = async (m: string) => {

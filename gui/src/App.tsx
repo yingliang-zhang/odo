@@ -865,6 +865,10 @@ export default function App() {
         // Image lightbox (ZoomableImage) — its own Esc listener closes it,
         // but without this gate a bare Esc would also cancel the agent.
         if (document.querySelector(".md-img-lightbox") != null) return;
+        // ModelPill / QueueDock menus — their own Esc listeners close them,
+        // but without this gate a bare Esc would also cancel the agent.
+        if (document.querySelector(".model-pill-menu") != null) return;
+        if (document.querySelector(".queue-popover") != null) return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;
