@@ -484,6 +484,10 @@ body {
   padding: 0 4px;
   border-radius: 4px;
   transition: background 0.15s;
+  max-width: min(40vw, 360px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .status-fact-btn:hover {
   background: var(--bg-input, rgba(255, 255, 255, 0.05));
@@ -2360,8 +2364,8 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--err);
 }
 
-.chat-input input,
-.chat-input textarea {
+.chat-input > input,
+.chat-input > textarea {
   flex: 1;
   background: transparent;
   border: none;
@@ -2370,7 +2374,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   font: inherit;
 }
 
-.chat-input textarea {
+.chat-input > textarea {
   resize: none;
   overflow-y: auto;
   max-height: 148px;
@@ -2378,22 +2382,22 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   line-height: 1.4;
 }
 
-.chat-input input:focus,
-.chat-input textarea:focus {
+.chat-input > input:focus,
+.chat-input > textarea:focus {
   border: none;
   outline: none;
 }
-.chat-input input:focus-visible,
-.chat-input textarea:focus-visible {
+.chat-input > input:focus-visible,
+.chat-input > textarea:focus-visible {
   outline: none;
 }
 
-.chat-input input:disabled,
-.chat-input textarea:disabled {
+.chat-input > input:disabled,
+.chat-input > textarea:disabled {
   opacity: 0.6;
 }
 
-.chat-input button {
+.chat-input > button {
   background: var(--accent-user);
   border: none;
   border-radius: var(--radius-md);
@@ -2404,13 +2408,20 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   transition: filter 0.15s var(--ease-standard);
 }
 
-.chat-input button:hover:not(:disabled) {
+.chat-input > button:hover:not(:disabled) {
   filter: brightness(1.1);
 }
 
-.chat-input button:disabled {
+.chat-input > button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Stop button — must override the .chat-input > button accent fill.
+   Tri-model layout audit: .stop-btn (0,1,0) lost to .chat-input button
+   (0,1,1); compound selector restores the danger affordance. */
+.chat-input > button.stop-btn {
+  background: var(--err);
 }
 
 .stop-btn {
@@ -2430,7 +2441,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 /* W6 (goal queue): the composer park toggle, immediately left of Send.
    Overrides the .chat-input button accent fill: a quiet icon button when
    disarmed, amber when armed (amber = queue, matching ws-parked-pill). */
-.chat-input button.park-toggle {
+.chat-input > button.park-toggle {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -2441,18 +2452,18 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   justify-content: center;
 }
 
-.chat-input button.park-toggle:hover:not(:disabled) {
+.chat-input > button.park-toggle:hover:not(:disabled) {
   color: var(--text);
   filter: none;
 }
 
-.chat-input button.park-toggle.armed {
+.chat-input > button.park-toggle.armed {
   background: rgba(204, 167, 66, 0.14);
   border-color: var(--warn);
   color: var(--warn);
 }
 
-.chat-input button.park-toggle:disabled {
+.chat-input > button.park-toggle:disabled {
   opacity: 0.4;
 }
 
@@ -3071,8 +3082,8 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 3px 10px;
-  font-size: var(--text-caption);
+  padding: 6px 14px;
+  font: inherit;
   cursor: pointer;
 }
 .btn-comments:hover {
@@ -3316,8 +3327,8 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text-dim);
 }
 
-.settings-field input,
-.settings-field select {
+.settings-field > input,
+.settings-field > select {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -3326,15 +3337,15 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   padding: 7px 10px;
 }
 
-.settings-field input:focus,
-.settings-field select:focus {
+.settings-field > input:focus,
+.settings-field > select:focus {
   outline: none;
   border-color: var(--accent-user);
 }
 
 /* P1-4: gated fields read as unavailable */
-.settings-field input:disabled,
-.settings-field select:disabled {
+.settings-field > input:disabled,
+.settings-field > select:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -4710,7 +4721,7 @@ mark {
   gap: 1px;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .panel-tab {
@@ -4803,6 +4814,9 @@ mark {
 /* ---------- M9 Phase 5: StatusBar badges + adapter ---------- */
 
 .status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   background: none;
   border: 1px solid var(--border);
   border-radius: 4px;
