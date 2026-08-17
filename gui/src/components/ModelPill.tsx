@@ -57,7 +57,9 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
       await updateSettings({ coding_model: m }, projectRoot ?? undefined);
       onModelChanged?.();
     } catch {
-      // Revert on failure — the next settings poll will correct it.
+      // Revert local state — the daemon didn't accept the change.
+      // Without onModelChanged there's no refreshSettings to correct it.
+      setModel(currentModel ?? "");
     }
   };
 

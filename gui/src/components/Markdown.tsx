@@ -150,7 +150,9 @@ function ZoomableImage({ src, alt }: { src: string; alt: string }) {
 }
 
 // renderImage: renders ![alt](url) as a ZoomableImage. Scheme-allowlisted
-// (same security posture as renderLink — no javascript:/data: URLs).
+// (https:, mailto:, #, /, data:image/ — same as renderLink plus data:image
+// for base64-embedded images. <img> context does not execute scripts, so
+// data:image/svg+xml is safe here).
 function renderImage(alt: string, url: string, key: string): ReactNode {
   if (!/^(https?:|mailto:|#|\/|data:image\/)/i.test(url)) {
     return <Fragment key={key}>{highlightText(`![${alt}](${url})`, undefined, key)}</Fragment>;
