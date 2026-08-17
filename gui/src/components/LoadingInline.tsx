@@ -18,7 +18,7 @@ export default function LoadingInline({ label = "Loading" }: { label?: string })
 // has skeletons.tsx; Odo had only LoadingInline).
 export function ChatSkeleton() {
   return (
-    <div className="chat-skeleton" aria-label="Loading conversation">
+    <div className="chat-skeleton" role="status" aria-label="Loading conversation">
       {[0, 1, 2].map((i) => (
         <div className="chat-skeleton-group" key={i}>
           <div className="chat-skeleton-header" />

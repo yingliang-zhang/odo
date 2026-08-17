@@ -47,6 +47,7 @@ import { notifyRunDone } from "./notify";
 import { derivePipelineStates } from "./pipeline";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
 import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
+import { strings } from "./strings";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -62,6 +63,13 @@ const DAEMON_CHIP_MS = 30_000;  // daemon-sourced chips (memory/retraction/ledge
 // Belt C (§Fix 2): the error banner auto-dismisses after 10 s.
 const ERROR_BANNER_MS = 10_000;
 const POLL_FAIL_THRESHOLD = 3; // consecutive poll failures before showing disconnect banner
+// P4: jittered exponential backoff while polls keep failing —
+// base * (1 + rand) * 2^min(failures, 5), so a dead daemon is hit ~4×/min,
+// never at the live cadence.
+const POLL_BACKOFF_CAP_MS = 15_000;
+// P4: manual escape hatch — past this many consecutive failures the banner
+// grows a Restart daemon button.
+const POLL_FAIL_RESTART_THRESHOLD = 20;
 
 function mergeEvents(prev: OdoEvent[], next: OdoEvent[]): OdoEvent[] {
   if (next.length === 0) return prev;
@@ -165,6 +173,9 @@ export default function App() {
   // E P2: daemon disconnect tracking — consecutive poll failures
   const [daemonDown, setDaemonDown] = useState(false);
   const pollFailRef = useRef(0);
+  // P4: render-mirror of pollFailRef — the banner's Restart button gates on
+  // POLL_FAIL_RESTART_THRESHOLD, which refs alone can't re-render for.
+  const [pollFailures, setPollFailures] = useState(0);
   // M3: wiki note count — TopBar badge + panel wiki tab (null = unknown).
   const [wikiNoteCount, setWikiNoteCount] = useState<number | null>(null);
   // M4: pending learner-proposal count (TopBar distill badge + panel
@@ -610,8 +621,9 @@ export default function App() {
         if (conversationRef.current !== cid || projectRootRef.current !== root) return; // switched mid-flight
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
-        if (resp.agent_running) setTurnStartedAt(Date.now());
-        else setTurnStartedAt(null);
+        // Seed only on the false→true transition — re-seeding on every
+        // 350ms poll kept the live turn duration permanently at 0:00.
+        setTurnStartedAt((prev) => (resp.agent_running ? (prev ?? Date.now()) : null));
         // M7: transient in-flight block preview — replaced wholesale per
         // poll; renders as the dimmed preview bubble. Only update state
         // when the preview actually changed (reference equality from the
@@ -674,9 +686,11 @@ export default function App() {
         // E P2: reset consecutive failure counter on success
         pollFailRef.current = 0;
         setDaemonDown(false);
+        setPollFailures(0);
       } catch (e) {
         // E P2: track consecutive poll failures for disconnect detection
         pollFailRef.current += 1;
+        setPollFailures(pollFailRef.current);
         if (pollFailRef.current >= POLL_FAIL_THRESHOLD) {
           setDaemonDown(true);
         }
@@ -687,17 +701,61 @@ export default function App() {
         inFlight = false;
       }
     };
+    // M7: 350 ms while the agent runs (block-level preview latency), 1.5 s
+    // idle. The cadence resets when agentRunning flips. Self-scheduling
+    // setTimeout (rather than setInterval) so consecutive failures stretch
+    // the cadence with jittered exponential backoff (P4):
+    // base * (1 + rand) * 2^min(fails, 5), capped at 15 s.
+    // Aliveness guard: the tick().then(schedule) chain must not fire after
+    // the effect cleanup runs — clearTimeout only stops an un-fired timer,
+    // not a promise that already resolved (tri-model review S1 fix).
+    let alive = true;
+    let timer = 0;
+    const schedule = () => {
+      const base = agentRunning ? POLL_INTERVAL_RUNNING_MS : POLL_INTERVAL_IDLE_MS;
+      const fails = pollFailRef.current;
+      const delay =
+        fails === 0
+          ? base
+          : Math.min(
+              POLL_BACKOFF_CAP_MS,
+              base * (1 + Math.random()) * 2 ** Math.min(fails, 5),
+            );
+      timer = window.setTimeout(() => {
+        if (!alive) return;
+        void tick().then(schedule);
+      }, delay);
+    };
     // M12 (D-todo): the Plan popover triggers an immediate re-poll after
     // its journaled op instead of waiting ~1.5 s for the next tick.
-    pollNowRef.current = () => void tick();
-    // M7: 350 ms while the agent runs (block-level preview latency), 1.5 s
-    // idle. The interval resets when agentRunning flips.
-    const timer = setInterval(
-      () => void tick(),
-      agentRunning ? POLL_INTERVAL_RUNNING_MS : POLL_INTERVAL_IDLE_MS,
-    );
-    return () => clearInterval(timer);
+    // Poll-now also clears the pending (possibly backed-off) timer and
+    // re-arms after the tick, so a wake-nudge recovery returns to base
+    // cadence immediately instead of waiting out the stale delay
+    // (tri-model review S3 fix). If a tick is already in flight, that
+    // tick's own .then(schedule) re-arms once it settles — scheduling
+    // here too would fork a second timer chain that `timer` can't track.
+    pollNowRef.current = () => {
+      if (!alive || inFlight) return;
+      window.clearTimeout(timer);
+      void tick().then(schedule);
+    };
+    schedule();
+    return () => { alive = false; window.clearTimeout(timer); };
   }, [booted, recordEvents, agentRunning, refreshPendingCounts, refreshInbox]);
+
+  // P4: wake nudge — a tab becoming visible or the network returning polls
+  // immediately instead of waiting out the current (possibly backed-off)
+  // delay. pollNowRef no-ops until the poll effect installs the real tick.
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) pollNowRef.current(); };
+    const onOnline = () => pollNowRef.current();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+    };
+  }, []);
 
   // M11 P2: cross-project status poll — every 5s, fetch pending_counts for
   // all registered projects except the active one (whose counts come from the
@@ -877,6 +935,13 @@ export default function App() {
         if (document.querySelector(".queue-popover") != null) return;
         // Workstream context menu — same pattern as above.
         if (document.querySelector(".ws-context-menu") != null) return;
+        // @-mention completion menu — same pattern (tri-model review S2 fix).
+        if (document.querySelector(".at-menu") != null) return;
+        // StatusBar popover family — their own listeners close them,
+        // but without this gate a bare Esc would also cancel the agent.
+        if (document.querySelector(".bg-runs-menu") != null) return;
+        // TopBar overflow menu — same pattern as above.
+        if (document.querySelector(".topbar-overflow-menu") != null) return;
         // File preview overlay — its own Esc listener closes it; without
         // this gate a bare Esc would also cancel the agent.
         if (document.querySelector(".file-preview-overlay") != null) return;
@@ -1421,7 +1486,20 @@ export default function App() {
       {daemonDown && (
         <div className="daemon-down-banner" role="alert">
           <WifiOff size={14} />
-          <span>Daemon connection lost — retrying…</span>
+          <span>{strings.banner.daemonDown}</span>
+          {pollFailures >= POLL_FAIL_RESTART_THRESHOLD && (
+            // P4: escape hatch past 20 consecutive failures. gui/src-tauri
+            // has no restart/respawn command, so reload is the lever —
+            // bootstrap respawns the daemon if its socket is dead.
+            <button
+              type="button"
+              className="daemon-down-restart"
+              title={strings.banner.daemonRestartTitle}
+              onClick={() => window.location.reload()}
+            >
+              {strings.banner.daemonRestart}
+            </button>
+          )}
         </div>
       )}
       <TopBar

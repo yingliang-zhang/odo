@@ -38,8 +38,8 @@ export default function QueueDock({
   const [dropArmedSeq, setDropArmedSeq] = useState<number | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // Click-away closes the popover (PlanChip precedent — the slash menu's
-  // blur pattern doesn't fit non-composer buttons).
+  // Click-away or Escape closes the popover (PlanChip precedent — the
+  // slash menu's blur pattern doesn't fit non-composer buttons).
   useEffect(() => {
     if (!open) return;
     const onDocDown = (e: MouseEvent) => {
@@ -47,8 +47,15 @@ export default function QueueDock({
         setOpen(false);
       }
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", onDocDown);
-    return () => document.removeEventListener("mousedown", onDocDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocDown);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   // The journaled state caught up (or the click raced an auto-dequeue):

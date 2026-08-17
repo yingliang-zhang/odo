@@ -297,6 +297,7 @@ export default function TopBar({
                   onChange={(e) => setPinText(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Escape") {
+                      e.stopPropagation();
                       setPinOpen(false);
                       setPinError(null);
                     }

@@ -565,6 +565,21 @@ body {
   animation: toast-in var(--dur) ease-out;
 }
 
+/* P4: manual escape hatch on the disconnect banner — appears after 20
+   consecutive poll failures; reloads so bootstrap respawns the daemon. */
+.daemon-down-restart {
+  background: rgba(220, 160, 0, 0.18) !important;
+  border: 1px solid rgba(220, 160, 0, 0.6);
+  border-radius: var(--radius-sm);
+  color: #e8b030;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.daemon-down-restart:hover {
+  background: rgba(220, 160, 0, 0.32) !important;
+}
+
 /* Transient confirmations (distill/curate/pin, learner updates,
    retractions, ledger failures) live top-right of the main area — out of
    the sidebar — and auto-dismiss after 10s. Below the modal/palette
@@ -1174,6 +1189,12 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   text-overflow: ellipsis;
   max-width: 280px;
 }
+.file-ref-error {
+  font-size: 10px;
+  color: var(--err-text);
+  padding: 2px 8px;
+  word-break: break-word;
+}
 
 /* Tri-model right sidebar gap: inline file preview overlay (Esc-gated in App) */
 .file-preview-overlay {
@@ -1212,7 +1233,7 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   text-overflow: ellipsis;
 }
 .file-preview-trunc {
-  color: var(--text-warn, #eab308);
+  color: var(--warn, #eab308);
 }
 .file-preview-close {
   background: none;
@@ -1673,6 +1694,57 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   min-width: 70px;
 }
 .slash-desc {
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* P3: @-mention completion popup — same anchor as the slash menu (above the
+   composer, from its top-left). */
+.at-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--stroke-tertiary);
+  border-radius: var(--radius-md);
+  margin-bottom: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 10;
+  box-shadow: var(--shadow-soft);
+  padding: 4px;
+}
+.at-menu .at-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent !important;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+.at-menu .at-item:hover {
+  background: var(--bg-input) !important;
+}
+.at-category {
+  font-weight: 600;
+  color: var(--accent-user);
+  white-space: nowrap;
+  min-width: 32px;
+}
+.at-label {
+  white-space: nowrap;
+}
+.at-detail {
   color: var(--text-dim);
   font-size: 12px;
   overflow: hidden;
@@ -2419,10 +2491,13 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 }
 
 /* Agent output sits on a flat elevated surface — no fill, just a hairline
-   so long-form content (tables, code, diffs) gets the full column. */
+   so long-form content (tables, code, diffs) gets the full column.
+   --chat-column-width defaults to 100% (full-bleed) matching Hermes's
+   --composer-width: 100% change (commit 006a4a8873). Set to a fixed px/rem
+   value for a reading-width constraint. */
 .bubble-agent {
-  width: 92%;
-  max-width: 720px;
+  width: 100%;
+  max-width: var(--chat-column-width, 100%);
   margin: 0 auto;
   background: transparent;
   color: var(--agent-text);

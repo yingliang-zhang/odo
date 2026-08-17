@@ -4,6 +4,7 @@ import { errorMessage } from "../api";
 import { ChevronLeft, ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
 import WorkstreamContextMenu from "./WorkstreamContextMenu";
+import { strings } from "../strings";
 
 // Phase 3.1: Status dot priority reducer (inspired by Hermes session-row-state.ts).
 // One mutually-exclusive state per workstream row, resolved from boolean signals.
@@ -24,10 +25,10 @@ const dotClass: Record<DotState, string> = {
   idle: "dot-idle",
 };
 const dotLabel: Record<DotState, string> = {
-  running: "Running",
-  background: "Running in background",
-  pending: "Pending review",
-  idle: "Idle",
+  running: strings.sidebar.statusRunning,
+  background: strings.sidebar.statusBackground,
+  pending: strings.sidebar.statusPending,
+  idle: strings.sidebar.statusIdle,
 };
 
 // Phase 3.4: Tail-pin truncation (inspired by Hermes LaneLabel).
@@ -254,7 +255,7 @@ export default function Sidebar({
   // Phase 3.6: workstream actions as data (inspired by Hermes useProjectActions)
   const workstreamActions = (w: Workstream, projectRoot: string) => [
     {
-      label: "Rename",
+      label: strings.sidebar.rename,
       icon: <Pencil size={12} />,
       onClick: (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -262,7 +263,7 @@ export default function Sidebar({
       },
     },
     {
-      label: "Delete",
+      label: strings.sidebar.delete,
       icon: <Trash2 size={12} />,
       onClick: (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -323,7 +324,7 @@ export default function Sidebar({
               type="text"
               defaultValue={w.name}
               autoFocus
-              onKeyDown={(e) => { if (e.key === "Escape") setRenamingId(null); }}
+              onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setRenamingId(null); } }}
               className="ws-rename-input"
             />
           </form>
@@ -364,8 +365,8 @@ export default function Sidebar({
                   <button
                     type="button"
                     className="ws-action-btn ws-action-delete"
-                    title="Confirm delete"
-                    aria-label={`Confirm delete ${w.name}`}
+                    title={strings.sidebar.confirmDeleteTitle}
+                    aria-label={`${strings.sidebar.confirmDeleteTitle} ${w.name}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       setDeletingId(null);
@@ -386,8 +387,8 @@ export default function Sidebar({
                   <button
                     type="button"
                     className="ws-action-btn"
-                    title="Cancel"
-                    aria-label="Cancel delete"
+                    title={strings.common.cancel}
+                    aria-label={strings.sidebar.cancelDeleteLabel}
                     onClick={(e) => {
                       e.stopPropagation();
                       setDeletingId(null);
@@ -479,8 +480,8 @@ export default function Sidebar({
               <button
                 type="button"
                 className="ws-action-btn ws-action-delete"
-                title="Confirm removal"
-                aria-label={`Confirm remove ${p.name}`}
+                title={strings.sidebar.confirmRemoveTitle}
+                aria-label={`${strings.sidebar.confirmRemoveTitle} ${p.name}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   setRemovingRoot(null);
@@ -501,8 +502,8 @@ export default function Sidebar({
               <button
                 type="button"
                 className="ws-action-btn"
-                title="Cancel"
-                aria-label="Cancel remove"
+                title={strings.common.cancel}
+                aria-label={strings.sidebar.cancelRemoveLabel}
                 onClick={(e) => {
                   e.stopPropagation();
                   setRemovingRoot(null);
@@ -516,7 +517,7 @@ export default function Sidebar({
               <button
                 type="button"
                 className="ws-action-btn"
-                title="Remove from project list (registry only; files untouched)"
+                title={strings.sidebar.removeProjectTitle}
                 aria-label={`Remove ${p.name} from list`}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -538,8 +539,8 @@ export default function Sidebar({
                     type="text"
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Escape") resetCreate(); }}
-                    placeholder="workstream name"
+                    onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); resetCreate(); } }}
+                    placeholder={strings.sidebar.workstreamNamePlaceholder}
                     disabled={createBusy}
                     autoFocus
                   />
@@ -553,8 +554,8 @@ export default function Sidebar({
             {wsList.map((w) => renderWorkstream(w, isActive, p.root))}
             {isActive && (
               <li className="ws-row ws-add-row" onClick={(e) => { e.stopPropagation(); setCreateError(null); setCreating(true); }}>
-                <button type="button" className="ws-add-inline" title="New workstream (⌘N)">
-                  + New workstream
+                <button type="button" className="ws-add-inline" title={strings.sidebar.newWorkstreamTitle}>
+                  {strings.sidebar.newWorkstream}
                 </button>
               </li>
             )}
@@ -569,8 +570,8 @@ export default function Sidebar({
       <div className="sidebar-rail">
         <button
           type="button"
-          title="Expand sidebar (⌘B)"
-          aria-label="Expand sidebar"
+          title={strings.sidebar.expandSidebarTitle}
+          aria-label={strings.sidebar.expandSidebar}
           onClick={onToggleCollapsed}
         >
           <ChevronRight size={14} />
@@ -582,8 +583,8 @@ export default function Sidebar({
           <button
             type="button"
             className="collapse-btn"
-            title="Collapse (⌘B)"
-            aria-label="Collapse sidebar"
+            title={strings.sidebar.collapseSidebarTitle}
+            aria-label={strings.sidebar.collapseSidebar}
             onClick={onToggleCollapsed}
           >
             <ChevronLeft size={14} />
@@ -597,9 +598,9 @@ export default function Sidebar({
               type="button"
               className="proj-add-btn"
               onClick={onAddProject}
-              title="New project"
+              title={strings.sidebar.newProjectTitle}
             >
-              <FolderPlus size={12} /> New
+              <FolderPlus size={12} /> {strings.sidebar.newProject}
             </button>
           </div>
           <ul className="proj-tree">

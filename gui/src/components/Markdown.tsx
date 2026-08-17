@@ -1,4 +1,5 @@
 import { Fragment, memo, useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Check } from "lucide-react";
 import { tokenize, type Language } from "../highlight";
 import FileRefContextMenu from "./FileRefContextMenu";
@@ -221,10 +222,11 @@ function ZoomableImage({ src, alt }: { src: string; alt: string }) {
         onClick={() => setZoomed(true)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setZoomed(true); } }}
       />
-      {zoomed && (
+      {zoomed && createPortal(
         <div className="md-img-lightbox" role="dialog" aria-modal="true" aria-label={alt} onClick={() => setZoomed(false)}>
           <img src={src} alt={alt} className="md-img-zoomed" />
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

@@ -73,13 +73,6 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
     }
   };
 
-  const submitCustom = (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = customText.trim();
-    if (text === "") return;
-    void selectModel(text);
-  };
-
   // Short label: strip "sudo/" prefix for compactness.
   const shortLabel = model.replace(/^sudo\/[^/]+\//, "").replace(/^sudo\//, "") || "model";
 
@@ -108,21 +101,30 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
             </button>
           ))}
           {customMode ? (
-            <form className="model-pill-custom" onSubmit={submitCustom}>
+            <div className="model-pill-custom">
               <input
                 type="text"
                 value={customText}
                 placeholder="model name"
                 autoFocus
+                aria-label="Custom coding model name"
                 onChange={(e) => setCustomText(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Escape") {
+                  if (e.key === "Enter") {
+                    // This input sits inside ChatSurface's chat-input form —
+                    // swallow the implicit submit so Enter applies the model
+                    // instead of sending the chat draft.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const text = customText.trim();
+                    if (text !== "") void selectModel(text);
+                  } else if (e.key === "Escape") {
                     setCustomMode(false);
                     setCustomText("");
                   }
                 }}
               />
-            </form>
+            </div>
           ) : (
             <button
               type="button"

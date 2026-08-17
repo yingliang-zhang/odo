@@ -15,6 +15,7 @@ import type { PipelinePhase, PipelineState } from "../pipeline";
 import type { PanelTab } from "./ContextPanel";
 import { ompUsage } from "../api";
 import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent } from "../types";
+import { strings } from "../strings";
 
 // Tri-model header gap analysis: estimate bytes accumulated since the last
 // receipted prompt (agent_text + tool_call args + tool_result bodies). This
@@ -199,7 +200,7 @@ function ContextMeter({
         ~{pct}%
       </button>
       {open && (
-        <div className="bg-runs-menu ctx-meter-popover" role="dialog" aria-label="Prompt composition">
+        <div className="bg-runs-menu ctx-meter-popover" role="dialog" aria-label={strings.statusbar.promptCompositionLabel}>
           <div className="ctx-pop-title">
             last prompt — seq #{snapshot.seq}
           </div>
@@ -282,8 +283,8 @@ function PanelChip({ models }: { models: PanelModel[] }) {
         Panel ×{models.length}
       </button>
       {open && (
-        <div className="bg-runs-menu panel-chip-popover" role="dialog" aria-label="Review panel">
-          <div className="ctx-pop-title">review panel — read-only (⌘, to change)</div>
+        <div className="bg-runs-menu panel-chip-popover" role="dialog" aria-label={strings.statusbar.reviewPanelLabel}>
+          <div className="ctx-pop-title">{strings.statusbar.reviewPanelReadonlyTitle}</div>
           {models.map((m) => (
              <div key={`${m.model}@${m.provider}`} className="panel-model-row">
               <span className="panel-model-name mono" title={`${m.model}@${m.provider}`}>
@@ -675,7 +676,7 @@ export default function StatusBar({
           {turnStartedAt != null && (
             <span className="status-turn-duration">
               {(() => {
-                const secs = Math.floor((now - turnStartedAt) / 1000);
+                const secs = Math.max(0, Math.floor((now - turnStartedAt) / 1000));
                 const m = Math.floor(secs / 60);
                 const s = secs % 60;
                 return ` ${m}:${s.toString().padStart(2, "0")}`;

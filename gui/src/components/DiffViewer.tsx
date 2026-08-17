@@ -668,6 +668,10 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
                 setCommitEditing(false);
                 void act((id) => onAccept(id, commitMsg.trim() || undefined));
               } else if (e.key === "Escape") {
+                // Keep the keydown from bubbling to App's window listener —
+                // no gate matches the commit editor, so it would close the
+                // whole right panel.
+                e.stopPropagation();
                 setCommitEditing(false);
               }
             }}

@@ -6,11 +6,13 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 // surface. Hermes wraps every message in a boundary; Odo had zero
 // ErrorBoundary/componentDidCatch matches in the codebase.
 //
-// The boundary's resetKey is the group's structural identity (start
-// seq + event count), NOT per-token — per-token keys measured 540
-// wasted Block renders in Hermes's own profiling. When the
-// conversation changes, the resetKey changes, re-mounting the
-// boundary clean.
+// ChatSurface keys the boundary with stable group identity
+// (key = conversationId:startSeq) and passes resetKey = identity+size
+// (start seq + event count): key stability avoids re-mounting the group
+// on every token, while resetKey growth lets a crashed group self-heal
+// when new events arrive. NOT per-token — per-token keys measured 540
+// wasted Block renders in Hermes's own profiling. When the conversation
+// changes, both change, re-mounting the boundary clean.
 
 interface Props {
   children: ReactNode;

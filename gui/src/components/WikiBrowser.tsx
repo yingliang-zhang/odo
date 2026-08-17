@@ -325,7 +325,7 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
         <div className="wiki-reader">
           {contentLoading && <LoadingInline />}
           {!contentLoading && content !== null && content !== "" && !isTopicPage && (
-            <Markdown content={content} className="wiki-content" />
+            <Markdown content={content} className="wiki-content" projectRoot={projectRoot} />
           )}
           {!contentLoading && content !== null && content !== "" && isTopicPage && (
             <div className="wiki-content wiki-topic-content">

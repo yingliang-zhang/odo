@@ -22,6 +22,10 @@ import QueueDock from "./QueueDock";
 import { saveAttachment } from "../api";
 import { deriveTodoState } from "../todo";
 import { deriveParkedGoals } from "../parked";
+import { detectAtQuery, registerCompletionSource, resolveCompletions } from "../completions";
+import type { CompletionItem } from "../completions";
+import { makeWikiSource, makeWorkstreamSource } from "../completion-sources";
+import { strings } from "../strings";
 import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown, Archive } from "lucide-react";
 import ToolTicker from "./ToolTicker";
 import RunGroupBoundary from "./RunGroupBoundary";
@@ -435,6 +439,11 @@ export default function ChatSurface({
   // Slash command autocomplete menu state.
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
+  // P3 @-mention completion popup: resolved items for the live @query.
+  const [atMenu, setAtMenu] = useState<{ items: CompletionItem[]; query: string } | null>(null);
+  // Debounce timer + staleness seq for async @ resolution.
+  const atTimerRef = useRef<number | null>(null);
+  const atSeqRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -620,6 +629,67 @@ export default function ChatSurface({
     ta.style.height = `${Math.min(ta.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
   }, [draft]);
 
+  // P3: @-mention sources. Workstreams are project-scoped (the project root
+  // travels on each resolve ctx); wiki notes are conversation-scoped, so the
+  // wiki source re-registers when the conversation changes. Registration is
+  // inert until the @ popup actually resolves.
+  useEffect(() => registerCompletionSource(makeWorkstreamSource()), []);
+  useEffect(() => {
+    if (conversationId == null) return;
+    return registerCompletionSource(makeWikiSource(conversationId));
+  }, [conversationId]);
+
+  // P3: debounced @ resolution (100ms) so typing across the @query doesn't
+  // spam IPC; a stale resolution (superseded by a newer keystroke) is dropped
+  // by the seq guard.
+  const queueAtResolve = (query: string) => {
+    if (atTimerRef.current != null) window.clearTimeout(atTimerRef.current);
+    const seq = ++atSeqRef.current;
+    atTimerRef.current = window.setTimeout(() => {
+      atTimerRef.current = null;
+      void resolveCompletions({ query, projectRoot }).then((items) => {
+        if (seq !== atSeqRef.current) return;
+        const q = query.toLowerCase();
+        const filtered =
+          q === ""
+            ? items
+            : items.filter((it) => it.label.toLowerCase().includes(q) || it.insert.toLowerCase().includes(q));
+        setAtMenu(filtered.length > 0 ? { items: filtered, query } : null);
+      });
+    }, 100);
+  };
+  useEffect(
+    () => () => {
+      if (atTimerRef.current != null) window.clearTimeout(atTimerRef.current);
+    },
+    [],
+  );
+
+  const closeAtMenu = () => {
+    atSeqRef.current++; // invalidate any in-flight resolution
+    if (atTimerRef.current != null) window.clearTimeout(atTimerRef.current);
+    setAtMenu(null);
+  };
+
+  // Replace the `@query` span ending at the caret with the picked item's
+  // insert text, then restore focus after the inserted text.
+  const pickAtItem = (item: CompletionItem) => {
+    const caret = textareaRef.current?.selectionStart ?? draft.length;
+    const before = draft.slice(0, caret);
+    const at = before.lastIndexOf("@");
+    if (at < 0) {
+      closeAtMenu();
+      return;
+    }
+    setDraft(before.slice(0, at) + item.insert + draft.slice(caret));
+    closeAtMenu();
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      const pos = at + item.insert.length;
+      textareaRef.current?.setSelectionRange(pos, pos);
+    });
+  };
+
   // Belt A composer keys (Fix 3): Enter sends, Shift+Enter newlines (the
   // default), Esc stops a run or clears the draft. Escape is swallowed here
   // so App's global handler (blur/cancel for focus elsewhere) doesn't
@@ -634,11 +704,23 @@ export default function ChatSurface({
     } else {
       setSlashMenuOpen(false);
     }
+    // P3 @-mention completion: `@` opens the popup only at a word start
+    // (line start or after whitespace) — emails and code never trigger.
+    const atQuery = detectAtQuery(val, e.target.selectionStart);
+    if (atQuery != null) queueAtResolve(atQuery);
+    else closeAtMenu();
   };
 
   const handleComposerKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (atMenu && e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeAtMenu();
+      return;
+    }
     if (slashMenuOpen && e.key === "Escape") {
       e.preventDefault();
+      e.stopPropagation();
       setSlashMenuOpen(false);
       return;
     }
@@ -1028,7 +1110,7 @@ export default function ChatSurface({
           {runGroups.map((group) => (
             <RunGroupBoundary
               key={`${conversationId ?? "none"}:${group.start?.seq ?? "preamble"}`}
-              resetKey={String(conversationId ?? "none") + ":" + String(group.start?.seq ?? "preamble")}
+              resetKey={String(conversationId ?? "none") + ":" + String(group.start?.seq ?? "preamble") + ":" + String(group.events.length)}
             >
             <div className="run-group">
               <RunHeader group={group} />
@@ -1048,7 +1130,7 @@ export default function ChatSurface({
                       {item.calls} tool call{item.calls === 1 ? "" : "s"}
                     </summary>
                     {item.events.map((ev) => (
-                      <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} />
+                      <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
                     ))}
                   </details>
                 ),
@@ -1121,6 +1203,27 @@ export default function ChatSurface({
           </div>
         )}
         <form className="chat-input" onSubmit={handleSubmit}>
+          {atMenu && (
+            <div className="at-menu" role="listbox" aria-label={strings.composer.atMenuLabel}>
+              {atMenu.items.map((item, i) => (
+                <button
+                  key={`${item.category ?? "item"}:${item.insert}:${i}`}
+                  type="button"
+                  className="at-item"
+                  role="option"
+                  aria-selected="false"
+                  onMouseDown={(e) => {
+                    e.preventDefault(); // don't blur the textarea
+                    pickAtItem(item);
+                  }}
+                >
+                  {item.category != null && <span className="at-category">{item.category}</span>}
+                  <span className="at-label">{item.label}</span>
+                  {item.detail != null && <span className="at-detail">{item.detail}</span>}
+                </button>
+              ))}
+            </div>
+          )}
           {slashMenuOpen && (
             <div className="slash-menu">
               {SLASH_COMMANDS
@@ -1151,22 +1254,25 @@ export default function ChatSurface({
           )}
           <textarea
             ref={textareaRef}
-            aria-label="Message input"
+            aria-label={strings.composer.messageInputLabel}
             rows={1}
             value={draft}
             onChange={handleDraftChange}
             onBlur={() => {
               // Delay close so click registration on menu items fires first.
-              setTimeout(() => setSlashMenuOpen(false), 150);
+              setTimeout(() => {
+                setSlashMenuOpen(false);
+                setAtMenu(null);
+              }, 150);
             }}
             onKeyDown={handleComposerKeyDown}
             onPaste={handlePaste}
             placeholder={
               dragOver
-                ? "Drop files to attach them…"
+                ? strings.composer.placeholderDrop
                 : agentRunning
-                  ? "Steer the running agent… (Esc stops)"
-                  : "Describe the change you want…"
+                  ? strings.composer.placeholderRunning
+                  : strings.composer.placeholderIdle
             }
             // M12: locked during a MANUAL distill only — an auto distill
             // is send-cancelled daemon-side and never blocks typing.
@@ -1177,10 +1283,10 @@ export default function ChatSurface({
             <button
               type="button"
               className="stop-btn"
-              title="Stop the running agent (Esc)"
+              title={strings.composer.stopTitle}
               onClick={onCancel}
             >
-              Stop
+              {strings.composer.stop}
             </button>
           )}
           {/* W6 (goal queue): arm to queue the submit as a parked goal.
@@ -1190,15 +1296,15 @@ export default function ChatSurface({
             type="button"
             className={`park-toggle${parkArmed ? " armed" : ""}`}
             aria-pressed={parkArmed}
-            aria-label="Park: queue this goal for later"
-            title={parkArmed ? "Parked — this goal queues for later" : "Park: queue this goal for later"}
+            aria-label={strings.composer.parkToggleLabel}
+            title={parkArmed ? strings.composer.parkToggleTitleArmed : strings.composer.parkToggleTitleDisarmed}
             disabled={draft.trim().startsWith("/")}
             onClick={() => setParkArmed((v) => !v)}
           >
             <Archive size={14} />
           </button>
           <button type="submit" disabled={sendDisabled || sending || distillLocked || !canSend}>
-            {parkArmed ? "Park" : agentRunning ? "Steer" : "Send"}
+            {parkArmed ? strings.composer.park : agentRunning ? strings.composer.steer : strings.composer.send}
           </button>
           <ModelPill
             projectRoot={projectRoot}

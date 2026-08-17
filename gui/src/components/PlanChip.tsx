@@ -182,6 +182,7 @@ export default function PlanChip({
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Escape") {
+                    e.stopPropagation();
                     setAdding(false);
                     setDraft("");
                   }
