@@ -253,7 +253,7 @@ function runRenderItems(events: OdoEvent[]): RunRenderItem[] {
 // pulsing caret; tool previews lead with a spinning ⟳ plus the call's
 // intent. When the block completes, the next poll journals it and this
 // bubble is replaced by the real one.
-function PreviewBubble({ preview }: { preview: PreviewEvent }) {
+function PreviewBubble({ preview, projectRoot }: { preview: PreviewEvent; projectRoot?: string | null }) {
   const p = preview.payload ?? {};
   if (preview.type === "agent_tool_call") {
     const tool = typeof p.tool === "string" && p.tool !== "" ? p.tool : "tool";
@@ -272,7 +272,7 @@ function PreviewBubble({ preview }: { preview: PreviewEvent }) {
   if (text === "") return null;
   return (
     <div className="bubble bubble-agent bubble-preview" aria-live="polite" aria-busy="true">
-      <Markdown content={text} />
+      <Markdown content={text} projectRoot={projectRoot} />
       <span className="preview-caret" aria-hidden="true" />
     </div>
   );
@@ -1034,7 +1034,7 @@ export default function ChatSurface({
               <RunHeader group={group} />
               {runRenderItems(group.events).map((item) =>
                 item.kind === "bubble" ? (
-                  <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} />
+                  <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
                 ) : (
                   // Tool calls default-collapsed; an active ⌘F search
                   // forces them open so jump-to-match still reaches tool
@@ -1056,7 +1056,7 @@ export default function ChatSurface({
             </div>
             </RunGroupBoundary>
           ))}
-          {preview && <PreviewBubble preview={preview} />}
+          {preview && <PreviewBubble preview={preview} projectRoot={projectRoot} />}
           <ToolTicker running={agentRunning} events={events} />
         </div>
         {newOutput && (

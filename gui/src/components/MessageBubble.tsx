@@ -101,7 +101,7 @@ function recallTooltip(recall: RecallItem[]): string {
 // Belt B: agent_text renders as markdown; `highlight` wraps occurrences of
 // the chat-search query in <mark>. The .bubble-mount wrapper carries the
 // data-seq jump anchor without disturbing the flex layout (display: contents).
-export default memo(function MessageBubble({ event, highlight, onEditUserMessage }: { event: OdoEvent; highlight?: string; onEditUserMessage?: (text: string) => void }) {
+export default memo(function MessageBubble({ event, highlight, onEditUserMessage, projectRoot }: { event: OdoEvent; highlight?: string; onEditUserMessage?: (text: string) => void; projectRoot?: string | null }) {
   const p = event.payload ?? {};
   // GLM B4: copy feedback for tool results (mirrors CodeBlock pattern).
   const [copied, setCopied] = useState(false);
@@ -145,7 +145,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       body = (
         <div className="bubble bubble-agent">
           <div className="bubble-text">
-            <Markdown content={p.text ?? ""} highlight={highlight} />
+            <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />
           </div>
         </div>
       );
@@ -157,7 +157,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
           <details>
             <summary>Thinking…</summary>
             <div className="bubble-thinking-text">
-              <Markdown content={p.text ?? ""} highlight={highlight} />
+              <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />
             </div>
           </details>
         </div>

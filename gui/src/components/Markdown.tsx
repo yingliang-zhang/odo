@@ -1,6 +1,7 @@
 import { Fragment, memo, useEffect, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 import { tokenize, type Language } from "../highlight";
+import FileRefContextMenu from "./FileRefContextMenu";
 
 // Belt B: a small dependency-free markdown renderer for agent output and
 // wiki notes. Line-based block parsing (headings, fenced code, lists,
@@ -14,6 +15,8 @@ interface Props {
   className?: string;
   // Belt B chat search: case-insensitive substring wrapped in <mark>.
   highlight?: string;
+  // Tri-model open file: project root for resolving file paths in inline code spans.
+  projectRoot?: string | null;
 }
 
 // Fence info strings mapped onto the diff viewer's tokenizer languages;
@@ -87,7 +90,63 @@ export function highlightText(
 const BT = "`";
 const INLINE_SOURCE = String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|(` + BT + String.raw`[^` + BT + String.raw`\n]+` + BT + String.raw`)|(!\[([^\]\n]*)\]\(([^)\s]+)\))|(\[([^\]\n]+)\]\(([^)\s]+)\))`;
 
-function parseInline(text: string, highlight: string | undefined, keyPrefix: string): ReactNode[] {
+// Tri-model open file: conservative path detection for inline code spans.
+// Gate loosely (JS) — the Rust side validates existence + containment.
+// Matches: src/main.go, src/main.go:42, /abs/path/x.ts, ~/path, wiki/note.md
+// Rejects: URLs (https://), package names (encoding/json), bare words.
+const FILE_EXT = /\.(go|rs|ts|tsx|js|jsx|py|md|json|toml|yaml|yml|sh|sql|css|html|txt|lock|mod|sum|proto|gradle)$/i;
+function looksLikeFilePath(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2 || /\s/.test(t)) return false;
+  // Reject URL schemes.
+  if (/^[a-z]+:\/\//i.test(t)) return false;
+  // Strip trailing :line or :line-range.
+  const stripped = t.replace(/:\d+(-\d+)?$/, "");
+  // Must contain / or ~, OR have a known file extension.
+  if (stripped.includes("/") || stripped.startsWith("~")) return true;
+  if (FILE_EXT.test(stripped)) return true;
+  return false;
+}
+
+// Strip trailing :line or :line-range from a path for resolution.
+function stripLineRef(text: string): string {
+  return text.trim().replace(/:\d+(-\d+)?$/, "");
+}
+
+// CodeSpan: an inline code element that offers a right-click context menu
+// (Open / Reveal in Folder) when the text looks like a file path.
+function CodeSpan({ text, highlight, highlightKey, projectRoot }: {
+  text: string;
+  highlight?: string;
+  highlightKey: string;
+  projectRoot?: string | null;
+}) {
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <>
+      <code
+        className="bubble-inline-code file-ref-span"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
+        {highlightText(text, highlight, highlightKey)}
+      </code>
+      {menu && (
+        <FileRefContextMenu
+          path={stripLineRef(text)}
+          projectRoot={projectRoot ?? null}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
+  );
+}
+
+function parseInline(text: string, highlight: string | undefined, keyPrefix: string, projectRoot?: string | null): ReactNode[] {
   const re = new RegExp(INLINE_SOURCE, "g");
   const nodes: ReactNode[] = [];
   let last = 0;
@@ -99,18 +158,25 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
     }
     const key = `${keyPrefix}-i${k++}`;
     if (m[1] !== undefined) {
-      nodes.push(<strong key={key}>{parseInline(m[1].slice(2, -2), highlight, key)}</strong>);
+      nodes.push(<strong key={key}>{parseInline(m[1].slice(2, -2), highlight, key, projectRoot)}</strong>);
     } else if (m[2] !== undefined) {
-      nodes.push(<em key={key}>{parseInline(m[2].slice(1, -1), highlight, key)}</em>);
+      nodes.push(<em key={key}>{parseInline(m[2].slice(1, -1), highlight, key, projectRoot)}</em>);
     } else if (m[3] !== undefined) {
       // ~~strikethrough~~
-      nodes.push(<del key={key}>{parseInline(m[3].slice(2, -2), highlight, key)}</del>);
+      nodes.push(<del key={key}>{parseInline(m[3].slice(2, -2), highlight, key, projectRoot)}</del>);
     } else if (m[4] !== undefined) {
-      nodes.push(
-        <code key={key} className="bubble-inline-code">
-          {highlightText(m[4].slice(1, -1), highlight, key)}
-        </code>,
-      );
+      const codeText = m[4].slice(1, -1);
+      if (looksLikeFilePath(codeText)) {
+        nodes.push(
+          <CodeSpan key={key} text={codeText} highlight={highlight} highlightKey={key} projectRoot={projectRoot} />,
+        );
+      } else {
+        nodes.push(
+          <code key={key} className="bubble-inline-code">
+            {highlightText(codeText, highlight, key)}
+          </code>,
+        );
+      }
     } else if (m[6] !== undefined) {
       // ![alt](url) — inline image with click-to-zoom.
       nodes.push(renderImage(m[6], m[7], key));
@@ -376,7 +442,7 @@ function CodeBlock({ block, highlight, index }: { block: Extract<Block, { kind: 
   );
 }
 
-function renderBlock(block: Block, index: number, highlight: string | undefined): ReactNode {
+function renderBlock(block: Block, index: number, highlight: string | undefined, projectRoot?: string | null): ReactNode {
   const key = `b${index}`;
   switch (block.kind) {
     case "code": {
@@ -384,7 +450,7 @@ function renderBlock(block: Block, index: number, highlight: string | undefined)
     }
     case "heading": {
       const Tag = `h${block.level}` as "h1" | "h2" | "h3" | "h4";
-      return <Tag key={key}>{parseInline(block.text, highlight, key)}</Tag>;
+      return <Tag key={key}>{parseInline(block.text, highlight, key, projectRoot)}</Tag>;
     }
     case "ul":
       return (
@@ -414,13 +480,13 @@ function renderBlock(block: Block, index: number, highlight: string | undefined)
         </ol>
       );
     case "quote":
-      return <blockquote key={key}>{parseInline(block.text, highlight, key)}</blockquote>;
+      return <blockquote key={key}>{parseInline(block.text, highlight, key, projectRoot)}</blockquote>;
     case "alert": {
       // GFM alert callout: colored left-border box matching the alert type.
       return (
         <div key={key} className={`md-alert md-alert-${block.alertType}`}>
           <div className="md-alert-label">{block.alertType.toUpperCase()}</div>
-          <div className="md-alert-body">{parseInline(block.text, highlight, key)}</div>
+          <div className="md-alert-body">{parseInline(block.text, highlight, key, projectRoot)}</div>
         </div>
       );
     }
@@ -449,15 +515,15 @@ function renderBlock(block: Block, index: number, highlight: string | undefined)
       );
     }
     case "para":
-      return <p key={key}>{parseInline(block.text, highlight, key)}</p>;
+      return <p key={key}>{parseInline(block.text, highlight, key, projectRoot)}</p>;
   }
 }
 
-export default memo(function Markdown({ content, className, highlight }: Props) {
+export default memo(function Markdown({ content, className, highlight, projectRoot }: Props) {
   const blocks = parseBlocks(content);
   return (
     <div className={className !== undefined ? `markdown ${className}` : "markdown"}>
-      {blocks.map((b, bi) => renderBlock(b, bi, highlight))}
+      {blocks.map((b, bi) => renderBlock(b, bi, highlight, projectRoot))}
     </div>
   );
 });
