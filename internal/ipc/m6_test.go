@@ -494,8 +494,8 @@ func TestLedgerAppendedAtDistill(t *testing.T) {
 	}
 
 	ledger := readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
-	if !strings.Contains(ledger, "## epoch 1 — ") {
-		t.Errorf("ledger missing '## epoch 1 — ' section header:\n%s", ledger)
+	if !strings.Contains(ledger, "## main/epoch 1 — ") {
+		t.Errorf("ledger missing '## main/epoch 1 — ' section header:\n%s", ledger)
 	}
 	if !strings.Contains(ledger, "- distill duration: ") ||
 		!strings.Contains(ledger, fmt.Sprintf("(review_action/distill seq %d)", distillSeq)) {
@@ -543,8 +543,8 @@ func TestLedgerAppendedAtApply(t *testing.T) {
 		t.Fatal("no memory_apply review_action journaled")
 	}
 	ledger := readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
-	if !strings.Contains(ledger, "## epoch 1 (apply) — ") {
-		t.Errorf("ledger missing '## epoch 1 (apply) — ' section:\n%s", ledger)
+	if !strings.Contains(ledger, "## main/epoch 1 (apply) — ") {
+		t.Errorf("ledger missing '## main/epoch 1 (apply) — ' section:\n%s", ledger)
 	}
 	want := fmt.Sprintf("- accepted: 2, rejected: 1 (review_action/memory_apply seq %d)", applySeq)
 	if !strings.Contains(ledger, want) {
@@ -726,17 +726,17 @@ func TestLedgerZeroProposalsNoCrossEpoch(t *testing.T) {
 	ledger := readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
 
 	// Epoch 1 section should have "proposals: 1"
-	if !strings.Contains(ledger, "## epoch 1 — ") {
-		t.Errorf("ledger missing epoch 1 section:\n%s", ledger)
+	if !strings.Contains(ledger, "## main/epoch 1 — ") {
+		t.Errorf("ledger missing main/epoch 1 section:\n%s", ledger)
 	}
 
 	// Epoch 2 section should have "proposals: 0 (no memory_propose event)"
 	// NOT "proposals: 1" — that would be cross-epoch misattribution
-	if !strings.Contains(ledger, "## epoch 2 — ") {
-		t.Errorf("ledger missing epoch 2 section:\n%s", ledger)
+	if !strings.Contains(ledger, "## main/epoch 2 — ") {
+		t.Errorf("ledger missing main/epoch 2 section:\n%s", ledger)
 	}
 	// Find the epoch 2 section and check its proposals line
-	epoch2Start := strings.Index(ledger, "## epoch 2 — ")
+	epoch2Start := strings.Index(ledger, "## main/epoch 2 — ")
 	if epoch2Start < 0 {
 		t.Fatal("no epoch 2 section")
 	}

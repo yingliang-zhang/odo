@@ -2975,6 +2975,11 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		return Response{}, fmt.Errorf("distill: create wiki dir: %w", err)
 	}
 	wikiPath := filepath.Join(wikiDir, fmt.Sprintf("%s-epoch-%d.md", w.Name, c.Epoch))
+	// Safety net (GLM defect 2): strip any preamble before the first
+	// `# ` heading — the distiller sometimes emits chain-of-thought or
+	// tool-output fragments before the actual summary. The prompt now
+	// forbids this, but the strip is defense-in-depth.
+	note = stripPreamble(note)
 	if err := os.WriteFile(wikiPath, []byte(note), 0o644); err != nil {
 		return Response{}, fmt.Errorf("distill: write wiki note: %w", err)
 	}
@@ -3295,6 +3300,16 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 // when the request's ctx is what failed (client dropped mid-distill), the
 // original ctx could never carry the record.
 func (s *Server) journalDistillLedger(ctx context.Context, conversationID int64, epoch int, distillEv store.Event) {
+	// Resolve the workstream name so the ledger section header is
+	// uniquely addressable (GLM defect 2: "epoch 1" appears 4× across
+	// workstreams; the curator qualifies topic citations as
+	// "(main-epoch-3)" — the ledger must match that discipline).
+	wsName := "unknown"
+	if conv, err := s.store.GetConversation(ctx, conversationID); err == nil {
+		if ws, err := s.store.GetWorkstream(ctx, conv.WorkstreamID); err == nil {
+			wsName = ws.Name
+		}
+	}
 	events, lerr := s.store.ListEvents(ctx, conversationID, 0)
 	if lerr != nil {
 		_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
@@ -3304,7 +3319,7 @@ func (s *Server) journalDistillLedger(ctx context.Context, conversationID int64,
 		}))
 		return
 	}
-	if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d", epoch),
+	if err := appendLedger(s.projectRoot, fmt.Sprintf("%s/epoch %d", wsName, epoch),
 		distillLedgerMetrics(events, distillEv, lastRecallCount(events), epoch)); err != nil {
 		_, _ = s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":  "ledger",
@@ -3966,8 +3981,13 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 
 	// M6: ledger append (best-effort). Separate "(apply)" section: the file
 	// is append-only and a later epoch's distill section may already follow
-	// the epoch this apply belongs to.
-	if err := appendLedger(s.projectRoot, fmt.Sprintf("epoch %d (apply)", batch.epoch), applyLedgerMetrics(applyEv)); err != nil {
+	// the epoch this apply belongs to. Section header includes the
+	// workstream name for unique addressability (GLM defect 2).
+	applyWsName := "unknown"
+	if ws, err := s.store.GetWorkstream(ctx, c.WorkstreamID); err == nil {
+		applyWsName = ws.Name
+	}
+	if err := appendLedger(s.projectRoot, fmt.Sprintf("%s/epoch %d (apply)", applyWsName, batch.epoch), applyLedgerMetrics(applyEv)); err != nil {
 		_, _ = s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":  "ledger",
 			"cause":  "write_failed",
@@ -4223,6 +4243,22 @@ type omission struct {
 	count, firstSeq, lastSeq int
 }
 
+// stripPreamble removes any text before the first markdown `# ` heading.
+// The distiller is instructed to start with `# `, but as defense-in-depth
+// (GLM defect 2: Vietnamese tool-output fragments in moa-chain-epoch-2),
+// any preamble — chain-of-thought, tool output, scratch text — is stripped
+// before the note is written to disk. If no `# ` heading is found, the
+// note is returned as-is (don't discard a valid note that just lacks a
+// heading — the curate pass or a future re-distill can fix it).
+func stripPreamble(note string) string {
+	for i, line := range strings.Split(note, "\n") {
+		if strings.HasPrefix(line, "# ") {
+			return strings.Join(strings.Split(note, "\n")[i:], "\n")
+		}
+	}
+	return note
+}
+
 // distillPrompt renders journaled events into the summary prompt: the M1
 // spec's instruction line, the Open loops mandate (R4 — the next epoch's
 // cold-start resume card is rendered from this section), then each event
@@ -4235,6 +4271,10 @@ type omission struct {
 func distillPrompt(events []store.Event) (string, omission) {
 	var b strings.Builder
 	b.WriteString("Summarize the key decisions, code changes, and open questions from this conversation. Format as markdown.\n\n")
+	b.WriteString("Output rules (critical):\n")
+	b.WriteString("- Begin with a single `# ` heading — no preamble, no chain-of-thought, no scratch text before it.\n")
+	b.WriteString("- Write in English. Code, identifiers, and commit messages stay in English.\n")
+	b.WriteString("- The note is a persistent wiki artifact, not a chat reply: be concise, factual, and self-contained.\n\n")
 	b.WriteString("The note MUST end with a `## Open loops` section: one bullet per unresolved question, pending task, or decision still awaiting the user. If nothing is open, write `## Open loops` followed by the single line `None.` — never omit the section.\n\n")
 	var om omission
 	if tail, omitted := capEvents(events, distillPromptBytesCap); omitted > 0 {
