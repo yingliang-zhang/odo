@@ -1,4 +1,4 @@
-import { Fragment, memo, useState, type ReactNode } from "react";
+import { Fragment, memo, useEffect, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 import { tokenize, type Language } from "../highlight";
 
@@ -71,13 +71,15 @@ export function highlightText(
   return <Fragment key={keyPrefix}>{out}</Fragment>;
 }
 
-// Combined inline alternation: **bold** | *italic* | ~~strike~~ | `code` | [text](url).
+// Combined inline alternation: **bold** | *italic* | ~~strike~~ | `code` | ![alt](url) | [text](url).
 // Bold runs first so `*` inside bold is parsed by the recursive call.
+// Image `![alt](url)` runs before link `[text](url)` to avoid the link
+// pattern matching `![...]` (the `!` prefix is the image discriminator).
 // A shared /g regex would be corrupted by the recursion (a nested call
 // resets lastIndex while an outer exec loop is mid-scan) — each call
 // gets a fresh instance.
 const INLINE_SOURCE =
-  String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|(` + "`" + `[^` + "`" + `\n]+` + "`" + `)|(\[([^]\n]+)\]\([^)\s]+\))`;
+  String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|(` + "`" + `[^` + "`" + `\n]+` + "`" + `)|(!\[([^\]\n]*)\]\(([^)\s]+)\))|(\[([^]\n]+)\]\([^)\s]+\))`;
 
 function parseInline(text: string, highlight: string | undefined, keyPrefix: string): ReactNode[] {
   const re = new RegExp(INLINE_SOURCE, "g");
@@ -103,8 +105,11 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
           {highlightText(m[4].slice(1, -1), highlight, key)}
         </code>,
       );
+    } else if (m[6] !== undefined) {
+      // ![alt](url) — inline image with click-to-zoom.
+      nodes.push(renderImage(m[6], m[7], key));
     } else {
-      nodes.push(renderLink(m[6], m[7], highlight, key));
+      nodes.push(renderLink(m[9], m[10], highlight, key));
     }
     last = m.index + m[0].length;
   }
@@ -112,6 +117,45 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
     nodes.push(highlightText(text.slice(last), highlight, `${keyPrefix}-t${k++}`));
   }
   return nodes;
+}
+
+// ZoomableImage: click to open a full-screen lightbox overlay.
+// Esc or click-outside closes. No external dependencies.
+function ZoomableImage({ src, alt }: { src: string; alt: string }) {
+  const [zoomed, setZoomed] = useState(false);
+  useEffect(() => {
+    if (!zoomed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoomed(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoomed]);
+  return (
+    <>
+      <img
+        src={src}
+        alt={alt}
+        className="md-inline-img"
+        loading="lazy"
+        onClick={() => setZoomed(true)}
+      />
+      {zoomed && (
+        <div className="md-img-lightbox" onClick={() => setZoomed(false)}>
+          <img src={src} alt={alt} className="md-img-zoomed" />
+        </div>
+      )}
+    </>
+  );
+}
+
+// renderImage: renders ![alt](url) as a ZoomableImage. Scheme-allowlisted
+// (same security posture as renderLink — no javascript:/data: URLs).
+function renderImage(alt: string, url: string, key: string): ReactNode {
+  if (!/^(https?:|mailto:|#|\/|data:image\/)/i.test(url)) {
+    return <Fragment key={key}>{highlightText(`![${alt}](${url})`, undefined, key)}</Fragment>;
+  }
+  return <ZoomableImage key={key} src={url} alt={alt} />;
 }
 
 // javascript:/data: URLs never render as links — the raw text stays.

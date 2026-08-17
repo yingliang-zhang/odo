@@ -25,6 +25,7 @@ import { deriveParkedGoals } from "../parked";
 import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown, Archive } from "lucide-react";
 import ToolTicker from "./ToolTicker";
 import RunGroupBoundary from "./RunGroupBoundary";
+import ModelPill from "./ModelPill";
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
 // minute ("35s").
@@ -88,6 +89,10 @@ interface Props {
   projectRoot?: string | null;
   onTodoChanged?: () => void;
   onTodoError?: (message: string) => void;
+  // Model pill: shows the current coding model in the composer, lets
+  // the user switch per-message without opening Settings.
+  codingModel?: string | null;
+  onModelChanged?: () => void;
 }
 
 // AutoDistillChip discloses the daemon's auto-distill state above the
@@ -394,6 +399,8 @@ export default function ChatSurface({
   projectRoot = null,
   onTodoChanged,
   onTodoError,
+  codingModel = null,
+  onModelChanged,
 }: Props) {
   // M12 (D-todo): the plan layer's read side — derived from the journaled
   // event history already in memory (bootstrap replay + poll appends).
@@ -1178,6 +1185,11 @@ export default function ChatSurface({
           <button type="submit" disabled={sendDisabled || sending || distillLocked || !canSend}>
             {parkArmed ? "Park" : agentRunning ? "Steer" : "Send"}
           </button>
+          <ModelPill
+            projectRoot={projectRoot}
+            currentModel={codingModel}
+            onModelChanged={onModelChanged}
+          />
         </form>
         <div className="composer-hint">
           ⌘↵ send · Shift+↵ newline{agentRunning ? " · Esc stop" : ""}{distillLocked ? " · distilling…" : ""}

@@ -1537,6 +1537,10 @@ export default function App() {
           projectRoot={project?.root_path ?? null}
           onTodoChanged={() => pollNowRef.current()}
           onTodoError={(m) => setError(m)}
+          codingModel={appSettings?.coding_model ?? null}
+          onModelChanged={() => {
+            void refreshSettings();
+          }}
           // W6 (goal queue): the composer park toggle and the QueueDock's
           // Resume/Drop; rows derive from `events` (already passed above).
           onResumeParked={handleResumeParked}
