@@ -84,6 +84,21 @@ export function listProjects(): Promise<ProjectEntry[]> {
   return invoke<ProjectEntry[]>("list_projects");
 }
 
+// Open file / reveal in folder — pure OS command, daemon-free.
+// Resolves relative paths against projectRoot. Canonicalizes + validates
+// containment (projectRoot or ~/.odo) on the Rust side.
+export async function openPath(
+  path: string,
+  reveal: boolean,
+  projectRoot?: string | null,
+): Promise<string> {
+  return invoke<string>("open_path", {
+    path,
+    reveal,
+    projectRoot: projectRoot ?? null,
+  });
+}
+
 // M11 F1: open a native folder picker; if the user selects a folder, the
 // bridge ensures the daemon is running (auto-registers the project) and
 // returns the new entry. Returns null when the user cancels.

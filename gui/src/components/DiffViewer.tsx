@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type UIEvent, type ReactNode } from "react";
 import { autonomyStatus, errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
+import FileRefContextMenu from "./FileRefContextMenu";
 import type { AutonomyReport, Diff, ReviewResult } from "../types";
 
 interface Props {
@@ -362,6 +363,8 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   }, [projectRoot]);
   // Belt D: inline (unified) vs split (old | new) rendering.
   const [split, setSplit] = useState(false);
+  // File-ref context menu state for file chips.
+  const [fileRefMenu, setFileRefMenu] = useState<{ path: string; x: number; y: number } | null>(null);
   // P1-3: inline diff comments — Map<lineIndex, comment text>
   const [comments, setComments] = useState<Map<number, string>>(new Map());
   const [openLine, setOpenLine] = useState<number | null>(null);
@@ -694,6 +697,10 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
                 title={seg.path}
                 disabled={isTruncated}
                 onClick={() => scrollToFile(seg.lineIndex)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setFileRefMenu({ path: seg.path, x: e.clientX, y: e.clientY });
+                }}
               >
                 <span className="diff-file-status" data-status={seg.status} />
                 <span className="diff-file-name">{basename}</span>
@@ -764,6 +771,16 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
             Done
           </button>
         </div>
+      )}
+
+      {fileRefMenu && (
+        <FileRefContextMenu
+          path={fileRefMenu.path}
+          projectRoot={projectRoot ?? null}
+          x={fileRefMenu.x}
+          y={fileRefMenu.y}
+          onClose={() => setFileRefMenu(null)}
+        />
       )}
     </section>
   );

@@ -38,6 +38,11 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       fx.projects.splice(0, fx.projects.length, ...kept);
       return kept;
     }
+    case "open_path": {
+      // Browser dev mode — no-op (can't open files). Log for dev visibility.
+      console.log("[mock] open_path:", args?.path, args?.reveal ? "(reveal)" : "(open)");
+      return args?.path ?? "";
+    }
 
     // ---------- Workstreams ----------
     case "list_workstreams": {

@@ -1281,6 +1281,77 @@ mod tests {
     }
 }
 
+/// Open a file/folder with the OS default app, or reveal it in the file
+/// manager (Finder on macOS). This is the first pure-OS, daemon-free Tauri
+/// command — no Unix socket, no journal. Security: the path is canonicalized
+/// and must be inside `project_root` (or `~/.odo` for global files). Relative
+/// paths are joined against `project_root` before validation.
+#[tauri::command]
+fn open_path(path: String, reveal: bool, project_root: Option<String>) -> Result<String, String> {
+    use std::env;
+
+    // 1. Resolve to an absolute path.
+    let resolved = if path.starts_with('~') {
+        let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+        path.replacen('~', &home, 1)
+    } else if Path::new(&path).is_absolute() {
+        path.clone()
+    } else {
+        let root = project_root.as_ref().ok_or("project_root required for relative paths")?;
+        let mut p = PathBuf::from(root);
+        p.push(&path);
+        p.to_string_lossy().to_string()
+    };
+
+    let canonical = std::fs::canonicalize(&resolved)
+        .map_err(|e| format!("Path not found: {} ({})", resolved, e))?;
+
+    // 2. Containment check — must be inside project_root or ~/.odo.
+    let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let odo_dir = PathBuf::from(&home).join(".odo");
+
+    let allowed = if let Some(ref root) = project_root {
+        let canonical_root = std::fs::canonicalize(root)
+            .map_err(|e| format!("project_root not found: {} ({})", root, e))?;
+        canonical.starts_with(&canonical_root) || canonical.starts_with(&odo_dir)
+    } else {
+        canonical.starts_with(&odo_dir)
+    };
+
+    if !allowed {
+        return Err(format!(
+            "Path outside project root: {} (resolved to {})",
+            path, canonical.display()
+        ));
+    }
+
+    // 3. Open or reveal via the OS's native handler.
+    let result = if reveal {
+        #[cfg(target_os = "macos")]
+        { Command::new("open").arg("-R").arg(&canonical).status() }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let parent = canonical.parent().unwrap_or(Path::new("."));
+            Command::new("xdg-open").arg(parent).status()
+        }
+    } else {
+        #[cfg(target_os = "macos")]
+        { Command::new("open").arg(&canonical).status() }
+        #[cfg(not(target_os = "macos"))]
+        { Command::new("xdg-open").arg(&canonical).status() }
+    };
+
+    result
+        .map_err(|e| format!("Failed to open: {}", e))
+        .and_then(|s| {
+            if s.success() {
+                Ok(canonical.to_string_lossy().to_string())
+            } else {
+                Err(format!("open exited with status: {}", s))
+            }
+        })
+}
+
 pub fn run() {
     // Best-effort pre-start so the daemon warms up before the first UI call;
     // failures surface as command errors in the UI rather than aborting boot.
@@ -1337,6 +1408,7 @@ pub fn run() {
             list_projects,
             add_project,
             remove_project,
+            open_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running odo");

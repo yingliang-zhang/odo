@@ -1158,6 +1158,16 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
 .ws-context-item.danger:hover {
   background: rgba(195, 74, 74, 0.1);
 }
+/* File reference context menu — path header + actions */
+.file-ref-path {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 4px 8px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
 
 /* P2: inline delete confirm — replaces native window.confirm */
 .ws-delete-confirm {
