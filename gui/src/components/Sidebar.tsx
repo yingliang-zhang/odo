@@ -91,8 +91,8 @@ interface Props {
   // by bootstrapping target root + wsId in one daemon roundtrip.
   onOpenForeignWorkstream?: (root: string, wsId: number) => void;
   onCreateWorkstream: (name: string) => Promise<void>;
-  onRenameWorkstream: (workstreamId: number, name: string) => Promise<void>;
-  onDeleteWorkstream: (workstreamId: number) => Promise<void>;
+  onRenameWorkstream: (workstreamId: number, name: string, projectRoot?: string) => Promise<void>;
+  onDeleteWorkstream: (workstreamId: number, projectRoot?: string) => Promise<void>;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   // Phase 3.7: lazy-fetch workstreams for non-active projects
@@ -294,13 +294,13 @@ export default function Sidebar({
           setCtxMenu({ ws: w, projectRoot, isActiveProject, x: e.clientX, y: e.clientY });
         }}
       >
-        {renamingId != null && renamingId.id === w.id && renamingId.root === projectRoot && isActiveProject ? (
+        {renamingId != null && renamingId.id === w.id && renamingId.root === projectRoot ? (
           <form
             className="ws-rename-form"
             onSubmit={(e) => {
               e.preventDefault();
               const name = (e.currentTarget.elements.namedItem("name") as HTMLInputElement)?.value?.trim();
-              if (name) void onRenameWorkstream(w.id, name);
+              if (name) void onRenameWorkstream(w.id, name, projectRoot);
               setRenamingId(null);
             }}
           >
@@ -344,8 +344,7 @@ export default function Sidebar({
               {activity && <span className="ws-activity-line">{activity}</span>}
             </span>
           </button>
-            {isActiveProject && (
-              deletingId != null && deletingId.id === w.id && deletingId.root === projectRoot ? (
+            {deletingId != null && deletingId.id === w.id && deletingId.root === projectRoot ? (
                 <span className="ws-delete-confirm">
                   <span className="ws-delete-confirm-text">Delete?</span>
                   <button
@@ -356,7 +355,7 @@ export default function Sidebar({
                     onClick={(e) => {
                       e.stopPropagation();
                       setDeletingId(null);
-                      void onDeleteWorkstream(w.id);
+                      void onDeleteWorkstream(w.id, projectRoot);
                     }}
                   >
                     <Trash2 size={12} />
@@ -389,8 +388,7 @@ export default function Sidebar({
                     </button>
                   ))}
                 </span>
-              )
-            )}
+              )}
           </>
         )}
       </li>
@@ -603,19 +601,13 @@ export default function Sidebar({
             }
           }}
           onRename={() => {
-            if (!ctxMenu.isActiveProject) {
-              if (onOpenForeignWorkstream) onOpenForeignWorkstream(ctxMenu.projectRoot, ctxMenu.ws.id);
-              else { onSwitchProject(ctxMenu.projectRoot); onSwitchWorkstream(ctxMenu.ws.id); }
-            }
-            // Arm root-keyed rename — the render guard checks both root+id,
-            // so the form only appears once the target project's rows render.
+            // In-place: arm rename for this row without switching projects.
+            // The root-keyed guard ensures the form only renders for the
+            // correct project's row.
             setRenamingId({ root: ctxMenu.projectRoot, id: ctxMenu.ws.id });
           }}
           onDelete={() => {
-            if (!ctxMenu.isActiveProject) {
-              if (onOpenForeignWorkstream) onOpenForeignWorkstream(ctxMenu.projectRoot, ctxMenu.ws.id);
-              else { onSwitchProject(ctxMenu.projectRoot); onSwitchWorkstream(ctxMenu.ws.id); }
-            }
+            // In-place: arm delete confirm for this row without switching.
             setDeletingId({ root: ctxMenu.projectRoot, id: ctxMenu.ws.id });
           }}
         />

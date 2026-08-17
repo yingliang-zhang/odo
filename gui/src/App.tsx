@@ -1008,16 +1008,18 @@ export default function App() {
   // M11 F7: rename a workstream. Refreshes the list; if renaming the active
   // workstream, re-bootstraps to pick up the new name in the TopBar.
   const handleRenameWorkstream = useCallback(
-    async (workstreamId: number, name: string) => {
-      const root = project?.root_path;
+    async (workstreamId: number, name: string, projectRoot?: string) => {
+      const root = projectRoot ?? project?.root_path;
       if (!root) throw new Error("no project loaded yet");
       try {
         const resp = unwrap(await renameWorkstream(root, workstreamId, name));
-        // Refresh the workstream list
+        // Refresh the workstream list for the target root.
         const list = unwrap(await listWorkstreams(root));
-        setWorkstreams(list.workstreams ?? []);
+        if (root === project?.root_path) {
+          setWorkstreams(list.workstreams ?? []);
+        }
         // If renaming the active workstream, update local state
-        if (workstream && workstream.id === workstreamId && resp.workstream) {
+        if (workstream && workstream.id === workstreamId && resp.workstream && root === project?.root_path) {
           setWorkstream(resp.workstream);
         }
         setError(null);
@@ -1030,23 +1032,30 @@ export default function App() {
 
   // M11 F7: delete a workstream. Refuses if pending diffs exist (daemon-side
   // check). After delete, switches to the first remaining workstream.
+  // K3 ctxmenu review: accept optional projectRoot so the context menu
+  // can delete a foreign project's workstream in-place (no switch).
   const handleDeleteWorkstream = useCallback(
-    async (workstreamId: number) => {
-      const root = project?.root_path;
+    async (workstreamId: number, projectRoot?: string) => {
+      const root = projectRoot ?? project?.root_path;
       if (!root) throw new Error("no project loaded yet");
       try {
         const resp = unwrap(await deleteWorkstream(root, workstreamId));
         const remaining = resp.workstreams ?? [];
-        setWorkstreams(remaining);
-        // If deleting the active workstream, switch to the first remaining
-        if (workstream && workstream.id === workstreamId) {
-          if (remaining.length > 0) {
-            await handleSwitchWorkstream(remaining[0].id);
-          } else {
-            setWorkstream(null);
-            setEvents([]);
+        if (root === project?.root_path) {
+          setWorkstreams(remaining);
+          // If deleting the active workstream, switch to the first remaining
+          if (workstream && workstream.id === workstreamId) {
+            if (remaining.length > 0) {
+              await handleSwitchWorkstream(remaining[0].id);
+            } else {
+              setWorkstream(null);
+              setEvents([]);
+            }
           }
         }
+        // For foreign projects, the sidebar's onFetchWorkstreams will
+        // refresh that project's list on the next expand/poll. The
+        // deleted row simply disappears from the remote list.
         setError(null);
       } catch (e) {
         setError(`delete workstream failed: ${errorMessage(e)}`);
