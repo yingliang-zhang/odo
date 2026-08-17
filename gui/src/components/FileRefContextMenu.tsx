@@ -62,7 +62,9 @@ export default function FileRefContextMenu({
   }, [onClose]);
 
   const handleOpen = (reveal: boolean) => {
-    void openPath(path, reveal, projectRoot).catch(() => {});
+    void openPath(path, reveal, projectRoot).catch((e) => {
+      console.warn("open_path failed:", e);
+    });
     onClose();
   };
 

@@ -1308,7 +1308,12 @@ fn open_path(path: String, reveal: bool, project_root: Option<String>) -> Result
 
     // 2. Containment check — must be inside project_root or ~/.odo.
     let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let odo_dir = PathBuf::from(&home).join(".odo");
+    let mut odo_dir = PathBuf::from(&home).join(".odo");
+    // Best-effort canonicalize — tolerate non-existent ~/.odo (safe direction:
+    // false reject, not false accept). Fixes symlinked-$HOME on Linux.
+    if let Ok(canonical_odo) = std::fs::canonicalize(&odo_dir) {
+        odo_dir = canonical_odo;
+    }
 
     let allowed = if let Some(ref root) = project_root {
         let canonical_root = std::fs::canonicalize(root)
