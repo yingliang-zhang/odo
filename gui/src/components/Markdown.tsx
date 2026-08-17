@@ -78,8 +78,14 @@ export function highlightText(
 // A shared /g regex would be corrupted by the recursion (a nested call
 // resets lastIndex while an outer exec loop is mid-scan) — each call
 // gets a fresh instance.
-const INLINE_SOURCE =
-  String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|(` + "`" + `[^` + "`" + `\n]+` + "`" + `)|(!\[([^\]\n]*)\]\(([^)\s]+)\))|(\[([^]\n]+)\]\([^)\s]+\))`;
+//
+// GLM batch review CRITICAL: the concatenated template segments after
+// the first String.raw tag were cooked (escapes like \n \s \] \( became
+// literal chars), producing a non-compiling regex. Fixed: the entire
+// pattern is one String.raw template, with the backtick character
+// injected via a const to avoid breaking the template literal.
+const BT = "`";
+const INLINE_SOURCE = String.raw`(\*\*[\s\S]+?\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)|(` + BT + String.raw`[^` + BT + String.raw`\n]+` + BT + String.raw`)|(!\[([^\]\n]*)\]\(([^)\s]+)\))|(\[([^\]\n]+)\]\(([^)\s]+)\))`;
 
 function parseInline(text: string, highlight: string | undefined, keyPrefix: string): ReactNode[] {
   const re = new RegExp(INLINE_SOURCE, "g");
@@ -138,10 +144,14 @@ function ZoomableImage({ src, alt }: { src: string; alt: string }) {
         alt={alt}
         className="md-inline-img"
         loading="lazy"
+        tabIndex={0}
+        role="button"
+        aria-label={`Image: ${alt}. Press Enter to zoom.`}
         onClick={() => setZoomed(true)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setZoomed(true); } }}
       />
       {zoomed && (
-        <div className="md-img-lightbox" onClick={() => setZoomed(false)}>
+        <div className="md-img-lightbox" role="dialog" aria-modal="true" aria-label={alt} onClick={() => setZoomed(false)}>
           <img src={src} alt={alt} className="md-img-zoomed" />
         </div>
       )}

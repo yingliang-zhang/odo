@@ -516,7 +516,7 @@ export default function App() {
       const evs = resp.events ?? [];
       lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
       setEvents(evs);
-      setChatLoading(evs.length === 0); // hide skeleton if history exists
+      setChatLoading(false); // history loaded (empty or not) — show welcome or content
       setAgentRunning(resp.agent_running ?? false);
       setPreview(null); // bootstrap carries no preview; the next poll restores it
       setDiff(resp.diff ?? null);
@@ -617,7 +617,8 @@ export default function App() {
           if (prev != null && nextPreview != null &&
               prev.type === nextPreview.type &&
               prev.payload?.text === nextPreview.payload?.text &&
-              prev.payload?.tool === nextPreview.payload?.tool) {
+              prev.payload?.tool === nextPreview.payload?.tool &&
+              prev.payload?.intent === nextPreview.payload?.intent) {
             return prev;
           }
           return nextPreview;
