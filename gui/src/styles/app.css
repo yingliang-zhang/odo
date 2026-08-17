@@ -3296,8 +3296,8 @@ body {
 
 .settings-toast {
   position: absolute;
+  top: 16px;
   right: 20px;
-  bottom: 18px;
   background: rgba(63, 163, 95, 0.15);
   border: 1px solid var(--ok);
   border-radius: 6px;
