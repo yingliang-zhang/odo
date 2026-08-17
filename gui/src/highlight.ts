@@ -75,24 +75,42 @@ const PARTS: Record<Language, Record<Exclude<TokenClass, "tok-keyword">, string>
 };
 
 // One regex per language, built lazily. Fixed Language keys → Record.
-const regexCache: Partial<Record<Language, RegExp>> = {};
+interface CompiledPattern {
+  re: RegExp;
+  classes: TokenClass[]; // capture group i+1 → its class
+}
+const regexCache: Partial<Record<Language, CompiledPattern>> = {};
 
-// One regex per language: group 1 comment, 2 string, 3 number, 4 keyword,
-// 5 function call. The alternation is ordered — first match at a position
-// wins — so `// "not a string"` highlights as a comment.
-function patternFor(lang: Language): RegExp {
-  let re = regexCache[lang];
-  if (!re) {
+// One regex per language: the alternation is ordered — first match at a
+// position wins — so `// "not a string"` highlights as a comment. Empty
+// fragments (json has no comments/keywords/fns) are SKIPPED, not kept as
+// `()` groups: an empty group matches zero-width before every real token
+// and would emit a garbage empty-classified token per position.
+function patternFor(lang: Language): CompiledPattern {
+  let entry = regexCache[lang];
+  if (!entry) {
     const p = PARTS[lang];
+    const frags: string[] = [];
+    const classes: TokenClass[] = [];
+    const push = (frag: string, cls: TokenClass) => {
+      if (frag === "") return;
+      frags.push(`(${frag})`);
+      classes.push(cls);
+    };
+    push(p["tok-comment"], "tok-comment");
+    push(p["tok-string"], "tok-string");
+    push(p["tok-number"], "tok-number");
     const kw = KEYWORDS[lang].join("|");
-    re = new RegExp(
-      `(${p["tok-comment"]})|(${p["tok-string"]})|(${p["tok-number"]})|(\\b(?:${kw})\\b)|(${p["tok-fn"]})`,
-      "g",
-    );
-    regexCache[lang] = re;
+    if (kw !== "") {
+      frags.push(`(\\b(?:${kw})\\b)`);
+      classes.push("tok-keyword");
+    }
+    push(p["tok-fn"], "tok-fn");
+    entry = { re: new RegExp(frags.join("|"), "g"), classes };
+    regexCache[lang] = entry;
   }
-  re.lastIndex = 0;
-  return re;
+  entry.re.lastIndex = 0;
+  return entry;
 }
 
 const EXT_TO_LANGUAGE: Record<string, Language> = {
@@ -131,7 +149,7 @@ export function tokenize(line: string, lang: Language | null): Token[] {
   if (lang === null || line === "") {
     return [{ text: line, cls: null }];
   }
-  const re = patternFor(lang);
+  const { re, classes } = patternFor(lang);
   const tokens: Token[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
@@ -139,16 +157,13 @@ export function tokenize(line: string, lang: Language | null): Token[] {
     if (m.index > last) {
       pushMerged(tokens, { text: line.slice(last, m.index), cls: null });
     }
-    const cls: TokenClass =
-      m[1] !== undefined
-        ? "tok-comment"
-        : m[2] !== undefined
-          ? "tok-string"
-          : m[3] !== undefined
-            ? "tok-number"
-            : m[4] !== undefined
-              ? "tok-keyword"
-              : "tok-fn";
+    let cls: TokenClass = "tok-fn"; // unreachable: a match implies one group matched
+    for (let g = 0; g < classes.length; g++) {
+      if (m[g + 1] !== undefined) {
+        cls = classes[g];
+        break;
+      }
+    }
     tokens.push({ text: m[0], cls });
     last = m.index + m[0].length;
     if (m[0] === "") re.lastIndex++; // guard: zero-width match
