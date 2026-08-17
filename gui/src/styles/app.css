@@ -2619,6 +2619,19 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   flex-direction: column;
 }
 
+/* Tri-model: aggregate churn summary bar */
+.diff-churn-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  font-size: var(--text-caption);
+  border-bottom: 1px solid var(--border);
+}
+.diff-churn-bar .churn-add { color: var(--diff-add-fg, #4caf50); font-weight: 500; }
+.diff-churn-bar .churn-del { color: var(--diff-del-fg, #f44336); font-weight: 500; }
+.diff-churn-files { color: var(--text-dim); }
+
 .diff-header {
   display: flex;
   align-items: center;

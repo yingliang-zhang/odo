@@ -44,13 +44,13 @@ export default class RunGroupBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
-      // Render a degraded fallback bubble showing the error, so the
-      // rest of the chat stays visible and the user can still interact.
+      // Render a degraded fallback showing the error, so the rest of the
+      // UI stays visible and the user can still interact.
       return (
         <div className="bubble bubble-error run-boundary-fallback">
           <span className="bubble-icon">⚠</span>{" "}
           <details>
-            <summary>This run failed to render — other runs are unaffected</summary>
+            <summary>This section failed to render — other tabs are unaffected</summary>
             <pre>{this.state.error?.message ?? "Unknown error"}</pre>
           </details>
         </div>

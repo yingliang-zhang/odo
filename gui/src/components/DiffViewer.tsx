@@ -459,6 +459,12 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   // Memoized on diff.content — parseFileSegments is a full linear pass.
   const fileSegments = useMemo(() => parseFileSegments(allLines), [diff.content]);
 
+  // Tri-model right sidebar gap analysis: aggregate churn summary bar.
+  // Odo already computes per-file adds/dels in fileSegments — surface the
+  // total at the diff head for instant scan value.
+  const totalAdds = fileSegments.reduce((sum, s) => sum + s.adds, 0);
+  const totalDels = fileSegments.reduce((sum, s) => sum + s.dels, 0);
+
   // #10: parse inline rows with line number tracking.
   const inlineRows = useMemo(() => parseInlineRows(lines), [lines]);
 
@@ -634,6 +640,16 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           </span>
         )}
       </header>
+      {/* Tri-model: aggregate churn summary bar — +N −M across all files */}
+      {(totalAdds > 0 || totalDels > 0) && (
+        <div className="diff-churn-bar" aria-label="Diff summary">
+          <span className="churn-add">+{totalAdds}</span>{" "}
+          <span className="churn-del">-{totalDels}</span>
+          <span className="diff-churn-files">
+            {fileSegments.length} file{fileSegments.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+      )}
       {reviewError && <div className="review-error">{reviewError}</div>}
       {reviews && (
         <div className="review-results">

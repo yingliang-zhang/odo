@@ -6,6 +6,7 @@
 import { type ReactNode, useRef, useState } from "react";
 import { GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, Inbox, X } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import RunGroupBoundary from "./RunGroupBoundary";
 
 export type PanelTab = "changes" | "review" | "wiki" | "memory" | "ledger" | "skills";
 
@@ -124,9 +125,11 @@ export default function ContextPanel({
         </button>
       </div>
       <div className="panel-body">
-        {children ?? (
-          <div className="panel-empty">Select a tab to view content.</div>
-        )}
+        <RunGroupBoundary resetKey={activeTab}>
+          {children ?? (
+            <div className="panel-empty">Select a tab to view content.</div>
+          )}
+        </RunGroupBoundary>
       </div>
     </aside>
   );
