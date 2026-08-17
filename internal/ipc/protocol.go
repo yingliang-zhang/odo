@@ -5,6 +5,8 @@
 package ipc
 
 import (
+	"encoding/json"
+
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/moa"
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -84,6 +86,11 @@ const (
 	// orchestrator-model moa.Query, journaled as review_action
 	// {action:"design_lock"}. Opt-in: requires prefs `design_via: moa`.
 	CmdDesignMoa = "design_moa"
+	// P2 (OMP stats): omp_usage returns provider usage limits and
+	// grievances from `omp usage --json` + `omp grievances --json`,
+	// merged into one JSON blob. Read-only display — the data is
+	// never journaled as facts.
+	CmdOmpUsage = "omp_usage"
 )
 
 // Request is one command line on the socket.
@@ -321,4 +328,8 @@ type Response struct {
 	// wire key, hence design_proposals).
 	DesignLock      string           `json:"design_lock,omitempty"`
 	DesignProposals []DesignProposal `json:"design_proposals,omitempty"`
+	// P2 (OMP stats): merged omp usage + grievances JSON for the
+	// StatusBar's read-only stats chip. Raw JSON passthrough — the
+	// daemon does not parse or journal this data.
+	OmpUsage json.RawMessage `json:"omp_usage,omitempty"`
 }

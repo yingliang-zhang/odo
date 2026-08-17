@@ -4138,7 +4138,8 @@ mark {
 /* Popovers widen the shared .bg-runs-menu surface — right-anchored like
    the run list so a long path never grows past the window edge. */
 .ctx-meter-popover,
-.panel-chip-popover {
+.panel-chip-popover,
+.omp-usage-popover {
   min-width: 260px;
   max-height: 60vh;
   overflow-y: auto;
@@ -4747,4 +4748,155 @@ mark {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ---------- P2 (OMP stats): usage chip + popover ---------- */
+
+.omp-usage-chip {
+  gap: 4px;
+}
+
+.omp-usage-chip.omp-unavailable {
+  opacity: 0.6;
+}
+
+.omp-grievance-badge {
+  margin-left: 2px;
+  padding: 0 4px;
+  border-radius: var(--radius-sm, 3px);
+  background: var(--bg-tertiary, #e74c3c);
+  color: var(--text-invert, #fff);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.omp-usage-popover {
+  min-width: 300px;
+}
+
+.omp-section {
+  padding: 4px;
+  font-size: var(--text-micro);
+  color: var(--text-dim);
+}
+
+.omp-loading {
+  color: var(--text-dim);
+}
+
+.omp-error-text {
+  color: var(--text-error, #e74c3c);
+  font-size: var(--text-micro);
+  padding: 4px;
+}
+
+.omp-error-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.omp-dim {
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+  padding: 4px;
+}
+
+.omp-provider-group {
+  padding: 6px 4px;
+  border-top: 1px solid var(--stroke-tertiary);
+}
+
+.omp-provider-group:first-of-type {
+  border-top: none;
+}
+
+.omp-provider-name {
+  font-size: var(--text-micro);
+  font-weight: 600;
+  color: var(--text);
+  padding: 2px 0 4px;
+}
+
+.omp-limit-row {
+  padding: 2px 0 4px 8px;
+}
+
+.omp-limit-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.omp-limit-label {
+  font-size: var(--text-micro);
+  color: var(--text-dim);
+}
+
+.omp-limit-value {
+  font-size: var(--text-micro);
+  color: var(--text);
+}
+
+.omp-limit-pct {
+  color: var(--text-dim);
+}
+
+.omp-bar-track {
+  height: 4px;
+  margin: 3px 0 2px;
+  border-radius: 2px;
+  background: var(--bg-tertiary, #e0e0e0);
+  overflow: hidden;
+}
+
+.omp-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.omp-bar-fill.meter-ok {
+  background: var(--accent-green, #2ecc71);
+}
+
+.omp-bar-fill.meter-warn {
+  background: var(--accent-yellow, #f39c12);
+}
+
+.omp-bar-fill.meter-err {
+  background: var(--accent-red, #e74c3c);
+}
+
+.omp-limit-resets {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding-left: 8px;
+}
+
+.omp-limit-status {
+  color: var(--accent-red, #e74c3c);
+}
+
+.omp-grievances-section {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid var(--stroke-tertiary);
+}
+
+.omp-grievances-label {
+  font-size: var(--text-micro);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.omp-grievances-count {
+  font-size: var(--text-micro);
+  color: var(--text);
+  font-weight: 600;
 }

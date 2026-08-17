@@ -306,6 +306,34 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true, wiki_path: "wiki/epoch-3.md", epoch: 3 };
     }
 
+    // ---------- P2 (OMP stats) ----------
+    case "omp_usage": {
+      return {
+        ok: true,
+        omp_usage: {
+          usage: {
+            generatedAt: Date.now(),
+            reports: [
+              {
+                provider: "openai-codex",
+                fetchedAt: Date.now(),
+                limits: [
+                  {
+                    id: "openai-codex:primary",
+                    label: "7 days",
+                    window: { id: "7d", label: "7 days", durationMs: 604800000, resetsAt: Date.now() + 604800000 },
+                    amount: { used: 12, limit: 100, remaining: 88, usedFraction: 0.12, remainingFraction: 0.88, unit: "percent" },
+                    status: "ok",
+                  },
+                ],
+              },
+            ],
+          },
+          grievances: [],
+        },
+      };
+    }
+
     default: {
       console.warn(`[mock-invoke] unknown command: ${cmd}`, args);
       return { ok: false, error: `mock: unknown command ${cmd}` };

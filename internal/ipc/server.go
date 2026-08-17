@@ -405,6 +405,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleSearchEvents(ctx, req)
 	case CmdSaveAttachment:
 		resp, err = s.handleSaveAttachment(ctx, req)
+	case CmdOmpUsage:
+		resp, err = s.handleOmpUsage(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}

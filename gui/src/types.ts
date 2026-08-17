@@ -699,3 +699,63 @@ export interface TodoUpdateResponse {
   error?: string;
   event?: OdoEvent;
 }
+
+// ---------- P2 (OMP stats): provider usage + grievances ----------
+
+// One usage limit entry from `omp usage --json`. The daemon passes the
+// raw omp JSON through; these interfaces describe the shape the GUI
+// renders. Unknown/extra fields are ignored (omp may add new ones).
+export interface OmpUsageWindow {
+  id: string;
+  label: string;
+  durationMs: number;
+  resetsAt: number;
+}
+
+export interface OmpUsageAmount {
+  used: number;
+  limit: number;
+  remaining: number;
+  usedFraction: number;
+  remainingFraction: number;
+  unit: string;
+}
+
+export interface OmpUsageLimit {
+  id: string;
+  label: string;
+  window: OmpUsageWindow;
+  amount: OmpUsageAmount;
+  status: string;
+}
+
+export interface OmpUsageReport {
+  provider: string;
+  fetchedAt: number;
+  limits: OmpUsageLimit[];
+}
+
+export interface OmpUsageData {
+  generatedAt?: number;
+  reports?: OmpUsageReport[];
+}
+
+// Grievances: omp grievances --json returns an array of issue objects.
+// The exact shape varies; the GUI only needs the count and optionally
+// the first few for display. We type it as unknown[] for safety.
+export type OmpGrievance = Record<string, unknown>;
+
+// Merged response from the daemon's omp_usage handler:
+//   { usage: <omp usage JSON | null>, grievances: <array | null>,
+//     errors?: string[] }
+export interface OmpUsageMerged {
+  usage: OmpUsageData | null;
+  grievances: OmpGrievance[] | null;
+  errors?: string[];
+}
+
+export interface OmpUsageResponse {
+  ok: boolean;
+  error?: string;
+  omp_usage?: OmpUsageMerged;
+}

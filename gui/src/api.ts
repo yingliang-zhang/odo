@@ -63,6 +63,7 @@ import type {
   UpdateSettingsRequest,
   UpdateSettingsResponse,
   ListSkillsResponse,
+  OmpUsageResponse,
   ReadSkillResponse,
   UpdateSkillResponse,
 } from "./types";
@@ -462,4 +463,12 @@ export async function deleteSkill(
     scope: scope ?? "project",
     projectRoot: projectRoot ?? null,
   }));
+}
+
+// P2 (OMP stats): merged provider usage + grievances for the StatusBar's
+// read-only stats chip. The daemon shells out to omp with a 10s timeout.
+export function ompUsage(projectRoot?: string): Promise<OmpUsageResponse> {
+  return invoke<OmpUsageResponse>("omp_usage", {
+    projectRoot: projectRoot ?? null,
+  });
 }

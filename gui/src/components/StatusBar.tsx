@@ -2,8 +2,8 @@
 // and run indicator. Absorbs everything System-ish that used to weigh down
 // the sidebar.
 
-import { useEffect, useRef, useState } from "react";
-import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity } from "lucide-react";
 import {
   BYTES_PER_TOKEN,
   contextWindowTokens,
@@ -13,6 +13,8 @@ import {
 import type { PanelModel, PromptSnapshot } from "../stats";
 import type { PipelinePhase, PipelineState } from "../pipeline";
 import type { PanelTab } from "./ContextPanel";
+import { ompUsage } from "../api";
+import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit } from "../types";
 
 // One background run as reported by the daemon's pending_counts —
 // workstreams with a live run that is NOT the one in view.
@@ -383,6 +385,161 @@ function PipelineChip({
   );
 }
 
+// P2 (OMP stats): read-only chip showing provider usage limits and
+// grievances count. Fetches on mount and every 60s while visible — never
+// more frequent (task constraint). The popover lists each provider's
+// usage bars and the grievance count. Degrades to "unavailable" when omp
+// is missing or timed out.
+const OMP_POLL_INTERVAL = 60_000;
+
+function usageTier(pct: number): string {
+  if (pct >= 90) return "meter-err";
+  if (pct >= 70) return "meter-warn";
+  return "meter-ok";
+}
+
+function formatResetsAt(resetsAt: number): string {
+  const now = Date.now();
+  const deltaMs = resetsAt - now;
+  if (deltaMs <= 0) return "resets soon";
+  const hours = Math.floor(deltaMs / 3_600_000);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `resets in ${days}d`;
+  if (hours > 0) return `resets in ${hours}h`;
+  const mins = Math.floor(deltaMs / 60_000);
+  return `resets in ${mins}m`;
+}
+
+function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<OmpUsageMerged | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  useCloseOnClickAway(open, wrapRef, () => setOpen(false));
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await ompUsage(projectRoot ?? undefined);
+      if (resp.ok) {
+        setData(resp.omp_usage ?? null);
+      } else {
+        setError(resp.error ?? "fetch failed");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectRoot]);
+
+  // Fetch on mount and every 60s — only while the popover is open (lazy).
+  // When closed, the chip shows a stale summary from the last fetch.
+  useEffect(() => {
+    if (!open) return;
+    fetchData();
+    const timer = window.setInterval(fetchData, OMP_POLL_INTERVAL);
+    return () => window.clearInterval(timer);
+  }, [open, fetchData]);
+
+  // Derive chip summary: total providers + total grievances.
+  const reports = data?.usage?.reports ?? [];
+  const grievances = data?.grievances ?? null;
+  const grievanceCount = grievances?.length ?? 0;
+  const hasData = reports.length > 0 || grievances != null;
+  const hasErrors = (data?.errors?.length ?? 0) > 0;
+  const unavailable = !hasData && hasErrors;
+
+  if (unavailable && !open) {
+    return (
+      <span className="bg-runs-wrap" ref={wrapRef}>
+        <button
+          type="button"
+          className="status-badge omp-usage-chip omp-unavailable"
+          title="OMP stats unavailable"
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <Activity size={11} aria-hidden="true" />
+          OMP unavailable
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="bg-runs-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className="status-badge omp-usage-chip"
+        title={`OMP: ${reports.length} provider${reports.length !== 1 ? "s" : ""}${grievanceCount > 0 ? ` · ${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}` : ""} — click for details`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Activity size={11} aria-hidden="true" />
+        OMP{reports.length > 0 && ` · ${reports.length}p`}
+        {grievanceCount > 0 && <span className="omp-grievance-badge">{grievanceCount}</span>}
+      </button>
+      {open && (
+        <div className="bg-runs-menu omp-usage-popover" role="dialog" aria-label="OMP usage and grievances">
+          <div className="ctx-pop-title">OMP usage — read-only (never journaled)</div>
+          {loading && <div className="omp-section omp-loading">loading…</div>}
+          {error && <div className="omp-section omp-error-text">error: {error}</div>}
+          {hasErrors && data?.errors && (
+            <div className="omp-section omp-error-text">
+              {data.errors.map((e, i) => (
+                <div key={i} className="mono omp-error-line">{e}</div>
+              ))}
+            </div>
+          )}
+          {reports.length === 0 && !loading && !error && (
+            <div className="omp-section omp-dim">no usage reports</div>
+          )}
+          {reports.map((report: OmpUsageReport) => (
+            <div key={report.provider} className="omp-provider-group">
+              <div className="omp-provider-name mono">{report.provider}</div>
+              {(report.limits ?? []).map((limit: OmpUsageLimit) => {
+                const pct = Math.round(limit.amount.usedFraction * 100);
+                return (
+                  <div key={limit.id} className="omp-limit-row">
+                    <div className="omp-limit-header">
+                      <span className="omp-limit-label">{limit.label}</span>
+                      <span className="omp-limit-value mono">
+                        {limit.amount.used}/{limit.amount.limit} {limit.amount.unit}
+                        <span className="omp-limit-pct"> · {pct}%</span>
+                      </span>
+                    </div>
+                    <div className="omp-bar-track">
+                      <div
+                        className={`omp-bar-fill ${usageTier(pct)}`}
+                        style={{ width: `${Math.min(100, pct)}%` }}
+                      />
+                    </div>
+                    <div className="omp-limit-resets omp-dim mono">
+                      {limit.amount.remaining} remaining · {formatResetsAt(limit.window.resetsAt)}
+                      {limit.status !== "ok" && <span className="omp-limit-status"> · {limit.status}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          <div className="omp-grievances-section">
+            <span className="omp-grievances-label">grievances</span>
+            <span className="omp-grievances-count mono">
+              {grievances == null ? "unavailable" : `${grievanceCount}`}
+            </span>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 export default function StatusBar({
   workstreamName,
   conversationId,
@@ -490,6 +647,9 @@ export default function StatusBar({
       {pipelineStates.length > 0 && (
         <PipelineChip states={pipelineStates} onOpenReview={() => onBadgeClick("review")} />
       )}
+      {/* P2 (OMP stats): read-only provider usage + grievances chip.
+          Lazy fetch on open, 60s poll, degrades to "unavailable". */}
+      <OmpUsageChip projectRoot={projectRoot} />
       {/* Right: clickable badges */}
       {pendingDiffs > 0 && (
         <button

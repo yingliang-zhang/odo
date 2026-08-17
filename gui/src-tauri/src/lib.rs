@@ -589,6 +589,16 @@ async fn autonomy_status(project_root: Option<String>) -> Result<Value, String> 
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// P2 (OMP stats): merged omp usage + grievances for the StatusBar's
+// read-only stats chip. The daemon shells out to `omp usage --json` and
+// `omp grievances --json` with a 10s timeout each.
+#[tauri::command]
+async fn omp_usage(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "omp_usage", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M4 learning: read the three canonical memory files (project memory.md,
 // memory-archive.md, global user.md) through the daemon, which constructs
 // the paths itself and equality-checks the root against its bound root.
@@ -1308,6 +1318,7 @@ pub fn run() {
             pending_counts,
             list_all_pending_diffs,
             autonomy_status,
+            omp_usage,
             read_memory,
             memory_proposals,
             apply_memory,
