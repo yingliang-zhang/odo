@@ -1854,6 +1854,29 @@ details.sidebar-section[open] > .sidebar-section-header .caret {
   color: var(--text);
 }
 
+/* RunGroupBoundary fallback — rendered when a run group's content
+   throws during render. Styled to match error bubbles. */
+.run-boundary-fallback {
+  margin: 4px 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--err-surface, rgba(195, 74, 74, 0.08));
+  border: 1px solid var(--err, #c34a4a);
+  color: var(--err-text, #e08a8a);
+  font-size: 12px;
+}
+.run-boundary-fallback summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.run-boundary-fallback pre {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* W6 (goal queue): the composer "Queue · N" chip and its popover — the
    parked-goal FIFO. Same hairline chip + anchored popover family as the
    Plan chip (shared classes carry the base geometry); these rules add the

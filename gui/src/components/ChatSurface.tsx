@@ -23,6 +23,7 @@ import { deriveTodoState } from "../todo";
 import { deriveParkedGoals } from "../parked";
 import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown, Archive } from "lucide-react";
 import ToolTicker from "./ToolTicker";
+import RunGroupBoundary from "./RunGroupBoundary";
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
 // minute ("35s").
@@ -990,7 +991,11 @@ export default function ChatSurface({
           </div>
         )}
           {runGroups.map((group) => (
-            <div className="run-group" key={group.start?.seq ?? "preamble"}>
+            <RunGroupBoundary
+              key={group.start?.seq ?? "preamble"}
+              resetKey={`${group.start?.seq ?? "preamble"}:${group.events.length}`}
+            >
+            <div className="run-group">
               <RunHeader group={group} />
               {runRenderItems(group.events).map((item) =>
                 item.kind === "bubble" ? (
@@ -1014,6 +1019,7 @@ export default function ChatSurface({
                 ),
               )}
             </div>
+            </RunGroupBoundary>
           ))}
           {preview && <PreviewBubble preview={preview} />}
           <ToolTicker running={agentRunning} events={events} />
