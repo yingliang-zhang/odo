@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { errorMessage } from "../api";
-import { ChevronLeft, ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
+import { ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
 import WorkstreamContextMenu from "./WorkstreamContextMenu";
 import ProjectContextMenu from "./ProjectContextMenu";
@@ -675,17 +675,6 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-sections flex min-h-0 flex-1 flex-col overflow-y-auto group-data-[sidebar-state=collapsed]/sidebar:hidden">
-        <div className="sidebar-head flex items-center justify-between mb-3 pb-2 border-b border-[var(--stroke-tertiary)]">
-          <button
-            type="button"
-            className="collapse-btn ml-auto cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[16px] text-[var(--text-dim)] hover:bg-[var(--bg-input)] hover:text-[var(--text)]"
-            title={strings.sidebar.collapseSidebarTitle}
-            aria-label={strings.sidebar.collapseSidebar}
-            onClick={onToggleCollapsed}
-          >
-            <ChevronLeft size={14} />
-          </button>
-        </div>
 
         <div className="sidebar-section sidebar-section-grow mb-[18px] flex min-h-0 flex-1 flex-col">
           <div className="sidebar-section-head mb-2 flex items-center justify-between">
