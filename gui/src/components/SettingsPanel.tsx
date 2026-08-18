@@ -168,6 +168,7 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
       <DialogContent
         aria-label="Settings"
         className="settings-panel w-[480px] max-w-[calc(100vw-48px)] px-7 py-6"
+        onInteractOutside={(e) => e.preventDefault()}
       >
         <DialogTitle className="settings-title">Settings</DialogTitle>
 

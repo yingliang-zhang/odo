@@ -873,24 +873,6 @@ body {
   overflow-y: auto;
 }
 
-.ws-add {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-dim);
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  font: inherit;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.ws-add:hover {
-  color: var(--text);
-  border-color: var(--accent-user);
-}
-
 .ws-create input {
   width: 100%;
   background: var(--bg-input);
