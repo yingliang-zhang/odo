@@ -1,15 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Pencil, Trash2, ClipboardCopy, ArrowRightLeft } from "lucide-react";
 import type { Workstream } from "../types";
+import { cn } from "../lib/utils";
 
-// Lightweight context menu for workstream rows. Positioned at the
-// right-click coordinates, dismissed by outside-click/Escape/scroll.
-// Reuses the same actions-as-data pattern as the hover icon strip.
-//
-// Tri-model sidebar gap analysis (3/3 K3+GLM+DSF) identified the
-// missing right-click menu as a daily friction point — especially
-// for remote (non-active) project rows where rename/delete are
-// impossible without switching projects first.
+/**
+ * WorkstreamContextMenu — right-click menu for workstream rows.
+ *
+ * Phase 4: styles migrated to Tailwind utilities via Odo tokens.
+ * Still uses manual positioning (not Radix ContextMenu) because Sidebar's
+ * ctxMenu state passes x/y coordinates. Full Radix ContextMenu migration
+ * requires restructuring Sidebar's workstream <li> as a ContextMenuTrigger.
+ * Deferred to a later phase.
+ *
+ * Esc gate: the window keydown listener calls stopPropagation before onClose
+ * to prevent App's global Esc handler from also firing.
+ */
 
 export interface ContextMenuItem {
   label: string;
@@ -38,12 +43,9 @@ export default function WorkstreamContextMenu({
   onDelete,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
-  // Captured before the first menu item steals focus via autoFocus, so
-  // closing returns focus to the element that opened the menu.
   const prevFocusRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
   useEffect(() => () => prevFocusRef.current?.focus(), []);
 
-  // Adjust position to stay in viewport (useLayoutEffect = no flash).
   const [pos, setPos] = useState({ x, y });
   useLayoutEffect(() => {
     const menu = menuRef.current;
@@ -56,22 +58,19 @@ export default function WorkstreamContextMenu({
     setPos({ x: Math.max(4, adjX), y: Math.max(4, adjY) });
   }, [x, y]);
 
-  // Dismiss: outside-click, Escape, scroll.
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
     const onScroll = (e: Event) => {
-      // K3: only dismiss on scrolls originating from the sidebar scroller,
-      // not from ChatSurface's programmatic auto-scroll during streaming.
-      // The menu's highest-value moment is renaming/deleting a workstream
-      // while an agent runs — auto-scroll fires on every token batch and
-      // would otherwise dismiss the menu immediately.
       const target = e.target as Node | null;
       if (target && menuRef.current && !menuRef.current.contains(target) && !target.contains(menuRef.current)) {
-        // Scroll in an unrelated container — only close if the user
-        // scrolled the sidebar itself (where the rows live).
         const sidebar = document.querySelector(".sidebar-sections");
         if (sidebar && (sidebar === target || sidebar.contains(target))) {
           onClose();
@@ -120,7 +119,11 @@ export default function WorkstreamContextMenu({
   return (
     <div
       ref={menuRef}
-      className="ws-context-menu"
+      className={cn(
+        "fixed z-[200] min-w-[160px]",
+        "bg-[var(--bg-elevated)] border border-[var(--border)]",
+        "rounded-[var(--radius-md)] p-1 shadow-[var(--shadow-panel)]",
+      )}
       style={{ left: pos.x, top: pos.y }}
       role="group"
       aria-label={`Actions for ${workstream.name}`}
@@ -129,7 +132,12 @@ export default function WorkstreamContextMenu({
         <button
           key={item.label}
           type="button"
-          className={`ws-context-item${item.danger ? " danger" : ""}`}
+          className={cn(
+            "flex items-center gap-2 w-full px-2 py-1.5 text-xs",
+            "rounded-[var(--radius-sm)] cursor-pointer text-left",
+            "bg-transparent border-none text-[var(--text)]",
+            item.danger && "text-[var(--err-text)]",
+          )}
           autoFocus={i === 0}
           onClick={item.onClick}
         >

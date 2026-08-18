@@ -1964,86 +1964,10 @@ body {
   margin-left: 4px;
   margin-bottom: 1px;
 }
-.model-pill {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--text-dim);
-  font-size: 11px;
-  padding: 3px 8px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.model-pill:hover {
-  color: var(--text);
-  border-color: var(--accent);
-}
-.model-pill.open {
-  border-color: var(--accent);
-  color: var(--text);
-}
-.model-pill-label {
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.model-pill-menu {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  right: 0;
-  min-width: 200px;
-  background: var(--bg-elevated, var(--bg-raised));
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 4px;
-  z-index: 100;
-  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
-}
-.model-pill-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  background: none;
-  border: none;
-  color: var(--text-dim);
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  text-align: left;
-}
-.model-pill-item:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-}
-.model-pill-item.active {
-  color: var(--text);
-}
-.model-pill-other {
-  border-top: 1px solid var(--border);
-  margin-top: 2px;
-  padding-top: 6px;
-}
-.model-pill-custom {
-  padding: 4px 8px;
-}
-.model-pill-custom input {
-  width: 100%;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-size: 12px;
-  padding: 4px 8px;
-  outline: none;
-}
-.model-pill-custom input:focus {
-  border-color: var(--accent);
-}
+
+/* ModelPill CSS migrated to Tailwind utilities in ModelPill.tsx (Phase 4).
+   Old .model-pill, .model-pill-menu, .model-pill-item, .model-pill-custom
+   rules deleted — Radix DropdownMenu handles positioning/portal/styling. */
 
 /* Message edit button (tri-model gap analysis: message actuation). */
 .bubble-edit-btn {
@@ -2257,11 +2181,6 @@ body {
 .chat-input > button.send-btn,
 .chat-input > button.stop-btn,
 .chat-input > button.park-toggle,
-.chat-input .model-pill {
-  min-height: 38px;
-  box-sizing: border-box;
-}
-
 .chat-input > button:hover:not(:disabled) {
   filter: brightness(1.1);
 }

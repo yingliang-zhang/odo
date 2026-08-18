@@ -1,14 +1,23 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import { updateSettings } from "../api";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "./ui/dropdown-menu";
+import { cn } from "../lib/utils";
 
-// Model pill: a compact dropdown in the composer that shows the
-// current coding model and lets the user switch it per-message.
-// Reads/writes the daemon's coding_model setting via IPC.
-//
-// The model list is a curated set of common sudo models plus whatever
-// the daemon reports as the current value. The user can also type a
-// custom model name (matching the Settings panel's free-text input).
+/**
+ * ModelPill — compact dropdown in the composer for switching the coding model.
+ *
+ * Migrated to Radix DropdownMenu (Phase 4):
+ * - Portal positioning, viewport collision, keyboard nav — all Radix.
+ * - Esc gate: onEscapeKeyDown stopPropagation in DropdownMenuContent.
+ * - Old hand-rolled click-away/Esc/positioning code deleted.
+ */
 
 const COMMON_MODELS = [
   "sudo/t9s/kimi-k3",
@@ -27,50 +36,24 @@ interface Props {
 }
 
 export default function ModelPill({ projectRoot, currentModel, onModelChanged }: Props) {
-  const [open, setOpen] = useState(false);
   const [model, setModel] = useState(currentModel ?? "");
   const [customMode, setCustomMode] = useState(false);
   const [customText, setCustomText] = useState("");
-  const rootRef = useRef<HTMLDivElement>(null);
 
   // Sync from parent when settings reload.
-  useEffect(() => {
-    setModel(currentModel ?? "");
-  }, [currentModel]);
-
-  // Click-away closes.
-  useEffect(() => {
-    if (!open) return;
-    const onDocDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-        setCustomMode(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-        setCustomMode(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // Note: removed useEffect — Radix controls open state internally.
+  // We still sync model from parent.
+  if (currentModel && currentModel !== model && !customMode) {
+    setModel(currentModel);
+  }
 
   const selectModel = async (m: string) => {
     setModel(m);
-    setOpen(false);
     setCustomMode(false);
     try {
       await updateSettings({ coding_model: m }, projectRoot ?? undefined);
       onModelChanged?.();
     } catch {
-      // Revert local state — the daemon didn't accept the change.
-      // Without onModelChanged there's no refreshSettings to correct it.
       setModel(currentModel ?? "");
     }
   };
@@ -79,51 +62,58 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
   const shortLabel = model.replace(/^sudo\/[^/]+\//, "").replace(/^sudo\//, "") || "model";
 
   return (
-    <div className="model-pill-wrap" ref={rootRef}>
-      <button
-        type="button"
-        className={`model-pill${open ? " open" : ""}`}
-        title={`Coding model: ${model}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span className="model-pill-label">{shortLabel}</span>
-        <ChevronDown size={10} aria-hidden />
-      </button>
-      {open && (
-        <div className="model-pill-menu" role="menu">
+    <div className="model-pill-wrap min-h-[38px] flex items-center">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "model-pill min-h-[38px] flex items-center gap-1",
+              "bg-[var(--bg-input)] border border-[var(--border)]",
+              "rounded-[var(--radius-md)] text-[var(--text-dim)] text-xs",
+              "px-2 py-1 cursor-pointer hover:text-[var(--text)]",
+              "data-[state=open]:text-[var(--text)]",
+            )}
+            title={`Coding model: ${model}`}
+            aria-label={`Coding model: ${shortLabel}`}
+          >
+            <span className="model-pill-label">{shortLabel}</span>
+            <ChevronDown size={10} aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" side="top" sideOffset={4}>
           {COMMON_MODELS.map((m) => (
-            <button
+            <DropdownMenuItem
               key={m}
-              type="button"
-              role="menuitem"
-              className={`model-pill-item${m === model ? " active" : ""}`}
               onClick={() => void selectModel(m)}
+              className={m === model ? "font-medium" : ""}
             >
               {m === model && <Check size={10} aria-hidden />}
-              <span>{m}</span>
-            </button>
+              <span className={m === model ? "" : "ml-[14px]"}>{m}</span>
+            </DropdownMenuItem>
           ))}
+          <DropdownMenuSeparator />
           {customMode ? (
-            <div className="model-pill-custom">
+            <div className="px-2 py-1">
               <input
                 type="text"
                 value={customText}
                 placeholder="model name"
                 autoFocus
                 aria-label="Custom coding model name"
+                className={cn(
+                  "w-full bg-transparent border-none text-xs text-[var(--text)]",
+                  "outline-none px-1 py-1",
+                )}
                 onChange={(e) => setCustomText(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
-                    // This input sits inside ChatSurface's chat-input form —
-                    // swallow the implicit submit so Enter applies the model
-                    // instead of sending the chat draft.
                     e.preventDefault();
                     e.stopPropagation();
                     const text = customText.trim();
                     if (text !== "") void selectModel(text);
                   } else if (e.key === "Escape") {
+                    e.stopPropagation();
                     setCustomMode(false);
                     setCustomText("");
                   }
@@ -131,20 +121,15 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
               />
             </div>
           ) : (
-            <button
-              type="button"
-              role="menuitem"
-              className="model-pill-item model-pill-other"
-              onClick={() => {
-                setCustomMode(true);
-                setCustomText(model);
-              }}
-            >
-              Other…
-            </button>
+            <DropdownMenuItem onClick={() => {
+              setCustomMode(true);
+              setCustomText(model);
+            }}>
+              <span className="ml-[14px]">Other…</span>
+            </DropdownMenuItem>
           )}
-        </div>
-      )}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
