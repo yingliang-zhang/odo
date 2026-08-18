@@ -1,0 +1,82 @@
+/* Tailwind CSS v4 entry — bridges Odo's existing design tokens to Tailwind's
+   utility system. Uses @theme inline so var() references resolve at use-site,
+   not at :root (matches Hermes Desktop's approach).
+
+   Existing app.css is imported AFTER Tailwind so unlayered app.css rules
+   win over Tailwind's layered utilities — this is intentional during the
+   migration: old styles keep working, new components use Tailwind utilities.
+   As each component migrates, its old CSS is deleted in the same commit. */
+
+@import "tailwindcss";
+
+/* Null the default color palette — only Odo's tokens should be available.
+   This prevents accidental use of Tailwind's built-in colors (red-500 etc.)
+   and enforces the token system. */
+@theme inline {
+  /* Colors — map to existing CSS custom properties */
+  --color-bg: var(--bg);
+  --color-bg-raised: var(--bg-raised);
+  --color-bg-input: var(--bg-input);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-bg-tertiary: var(--bg-tertiary);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-dim: var(--text-dim);
+  --color-accent: var(--accent);
+  --color-accent-user: var(--accent-user);
+  --color-accent-agent: var(--accent-agent);
+  --color-ok: var(--ok);
+  --color-ok-text: var(--ok-text);
+  --color-err: var(--err);
+  --color-err-text: var(--err-text);
+  --color-warn: var(--warn);
+  --color-warn-text: var(--warn-text);
+  --color-link: var(--link);
+  --color-bg-run: var(--bg-run);
+  --color-bg-hover: var(--bg-hover);
+
+  /* Stroke hierarchy */
+  --color-stroke-primary: var(--stroke-primary);
+  --color-stroke-secondary: var(--stroke-secondary);
+  --color-stroke-tertiary: var(--stroke-tertiary);
+
+  /* Semantic surfaces */
+  --color-err-surface: var(--err-surface);
+  --color-err-surface-text: var(--err-surface-text);
+  --color-diff-add-bg: var(--diff-add-bg);
+  --color-diff-add-text: var(--diff-add-text);
+  --color-diff-del-bg: var(--diff-del-bg);
+  --color-diff-del-text: var(--diff-del-text);
+  --color-panel-float: var(--panel-float);
+  --color-code-chip-bg: var(--code-chip-bg);
+
+  /* Syntax tokens */
+  --color-tok-keyword: var(--tok-keyword);
+  --color-tok-string: var(--tok-string);
+  --color-tok-comment: var(--tok-comment);
+  --color-tok-number: var(--tok-number);
+  --color-tok-fn: var(--tok-fn);
+
+  /* Radius scale (maps to existing tokens) */
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+
+  /* Font family */
+  --font-mono: var(--mono);
+
+  /* Spacing scale — Tailwind's default 0.25rem base is kept.
+     This gives us py-1=4px, py-1.5=6px, py-2=8px, py-3=12px, py-4=16px etc.
+     The spacing scale is the structural enforcement against drift. */
+  --spacing: 0.25rem;
+
+  /* Type scale — map to existing semantic tokens */
+  --text-micro: var(--text-micro);
+  --text-caption: var(--text-caption);
+  --text-label: var(--text-label);
+  --text-body: var(--text-body);
+  --text-body-lg: var(--text-body-lg);
+  --text-heading: var(--text-heading);
+  --text-title: var(--text-title);
+  --text-display: var(--text-display);
+}
