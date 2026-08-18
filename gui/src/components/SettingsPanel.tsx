@@ -1,11 +1,68 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { ChevronDown, Check } from "lucide-react";
 import { errorMessage, getSettings, unwrap, updateSettings } from "../api";
 import { SUDO_MODELS, SUDO_PROVIDER, type Settings } from "../types";
 import LoadingInline from "./LoadingInline";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import { cn } from "../lib/utils";
 
 const SAVED_TOAST_MS = 3000;
+
+// P1-1 rev 2: model field with free-form typing AND a browse menu of the 7
+// known sudo models. Replaces the native <datalist> combobox — the datalist
+// dropdown auto-filters suggestions by the current text, so a filled field
+// only ever showed its own echo (user report: "models 选项只有 k3 一个").
+// The menu button always lists every suggestion, like ModelPill.
+function ModelInput({
+  value,
+  onChange,
+  placeholder,
+  inputClassName,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  placeholder?: string;
+  inputClassName?: string;
+}) {
+  return (
+    <span className="flex w-full items-center gap-1">
+      <input
+        type="text"
+        className={cn("min-w-0 flex-1", inputClassName)}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Browse model suggestions"
+            title="Browse model suggestions"
+            className="grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded border-none bg-transparent text-[var(--text-dim)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]"
+          >
+            <ChevronDown size={12} aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="bottom" align="end" sideOffset={4} className="max-h-[260px] overflow-y-auto">
+          {SUDO_MODELS.map((m) => (
+            <DropdownMenuItem key={m} onSelect={() => onChange(m)}>
+              <span className="flex-1">{m}</span>
+              {m === value && <Check size={12} className="text-[var(--ok-text)]" aria-hidden />}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </span>
+  );
+}
 
 // P1-1: Chip/tag input for comma-separated model@provider review models.
 // Enter/comma commits a chip; each chip auto-appends @sudo if no provider is
@@ -54,7 +111,6 @@ function ReviewModelsInput({
       ))}
       <input
         type="text"
-        list="sudo-models"
         className="model-chip-input"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -67,6 +123,34 @@ function ReviewModelsInput({
         onBlur={addChip}
         placeholder="Add model…"
       />
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Browse model suggestions"
+            title="Browse model suggestions"
+            className="grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded border-none bg-transparent text-[var(--text-dim)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]"
+          >
+            <ChevronDown size={12} aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="bottom" align="end" sideOffset={4} className="max-h-[260px] overflow-y-auto">
+          {SUDO_MODELS.map((m) => (
+            <DropdownMenuItem
+              key={m}
+              onSelect={() => {
+                const chip = `${m}@${SUDO_PROVIDER}`;
+                if (!chips.includes(chip)) commit([...chips, chip]);
+              }}
+            >
+              <span className="flex-1">{m}</span>
+              {chips.includes(`${m}@${SUDO_PROVIDER}`) && (
+                <Check size={12} className="text-[var(--ok-text)]" aria-hidden />
+              )}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
@@ -177,12 +261,6 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
 
         {settings && (
           <form className="settings-inspector" onSubmit={handleSave}>
-            <datalist id="sudo-models">
-              {SUDO_MODELS.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-
             {/* PR2: Left category sidebar */}
             <nav className="settings-sidebar" aria-label="Settings categories">
               {CATEGORIES.map((cat) => (
@@ -259,22 +337,16 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
                 <>
                   <label className="settings-field">
                     <span>Coding model</span>
-                    <input
-                      type="text"
-                      list="sudo-models"
+                    <ModelInput
                       value={settings.coding_model}
-                      onChange={(e) => set("coding_model", e.target.value)}
+                      onChange={(v) => set("coding_model", v)}
                     />
                   </label>
                   <label className="settings-field">
                     <span>Orchestrator model</span>
-                    <input
-                      type="text"
-                      list="sudo-models"
+                    <ModelInput
                       value={settings.orchestrator_model}
-                      onChange={(e) =>
-                        set("orchestrator_model", e.target.value)
-                      }
+                      onChange={(v) => set("orchestrator_model", v)}
                     />
                   </label>
                   <label className="settings-field">
