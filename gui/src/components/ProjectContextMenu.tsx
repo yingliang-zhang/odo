@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowRightLeft, Trash2 } from "lucide-react";
+import { cn } from "../lib/utils";
 
 // Project header context menu — mirrors WorkstreamContextMenu's pattern:
 // positioned at click coords, viewport-clamped via useLayoutEffect,
@@ -77,7 +78,11 @@ export default function ProjectContextMenu({
   return createPortal(
     <div
       ref={menuRef}
-      className="ws-context-menu"
+      className={cn(
+        "fixed z-[200] min-w-[160px] ws-context-menu",
+        "bg-[var(--bg-elevated)] border border-[var(--border)]",
+        "rounded-[var(--radius-md)] p-1 shadow-[var(--shadow-panel)]",
+      )}
       style={{ left: pos.x, top: pos.y }}
       role="group"
       aria-label={`Actions for project ${name}`}
@@ -86,7 +91,13 @@ export default function ProjectContextMenu({
         <button
           key={item.label}
           type="button"
-          className={`ws-context-item${item.danger ? " danger" : ""}`}
+          className={cn(
+            "flex items-center gap-2 w-full px-2 py-1.5 text-xs",
+            "rounded-[var(--radius-sm)] cursor-pointer text-left",
+            "bg-transparent border-none text-[var(--text)]",
+            "hover:bg-[var(--bg-hover)] transition-colors",
+            item.danger && "text-[var(--err-text)]",
+          )}
           autoFocus={i === 0}
           onClick={item.onClick}
         >

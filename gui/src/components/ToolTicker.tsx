@@ -35,6 +35,11 @@ function briefArgs(args: unknown): string {
 // agent_tool_call event as it arrives; with none, degrades to a bare
 // spinner. Historical calls are the run group header's job (collapsed
 // tool-group details) — rendering them here at idle duplicated both.
+//
+// P1-P4: styles migrated to Tailwind utilities; class names survive as
+// inert identity markers. The ring spinner is the old `.spinner` geometry
+// (12px, 2px border, bright top edge) animated by the shared `.spin`
+// rule (its CSS stays for StatusBar).
 export default function ToolTicker({ running, events }: Props) {
   const listRef = useRef<HTMLUListElement>(null);
   const toolCalls = events.filter((e) => e.type === "agent_tool_call");
@@ -48,19 +53,25 @@ export default function ToolTicker({ running, events }: Props) {
   if (!running) return null;
 
   return (
-    <div className="tool-ticker">
-      <div className="tool-ticker-status">
-        <span className="spinner" aria-hidden="true" />
+    <div className="tool-ticker self-start text-[var(--text-dim)] p-1">
+      <div className="tool-ticker-status flex items-center gap-2">
+        <span
+          className="spinner spin h-3 w-3 rounded-full border-2 border-[var(--border)] border-t-[var(--text)]"
+          aria-hidden="true"
+        />
         <span>Working...</span>
       </div>
       {toolCalls.length > 0 && (
-        <ul className="tool-ticker-list" ref={listRef}>
+        <ul
+          className="tool-ticker-list list-none m-0 mt-1.5 ml-6 p-0 font-[var(--mono)] text-[12px] flex flex-col gap-0.5 max-h-[200px] overflow-y-auto"
+          ref={listRef}
+        >
           {toolCalls.map((ev) => (
             <li key={ev.seq}>
-              <span className="tool-arrow" aria-hidden>→</span>{" "}
-              <span className="tool-name">{ev.payload?.tool ?? "tool"}</span>
+              <span className="tool-arrow text-[var(--text-dim)] opacity-60" aria-hidden>→</span>{" "}
+              <span className="tool-name font-bold text-[var(--text)]">{ev.payload?.tool ?? "tool"}</span>
               {ev.payload?.args != null && (
-                <span className="tool-args"> {briefArgs(ev.payload.args)}</span>
+                <span className="tool-args text-[var(--text-dim)]"> {briefArgs(ev.payload.args)}</span>
               )}
             </li>
           ))}

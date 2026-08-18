@@ -1,10 +1,11 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import clsx from "clsx";
 import { errorMessage } from "../api";
 import { ChevronLeft, ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
 import WorkstreamContextMenu from "./WorkstreamContextMenu";
 import ProjectContextMenu from "./ProjectContextMenu";
+import { Button } from "./ui/button";
+import { cn } from "../lib/utils";
 import { strings } from "../strings";
 
 // Phase 3.1: Status dot priority reducer (inspired by Hermes session-row-state.ts).
@@ -44,9 +45,9 @@ function TailPin({ label, title }: { label: string; title?: string }) {
   const head = chars.slice(0, chars.length - tailLen).join("");
   const tail = chars.slice(chars.length - tailLen).join("");
   return (
-    <span className="tail-pin" title={title ?? label}>
-      <span className="tail-head">{head}</span>
-      <span className="tail-tail">{tail}</span>
+    <span className="tail-pin inline-flex min-w-0 overflow-hidden" title={title ?? label}>
+      <span className="tail-head overflow-hidden text-ellipsis whitespace-nowrap">{head}</span>
+      <span className="tail-tail shrink-0 whitespace-pre">{tail}</span>
     </span>
   );
 }
@@ -303,7 +304,7 @@ export default function Sidebar({
     return (
       <li
         key={w.id}
-        className={clsx("ws-row", active && "ws-row-active")}
+        className={cn("ws-row group flex items-center gap-0.5", active && "ws-row-active")}
         onContextMenu={(e) => {
           e.preventDefault();
           setCtxMenu({ ws: w, projectRoot, isActiveProject, x: e.clientX, y: e.clientY });
@@ -311,7 +312,7 @@ export default function Sidebar({
       >
         {renamingId != null && renamingId.id === w.id && renamingId.root === projectRoot ? (
           <form
-            className="ws-rename-form"
+            className="ws-rename-form flex-1"
             onSubmit={(e) => {
               e.preventDefault();
               const name = (e.currentTarget.elements.namedItem("name") as HTMLInputElement)?.value?.trim();
@@ -335,14 +336,27 @@ export default function Sidebar({
               defaultValue={w.name}
               autoFocus
               onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setRenamingId(null); } }}
-              className="ws-rename-input"
+              className={cn(
+                "ws-rename-input w-full rounded-md border border-[var(--accent-user)]",
+                "bg-[var(--bg)] px-2 py-1.5 text-[var(--text)] outline-none",
+                "font-[family-name:inherit] text-[13px] leading-[inherit]",
+              )}
             />
           </form>
         ) : (
           <>
           <button
             type="button"
-            className={clsx("ws-item", active && "active")}
+            className={cn(
+              "ws-item flex min-w-0 flex-1 cursor-pointer items-center justify-start gap-2",
+              "w-full rounded-[var(--radius-md)] border border-transparent bg-transparent",
+              "px-2 py-[5px] text-left text-[var(--text)]",
+              "font-[family-name:inherit] text-[14px] leading-[inherit]",
+              "transition-colors duration-150 ease-[var(--ease-standard)]",
+              active
+                ? "active bg-[color-mix(in_srgb,var(--accent-user)_12%,transparent)] hover:bg-[color-mix(in_srgb,var(--accent-user)_12%,transparent)]"
+                : "hover:bg-[var(--bg-input)]",
+            )}
             onClick={() => {
               if (!isActiveProject) {
                 if (onOpenForeignWorkstream) onOpenForeignWorkstream(projectRoot, w.id);
@@ -352,29 +366,44 @@ export default function Sidebar({
               }
             }}
           >
-            <span className={clsx("ws-dot", dotClass[ds])} aria-hidden="true" />
+            <span className={cn("ws-dot", dotClass[ds])} aria-hidden="true" />
             <span className="sr-only">{dotLabel[ds]}</span>
-            <span className="ws-item-body">
-              <span className="ws-item-line">
+            <span className="ws-item-body flex min-w-0 flex-1 flex-col gap-px">
+              <span className="ws-item-line flex min-w-0 items-center">
                 <TailPin label={w.name} title={w.name} />
-                <span className="ws-meta">
-                  {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
+                <span className="ws-meta ml-auto inline-flex shrink-0 items-center gap-1.5">
+                  {pending > 0 && (
+                    <span className="ws-pending-pill rounded-[9px] bg-[var(--err)] px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                      {pending}
+                    </span>
+                  )}
                   {parked > 0 && (
-                    <span className="ws-parked-pill" title={`${parked} parked goal${parked > 1 ? "s" : ""}`}>
+                    <span
+                      className="ws-parked-pill rounded-[9px] bg-[var(--warn)] px-1.5 py-0.5 text-[10px] font-bold leading-none text-[var(--bg)]"
+                      title={`${parked} parked goal${parked > 1 ? "s" : ""}`}
+                    >
                       {parked}
                     </span>
                   )}
                 </span>
               </span>
-              {activity && <span className="ws-activity-line">{activity}</span>}
+              {activity && (
+                <span className="ws-activity-line overflow-hidden text-ellipsis whitespace-nowrap text-[11px] leading-[1.3] text-[var(--text-dim)]">
+                  {activity}
+                </span>
+              )}
             </span>
           </button>
             {deletingId != null && deletingId.id === w.id && deletingId.root === projectRoot ? (
-                <span className="ws-delete-confirm">
-                  <span className="ws-delete-confirm-text">Delete?</span>
-                  <button
+                <span className="ws-delete-confirm flex shrink-0 items-center gap-1">
+                  <span className="ws-delete-confirm-text whitespace-nowrap text-[var(--text-micro)] text-[var(--err-text)]">
+                    Delete?
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     type="button"
-                    className="ws-action-btn ws-action-delete"
+                    className="ws-action-btn ws-action-delete h-5 w-5 rounded font-normal hover:bg-[var(--bg)] hover:text-[var(--err-text)]"
                     title={strings.sidebar.confirmDeleteTitle}
                     aria-label={`${strings.sidebar.confirmDeleteTitle} ${w.name}`}
                     onClick={(e) => {
@@ -393,10 +422,12 @@ export default function Sidebar({
                     }}
                   >
                     <Trash2 size={12} />
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     type="button"
-                    className="ws-action-btn"
+                    className="ws-action-btn h-5 w-5 rounded font-normal hover:bg-[var(--bg)] hover:text-[var(--text)]"
                     title={strings.common.cancel}
                     aria-label={strings.sidebar.cancelDeleteLabel}
                     onClick={(e) => {
@@ -405,21 +436,23 @@ export default function Sidebar({
                     }}
                   >
                     ✕
-                  </button>
+                  </Button>
                 </span>
               ) : (
-                <span className="ws-actions">
+                <span className="ws-actions hidden shrink-0 gap-0.5 group-hover:flex group-focus-within:flex">
                   {workstreamActions(w, projectRoot).map((action) => (
-                    <button
+                    <Button
                       key={action.label}
+                      variant="ghost"
+                      size="icon"
                       type="button"
-                      className="ws-action-btn"
+                      className="ws-action-btn h-5 w-5 rounded font-normal hover:bg-[var(--bg)] hover:text-[var(--text)]"
                       title={action.label}
                       aria-label={`${action.label} ${w.name}`}
                       onClick={action.onClick}
                     >
                       {action.icon}
-                    </button>
+                    </Button>
                   ))}
                 </span>
               )}
@@ -449,11 +482,17 @@ export default function Sidebar({
     const wsList = isActive ? attentionOrdered : (remoteWorkstreams[p.root] ?? []);
 
     return (
-      <li key={p.root} className="proj-group">
-        <div className="proj-row-head">
+      <li key={p.root} className="proj-group flex flex-col">
+        <div className="proj-row-head group flex items-center gap-0.5">
         <button
           type="button"
-          className={clsx("proj-row", isActive && "proj-row-active")}
+          className={cn(
+            "proj-row flex min-w-0 flex-1 cursor-pointer items-center gap-1.5",
+            "w-full rounded-[var(--radius-md)] border-none bg-transparent",
+            "px-2 py-[5px] text-left text-[var(--text-body)] font-semibold text-[var(--text)]",
+            "hover:bg-[var(--bg-input)]",
+            isActive && "proj-row-active",
+          )}
           aria-expanded={isExpanded}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -479,21 +518,32 @@ export default function Sidebar({
         >
           <ChevronRight
             size={12}
-            className={clsx("proj-chevron", isExpanded && "proj-chevron-open")}
+            className={cn(
+              "proj-chevron shrink-0 text-[var(--text-dim)] transition-transform duration-150 ease-[ease]",
+              isExpanded && "proj-chevron-open rotate-90",
+            )}
             aria-hidden="true"
           />
-          <span className={clsx("ws-dot", dotClass[ds])} aria-hidden="true" />
+          <span className={cn("ws-dot", dotClass[ds])} aria-hidden="true" />
           <span className="sr-only">{dotLabel[ds]}</span>
-          <span className="proj-name" title={p.root}>{p.name}</span>
-          {pending > 0 && <span className="ws-pending-pill">{pending}</span>}
+          <span className="proj-name flex-1 overflow-hidden text-ellipsis whitespace-nowrap" title={p.root}>{p.name}</span>
+          {pending > 0 && (
+            <span className="ws-pending-pill rounded-[9px] bg-[var(--err)] px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+              {pending}
+            </span>
+          )}
         </button>
         {!isActive && (
           removingRoot === p.root ? (
-            <span className="ws-delete-confirm">
-              <span className="ws-delete-confirm-text">Remove?</span>
-              <button
+            <span className="ws-delete-confirm flex shrink-0 items-center gap-1">
+              <span className="ws-delete-confirm-text whitespace-nowrap text-[var(--text-micro)] text-[var(--err-text)]">
+                Remove?
+              </span>
+              <Button
+                variant="ghost"
+                size="icon"
                 type="button"
-                className="ws-action-btn ws-action-delete"
+                className="ws-action-btn ws-action-delete h-5 w-5 rounded font-normal hover:bg-[var(--bg)] hover:text-[var(--err-text)]"
                 title={strings.sidebar.confirmRemoveTitle}
                 aria-label={`${strings.sidebar.confirmRemoveTitle} ${p.name}`}
                 onClick={(e) => {
@@ -512,10 +562,12 @@ export default function Sidebar({
                 }}
               >
                 <Trash2 size={12} />
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
                 type="button"
-                className="ws-action-btn"
+                className="ws-action-btn h-5 w-5 rounded font-normal hover:bg-[var(--bg)] hover:text-[var(--text)]"
                 title={strings.common.cancel}
                 aria-label={strings.sidebar.cancelRemoveLabel}
                 onClick={(e) => {
@@ -524,13 +576,15 @@ export default function Sidebar({
                 }}
               >
                 ✕
-              </button>
+              </Button>
             </span>
           ) : (
-            <span className="ws-actions">
-              <button
+            <span className="ws-actions hidden shrink-0 gap-0.5 group-hover:flex group-focus-within:flex">
+              <Button
+                variant="ghost"
+                size="icon"
                 type="button"
-                className="ws-action-btn"
+                className="ws-action-btn h-5 w-5 rounded font-normal hover:bg-[var(--bg)] hover:text-[var(--text)]"
                 title={strings.sidebar.removeProjectTitle}
                 aria-label={`Remove ${p.name} from list`}
                 onClick={(e) => {
@@ -539,16 +593,16 @@ export default function Sidebar({
                 }}
               >
                 <Trash2 size={12} />
-              </button>
+              </Button>
             </span>
           )
         )}
         </div>
         {isExpanded && (
-          <ul className="ws-list">
+          <ul className="ws-list m-0 flex min-h-0 flex-1 list-none flex-col gap-0.5 overflow-y-auto p-0 pl-7">
             {isActive && creating && (
-              <li className="ws-row ws-create-row">
-                <form className="ws-create" onSubmit={handleCreate}>
+              <li className="ws-row ws-create-row group flex items-center gap-0.5 p-0">
+                <form className="ws-create px-2" onSubmit={handleCreate}>
                   <input
                     type="text"
                     value={newName}
@@ -557,20 +611,36 @@ export default function Sidebar({
                     placeholder={strings.sidebar.workstreamNamePlaceholder}
                     disabled={createBusy}
                     autoFocus
+                    className={cn(
+                      "mb-1.5 w-full rounded-md border border-[var(--border)]",
+                      "bg-[var(--bg-input)] px-2 py-1.5 text-[var(--text)]",
+                      "[font:inherit] focus:border-[var(--accent-user)] focus:outline-none",
+                    )}
                   />
                 </form>
               </li>
             )}
-            {isActive && createError && <li className="ws-error">{createError}</li>}
+            {isActive && createError && <li className="ws-error mb-1.5 text-[12px] text-[var(--err-text)]">{createError}</li>}
             {wsList.length === 0 && !isActive && (
-              <li className="ws-empty-hint">No workstreams</li>
+              <li className="ws-empty-hint px-2 py-1.5 italic text-[var(--text-caption)] text-[var(--text-dim)]">No workstreams</li>
             )}
             {wsList.map((w) => renderWorkstream(w, isActive, p.root))}
             {isActive && (
-              <li className="ws-row ws-add-row" onClick={(e) => { e.stopPropagation(); setCreateError(null); setCreating(true); }}>
-                <button type="button" className="ws-add-inline" title={strings.sidebar.newWorkstreamTitle}>
+              <li className="ws-row ws-add-row group flex cursor-pointer items-center gap-0.5" onClick={(e) => { e.stopPropagation(); setCreateError(null); setCreating(true); }}>
+                <Button
+                  variant="ghost"
+                  size={null}
+                  type="button"
+                  className={cn(
+                    "ws-add-inline w-full justify-start rounded-[var(--radius-md)]",
+                    "py-1.5 pl-6 pr-2 font-normal",
+                    "font-[family-name:inherit] text-[var(--text-caption)] leading-[inherit]",
+                    "hover:bg-[var(--bg-input)] hover:text-[var(--text)]",
+                  )}
+                  title={strings.sidebar.newWorkstreamTitle}
+                >
                   {strings.sidebar.newWorkstream}
-                </button>
+                </Button>
               </li>
             )}
           </ul>
@@ -580,10 +650,20 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="sidebar" data-sidebar-state={collapsed ? "collapsed" : "expanded"}>
-      <div className="sidebar-rail">
+    <aside
+      className={cn(
+        "sidebar group/sidebar flex flex-col overflow-hidden",
+        "w-[var(--sidebar-width)] border-r border-[var(--stroke-tertiary)] bg-[var(--bg-raised)]",
+        "px-3 py-3.5",
+        "data-[sidebar-state=collapsed]:w-[var(--sidebar-width-icon)] data-[sidebar-state=collapsed]:px-1.5 data-[sidebar-state=collapsed]:py-2.5",
+        "transition-[width_var(--dur-slow)_var(--ease-out),padding_0.22s_var(--ease-out)] will-change-[width]",
+      )}
+      data-sidebar-state={collapsed ? "collapsed" : "expanded"}
+    >
+      <div className="sidebar-rail hidden flex-col gap-1 group-data-[sidebar-state=collapsed]/sidebar:flex">
         <button
           type="button"
+          className="grid w-full aspect-square cursor-pointer place-items-center rounded-md border border-transparent bg-transparent text-[16px] leading-none text-[var(--text)] hover:bg-[var(--bg-input)]"
           title={strings.sidebar.expandSidebarTitle}
           aria-label={strings.sidebar.expandSidebar}
           onClick={onToggleCollapsed}
@@ -592,11 +672,11 @@ export default function Sidebar({
         </button>
       </div>
 
-      <div className="sidebar-sections">
-        <div className="sidebar-head">
+      <div className="sidebar-sections flex min-h-0 flex-1 flex-col overflow-y-auto group-data-[sidebar-state=collapsed]/sidebar:hidden">
+        <div className="sidebar-head flex items-center justify-between mb-3 pb-2 border-b border-[var(--stroke-tertiary)]">
           <button
             type="button"
-            className="collapse-btn"
+            className="collapse-btn ml-auto cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[16px] text-[var(--text-dim)] hover:bg-[var(--bg-input)] hover:text-[var(--text)]"
             title={strings.sidebar.collapseSidebarTitle}
             aria-label={strings.sidebar.collapseSidebar}
             onClick={onToggleCollapsed}
@@ -605,19 +685,25 @@ export default function Sidebar({
           </button>
         </div>
 
-        <div className="sidebar-section sidebar-section-grow">
-          <div className="sidebar-section-head">
-            <h2>Projects</h2>
+        <div className="sidebar-section sidebar-section-grow mb-[18px] flex min-h-0 flex-1 flex-col">
+          <div className="sidebar-section-head mb-2 flex items-center justify-between">
+            <h2 className="m-0 text-[var(--text-micro)] font-semibold uppercase tracking-[0.08em] text-[var(--text-dim)]">Projects</h2>
             <button
               type="button"
-              className="proj-add-btn"
+              className={cn(
+                "proj-add-btn flex cursor-pointer items-center gap-1",
+                "rounded-[var(--radius-sm)] border border-[var(--stroke-tertiary)] bg-transparent",
+                "px-2 py-0.5 text-[11px] text-[var(--text-dim)]",
+                "transition-all duration-[var(--dur-fast)] ease-[var(--ease-out)]",
+                "hover:border-[var(--accent-user)] hover:bg-[var(--bg-input)] hover:text-[var(--text)]",
+              )}
               onClick={onAddProject}
               title={strings.sidebar.newProjectTitle}
             >
               <FolderPlus size={12} /> {strings.sidebar.newProject}
             </button>
           </div>
-          <ul className="proj-tree">
+          <ul className="proj-tree m-0 flex list-none flex-col gap-px p-0">
             {projects.map(renderProject)}
           </ul>
         </div>

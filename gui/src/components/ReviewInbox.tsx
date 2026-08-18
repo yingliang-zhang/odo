@@ -12,6 +12,8 @@
 import { useMemo, useState } from "react";
 import { ArrowRight, ChevronDown, ChevronRight } from "lucide-react";
 import DiffViewer from "./DiffViewer";
+import { Button } from "./ui/button";
+import { cn } from "../lib/utils";
 import type { DiffInfoEx } from "../types";
 
 interface Props {
@@ -71,16 +73,41 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
   }
 
   return (
-    <section className="review-inbox" aria-label="Review inbox">
+    <section className="review-inbox p-2" aria-label="Review inbox">
       {groups.map((g) => (
-        <div className="inbox-group" key={g.id}>
-          <header className="inbox-group-head">
-            <span className="inbox-ws-pill">{g.name}</span>
-            <span className="panel-tab-badge">{g.rows.length}</span>
+        <div className="inbox-group mb-3" key={g.id}>
+          <header
+            className={cn(
+              "inbox-group-head flex items-center gap-2 px-1 pt-1 pb-1.5",
+              "border-b border-[var(--border)] mb-1.5",
+            )}
+          >
+            <span
+              className={cn(
+                "inbox-ws-pill text-caption font-semibold text-[var(--text)]",
+                "bg-[var(--bg-raised)] border border-[var(--border)] rounded-sm",
+                "px-2 py-0.5 max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap",
+              )}
+            >
+              {g.name}
+            </span>
+            <span
+              className={cn(
+                "panel-tab-badge inline-block min-w-4 h-4 leading-4 text-center",
+                "rounded-md bg-[var(--accent-user)] text-[var(--bg)]",
+                "text-[10px] font-bold px-1",
+              )}
+            >
+              {g.rows.length}
+            </span>
             {onJump && (
               <button
                 type="button"
-                className="inbox-jump"
+                className={cn(
+                  "inbox-jump ml-auto bg-transparent border-none text-[var(--text-dim)]",
+                  "cursor-pointer px-1.5 py-0.5 rounded-sm leading-none",
+                  "hover:text-[var(--text)] hover:bg-[var(--bg-input)]",
+                )}
                 aria-label={`Jump to ${g.name}`}
                 title={`Switch to ${g.name}`}
                 onClick={() => onJump(g.id)}
@@ -92,15 +119,28 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
           {g.rows.map((d) => {
             const expanded = expandedId === d.id;
             return (
-              <div className="inbox-row" key={d.id}>
+              <div
+                className={cn(
+                  "inbox-row flex flex-wrap border border-[var(--border)] rounded-md",
+                  "bg-[var(--bg-raised)] mb-1.5 overflow-hidden",
+                  // Expanded DiffViewer must fill the row width so the diff
+                  // body scrolls instead of clipping (K3 final review S2).
+                  "[&>.diff-card]:w-full [&>.diff-card]:min-w-0",
+                )}
+                key={d.id}
+              >
                 <button
                   type="button"
-                  className="inbox-row-head"
+                  className={cn(
+                    "inbox-row-head flex items-center gap-1.5 w-full px-2.5 py-1.5",
+                    "bg-transparent border-none text-[var(--text)] cursor-pointer",
+                    "text-caption text-left hover:bg-[var(--bg-hover)]",
+                  )}
                   aria-expanded={expanded}
                   onClick={() => setExpandedId(expanded ? null : d.id)}
                 >
                   {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                  <span className="inbox-row-title">Diff #{d.id}</span>
+                  <span className="inbox-row-title font-semibold">Diff #{d.id}</span>
                 </button>
                 {expanded ? (
                   <DiffViewer
@@ -112,24 +152,42 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
                   />
                 ) : (
                   <>
-                    <pre className="inbox-preview">{preview(d.content)}</pre>
-                    <div className="inbox-row-actions">
-                      <button
+                    <pre
+                      className={cn(
+                        "inbox-preview basis-full m-0 px-2.5 py-1.5 max-h-[140px]",
+                        "overflow-auto bg-[var(--bg)] border-t border-[var(--border)]",
+                        "font-mono text-micro text-[var(--text-dim)]",
+                        "whitespace-pre-wrap wrap-anywhere",
+                      )}
+                    >
+                      {preview(d.content)}
+                    </pre>
+                    <div
+                      className={cn(
+                        "inbox-row-actions basis-full flex justify-end gap-1.5",
+                        "px-2.5 py-1.5 border-t border-[var(--border)]",
+                      )}
+                    >
+                      <Button
                         type="button"
+                        variant="danger"
+                        size="sm"
                         className="inbox-reject"
                         aria-label={`Reject diff ${d.id}`}
                         onClick={() => void onReject(d.id)}
                       >
                         Reject
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
+                        variant="default"
+                        size="sm"
                         className="inbox-accept"
                         aria-label={`Accept diff ${d.id}`}
                         onClick={() => void onAccept(d.id)}
                       >
                         Accept
-                      </button>
+                      </Button>
                     </div>
                   </>
                 )}

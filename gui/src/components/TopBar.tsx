@@ -8,6 +8,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
+import { Button } from "./ui/button";
 
 // M9 Phase 1: TopBar — 32px bar above the main content area.
 // M9 Phase 4: owns the action row that used to live in the sidebar
@@ -280,14 +281,16 @@ export default function TopBar({
                   disabled={pinBusy}
                   autoFocus
                 />
-                <button
+                <Button
                   type="submit"
+                  variant="ghost"
+                  size="sm"
                   className="pin-btn"
                   disabled={pinBusy || pinText.trim() === ""}
                   title="Store a verbatim pin in .odo/pins.md"
                 >
                   Pin
-                </button>
+                </Button>
                 {pinError && <div className="topbar-pin-error">{pinError}</div>}
               </form>
             </div>

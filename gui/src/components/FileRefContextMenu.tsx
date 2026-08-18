@@ -12,6 +12,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { FolderOpen, Eye, BookOpen } from "lucide-react";
 import { openPath } from "../api";
+import { cn } from "../lib/utils";
 import FilePreview from "./FilePreview";
 
 interface Props {
@@ -136,18 +137,42 @@ export default function FileRefContextMenu({
   return createPortal(
     <div
       ref={menuRef}
-      className="ws-context-menu file-ref-menu"
+      className={cn(
+        "fixed z-[200] min-w-[160px] ws-context-menu",
+        "bg-[var(--bg-elevated)] border border-[var(--border)]",
+        "rounded-[var(--radius-md)] p-1 shadow-[var(--shadow-panel)]",
+      )}
       style={{ left: pos.x, top: pos.y }}
       role="group"
       aria-label={`File actions for ${path}`}
     >
-      <div className="file-ref-path" title={path}>{path}</div>
-      {error != null && <div className="file-ref-error" role="alert">{error}</div>}
+      <div
+        className={cn(
+          "px-2 pt-1 pb-0.5 text-[10px] max-w-[280px]",
+          "text-[var(--text-dim)] whitespace-nowrap overflow-hidden text-ellipsis",
+        )}
+        title={path}
+      >
+        {path}
+      </div>
+      {error != null && (
+        <div
+          className="px-2 py-0.5 text-[10px] text-[var(--err-text)] break-words"
+          role="alert"
+        >
+          {error}
+        </div>
+      )}
       {items.map((item, i) => (
         <button
           key={item.label}
           type="button"
-          className="ws-context-item"
+          className={cn(
+            "flex items-center gap-2 w-full px-2 py-1.5 text-xs",
+            "rounded-[var(--radius-sm)] cursor-pointer text-left",
+            "bg-transparent border-none text-[var(--text)]",
+            "hover:bg-[var(--bg-hover)] transition-colors",
+          )}
           autoFocus={i === 0}
           onClick={item.onClick}
         >

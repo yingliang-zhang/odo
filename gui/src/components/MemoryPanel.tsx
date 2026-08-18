@@ -3,6 +3,7 @@ import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult } from "../types";
 import LoadingInline from "./LoadingInline";
 import { Button } from "./ui/button";
+import { cn } from "../lib/utils";
 
 // M4 memory review (spec §7): the learner proposes rules at distill time
 // (journaled as one memory_propose batch per epoch); this panel is the human
@@ -12,6 +13,13 @@ import { Button } from "./ui/button";
 // M9 P3: what was the memory review modal now renders inside the right
 // panel's Memory tab — Proposals and Current files. The ledger view moved
 // to LedgerPanel (the panel's Ledger tab); closing is the panel's job (⌘J).
+//
+// P1-P4: styles migrated to Tailwind utilities; class names survive as
+// inert identity markers (e2e hooks in skills-proposals.spec/ledger.spec).
+// Rules shared with other panels stay in app.css: verdict badges
+// (DiffViewer), mem-body/mem-section-title/mem-file (LedgerPanel),
+// wiki-hint/wiki-content (WikiBrowser), settings-save/settings-error
+// (SettingsPanel).
 
 interface Props {
   conversationId: number;
@@ -46,26 +54,32 @@ function ProposalRow({
   onDecision: (index: number, accept: boolean) => void;
 }) {
   return (
-    <div className="mem-row">
-      <div className="mem-row-main">
-        <div className="mem-rule">{p.rule}</div>
-        {p.evidence && <div className="mem-meta">cites {p.evidence}</div>}
-        {p.contradicts && <div className="mem-meta mem-meta-warn">replaces: {p.contradicts}</div>}
+    <div className="mem-row flex items-start justify-between gap-3 px-3 py-2.5 border-b border-[var(--border)] bg-[var(--bg-raised)]">
+      <div className="mem-row-main min-w-0">
+        <div className="mem-rule whitespace-pre-wrap [word-break:break-word]">{p.rule}</div>
+        {p.evidence && <div className="mem-meta mt-[3px] text-[11px] text-[var(--text-dim)]">cites {p.evidence}</div>}
+        {p.contradicts && <div className="mem-meta mem-meta-warn mt-[3px] text-[11px] text-[var(--warn)]">replaces: {p.contradicts}</div>}
         {p.projects != null && p.projects.length > 0 && (
-          <div className="mem-meta">seen in: {p.projects.join(", ")}</div>
+          <div className="mem-meta mt-[3px] text-[11px] text-[var(--text-dim)]">seen in: {p.projects.join(", ")}</div>
         )}
       </div>
-      <div className="mem-decisions">
+      <div className="mem-decisions flex gap-1 shrink-0">
         <button
           type="button"
-          className={`mem-decision accept${rejected ? "" : " selected"}`}
+          className={cn(
+            "mem-decision accept bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
+            !rejected && "selected text-[var(--ok-text)] border-[var(--ok-text)] bg-[rgba(63,163,95,0.15)]",
+          )}
           onClick={() => onDecision(index, true)}
         >
           Accept
         </button>
         <button
           type="button"
-          className={`mem-decision reject${rejected ? " selected" : ""}`}
+          className={cn(
+            "mem-decision reject bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
+            rejected && "selected text-[var(--err-text)] border-[var(--err-text)] bg-[rgba(195,74,74,0.12)]",
+          )}
           onClick={() => onDecision(index, false)}
         >
           Reject
@@ -99,14 +113,16 @@ function SkillProposalRow({
 }) {
   const { name, description } = parseSkillFrontmatter(p.rule);
   return (
-    <div className="mem-row mem-row-skill">
-      <div className="mem-row-main">
-        <div className="mem-skill-name">{name || p.name || "(unnamed skill)"}</div>
-        {description && <div className="mem-meta">{description}</div>}
-        {p.evidence && <div className="mem-meta">cites {p.evidence}</div>}
-        {p.contradicts && <div className="mem-meta mem-meta-warn">⚠ {p.contradicts}</div>}
+    <div className="mem-row mem-row-skill flex items-start justify-between gap-3 px-3 py-2.5 border-b border-[var(--border)] bg-[var(--bg-raised)]">
+      <div className="mem-row-main min-w-0">
+        <div className="mem-skill-name font-semibold text-[13px] text-[var(--text)]">{name || p.name || "(unnamed skill)"}</div>
+        {description && <div className="mem-meta mt-[3px] text-[11px] text-[var(--text-dim)]">{description}</div>}
+        {p.evidence && <div className="mem-meta mt-[3px] text-[11px] text-[var(--text-dim)]">cites {p.evidence}</div>}
+        {p.contradicts && <div className="mem-meta mem-meta-warn mt-[3px] text-[11px] text-[var(--warn)]">⚠ {p.contradicts}</div>}
         {p.reviews && p.reviews.length > 0 && (
-          <div className="mem-verdicts">
+          <div className="mem-verdicts flex flex-wrap gap-1 mt-1">
+            {/* verdict-badge CSS stays in app.css (DiffViewer shares it);
+                the className strings are also e2e hooks. */}
             {p.reviews.map((r: ReviewResult, i: number) => (
               <span key={i} className={`verdict-badge verdict-${r.verdict}`}>
                 {r.model}: {r.verdict}
@@ -114,22 +130,28 @@ function SkillProposalRow({
             ))}
           </div>
         )}
-        <details className="mem-skill-details">
-          <summary>Full SKILL.md</summary>
-          <pre className="wiki-content mem-file">{p.rule}</pre>
+        <details className="mem-skill-details mt-1.5">
+          <summary className="cursor-pointer text-[11px] text-[var(--text-dim)]">Full SKILL.md</summary>
+          <pre className="wiki-content mem-file max-h-[200px] overflow-y-auto">{p.rule}</pre>
         </details>
       </div>
-      <div className="mem-decisions">
+      <div className="mem-decisions flex gap-1 shrink-0">
         <button
           type="button"
-          className={`mem-decision accept${rejected ? "" : " selected"}`}
+          className={cn(
+            "mem-decision accept bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
+            !rejected && "selected text-[var(--ok-text)] border-[var(--ok-text)] bg-[rgba(63,163,95,0.15)]",
+          )}
           onClick={() => onDecision(index, true)}
         >
           Accept
         </button>
         <button
           type="button"
-          className={`mem-decision reject${rejected ? " selected" : ""}`}
+          className={cn(
+            "mem-decision reject bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
+            rejected && "selected text-[var(--err-text)] border-[var(--err-text)] bg-[rgba(195,74,74,0.12)]",
+          )}
           onClick={() => onDecision(index, false)}
         >
           Reject
@@ -292,13 +314,16 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
   const acceptedCount = batch ? batch.proposals.length - rejects.size : 0;
 
   return (
-    <div className="mem-panel">
-      <div className="mem-tabs" role="tablist" aria-label="Memory sections">
+    <div className="mem-panel h-full flex flex-col">
+      <div className="mem-tabs flex gap-1.5 mb-3" role="tablist" aria-label="Memory sections">
         <button
           type="button"
           role="tab"
           aria-selected={tab === "proposals"}
-          className={`mem-tab${tab === "proposals" ? " active" : ""}`}
+          className={cn(
+            "mem-tab bg-[var(--bg-input)] border border-[var(--border)] rounded-md text-[var(--text-dim)] px-3 py-[5px] text-[12px] cursor-pointer",
+            tab === "proposals" && "active text-[var(--text)] border-[var(--accent-user)]",
+          )}
           onClick={() => setTab("proposals")}
         >
           Proposals{batch ? ` (${batch.proposals.length})` : ""}
@@ -307,7 +332,10 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
           type="button"
           role="tab"
           aria-selected={tab === "files"}
-          className={`mem-tab${tab === "files" ? " active" : ""}`}
+          className={cn(
+            "mem-tab bg-[var(--bg-input)] border border-[var(--border)] rounded-md text-[var(--text-dim)] px-3 py-[5px] text-[12px] cursor-pointer",
+            tab === "files" && "active text-[var(--text)] border-[var(--accent-user)]",
+          )}
           onClick={() => setTab("files")}
         >
           Current files
@@ -370,7 +398,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
                   </>
                 )}
                 {(batch.reaffirm?.length ?? 0) > 0 && (
-                  <div className="mem-reaffirm">
+                  <div className="mem-reaffirm px-3 py-2 text-[var(--text-dim)] text-[11px] italic">
                     The daemon will also reaffirm {batch.reaffirm?.length} existing rule(s) on
                     apply.
                   </div>
@@ -378,7 +406,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
               </>
             )}
           </div>
-          <div className="mem-foot">
+          <div className="mem-foot flex items-center gap-3 mt-3">
             {batch && (
               <Button
                 type="button"
@@ -393,7 +421,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
                 {applyBusy ? "Applying…" : `Apply (${acceptedCount} accepted)`}
               </Button>
             )}
-            {applyResult && <span className="mem-result">{applyResult}</span>}
+            {applyResult && <span className="mem-result text-[var(--ok-text)] text-[12px]">{applyResult}</span>}
           </div>
         </>
       )}

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { errorMessage, ledger } from "../api";
 import type { EventPayload, OdoEvent } from "../types";
+import { cn } from "../lib/utils";
 import LoadingInline from "./LoadingInline";
 
 // M9 P3: the ledger view, lifted out of the memory review modal into the
@@ -59,6 +60,32 @@ const RISK_LEVEL_STYLE: Record<string, string> = {
   none: "clean",
 };
 
+// Outcome badges the chat transcript doesn't already style (badge-accept /
+// badge-reject / badge-other rules stay in app.css — DiffViewer and
+// MessageBubble share them). Values translated 1:1 from the deleted rules.
+const OUTCOME_BADGE_UTIL: Record<string, string> = {
+  "badge-blocked": "bg-[rgba(204,167,66,0.14)] text-[var(--warn)] border border-[var(--warn)]",
+  "badge-refresh":
+    "bg-[color-mix(in_srgb,var(--link)_14%,transparent)] text-[var(--link)] border border-[var(--link)]",
+};
+
+// Risk-class badge geometry (old .risk-badge) + the severity ramp's stops
+// (old .risk-critical … .risk-clean), translated 1:1 from the deleted rules.
+// The light-theme retheme of .risk-high stays in app.css behind
+// [data-theme="light"] — it overrides these inline values there.
+// Sizes are px literals (11px ≡ var(--text-micro), 12px ≡ var(--text-caption) —
+// single :root definitions, no theme override). twMerge would otherwise
+// collapse a var-size and a var-color text utility into one class.
+const RISK_BADGE_GEOMETRY =
+  "inline-block rounded-[10px] px-2 py-0.5 text-[11px] leading-[1.3] whitespace-nowrap";
+const RISK_SEVERITY_UTIL: Record<string, string> = {
+  critical: "bg-[rgba(195,74,74,0.15)] text-[var(--err-text)] border border-[var(--err)]",
+  high: "bg-[rgba(209,154,74,0.14)] text-[#d19a4a] border border-[#d19a4a]",
+  medium: "bg-[rgba(204,167,66,0.14)] text-[var(--warn)] border border-[var(--warn)]",
+  low: "bg-[color-mix(in_srgb,var(--link)_14%,transparent)] text-[var(--link)] border border-[var(--link)]",
+  clean: "bg-[var(--bg-raised)] text-[var(--text-dim)] border border-[var(--border)]",
+};
+
 // Outcome badge for one row: label + an existing badge-*/new outcome class.
 function actionBadge(p: EventPayload): { label: string; cls: string } {
   switch (p.action) {
@@ -110,12 +137,42 @@ function ReviewRow({ event }: { event: OdoEvent }) {
   // both render "Human".
   const auto = p.actor === "auto_panel";
   return (
-    <div className="ledger-review-row" data-action={p.action} data-seq={event.seq}>
-      <span className="ledger-review-seq mono">#{event.seq}</span>
-      <span className={`badge ${cls}`}>{label}</span>
-      {p.diff_id != null && <span className="ledger-review-diff">diff #{p.diff_id}</span>}
+    <div
+      className={cn(
+        "ledger-review-row",
+        "flex items-start flex-wrap gap-1.5 px-3 py-2",
+        "border-b border-[var(--border)] bg-[var(--bg-raised)]",
+      )}
+      data-action={p.action}
+      data-seq={event.seq}
+    >
       <span
-        className={`badge ${auto ? "badge-actor-auto" : "badge-actor-human"}`}
+        className={cn(
+          "ledger-review-seq mono",
+          "min-w-[40px] pt-0.5 text-[var(--text-dim)] text-[11px]",
+        )}
+      >
+        #{event.seq}
+      </span>
+      <span className={cn("badge", cls, OUTCOME_BADGE_UTIL[cls])}>{label}</span>
+      {p.diff_id != null && (
+        <span
+          className={cn(
+            "ledger-review-diff",
+            "pt-0.5 text-[var(--text-dim)] text-[12px]",
+          )}
+        >
+          diff #{p.diff_id}
+        </span>
+      )}
+      <span
+        className={cn(
+          "badge",
+          auto ? "badge-actor-auto" : "badge-actor-human",
+          auto
+            ? "bg-[color-mix(in_srgb,var(--bg-run)_18%,transparent)] text-[var(--bg-run)] border border-[var(--bg-run)]"
+            : "bg-[var(--bg-raised)] text-[var(--text-dim)] border border-[var(--border)]",
+        )}
         title={p.actor || "human review (no actor journaled)"}
       >
         {auto ? "Auto" : "Human"}
@@ -124,7 +181,12 @@ function ReviewRow({ event }: { event: OdoEvent }) {
         p.risk_class.map((riskCls) => (
           <span
             key={riskCls}
-            className={`risk-badge risk-${RISK_LEVEL_STYLE[riskCls] ?? "clean"}`}
+            className={cn(
+              "risk-badge",
+              `risk-${RISK_LEVEL_STYLE[riskCls] ?? "clean"}`,
+              RISK_BADGE_GEOMETRY,
+              RISK_SEVERITY_UTIL[RISK_LEVEL_STYLE[riskCls] ?? "clean"],
+            )}
             title={p.risk_evidence?.[riskCls] ?? (riskCls === "none" ? "rated clean" : "no evidence journaled")}
           >
             {riskCls === "none" ? "clean" : riskCls}
@@ -134,23 +196,66 @@ function ReviewRow({ event }: { event: OdoEvent }) {
         // Pre-W5 row (or an unreadable patch): absence is attested less,
         // never a false "clean". Only receipt-eligible verdicts flag this.
         RISK_ELIGIBLE_ACTIONS[p.action ?? ""] === true && (
-          <span className="risk-badge risk-unrated" title="pre-W5 row — no risk receipt journaled">
+          <span
+            className={cn(
+              "risk-badge risk-unrated",
+              RISK_BADGE_GEOMETRY,
+              "bg-transparent text-[var(--text-dim)] border border-dashed border-[var(--border)]",
+            )}
+            title="pre-W5 row — no risk receipt journaled"
+          >
             unrated
           </span>
         )
       )}
       {p.timed_out === true && (
-        <span className="risk-badge risk-timeout" title="the review timed out">
+        <span
+          className={cn(
+            "risk-badge risk-timeout",
+            RISK_BADGE_GEOMETRY,
+            "bg-[rgba(204,167,66,0.22)] text-[var(--warn)] border border-[var(--warn)]",
+          )}
+          title="the review timed out"
+        >
           timed out
         </span>
       )}
-      {detail !== null && <span className="ledger-review-detail">{detail}</span>}
+      {detail !== null && (
+        <span
+          className={cn(
+            "ledger-review-detail",
+            "pt-0.5 text-[var(--text-dim)] text-[12px] wrap-anywhere",
+          )}
+        >
+          {detail}
+        </span>
+      )}
       {runLog !== null && (
-        <details className="ledger-run-log">
-          <summary>
-            run output{runLog.cmd != null && <code className="ledger-run-cmd">{runLog.cmd}</code>}
+        <details className={cn("ledger-run-log", "basis-full mt-1")}>
+          <summary className="cursor-pointer select-none text-[var(--text-dim)] text-[12px] hover:text-[var(--text)]">
+            run output
+            {runLog.cmd != null && (
+              <code
+                className={cn(
+                  "ledger-run-cmd",
+                  "ml-1.5 px-1.5 py-[1px] text-[11px] text-[var(--text-dim)]",
+                  "bg-[var(--code-chip-bg)] rounded-[var(--radius-sm)]",
+                )}
+              >
+                {runLog.cmd}
+              </code>
+            )}
           </summary>
-          <pre className="ledger-run-log-pre">{runLog.output}</pre>
+          <pre
+            className={cn(
+              "ledger-run-log-pre",
+              "mt-1.5 mb-0.5 max-h-[260px] overflow-auto px-2.5 py-2",
+              "bg-[var(--bg)] border border-[var(--border)] rounded-[var(--radius-sm)]",
+              "text-[11.5px] leading-[1.45] whitespace-pre-wrap wrap-anywhere",
+            )}
+          >
+            {runLog.output}
+          </pre>
         </details>
       )}
     </div>

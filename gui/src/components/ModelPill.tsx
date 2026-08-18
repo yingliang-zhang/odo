@@ -60,13 +60,13 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
   const shortLabel = model.replace(/^sudo\/[^/]+\//, "").replace(/^sudo\//, "") || "model";
 
   return (
-    <div className="model-pill-wrap min-h-[38px] flex items-center">
+    <div className="model-pill-wrap min-h-[36px] flex items-center">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
             type="button"
             className={cn(
-              "model-pill min-h-[38px] flex items-center gap-1",
+              "model-pill min-h-[36px] flex items-center gap-1",
               "bg-[var(--bg-input)] border border-[var(--border)]",
               "rounded-[var(--radius-md)] text-[var(--text-dim)] text-xs",
               "px-2 py-1 cursor-pointer hover:text-[var(--text)] hover:border-[var(--accent)]",

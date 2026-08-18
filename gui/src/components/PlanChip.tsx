@@ -3,6 +3,7 @@ import { Check, X, ChevronDown, ChevronRight, Circle, Plus } from "lucide-react"
 import { visibleTodoItems } from "../todo";
 import type { TodoUpdateAction, TodoViewItem } from "../types";
 import { todoUpdate } from "../api";
+import { cn } from "../lib/utils";
 
 // Hermes-style inline todo stack — renders above the composer as a
 // collapsible card showing live todo items with status glyphs:
@@ -23,11 +24,13 @@ interface Props {
 }
 
 // Status glyph for a todo item, matching Hermes's visual language.
+// (P1-P4: styles are Tailwind utilities; class names survive as inert
+// identity markers.)
 function TodoGlyph({ status, stale }: { status: TodoViewItem["status"]; stale: boolean }) {
-  if (status === "done") return <Check size={11} aria-hidden className="todo-glyph todo-glyph-done" />;
-  if (status === "struck") return <X size={11} aria-hidden className="todo-glyph todo-glyph-struck" />;
-  if (stale) return <Circle size={11} aria-hidden className="todo-glyph todo-glyph-stale" />;
-  return <Circle size={11} aria-hidden className="todo-glyph todo-glyph-open" />;
+  if (status === "done") return <Check size={11} aria-hidden className="todo-glyph todo-glyph-done pointer-events-none text-[var(--ok-text)]" />;
+  if (status === "struck") return <X size={11} aria-hidden className="todo-glyph todo-glyph-struck pointer-events-none text-[var(--err)]" />;
+  if (stale) return <Circle size={11} aria-hidden className="todo-glyph todo-glyph-stale pointer-events-none opacity-30" />;
+  return <Circle size={11} aria-hidden className="todo-glyph todo-glyph-open pointer-events-none opacity-50" />;
 }
 
 export default function PlanChip({
@@ -103,18 +106,18 @@ export default function PlanChip({
       : "Plan";
 
   return (
-    <div className="todo-stack">
+    <div className="todo-stack flex flex-col gap-0.5 py-1 px-2 bg-[var(--bg-raised)] rounded-t-lg border-b border-[var(--border)]">
       {/* Header row: caret + label + progress count. Click toggles collapse. */}
       <button
         type="button"
-        className="todo-stack-header"
+        className="todo-stack-header flex items-center gap-1.5 bg-transparent border-none text-[var(--text-dim)] text-[11px] font-medium cursor-pointer py-0.5 w-full text-left hover:text-[var(--text)]"
         onClick={() => setCollapsed((v) => !v)}
         aria-expanded={!collapsed}
       >
         {collapsed ? <ChevronRight size={10} aria-hidden /> : <ChevronDown size={10} aria-hidden />}
-        <span className="todo-stack-label">{label}</span>
+        <span className="todo-stack-label flex-1">{label}</span>
         {progressTotal > 0 && (
-          <span className="todo-stack-count">
+          <span className="todo-stack-count tabular-nums text-[var(--text-dim)] text-[10px]">
             {doneCount}/{progressTotal}
           </span>
         )}
@@ -123,15 +126,25 @@ export default function PlanChip({
       {/* Expanded body: item list + add row. */}
       {!collapsed && (
         <>
-          <ul className="todo-list">
+          <ul className="todo-list list-none m-0 p-0 flex flex-col gap-px max-h-[200px] overflow-y-auto">
             {visible.map((it) => (
               <li
                 key={it.id}
-                className={`todo-row${it.status === "struck" ? " struck" : ""}${it.stale ? " stale" : ""}${busyId === it.id ? " busy" : ""}`}
+                className={cn(
+                  "todo-row group flex items-center gap-2 px-1 py-[3px] rounded text-[12px] leading-[1.4] hover:bg-[rgba(255,255,255,0.03)]",
+                  it.status === "struck" && "struck",
+                  it.stale && "stale",
+                  busyId === it.id && "busy opacity-[0.55] pointer-events-none",
+                )}
               >
                 <button
                   type="button"
-                  className={`todo-check${it.status === "done" ? " checked" : ""}`}
+                  className={cn(
+                    "todo-check flex items-center justify-center w-4 h-4 border-none bg-transparent cursor-pointer p-0 shrink-0",
+                    it.status === "done"
+                      ? "checked text-[var(--ok-text)]"
+                      : "text-[var(--text-dim)] hover:text-[var(--text)]",
+                  )}
                   title={
                     it.status === "done"
                       ? "Reopen this item"
@@ -151,14 +164,21 @@ export default function PlanChip({
                 >
                   <TodoGlyph status={it.status} stale={it.stale} />
                 </button>
-                <span className="todo-text" title={it.stale ? "Untouched for 3+ folds" : it.status}>
+                <span
+                  className={cn(
+                    "todo-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap",
+                    it.status === "struck" && "line-through",
+                    (it.status === "struck" || it.stale) && "text-[var(--text-dim)]",
+                  )}
+                  title={it.stale ? "Untouched for 3+ folds" : it.status}
+                >
                   {it.text}
-                  {it.stale && <span className="todo-stale-mark"> ~stale</span>}
+                  {it.stale && <span className="todo-stale-mark text-[var(--text-dim)] text-[10px] ml-1"> ~stale</span>}
                 </span>
                 {it.status === "open" && (
                   <button
                     type="button"
-                    className="chip-remove todo-strike"
+                    className="chip-remove todo-strike flex items-center bg-transparent border-none text-[var(--text-dim)] py-0.5 px-1 opacity-0 transition-opacity duration-150 [transition-timing-function:ease] cursor-pointer group-hover:opacity-100 focus-visible:opacity-100 hover:text-[var(--err)]"
                     title="Strike this item (keeps the record)"
                     aria-label={`Strike ${it.text}`}
                     disabled={busyId != null || disabled}
@@ -171,8 +191,9 @@ export default function PlanChip({
             ))}
           </ul>
           {adding ? (
-            <form className="todo-add" onSubmit={addItem}>
+            <form className="todo-add flex py-0.5 px-1" onSubmit={addItem}>
               <input
+                className="flex-1 bg-[var(--bg-input)] border border-[var(--border)] rounded text-[var(--text)] text-[12px] py-1 px-2 outline-none focus:border-[var(--accent)]"
                 type="text"
                 value={draft}
                 placeholder="Add a plan item…"
@@ -194,7 +215,7 @@ export default function PlanChip({
             !disabled && (
               <button
                 type="button"
-                className="todo-add-btn"
+                className="todo-add-btn flex items-center gap-1 bg-transparent border-none text-[var(--text-dim)] text-[11px] cursor-pointer py-0.5 px-1 hover:text-[var(--text)]"
                 onClick={() => setAdding(true)}
                 disabled={busyId != null}
               >

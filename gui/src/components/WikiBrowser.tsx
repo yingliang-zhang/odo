@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
 import type { WikiNoteInfo } from "../types";
+import { cn } from "../lib/utils";
 import Markdown, { highlightText } from "./Markdown";
 import LoadingInline from "./LoadingInline";
 
@@ -33,6 +34,12 @@ const TOPICS_MARKER = "/wiki/topics/";
 const CITATION_RE = /\(([A-Za-z0-9][A-Za-z0-9._-]*-epoch-\d+)\)$/;
 // Legacy pre-M12 pages may still carry bare "(epoch-N)" citations.
 const LEGACY_CITATION_RE = /\(epoch-(\d+)\)$/;
+
+// Note/topic list rows (old .wiki-row + :hover/:last-child), translated 1:1.
+// The `.selected` hook's styling is applied conditionally at the call site.
+const WIKI_ROW_UTIL =
+  "block w-full text-left px-2.5 py-2 cursor-pointer last:border-b-0 " +
+  "border-b border-[var(--border)] text-[var(--text)] bg-transparent hover:bg-[var(--bg-input)]";
 
 interface Props {
   conversationId: number;
@@ -201,13 +208,18 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
   const isTopicPage = selected.includes(TOPICS_MARKER);
 
   return (
-    <div className="wiki-panel">
-      <div className="wiki-tabs" role="tablist" aria-label="Wiki sections">
+    <div className={cn("wiki-panel", "h-full flex flex-col")}>
+      <div className={cn("wiki-tabs", "flex gap-1.5 mb-3")} role="tablist" aria-label="Wiki sections">
         <button
           type="button"
           role="tab"
           aria-selected={tab === "notes"}
-          className={`wiki-tab${tab === "notes" ? " active" : ""}`}
+          className={cn(
+            "wiki-tab",
+            "bg-[var(--bg-input)] border border-[var(--border)] rounded-[6px]",
+            "px-3 py-[5px] text-[12px] cursor-pointer text-[var(--text-dim)] hover:text-[var(--text)]",
+            tab === "notes" && "active text-[var(--text)] border-[var(--accent-user)]",
+          )}
           onClick={() => setTab("notes")}
         >
           Notes
@@ -216,16 +228,22 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
           type="button"
           role="tab"
           aria-selected={tab === "topics"}
-          className={`wiki-tab${tab === "topics" ? " active" : ""}`}
+          className={cn(
+            "wiki-tab",
+            "bg-[var(--bg-input)] border border-[var(--border)] rounded-[6px]",
+            "px-3 py-[5px] text-[12px] cursor-pointer text-[var(--text-dim)] hover:text-[var(--text)]",
+            tab === "topics" && "active text-[var(--text)] border-[var(--accent-user)]",
+          )}
           onClick={() => setTab("topics")}
         >
           Topics
         </button>
       </div>
 
-      <div className="wiki-search">
+      <div className={cn("wiki-search", "mb-3")}>
         <input
           type="text"
+          className="w-full px-2.5 py-1.5 text-[13px] text-[var(--text)] bg-[var(--bg-input)] border border-[var(--border)] rounded-[6px] focus:outline-none focus:border-[var(--accent-user)]"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
@@ -246,17 +264,33 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
         />
       </div>
 
-      <div className="wiki-body">
-        <div className="wiki-list">
+      <div
+        className={cn(
+          "wiki-body",
+          "grid grid-rows-[minmax(0,1fr)_minmax(0,2fr)] gap-3 flex-1 min-h-0",
+        )}
+      >
+        <div
+          className={cn(
+            "wiki-list",
+            "overflow-y-auto self-stretch border border-[var(--border)] rounded-[8px]",
+          )}
+        >
           {tab === "notes" && (
             <>
               {matchesQuery("user.md (global)", USER_MD_PATH) && (
                 <button
                   type="button"
-                  className={`wiki-row${selected === USER_MD_PATH ? " selected" : ""}`}
+                  className={cn(
+                    "wiki-row",
+                    WIKI_ROW_UTIL,
+                    selected === USER_MD_PATH && "selected bg-[var(--bg-input)] shadow-[inset_2px_0_0_var(--accent-user)]",
+                  )}
                   onClick={() => setSelected(USER_MD_PATH)}
                 >
-                  <span className="wiki-row-name">{highlightText("user.md (global)", needle, "umd")}</span>
+                  <span className={cn("wiki-row-name", "block font-semibold truncate")}>
+                    {highlightText("user.md (global)", needle, "umd")}
+                  </span>
                 </button>
               )}
               {notes === null && !listError && <LoadingInline />}
@@ -271,22 +305,26 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
                 <button
                   type="button"
                   key={n.path}
-                  className={`wiki-row${selected === n.path ? " selected" : ""}`}
+                  className={cn(
+                    "wiki-row",
+                    WIKI_ROW_UTIL,
+                    selected === n.path && "selected bg-[var(--bg-input)] shadow-[inset_2px_0_0_var(--accent-user)]",
+                  )}
                   title={n.path}
                   onClick={() => setSelected(n.path)}
                 >
-                  <span className="wiki-row-name">
+                  <span className={cn("wiki-row-name", "block font-semibold truncate")}>
                     {highlightText(n.name, needle, `n-${n.path}`)}
                     {retracted.has(n.name) && (
                       <span
-                        className="wiki-retracted-badge"
+                        className={cn("wiki-retracted-badge", "ml-2 text-[11px] text-[var(--err-text)]")}
                         title="Retracted by the contradiction pass — still readable, no longer injected"
                       >
                         ⚠ retracted
                       </span>
                     )}
                   </span>
-                  <span className="wiki-row-meta">
+                  <span className={cn("wiki-row-meta", "block mt-0.5 text-[11px] text-[var(--text-dim)]")}>
                     epoch {n.epoch}
                     {relativeTime(n.modified_at) !== "" ? ` · ${relativeTime(n.modified_at)}` : ""}
                   </span>
@@ -308,12 +346,18 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
                 <button
                   type="button"
                   key={topic.path}
-                  className={`wiki-row${selected === topic.path ? " selected" : ""}`}
+                  className={cn(
+                    "wiki-row",
+                    WIKI_ROW_UTIL,
+                    selected === topic.path && "selected bg-[var(--bg-input)] shadow-[inset_2px_0_0_var(--accent-user)]",
+                  )}
                   title={topic.path}
                   onClick={() => setSelected(topic.path)}
                 >
-                  <span className="wiki-row-name">{highlightText(topic.name, needle, `t-${topic.path}`)}</span>
-                  <span className="wiki-row-meta">
+                  <span className={cn("wiki-row-name", "block font-semibold truncate")}>
+                    {highlightText(topic.name, needle, `t-${topic.path}`)}
+                  </span>
+                  <span className={cn("wiki-row-meta", "block mt-0.5 text-[11px] text-[var(--text-dim)]")}>
                     {relativeTime(topic.modified_at) !== "" ? relativeTime(topic.modified_at) : ""}
                   </span>
                 </button>
@@ -322,7 +366,12 @@ export default function WikiBrowser({ conversationId, projectRoot, focus }: Prop
           )}
         </div>
 
-        <div className="wiki-reader">
+        <div
+          className={cn(
+            "wiki-reader",
+            "overflow-auto px-3 py-[2px] bg-[var(--bg)] border border-[var(--border)] rounded-[8px]",
+          )}
+        >
           {contentLoading && <LoadingInline />}
           {!contentLoading && content !== null && content !== "" && !isTopicPage && (
             <Markdown content={content} className="wiki-content" projectRoot={projectRoot} />
@@ -361,13 +410,21 @@ function TopicLine({
   onJumpToEpoch: (epoch: number) => void;
 }) {
   if (!line.startsWith("- ")) {
-    return <div className="wiki-topic-line">{line}</div>;
+    return <div className={cn("wiki-topic-line", "min-h-[1.5em]")}>{line}</div>;
   }
   const match = line.match(CITATION_RE) ?? line.match(LEGACY_CITATION_RE);
   if (!match) {
     return (
-      <div className="wiki-topic-line wiki-line-uncited">
-        {line} <span className="wiki-uncited-badge">⚠ uncited</span>
+      <div
+        className={cn(
+          "wiki-topic-line wiki-line-uncited",
+          "min-h-[1.5em] pl-1.5 -ml-2 bg-[rgba(195,74,74,0.12)] border-l-2 border-l-[var(--err)]",
+        )}
+      >
+        {line}{" "}
+        <span className={cn("wiki-uncited-badge", "text-[11px] text-[var(--err-text)]")}>
+          ⚠ uncited
+        </span>
       </div>
     );
   }
@@ -377,11 +434,14 @@ function TopicLine({
   // citation button (a visible double space).
   const text = line.slice(0, match.index).trimEnd();
   return (
-    <div className="wiki-topic-line">
+    <div className={cn("wiki-topic-line", "min-h-[1.5em]")}>
       {text}
       <button
         type="button"
-        className="wiki-epoch-link"
+        className={cn(
+          "wiki-epoch-link",
+          "p-0 bg-transparent border-0 cursor-pointer underline text-[var(--accent-user)] hover:brightness-125",
+        )}
         title={`Jump to the ${match[1]} source note (Notes tab)`}
         onClick={() => (qualified ? onJumpToNote(match[1]) : onJumpToEpoch(Number(match[1])))}
       >

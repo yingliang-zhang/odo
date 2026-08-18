@@ -31,6 +31,8 @@ import ToolTicker from "./ToolTicker";
 import RunGroupBoundary from "./RunGroupBoundary";
 import ModelPill from "./ModelPill";
 import { ChatSkeleton } from "./LoadingInline";
+import { Button } from "./ui/button";
+import { cn } from "../lib/utils";
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
 // minute ("35s").
@@ -1307,6 +1309,7 @@ export default function ChatSurface({
           )}
           <textarea
             ref={textareaRef}
+            className="min-h-[36px]"
             aria-label={strings.composer.messageInputLabel}
             rows={1}
             value={draft}
@@ -1333,21 +1336,28 @@ export default function ChatSurface({
             autoFocus
           />
           {agentRunning && (
-            <button
+            <Button
               type="button"
-              className="stop-btn"
+              variant="danger"
+              size="md"
+              className="stop-btn min-h-[36px]"
               title={strings.composer.stopTitle}
               onClick={onCancel}
             >
               {strings.composer.stop}
-            </button>
+            </Button>
           )}
           {/* W6 (goal queue): arm to queue the submit as a parked goal.
               Slash commands route before the daemon's park branch, so the
               toggle disables on a "/" draft. */}
-          <button
+          <Button
             type="button"
-            className={`park-toggle${parkArmed ? " armed" : ""}`}
+            variant="ghost"
+            size="icon"
+            className={cn(
+              "park-toggle min-h-[36px]",
+              parkArmed && "armed bg-[rgba(204,167,66,0.14)] border-[var(--warn)] text-[var(--warn)]",
+            )}
             aria-pressed={parkArmed}
             aria-label={strings.composer.parkToggleLabel}
             title={parkArmed ? strings.composer.parkToggleTitleArmed : strings.composer.parkToggleTitleDisarmed}
@@ -1355,10 +1365,10 @@ export default function ChatSurface({
             onClick={() => setParkArmed((v) => !v)}
           >
             <Archive size={14} />
-          </button>
-          <button type="submit" className="send-btn" disabled={sendDisabled || sending || distillLocked || !canSend}>
+          </Button>
+          <Button type="submit" variant="default" size="md" className="send-btn min-h-[36px]" disabled={sendDisabled || sending || distillLocked || !canSend}>
             {parkArmed ? strings.composer.park : agentRunning ? strings.composer.steer : strings.composer.send}
-          </button>
+          </Button>
           <ModelPill
             projectRoot={projectRoot}
             currentModel={codingModel}
