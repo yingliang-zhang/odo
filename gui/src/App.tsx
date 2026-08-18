@@ -819,8 +819,9 @@ export default function App() {
       // M12: the daemon disarms/cancels auto-distill on send itself; the
       // chip just re-reads promptly.
       void refreshPendingCounts();
-      // J: show a spinner for /panel and /vision while the daemon blocks.
-      const isPanel = text.trim().startsWith("/panel") || text.trim().startsWith("/vision");
+      // J: show a spinner for /panel, /vision and /preview while the
+      // daemon blocks (a preview capture + K3 call can outlast a panel).
+      const isPanel = text.trim().startsWith("/panel") || text.trim().startsWith("/vision") || text.trim().startsWith("/preview");
       if (isPanel) setPanelThinking(true);
       try {
         const resp = unwrap(

@@ -413,6 +413,7 @@ const EXAMPLE_PROMPTS = [
 const SLASH_COMMANDS = [
   { cmd: "/panel",  desc: "MoA thinking — fan out to N review models",          args: " <text>" },
   { cmd: "/vision", desc: "Vision analysis — send to K3 with image content blocks", args: " <text>" },
+  { cmd: "/preview", desc: "Screenshot a localhost page and analyze it", args: " <url> [prompt]" },
 ];
 
 export default function ChatSurface({

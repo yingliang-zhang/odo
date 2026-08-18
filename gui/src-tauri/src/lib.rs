@@ -402,9 +402,10 @@ async fn send_message(
             req["adapter"] = json!(adapter);
         }
     }
-    // /panel and /vision fan out to N models with FS-tool rounds; the
-    // generic 120s timeout provably cut real panels mid-run.
-    let timeout = if text.starts_with("/panel") || text.starts_with("/vision") {
+    // /panel, /vision and /preview fan out to N models or block on a
+    // headless capture + K3 call; the generic 120s timeout provably cut
+    // real panels mid-run.
+    let timeout = if text.starts_with("/panel") || text.starts_with("/vision") || text.starts_with("/preview") {
         SLASH_READ_TIMEOUT
     } else {
         READ_TIMEOUT

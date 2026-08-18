@@ -210,9 +210,9 @@ type rulesOutcome struct {
 // rulesAuditSlashCommands mirrors the slash routes in handleSendMessage
 // (server.go) and cmd_recall_audit.go's auditSlashCommands — keep all
 // three in sync. Slash user_messages carry a .odo/memory.md receipt from
-// the /panel /vision context block; counting them would score panel-only
-// contexts as rule injections.
-var rulesAuditSlashCommands = []string{"/panel", "/vision"}
+// the slash context block; counting them would score panel-only contexts
+// as rule injections.
+var rulesAuditSlashCommands = []string{"/panel", "/vision", "/preview"}
 
 // rulesIsSlash reports whether a journaled user_message text is a slash
 // payload, mirroring the daemon's routing rule: the trimmed text is

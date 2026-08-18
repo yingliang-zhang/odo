@@ -29,6 +29,11 @@ const (
 	slashModeVision
 )
 
+// slashVisionModel is K3 — the only vision-capable model on the gateway
+// (confirmed in ~/.omp/agent/models.yml). /vision and /preview both route
+// image analysis to it; GLM/DS lack vision capability.
+const slashVisionModel = "t9s/kimi-k3"
+
 const (
 	// slashRecallCap bounds the panel's recalled-notes section (the send
 	// path's recall layer allows 12KB; the advisor block buys a tighter

@@ -371,6 +371,19 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       );
       break;
 
+    case "preview_captured":
+      // /preview's capture receipt: subtle system-event badge (the
+      // memory_update pattern) — the captured PNG itself renders as the
+      // user_message's attachment chip above it.
+      body = (
+        <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <Badge variant="other" className="badge badge-other" title={`${p.url ?? ""}\nsha256 ${p.sha256 ?? ""}`}>
+            preview · {p.url ?? "?"}{p.bytes != null ? ` · ${(p.bytes / 1024).toFixed(1)} KB` : ""}{p.wait_ms != null ? ` · ${p.wait_ms} ms` : ""}
+          </Badge>
+        </div>
+      );
+      break;
+
     default:
       body = (
         <div className="bubble bubble-unknown self-start bg-bg-raised text-text-dim font-mono text-caption max-w-[82%] px-3.5 py-2.5 rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">

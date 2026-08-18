@@ -94,6 +94,7 @@ M0–M18 complete. 274 commits, ~67K lines (≈49K Go incl. tests + ≈16K TS/CS
 - **Skills**: global (`~/.odo/skills/`) and project-local (`.odo/skills/`) markdown skills, keyword-matched for prompt injection, full CRUD via GUI
 - **Skill distillation**: learner proposes skills from conversation patterns; three-tier gating (auto-discard / human-gate / auto-accept) with MoA review
 - **MoA review**: run a diff through N parallel models, results journal as one review_action event
+- **Slash advisors**: `/panel` (MoA fan-out) and `/vision` (K3 image analysis) route around the agent for direct-API answers with the same injection receipts; `/preview <url> [prompt]` screenshots a **localhost-only** page with headless chromium (per-shot spawn → navigate → capture → exit, 45s cap; external hosts refused — no MCP tool channel, no visible pane, no CDP attach) and feeds the PNG through the `/vision` pipeline with a `preview_captured` receipt event; first run: `PATH=~/.hermes/node/bin:$PATH npx playwright install chromium`
 - **Diff comments**: inline 💬 per code line, "Send comments" routes feedback to agent via `send_message`
 - **Theme**: dark/light, persisted to localStorage
 - **Keyboard shortcuts**: ⌘↵ send, ⌘B sidebar, ⌘F search, ⌘K palette, ⌘, settings, Esc stop/clear

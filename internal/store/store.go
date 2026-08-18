@@ -24,6 +24,9 @@ const (
 	EventAgentError      = "agent_error"
 	EventReviewAction    = "review_action"
 	EventMemoryUpdate    = "memory_update"
+	// /preview journals its headless capture facts (url, bytes, sha256 of
+	// the PNG, wait_ms) as one receipt event after the slash user_message.
+	EventPreviewCaptured = "preview_captured"
 )
 
 // Diff statuses.

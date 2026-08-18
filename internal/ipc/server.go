@@ -646,9 +646,10 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// The run/distill gates live inside the handler (M12): the gate and the
 	// slash-slot registration must be one critical section, or a distill
 	// starting between the two folds the slash answer into last_seq unseen.
-	// cmd_recall_audit.go's auditSlashCommands mirrors the two slash routes
-	// below (/panel, /vision) — keep them in sync: slash user_messages
-	// journal no recall key, so the audit excludes them from the miss class.
+	// cmd_recall_audit.go's auditSlashCommands mirrors the three slash routes
+	// below (/panel, /vision, /preview) — keep them in sync: slash
+	// user_messages journal no recall key, so the audit excludes them from
+	// the miss class.
 	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/panel"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
 		c, err := s.checkConversation(ctx, req.ConversationID)
 		if err != nil {
@@ -664,6 +665,17 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 			return Response{}, err
 		}
 		return s.handleVisionQuery(ctx, &c, strings.TrimSpace(rest), req.Attachments)
+	}
+	// /preview slash command: headless-chromium screenshot of a localhost
+	// URL, analyzed by the SAME /vision pipeline (K3 direct API). Third
+	// member of the auditSlashCommands / rulesAuditSlashCommands mirror —
+	// keep all three in sync.
+	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/preview"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
+		c, err := s.checkConversation(ctx, req.ConversationID)
+		if err != nil {
+			return Response{}, err
+		}
+		return s.handlePreviewQuery(ctx, &c, strings.TrimSpace(rest))
 	}
 	// Held for the entire handler (M11 P0): the byConv check and
 	// the run-table insert must be one critical section, and adapter.Start is
@@ -2646,8 +2658,7 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	s.mu.Unlock()
 	defer s.releaseSlashSlot(ctx, c.ID)
 
-	// K3 is the only vision-capable model (confirmed in ~/.omp/agent/models.yml).
-	const visionModel = "t9s/kimi-k3"
+	// slashVisionModel (slashctx.go): K3 — the only vision-capable model.
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
 	if err != nil {
 		return Response{}, err
@@ -2721,16 +2732,16 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 	case imageErr != nil:
 		err = imageErr
 	case len(images) > 0:
-		res, err = client.QueryWithImages(ctx, visionModel, system, text, images)
+		res, err = client.QueryWithImages(ctx, slashVisionModel, system, text, images)
 	default:
-		res, err = client.Query(ctx, visionModel, system, text)
+		res, err = client.Query(ctx, slashVisionModel, system, text)
 	}
 
 	var resultText string
 	if err != nil {
 		resultText = "(vision error: " + err.Error() + ")"
 	} else {
-		resultText = "## " + visionModel + "\n\n" + res.Text
+		resultText = "## " + slashVisionModel + "\n\n" + res.Text
 		if res.Truncated {
 			resultText += truncationMarker(res.Budget, len(res.Escalations))
 		}
@@ -4776,9 +4787,8 @@ func (s *Server) handleSaveAttachment(ctx context.Context, req Request) (Respons
 	}
 	// Sanitize filename — prevent path traversal.
 	base := filepath.Base(req.Name)
-	// Ensure .odo/attachments/ exists.
-	attachDir := filepath.Join(s.projectRoot, ".odo", "attachments")
-	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+	attachDir, err := attachmentDir(s.projectRoot)
+	if err != nil {
 		return Response{}, fmt.Errorf("save_attachment: mkdir: %w", err)
 	}
 	// Prepend timestamp to avoid collisions.

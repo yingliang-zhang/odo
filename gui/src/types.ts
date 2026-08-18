@@ -48,6 +48,7 @@ export type EventType =
   | "agent_error"
   | "review_action"
   | "memory_update"
+  | "preview_captured"
   | (string & {});
 
 // Payload keys by event type (ADR-0002):
@@ -69,6 +70,11 @@ export type EventType =
 //                       "apply" | "rotate" | "retract" | "failed" (M4) |
 //                       "curate" | "pin" (M5) |
 //                       "write_failed" | "verify_failed" (M6).
+//   preview_captured  { url, bytes, sha256, wait_ms } — /preview's
+//                       headless-capture receipt, journaled right after
+//                       its slash user_message. sha256 is the full hex of
+//                       the PNG; the user_message's image_sha16 covers
+//                       the same bytes as the wire preimage.
 // M6: one recall payload entry. Fixed markers (user.md/memory.md/pins.md/
 // index.md) carry path only; keyword-selected notes carry matched_terms
 // (omitted when the note ranked in purely by newest-first fallback).
@@ -200,10 +206,18 @@ export interface EventPayload {
   intent?: string;
   call_id?: string;
   // /panel and /vision payloads: mark the event as panel/vision output and
-  // carry per-model results for /panel.
+  // carry per-model results for /panel; /preview answers ride the same
+  // vision shape (plus preview:true provenance).
   panel?: boolean;
   vision?: boolean;
+  preview?: boolean;
   models?: { model: string; text: string; error?: string }[];
+  // preview_captured payload fields: the captured URL, PNG byte size,
+  // full-sha256 audit hash, and the per-shot wall time.
+  url?: string;
+  bytes?: number;
+  sha256?: string;
+  wait_ms?: number;
 }
 
 // M7 live streaming: the transient in-flight block preview returned by

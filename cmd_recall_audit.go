@@ -54,11 +54,11 @@ const recallAuditUsage = `usage: odo recall audit [--last N] [--json]
 const missAuditTermFloor = 3
 
 // auditSlashCommands mirrors the slash commands handleSendMessage routes
-// in internal/ipc/server.go (/panel, /vision) — keep the two in sync.
-// Slash user_messages journal no recall key, so text-tokenized recall
-// evidence does not exist for them; without this gate every slash message
-// with ≥ missAuditTermFloor terms would classify as a miss.
-var auditSlashCommands = []string{"/panel", "/vision"}
+// in internal/ipc/server.go (/panel, /vision, /preview) — keep the two in
+// sync. Slash user_messages journal no recall key, so text-tokenized
+// recall evidence does not exist for them; without this gate every slash
+// message with ≥ missAuditTermFloor terms would classify as a miss.
+var auditSlashCommands = []string{"/panel", "/vision", "/preview"}
 
 // isSlashMessage reports whether a journaled user_message text is a slash
 // payload, mirroring the daemon's routing rule: the trimmed text is
