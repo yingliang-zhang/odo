@@ -41,13 +41,13 @@
   --err-surface: #3a2022;
   --err-surface-text: #f0b8b8;
   --err-surface-hover-text: #fff;
-  --diff-add-bg: rgba(63, 163, 95, 0.12);
+  --diff-add-bg: color-mix(in srgb, var(--ok) 12%, transparent);
   --diff-add-text: #7bd794;
-  --diff-del-bg: rgba(195, 74, 74, 0.12);
+  --diff-del-bg: color-mix(in srgb, var(--err) 12%, transparent);
   --diff-del-text: #e08a8a;
   --agent-text: var(--text);
   --code-chip-bg: rgba(0, 0, 0, 0.35);
-  --panel-float: rgba(28, 31, 37, 0.92);
+  --panel-float: color-mix(in srgb, var(--bg-raised) 92%, transparent);
   --tok-keyword: #c08ae0;
   --tok-string: #d8a657;
   --tok-comment: #7a818c;
@@ -71,10 +71,18 @@
   --text-title: 19px;
   --text-display: 26px;
   /* Phase 3: stroke hierarchy (inspired by Hermes DESIGN.md) —
-     descending strength for different elevation levels. */
-  --stroke-primary: #2d3340;
-  --stroke-secondary: #232830;
-  --stroke-tertiary: #1a1e25;
+     descending strength for different elevation levels.
+     Tri-model border-system upgrade (2026-08-18): flat hex → color-mix
+     alpha tints. --stroke-tint is the single hue source (#636d83, the
+     blue-gray shared by both palettes' original strokes); per-theme alpha
+     knobs tune visibility (light surfaces need darker tints).
+     Dark tuned per canonical consumer (dialog=primary@raised Δ1,
+     divider=secondary@raised Δ0, menu=tertiary@elevated Δ2).
+     One deliberate dark fix: input borders become visible hairlines. */
+  --stroke-tint: #636d83;
+  --stroke-primary: color-mix(in srgb, var(--stroke-tint) 28%, transparent);
+  --stroke-secondary: color-mix(in srgb, var(--stroke-tint) 13%, transparent);
+  --stroke-tertiary: color-mix(in srgb, var(--stroke-tint) 2%, transparent);
   /* Phase 4: elevation shadow for floating surfaces (Hermes shadow-nous pattern) */
   --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 1px rgba(0, 0, 0, 0.15);
   --shadow-panel: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 1px rgba(0, 0, 0, 0.2);
@@ -91,7 +99,7 @@
      never on width/height (y1=1.56 overshoot causes layout jitter). */
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --accent: var(--accent-user);
-  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-hover: color-mix(in srgb, var(--text) 6%, transparent);
   --bg-tertiary: #2a2e37;
   --ok-text: #6fd39f;
   --warn-text: #e8c876;
@@ -139,35 +147,33 @@
   --err-surface: #fee2e2;
   --err-surface-text: #991b1b;
   --err-surface-hover-text: #7f1d1d;
-  --diff-add-bg: rgba(22, 163, 74, 0.14);
   --diff-add-text: #15803d;
-  --diff-del-bg: rgba(220, 38, 38, 0.1);
   --diff-del-text: #b91c1c;
   --agent-text: var(--text);
   --code-chip-bg: rgba(0, 0, 0, 0.07);
-  --panel-float: rgba(255, 255, 255, 0.94);
   --tok-keyword: #9333ea;
   --tok-string: #b45309;
   --tok-comment: #6b7280;
   --tok-number: #0e7490;
   --tok-fn: #1d4ed8;
-  /* Phase 3: light theme stroke overrides */
-  --stroke-primary: #c0c4cc;
-  --stroke-secondary: #ddd;
-  --stroke-tertiary: #ebebeb;
+  /* Phase 3: light theme stroke overrides — alpha knobs on the shared
+     --stroke-tint hue (heavier tints needed on light surfaces). */
+  --stroke-primary: color-mix(in srgb, var(--stroke-tint) 40%, transparent);
+  --stroke-secondary: color-mix(in srgb, var(--stroke-tint) 24%, transparent);
+  --stroke-tertiary: color-mix(in srgb, var(--stroke-tint) 14%, transparent);
+  /* Light shadows: ~⅓ of dark alphas (was inheriting dark 0.25/0.35 —
+     too heavy on white). Ring term stays stronger than blur for the
+     floating-panel hairline edge. */
+  --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.10);
+  --shadow-panel: 0 4px 16px rgba(0, 0, 0, 0.12), 0 0 1px rgba(0, 0, 0, 0.12);
   --accent: var(--accent-user);
-  --bg-hover: rgba(0, 0, 0, 0.06);
   --bg-tertiary: #e8e8e8;
   --ok-text: #15803d;
   --warn-text: #a16207;
 }
 
-/* Frosted vibrancy: the translucent top bar needs a light-theme-aware
-   background so AA text contrast holds in both themes. (The status bar is
-     flat now — see --statusbar-bg; the old per-theme override rules are gone.) */
-[data-theme="light"] .app-topbar {
-  background: rgba(255, 255, 255, 0.88);
-}
+/* Frosted vibrancy: the top bar background is a single color-mix token
+   (--bg-raised @ 88%) in both themes — the old per-theme override is gone. */
 
 [data-theme="light"] .daemon-down-banner {
   color: #92400e;
@@ -185,9 +191,16 @@
   color: var(--link);
 }
 
-/* Belt D: visible keyboard focus on every interactive element. Inputs keep
-   their border-color treatment (their :focus rules are more specific). */
-:focus-visible {
+/* Belt D: visible keyboard focus on interactive elements. Dialog containers
+   get an explicit outline:none AND are excluded from the custom ring —
+   Radix programmatically focuses the Content on open (focus trap), which
+   otherwise triggers the UA's own focus ring (auto 1px accent rectangle
+   around the whole dialog). */
+[role="dialog"]:focus,
+[role="dialog"]:focus-visible {
+  outline: none;
+}
+:focus-visible:not([role="dialog"]) {
   outline: 2px solid var(--accent-user);
   outline-offset: 1px;
 }
@@ -267,7 +280,7 @@ body {
   height: var(--topbar-height);
   flex-shrink: 0;
   padding: 0 14px;
-  background: rgba(26, 29, 36, 0.88);
+  background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
   backdrop-filter: blur(12px) saturate(140%);
   -webkit-backdrop-filter: blur(12px) saturate(140%);
   border-bottom: 1px solid var(--stroke-tertiary);
