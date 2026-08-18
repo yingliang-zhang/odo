@@ -428,11 +428,13 @@ export interface Settings {
 // datalist combobox; these only seed the picker suggestions.
 export const SUDO_PROVIDER = "sudo";
 export const SUDO_MODELS = [
-  "t9s/glm-5.2",
-  "t9s/kimi-k3",
-  "t9s/gpt-5.6-sol",
-  "t9s/deepseek-v4-flash",
-  "t9s/kimi-k2.7-code",
+  "sudo/t9s/glm-5.2",
+  "sudo/t9s/kimi-k3",
+  "sudo/t9s/gpt-5",
+  "sudo/t9s/gpt-5.6-sol",
+  "sudo/t9s/deepseek-v4-flash",
+  "sudo/t9s/claude-sonnet-4",
+  "sudo/t9s/kimi-k2.7-code",
 ] as const;
 
 export interface GetSettingsResponse {

@@ -16,6 +16,8 @@ const COMMON_MODELS = [
   "sudo/t9s/deepseek-v4-flash",
   "sudo/t9s/claude-sonnet-4",
   "sudo/t9s/gpt-5",
+  "sudo/t9s/gpt-5.6-sol",
+  "sudo/t9s/kimi-k2.7-code",
 ];
 
 interface Props {
