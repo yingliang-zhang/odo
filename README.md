@@ -18,7 +18,15 @@ Four pain points, each with zero lines of workaround:
 
 ## Status
 
-M0–M18 complete. 274 commits, ~67K lines (≈49K Go incl. tests + ≈16K TS/CSS + ≈1.3K Rust).
+M0–M18 complete. 342 commits, ~67K lines (≈49K Go incl. tests + ≈16K TS/CSS + ≈1.3K Rust).
+
+Pending merge to `main` (feat branches, all tests green):
+- `feat/react19-tailwind-radix` — GUI migration: React 19 + Tailwind v4 +
+  Radix UI + CVA; app.css 5700→1556 lines; color-mix alpha stroke tokens +
+  light-theme shadows; composer/dialog focus-ring fixes; Settings model
+  browse menu (7 models)
+- `feat/preview-screenshot` — `/preview <url>` slash (tri-model blind review
+  passed, hardening landed)
 
 | Milestone | What it delivers | Tests |
 |---|---|---|
@@ -59,21 +67,32 @@ M0–M18 complete. 274 commits, ~67K lines (≈49K Go incl. tests + ≈16K TS/CS
 | M18 Review Honesty | Per-leg wire receipts (request_sha16 + request_bytes), thinking_md journaling (non-accept only, 4KB cap), base_url provider honesty, truncated veto in majority-accept valve, auto-revise ladder (3 rounds, 64KB diff cap / 16KB comments cap), settle chain derivation, contradiction scan, risk classifier fixture-path exemption | Go tests |
 | OMP Feature Integration | astGrep XS integration, prewalk cost lever (opt-in), `omp bench` CLI, image `@path` separator, moa semaphore | Go + tsc |
 | P2 OMP Stats Panel | StatusBar read-only chip: provider usage limits (progress bars) + grievances count; `omp usage --json` + `omp grievances --json` via daemon IPC (10s timeout, graceful degradation, 60s lazy poll); data never journaled | 6 Go tests + tsc |
+| GUI Migration | React 19 + Tailwind v4 + Radix UI + CVA (shadcn pattern); unified ui/ components; content-layer Tailwind migration — app.css 5700→1556 lines (-73%); context menus / dialogs / dropdowns → Radix; dead CSS removal | tsc + vitest 34/34 + E2E |
+| Border System | color-mix alpha stroke tokens (`--stroke-tint` + per-theme alpha ladder) replacing flat hex; light-theme shadow tokens; topbar/panel-float/diff-bg single-formula overlays; dialog UA focus-ring removal; composer focus single-line | screenshot matrix + E2E |
+| Preview Slash | `/preview <url> [prompt]` — headless chromium screenshot of a localhost-only URL → attachment receipt → `/vision` K3 pipeline; URL allowlist loopback-only, process-group kill on 45s deadline, BASIC-auth journal redaction, cold-cache retry hint | 11 Go tests + E2E + tri-model blind review |
 
 ### Planned
 
 - **Self-improving waves 2–4** — Wave 1 (`odo rules audit` CLI) shipped. Wave 2+: skill proposal quality scoring, retrieval effectiveness, prompt-layer cost analysis; each follows the measure → identify → propose → review (MoA) → land → re-measure loop
 - **D-semantic recall spike** — FTS5 → bge-m3 embedding-based recall; pre-registered thresholds; reads the miss-audit pool from `odo recall audit` (~2 weeks of dogfood data needed first)
 - **Tool-bearing skills** — skill directories (`SKILL.md` + `references/` + `scripts/`) scanned and receipted by directory content hash; agent-authorable scripts stay behind the human apply gate (B-strategy-2)
-- **Design-MoA for nontrivial tasks** — 3 blind design proposals → consolidator → journaled DESIGN LOCK (human amend/veto) → single implementer → existing MoA review; mechanical fixes stay single-model (B-strategy-2). Shipped as R-W4 (`design_moa` IPC, opt-in `prefs design_via: moa`)
 - **GLM gateway thinking-replay investigation** — GLM-5.2 thinking blocks dropped at gateway (verified: E2 probe, 742→42/429). OMP-side replay is correct; residual risk is gateway/upstream transport. Separate workstream.
 - **Per-run diff lock** — move `ExtractDiff` out of `s.mu` to avoid blocking concurrent conversations during git subprocess calls (DEFER until accept latency is observed blocking another conversation)
+
+Developer-experience wave (from tri-model DX analysis 2026-08-18, ranked):
+- **Focus-hint for `/preview`** — inject the run's goal into the default analysis prompt (task-aware vision instead of a generic UI review list); lesson from `agent-vision-toolkit`'s focus-hint pattern (S)
+- **Retry failed run** — run-level retry button re-sending the original prompt with the attempt's diff context attached (S)
+- **Run/Test Hub** — project command registry (`.odo/commands.json`) + results panel (red/green + rerun button) in ContextPanel; consumed by the datasets-viewer dogfood loop (M)
+- **memory.md GUI editor + repo-root AGENTS.md ingestion** — `.odo/memory.md` is daemon-injected but has no GUI edit path, and the repo's own AGENTS.md/CLAUDE.md convention files are not read (S)
+- **ANSI rendering** — colored test output in transcript code blocks, no escape-residue (S)
+- **`/preview` v2: agent screenshot channel** — MCP tool + per-turn Allow chip (URL-keyed); and the capture engine reused for a future Process Dock "open in browser" (M)
+- **Control-size tokens** — Hermes-style `--composer-control-size`/`--control-gap` for the composer/control rows (deferred from the border-system DESIGN LOCK)
 
 ### WONTFIX (removed from roadmap)
 
 - ~~Experiment ledger~~ — redundant for a single-user app; git history + memory/log.md + ledger.md already capture experiment outcomes
 - ~~P2 polish (contrast audit, palette fuzzy search, combobox wiring)~~ — contrast passes WCAG AA at normal sizes; palette uses substring filter (sufficient); combobox ARIA already present in CommandPalette
-- ~~Vision auto-screenshot finishing layer~~ — premature; core `/vision` route ships with K3 image blocks; the finishing layer needs a demonstrated pain point
+- ~~Vision auto-screenshot finishing layer~~ — premature as an *automatic* loop; the manual per-turn form shipped as `/preview` (user types the command → headless capture → vision)
 - ~~Cross-examiner~~ — `/panel` already covers manual second opinions; no demonstrated decision-point pain
 - ~~Auto-register semantics~~ — registry guardrail shipped: `isOdoWorktreePath` structurally refuses worktree paths; phantom-project accident path closed
 
@@ -94,6 +113,7 @@ M0–M18 complete. 274 commits, ~67K lines (≈49K Go incl. tests + ≈16K TS/CS
 - **Skills**: global (`~/.odo/skills/`) and project-local (`.odo/skills/`) markdown skills, keyword-matched for prompt injection, full CRUD via GUI
 - **Skill distillation**: learner proposes skills from conversation patterns; three-tier gating (auto-discard / human-gate / auto-accept) with MoA review
 - **MoA review**: run a diff through N parallel models, results journal as one review_action event
+- **Design-MoA** (R-W4): for nontrivial tasks, 3 blind design proposals → consolidator → journaled DESIGN LOCK (human amend/veto) → single implementer → existing MoA review; opt-in via `prefs design_via: moa`; mechanical fixes stay single-model
 - **Slash advisors**: `/panel` (MoA fan-out) and `/vision` (K3 image analysis) route around the agent for direct-API answers with the same injection receipts; `/preview <url> [prompt]` screenshots a **localhost-only** page with headless chromium (per-shot spawn → navigate → capture → exit, 45s cap; external hosts refused — no MCP tool channel, no visible pane, no CDP attach) and feeds the PNG through the `/vision` pipeline with a `preview_captured` receipt event; first run: `PATH=~/.hermes/node/bin:$PATH npx playwright install chromium`
 - **Diff comments**: inline 💬 per code line, "Send comments" routes feedback to agent via `send_message`
 - **Theme**: dark/light, persisted to localStorage
