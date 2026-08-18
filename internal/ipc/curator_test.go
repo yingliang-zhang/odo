@@ -544,11 +544,11 @@ func TestInjectionReceiptWithIndexAndPins(t *testing.T) {
 	receipt := receiptFromEvent(t, sent.Event)
 	wantReceipt := map[string]string{
 		"~/.odo/user.md": "99ab47d9f8d99c16",
-		".odo/memory.md":  "46eb86bbcdf4eeda",
-		".odo/pins.md":    "4ee15cc70447e2dd",
-		"wiki/index.md":   "beb991d524a9dab3",
-		notePath:          "f95c368d357f9829",
-		"odo#memory-map":  sha16([]byte(memoryMapBlock(root))),
+		".odo/memory.md": "46eb86bbcdf4eeda",
+		".odo/pins.md":   "4ee15cc70447e2dd",
+		"wiki/index.md":  "beb991d524a9dab3",
+		notePath:         "f95c368d357f9829",
+		"odo#memory-map": sha16([]byte(memoryMapBlock(root))),
 	}
 	if len(receipt) != len(wantReceipt) {
 		t.Fatalf("receipt = %v, want %v", receipt, wantReceipt)

@@ -46,3 +46,4 @@ Thumbs.db
 # Odo project-local state
 .odo/
 test-results/
+.playwright-cli/

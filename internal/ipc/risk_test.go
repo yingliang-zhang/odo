@@ -141,8 +141,8 @@ func TestClassifyRiskPerClassTriggers(t *testing.T) {
 			wantClasses: []string{"none"},
 		},
 		{
-			name: "destructive: deleted file in the patch",
-			diff: "diff --git a/src/old.go b/src/old.go\ndeleted file mode 100644\n--- a/src/old.go\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-package src\n",
+			name:         "destructive: deleted file in the patch",
+			diff:         "diff --git a/src/old.go b/src/old.go\ndeleted file mode 100644\n--- a/src/old.go\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-package src\n",
 			wantClasses:  []string{"destructive"},
 			wantEvidence: "src/old.go (file deleted)",
 		},
@@ -238,8 +238,8 @@ func TestClassifyRiskPerClassTriggers(t *testing.T) {
 			wantEvidence: "gui/Package.JSON",
 		},
 		{
-			name: "supply chain: mode-only change caught via the header",
-			diff: "diff --git a/requirements.txt b/requirements.txt\nold mode 100644\nnew mode 100755\n",
+			name:         "supply chain: mode-only change caught via the header",
+			diff:         "diff --git a/requirements.txt b/requirements.txt\nold mode 100644\nnew mode 100755\n",
 			wantClasses:  []string{"supply_chain"},
 			wantEvidence: "requirements.txt",
 		},

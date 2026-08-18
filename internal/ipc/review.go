@@ -224,5 +224,3 @@ func scrubBaseURL(raw string) string {
 	u.Fragment = ""
 	return u.String()
 }
-
-

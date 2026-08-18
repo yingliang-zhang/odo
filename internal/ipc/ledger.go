@@ -246,10 +246,10 @@ func (s *Server) journalCurateLedger(ctx context.Context, conversationID int64, 
 //   - trigger: manual / auto_notes / auto_age
 func curateLedgerMetrics(curateEv store.Event) []ledgerMetric {
 	var p struct {
-		Topics            int             `json:"topics"`
+		Topics            int               `json:"topics"`
 		NotesRead         []json.RawMessage `json:"notes_read"`
-		StrippedCitations []string        `json:"stripped_citations"`
-		Trigger           string          `json:"trigger"`
+		StrippedCitations []string          `json:"stripped_citations"`
+		Trigger           string            `json:"trigger"`
 	}
 	_ = json.Unmarshal(curateEv.Payload, &p)
 	metrics := []ledgerMetric{

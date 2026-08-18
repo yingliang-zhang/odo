@@ -660,7 +660,10 @@ func TestReviseUserMessageCarriesReceipt(t *testing.T) {
 // transition, no in-memory state); the third evaluation spawns NOTHING; a
 // human accept resumes it; the next needs_fixes starts a fresh round-1 —
 // which, failing again at round 2, suspends a second time.
-func TestSettleRoundCapSuspendsAndResumes(t *testing.T) { t.Skip("pending rewrite for 3-round cap"); testSettleRoundCapSuspendsAndResumes(t) }
+func TestSettleRoundCapSuspendsAndResumes(t *testing.T) {
+	t.Skip("pending rewrite for 3-round cap")
+	testSettleRoundCapSuspendsAndResumes(t)
+}
 
 func testSettleRoundCapSuspendsAndResumes(t *testing.T) {
 	rig := settleRig(t, func(call int64, model string) (int, string) {

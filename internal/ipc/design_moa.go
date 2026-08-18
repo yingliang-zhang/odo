@@ -161,19 +161,19 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 	// verdicts). Full proposal texts ride the row: the design_lock is
 	// falsifiable against exactly what the consolidator saw.
 	payload := map[string]interface{}{
-		"action":        "design_lock",
-		"goal":          goal,
-		"goal_sha16":    sha16([]byte(goal)),
-		"design_lock":   lock,
-		"design_sha16":  sha16([]byte(lock)),
-		"proposals":     proposals,
+		"action":       "design_lock",
+		"goal":         goal,
+		"goal_sha16":   sha16([]byte(goal)),
+		"design_lock":  lock,
+		"design_sha16": sha16([]byte(lock)),
+		"proposals":    proposals,
 		"consolidator": map[string]interface{}{
-			"model":          orchModel,
-			"request_sha16":  consolidated.RequestSHA16,
-			"request_bytes":  consolidated.RequestBytes,
-			"budget":         consolidated.Budget,
-			"output_tokens":  consolidated.OutputTokens,
-			"escalations":    consolidated.Escalations,
+			"model":         orchModel,
+			"request_sha16": consolidated.RequestSHA16,
+			"request_bytes": consolidated.RequestBytes,
+			"budget":        consolidated.Budget,
+			"output_tokens": consolidated.OutputTokens,
+			"escalations":   consolidated.Escalations,
 		},
 	}
 	if len(req.ContextFiles) > 0 {

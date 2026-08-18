@@ -104,9 +104,9 @@ type Diff struct {
 	// the sweeper derives live/hold/reclaim decisions from these rows, and
 	// reject/accept retires exactly this dir. NULL on pre-v2 rows — the
 	// sweeper treats NULL as long-retired and never reclaims for them.
-	WorktreePath   *string `json:"worktree_path,omitempty"`
-	Status         string  `json:"status"`
-	CreatedAt      string  `json:"created_at"`
+	WorktreePath *string `json:"worktree_path,omitempty"`
+	Status       string  `json:"status"`
+	CreatedAt    string  `json:"created_at"`
 }
 
 // Store owns the journal database. SQLite is opened with a single

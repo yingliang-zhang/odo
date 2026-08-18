@@ -975,10 +975,10 @@ func TestInjectionReceiptHashesFrozen(t *testing.T) {
 	}
 	receipt := receiptFromEvent(t, sent.Event)
 	wantReceipt := map[string]string{
-		"~/.odo/user.md":  wantUserHash,
-		".odo/memory.md":  wantMemHash,
-		notePath:          wantNoteHash,
-		"odo#memory-map":  sha16([]byte(memoryMapBlock(root))),
+		"~/.odo/user.md": wantUserHash,
+		".odo/memory.md": wantMemHash,
+		notePath:         wantNoteHash,
+		"odo#memory-map": sha16([]byte(memoryMapBlock(root))),
 	}
 	if len(receipt) != len(wantReceipt) {
 		t.Fatalf("receipt = %v, want exactly %v", receipt, wantReceipt)
