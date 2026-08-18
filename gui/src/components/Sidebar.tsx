@@ -396,7 +396,7 @@ export default function Sidebar({
           </button>
             {deletingId != null && deletingId.id === w.id && deletingId.root === projectRoot ? (
                 <span className="ws-delete-confirm flex shrink-0 items-center gap-1">
-                  <span className="ws-delete-confirm-text whitespace-nowrap text-[var(--text-micro)] text-[var(--err-text)]">
+                  <span className="ws-delete-confirm-text whitespace-nowrap text-[length:var(--text-micro)] text-[var(--err-text)]">
                     Delete?
                   </span>
                   <Button
@@ -489,7 +489,7 @@ export default function Sidebar({
           className={cn(
             "proj-row flex min-w-0 flex-1 cursor-pointer items-center gap-1.5",
             "w-full rounded-[var(--radius-md)] border-none bg-transparent",
-            "px-2 py-[5px] text-left text-[var(--text-body)] font-semibold text-[var(--text)]",
+            "px-2 py-[5px] text-left text-[length:var(--text-body)] font-semibold text-[var(--text)]",
             "hover:bg-[var(--bg-input)]",
             isActive && "proj-row-active",
           )}
@@ -536,7 +536,7 @@ export default function Sidebar({
         {!isActive && (
           removingRoot === p.root ? (
             <span className="ws-delete-confirm flex shrink-0 items-center gap-1">
-              <span className="ws-delete-confirm-text whitespace-nowrap text-[var(--text-micro)] text-[var(--err-text)]">
+              <span className="ws-delete-confirm-text whitespace-nowrap text-[length:var(--text-micro)] text-[var(--err-text)]">
                 Remove?
               </span>
               <Button
@@ -622,7 +622,7 @@ export default function Sidebar({
             )}
             {isActive && createError && <li className="ws-error mb-1.5 text-[12px] text-[var(--err-text)]">{createError}</li>}
             {wsList.length === 0 && !isActive && (
-              <li className="ws-empty-hint px-2 py-1.5 italic text-[var(--text-caption)] text-[var(--text-dim)]">No workstreams</li>
+              <li className="ws-empty-hint px-2 py-1.5 italic text-[length:var(--text-caption)] text-[var(--text-dim)]">No workstreams</li>
             )}
             {wsList.map((w) => renderWorkstream(w, isActive, p.root))}
             {isActive && (
@@ -634,7 +634,7 @@ export default function Sidebar({
                   className={cn(
                     "ws-add-inline w-full justify-start rounded-[var(--radius-md)]",
                     "py-1.5 pl-6 pr-2 font-normal",
-                    "font-[family-name:inherit] text-[var(--text-caption)] leading-[inherit]",
+                    "font-[family-name:inherit] text-[length:var(--text-caption)] leading-[inherit]",
                     "hover:bg-[var(--bg-input)] hover:text-[var(--text)]",
                   )}
                   title={strings.sidebar.newWorkstreamTitle}
@@ -687,7 +687,7 @@ export default function Sidebar({
 
         <div className="sidebar-section sidebar-section-grow mb-[18px] flex min-h-0 flex-1 flex-col">
           <div className="sidebar-section-head mb-2 flex items-center justify-between">
-            <h2 className="m-0 text-[var(--text-micro)] font-semibold uppercase tracking-[0.08em] text-[var(--text-dim)]">Projects</h2>
+            <h2 className="m-0 text-[length:var(--text-micro)] font-semibold uppercase tracking-[0.08em] text-[var(--text-dim)]">Projects</h2>
             <button
               type="button"
               className={cn(

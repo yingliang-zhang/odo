@@ -210,7 +210,7 @@ export default function SkillsPanel({ projectRoot }: Props) {
                 type="button"
                 variant="default"
                 size="sm"
-                className="skill-save-btn text-white"
+                className="skill-save-btn"
                 disabled={saving}
                 onClick={() => void saveSkill()}
               >
