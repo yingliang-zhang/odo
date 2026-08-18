@@ -9,7 +9,7 @@ test.beforeEach(async ({ page }) => {
 
 test("send message creates user bubble", async ({ page }) => {
   const textarea = page.getByPlaceholder("Describe the change you want…");
-  const sendBtn = page.getByRole("button", { name: "Send" });
+  const sendBtn = page.getByRole("button", { name: "Send", exact: true });
 
   // Send button is disabled when textarea is empty
   await expect(sendBtn).toBeDisabled();
@@ -34,7 +34,7 @@ test("send message creates user bubble", async ({ page }) => {
 
 test("send message via Send button click", async ({ page }) => {
   const textarea = page.getByPlaceholder("Describe the change you want…");
-  const sendBtn = page.getByRole("button", { name: "Send" });
+  const sendBtn = page.getByRole("button", { name: "Send", exact: true });
 
   await textarea.fill("Fix the alignment bug");
   await sendBtn.click();
