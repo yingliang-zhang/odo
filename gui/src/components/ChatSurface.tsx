@@ -104,6 +104,12 @@ interface Props {
   loading?: boolean;
 }
 
+// Utilities replacing the deleted .auto-distill-chip CSS rule (inline-flex
+// chip, hairline border, dim mono text). QueueDock.tsx keeps an inlined copy
+// for its Popover trigger — do not import across the boundary.
+const AUTO_DISTILL_CHIP_BASE =
+  "inline-flex items-center self-start gap-1 mt-2.5 mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-0.5 font-mono text-[length:var(--text-caption)] text-text-dim";
+
 // AutoDistillChip discloses the daemon's auto-distill state above the
 // composer: scheduled countdown with a Cancel (auto_distill_ctl disarm),
 // an in-flight "Distilling…" while the fold runs, or the coverage-honesty
@@ -127,12 +133,19 @@ function AutoDistillChip({
     return () => window.clearInterval(timer);
   }, [entry]);
   if (inFlight) {
-    return <div className="auto-distill-chip" title="The daemon is distilling this conversation's epoch">Distilling…</div>;
+    return (
+      <div
+        className={cn("auto-distill-chip", AUTO_DISTILL_CHIP_BASE)}
+        title="The daemon is distilling this conversation's epoch"
+      >
+        Distilling…
+      </div>
+    );
   }
   if (blocked != null) {
     return (
       <div
-        className="auto-distill-chip blocked"
+        className={cn("auto-distill-chip blocked", AUTO_DISTILL_CHIP_BASE, "text-warn")}
         title="The un-folded window outgrew the distill prompt budget — auto-distill never claims coverage it did not see. Run a manual Distill."
       >
         Auto-distill paused — window exceeds prompt budget · distill manually
@@ -144,7 +157,7 @@ function AutoDistillChip({
   const m = Math.floor(remaining / 60);
   const s = remaining % 60;
   return (
-    <div className="auto-distill-chip" title={
+    <div className={cn("auto-distill-chip", AUTO_DISTILL_CHIP_BASE)} title={
       entry.trigger === "urgent"
         ? "The conversation window crossed the size trigger — the daemon will fold it now"
         : entry.trigger === "startup"
@@ -155,7 +168,11 @@ function AutoDistillChip({
       {onDisarm && (
         <>
           {" · "}
-          <button type="button" className="chip-link" onClick={onDisarm}>
+          <button
+            type="button"
+            className="chip-link cursor-pointer border-none bg-transparent p-0 text-accent [font:inherit] leading-none hover:underline"
+            onClick={onDisarm}
+          >
             Cancel
           </button>
         </>
@@ -265,8 +282,8 @@ function PreviewBubble({ preview, projectRoot }: { preview: PreviewEvent; projec
     const tool = typeof p.tool === "string" && p.tool !== "" ? p.tool : "tool";
     const intent = typeof p.intent === "string" && p.intent !== "" ? ` — ${p.intent}` : "";
     return (
-      <div className="bubble bubble-tool bubble-preview" aria-live="polite" aria-busy="true">
-        <span className="preview-spinner" aria-hidden="true">
+      <div className="bubble bubble-tool bubble-preview self-start bg-transparent text-text-dim font-mono text-caption px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)] opacity-60 italic" aria-live="polite" aria-busy="true">
+        <span className="preview-spinner inline-flex items-center" aria-hidden="true">
           <LoaderCircle size={12} className="spin" />
         </span>{" "}
         {tool}
@@ -277,7 +294,7 @@ function PreviewBubble({ preview, projectRoot }: { preview: PreviewEvent; projec
   const text = typeof p.text === "string" ? p.text : "";
   if (text === "") return null;
   return (
-    <div className="bubble bubble-agent bubble-preview" aria-live="polite" aria-busy="true">
+    <div className="bubble bubble-agent bubble-preview w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-transparent text-[var(--agent-text)] border border-stroke-tertiary rounded-none px-3.5 py-2.5 whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)] opacity-60 italic" aria-live="polite" aria-busy="true">
       <Markdown content={text} projectRoot={projectRoot} />
       <span className="preview-caret" aria-hidden="true" />
     </div>
@@ -327,19 +344,34 @@ function RunHeader({ group }: { group: RunGroup }) {
   const showDuration = done !== undefined && !Number.isNaN(startMs) && !Number.isNaN(doneMs);
   const stats = deriveTurnStats(start, group.events, done);
   return (
-    <div className="run-header">
-      <span className={`run-status ${status}`}>{icon}</span>
+    <div className="run-header mt-3.5 flex items-baseline gap-2 border-t border-stroke-tertiary px-1 pt-2 pb-0.5 text-caption text-text-dim tabular-nums">
+      <span
+        className={cn(
+          "run-status border-t-0 bg-transparent p-0 [font-family:inherit] [font-size:inherit]",
+          status,
+          status === "done" && "text-ok-text",
+          status === "error" && "text-err-text",
+          status === "running" && "text-accent-user",
+        )}
+      >
+        {icon}
+      </span>
       <span>{clock}</span>
       <span>{`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`}</span>
       {showDuration && <span>{formatElapsed(doneMs - startMs)}</span>}
       {diffOutcome && (
-        <span className={`run-diff-outcome ${diffOutcome}`}>
+        <span
+          className={cn(
+            "run-diff-outcome ml-1 rounded px-1.5 py-px text-[10px] font-medium",
+            diffOutcome === "accept" ? "bg-ok/10 text-ok-text" : "bg-err/10 text-err",
+          )}
+        >
           {diffOutcome === "accept" ? "✓" : "✗"} diff #{diffId ?? "?"} {diffOutcome === "accept" ? "accepted" : "rejected"}
         </span>
       )}
       {stats != null && (
         <span
-          className="run-turn-stats"
+          className="run-turn-stats text-[10px] text-text-dim"
           title={
             "in = journaled prompt bytes (receipt closure); out = agent text bytes." +
             (stats.outputTokens != null ? " Tokens are usage billed by the provider." : "")
@@ -363,7 +395,7 @@ function RunHeader({ group }: { group: RunGroup }) {
 // never double-fire.
 // Belt A: the composer auto-grows from one row up to six, then scrolls
 // internally. 6 rows * 21px (14px/1.5) + padding/border ≈ 148px; this cap
-// must match .chat-input textarea's max-height in app.css.
+// must match the composer textarea's max-h-[148px] utility.
 const COMPOSER_MAX_HEIGHT = 148;
 
 // Auto-follow engages only while the user is within this many px of the
@@ -1035,12 +1067,13 @@ export default function ChatSurface({
   }, [agentRunning]);
 
   return (
-    <section className="chat-surface">
-      <div className="message-list-wrap">
+    <section className="chat-surface flex min-h-0 flex-1 flex-col">
+      <div className="message-list-wrap relative flex min-h-0 flex-1 flex-col">
         {searchOpen && (
-          <div className="search-bar">
+          <div className="search-bar absolute top-2 left-1/2 z-20 -translate-x-1/2 flex items-center gap-1.5 rounded-md border border-border bg-panel-float px-2 py-1.5 shadow-[0_4px_16px_rgba(0,0,0,0.4)] backdrop-blur-[6px]">
             <input
               ref={searchInputRef}
+              className="w-[220px] rounded-sm border border-border bg-bg-input px-[9px] py-[5px] text-text [font:inherit] focus:border-accent-user focus:outline-none"
               type="text"
               value={searchQuery}
               onChange={(e) => onSearchQueryChange(e.target.value)}
@@ -1048,7 +1081,7 @@ export default function ChatSurface({
               placeholder="Find in conversation"
               aria-label="Find in conversation"
             />
-            <span className="search-count">
+            <span className="search-count min-w-[44px] text-center text-caption whitespace-nowrap text-text-dim">
               {trimmedQuery === ""
                 ? ""
                 : matches.length === 0
@@ -1057,6 +1090,7 @@ export default function ChatSurface({
             </span>
             <button
               type="button"
+              className="cursor-pointer rounded border border-transparent bg-transparent px-2 py-0.5 text-text-dim [font:inherit] not-disabled:hover:bg-bg-input not-disabled:hover:text-text disabled:cursor-default disabled:opacity-40"
               aria-label="Previous match"
               title="Previous match (Shift+Enter)"
               disabled={matches.length === 0}
@@ -1066,6 +1100,7 @@ export default function ChatSurface({
             </button>
             <button
               type="button"
+              className="cursor-pointer rounded border border-transparent bg-transparent px-2 py-0.5 text-text-dim [font:inherit] not-disabled:hover:bg-bg-input not-disabled:hover:text-text disabled:cursor-default disabled:opacity-40"
               aria-label="Next match"
               title="Next match (Enter)"
               disabled={matches.length === 0}
@@ -1073,26 +1108,35 @@ export default function ChatSurface({
             >
               <ChevronDown size={14} />
             </button>
-            <button type="button" aria-label="Close search" title="Close (Esc)" onClick={onSearchClose}>
+            <button
+              type="button"
+              className="cursor-pointer rounded border border-transparent bg-transparent px-2 py-0.5 text-text-dim [font:inherit] not-disabled:hover:bg-bg-input not-disabled:hover:text-text disabled:cursor-default disabled:opacity-40"
+              aria-label="Close search"
+              title="Close (Esc)"
+              onClick={onSearchClose}
+            >
               <X size={14} />
             </button>
           </div>
         )}
         <div
-          className="message-list"
+          className="message-list flex min-h-[120px] flex-1 flex-col gap-2.5 overflow-y-auto px-6 py-5"
           ref={listRef}
           onScroll={handleListScroll}
           aria-live="polite"
         >
         {fold && (
-          <div className="fold-chip" role="note">
+          <div
+            className="fold-chip flex max-w-full items-center gap-2 self-center rounded-[10px] border border-border bg-bg-raised px-3 py-1 text-caption text-text-dim"
+            role="note"
+          >
             <span className="fold-chip-text" title={fold.notePath}>
               {fold.epoch != null ? `epoch ${fold.epoch} · ` : ""}
               {fold.count} event{fold.count === 1 ? "" : "s"} folded{!expanded && " · click to expand"}
             </span>
             <button
               type="button"
-              className="fold-chip-btn"
+              className="fold-chip-btn cursor-pointer rounded-sm border border-border bg-transparent px-2 py-px text-micro text-text-dim hover:border-accent-user hover:text-accent-user"
               aria-expanded={expanded}
               onClick={() => setExpandedKey(expanded ? null : foldKey)}
             >
@@ -1101,7 +1145,7 @@ export default function ChatSurface({
             {fold.notePath && (
               <button
                 type="button"
-                className="fold-chip-btn"
+                className="fold-chip-btn cursor-pointer rounded-sm border border-border bg-transparent px-2 py-px text-micro text-text-dim hover:border-accent-user hover:text-accent-user"
                 onClick={() => onOpenNote(fold.notePath!)}
               >
                 Open note
@@ -1111,9 +1155,9 @@ export default function ChatSurface({
         )}
         {loading && visibleEvents.length === 0 && <ChatSkeleton />}
         {visibleEvents.length === 0 && !loading && (fold ? (
-          <div className="empty-state">
-            <h2>Everything here is folded</h2>
-            <p className="dim">
+          <div className="empty-state m-auto max-w-[480px] rounded-lg border border-border bg-bg-raised px-8 py-7 text-center">
+            <h2 className="mb-1.5 text-[18px] text-accent-user">Everything here is folded</h2>
+            <p className="dim mb-4 text-label">
               All {fold.count} events in this conversation were distilled into
               {fold.noteName ? <> <code>{fold.noteName}</code></> : " a wiki note"}.
               Nothing was lost — the journal keeps every event. Send a message
@@ -1121,7 +1165,7 @@ export default function ChatSurface({
             </p>
             <button
               type="button"
-              className="example-prompt"
+              className="example-prompt mt-2 block w-full cursor-pointer rounded-md border border-border bg-bg-input px-3 py-[9px] text-left text-text [font:inherit] hover:border-accent-user hover:text-accent-user"
               onClick={() => setExpandedKey(foldKey)}
             >
               Expand the folded record
@@ -1129,7 +1173,7 @@ export default function ChatSurface({
             {fold.notePath && (
               <button
                 type="button"
-                className="example-prompt"
+                className="example-prompt mt-2 block w-full cursor-pointer rounded-md border border-border bg-bg-input px-3 py-[9px] text-left text-text [font:inherit] hover:border-accent-user hover:text-accent-user"
                 onClick={() => onOpenNote(fold.notePath!)}
               >
                 Open the note
@@ -1137,16 +1181,16 @@ export default function ChatSurface({
             )}
           </div>
         ) : (
-          <div className="empty-state">
-            <h2>Welcome to Odo</h2>
-            <p className="dim">
+          <div className="empty-state m-auto max-w-[480px] rounded-lg border border-border bg-bg-raised px-8 py-7 text-center">
+            <h2 className="mb-1.5 text-[18px] text-accent-user">Welcome to Odo</h2>
+            <p className="dim mb-4 text-label">
               Every run is journaled, and its diff lands here for review.
             </p>
             {EXAMPLE_PROMPTS.map((prompt) => (
               <button
                 key={prompt}
                 type="button"
-                className="example-prompt"
+                className="example-prompt mt-2 block w-full cursor-pointer rounded-md border border-border bg-bg-input px-3 py-[9px] text-left text-text [font:inherit] hover:border-accent-user hover:text-accent-user"
                 onClick={() => {
                   setDraft(prompt);
                   textareaRef.current?.focus();
@@ -1155,7 +1199,7 @@ export default function ChatSurface({
                 {prompt}
               </button>
             ))}
-            <div className="shortcuts">
+            <div className="shortcuts mt-[18px] flex justify-center gap-4 text-micro text-text-dim">
               <span>⌘K Commands</span>
               <span>⌘↵ Send</span>
               <span>⌘B Sidebar</span>
@@ -1165,7 +1209,7 @@ export default function ChatSurface({
           </div>
         ))}
         {panelThinking && (
-          <div className="panel-thinking">
+          <div className="panel-thinking flex items-center gap-1.5 px-4 py-2 text-label text-text-dim">
             <LoaderCircle size={14} className="spin" />
             <span>Panel consulting models…</span>
           </div>
@@ -1175,7 +1219,7 @@ export default function ChatSurface({
               key={`${conversationId ?? "none"}:${group.start?.seq ?? "preamble"}`}
               resetKey={String(conversationId ?? "none") + ":" + String(group.start?.seq ?? "preamble") + ":" + String(group.events.length)}
             >
-            <div className="run-group">
+            <div className="run-group flex flex-col gap-2.5">
               <RunHeader group={group} />
               {runRenderItems(group.events).map((item) =>
                 item.kind === "bubble" ? (
@@ -1185,11 +1229,11 @@ export default function ChatSurface({
                   // forces them open so jump-to-match still reaches tool
                   // bubbles (the <details> `open` attribute, no JS state).
                   <details
-                    className="tool-group"
+                    className="tool-group group my-1"
                     key={`tools-${item.events[0].seq}`}
                     open={searchActive}
                   >
-                    <summary>
+                    <summary className="cursor-pointer select-none rounded px-1 py-0.5 text-caption text-text-dim hover:bg-bg-input hover:text-text group-open:mb-1 group-open:text-text">
                       {item.calls} tool call{item.calls === 1 ? "" : "s"}
                     </summary>
                     {item.events.map((ev) => (
@@ -1205,19 +1249,26 @@ export default function ChatSurface({
           <ToolTicker running={agentRunning} events={events} />
         </div>
         {newOutput && (
-          <button type="button" className="new-output-pill" onClick={scrollToBottom}>
+          <button
+            type="button"
+            className="new-output-pill absolute bottom-2 left-1/2 z-10 -translate-x-1/2 cursor-pointer rounded-[16px] border-none bg-accent-user px-3.5 py-1 text-caption text-white shadow-[0_2px_8px_rgba(0,0,0,0.3)] hover:opacity-90"
+            onClick={scrollToBottom}
+          >
             <ArrowDown size={12} /> new output
           </button>
         )}
       </div>
       {run && (
-        <div className="run-status">
+        <div className="run-status shrink-0 truncate border-t border-border bg-bg px-4 py-1 font-mono text-caption text-text-dim tabular-nums">
           {`running — ${formatElapsed(Number.isNaN(run.startMs) ? 0 : Date.now() - run.startMs)}`}
           {run.lastTool != null ? ` — tool: ${run.lastTool} (call ${run.calls})` : ""}
         </div>
       )}
       <div
-        className={`chat-composer${dragOver ? " drag-over" : ""}`}
+        className={cn(
+          "chat-composer shrink-0 border-t border-stroke-tertiary bg-bg-raised px-4 pt-2.5 pb-2",
+          dragOver && "drag-over shadow-[inset_0_0_0_2px_var(--accent-user)]",
+        )}
         ref={composerRef}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -1249,13 +1300,17 @@ export default function ChatSurface({
           />
         )}
         {attachments.length > 0 && (
-          <div className="attachment-chips">
+          <div className="attachment-chips flex flex-wrap gap-1.5 px-4 pt-2.5">
             {attachments.map((path) => (
-              <span className="attachment-chip" key={path} title={path}>
+              <span
+                className="attachment-chip inline-flex items-center gap-1.5 rounded-[12px] border border-border bg-bg-input px-2 py-0.5 font-mono text-caption"
+                key={path}
+                title={path}
+              >
                 <code>{basename(path)}</code>
                 <button
                   type="button"
-                  className="chip-remove"
+                  className="chip-remove cursor-pointer border-none bg-transparent p-0 leading-none text-text-dim [font:inherit] hover:text-err-text"
                   aria-label={`Remove ${basename(path)}`}
                   onClick={() => removeAttachment(path)}
                 >
@@ -1265,14 +1320,24 @@ export default function ChatSurface({
             ))}
           </div>
         )}
-        <form className="chat-input" onSubmit={handleSubmit}>
+        <form
+          className="chat-input relative flex items-end gap-2 rounded-lg border border-stroke-secondary bg-bg-input py-1.5 pr-1.5 pl-3.5 transition-[border-color,box-shadow] duration-[180ms] ease-[var(--ease-standard)] focus-within:border-accent-user focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--accent-user)_25%,transparent)]"
+          onSubmit={handleSubmit}
+        >
           {atMenu && (
-            <div className="at-menu" role="listbox" aria-label={strings.composer.atMenuLabel}>
+            <div
+              className="at-menu absolute inset-x-0 bottom-full z-10 mb-1.5 max-h-[200px] overflow-y-auto rounded-md border border-stroke-tertiary bg-bg-elevated p-1 shadow-soft"
+              role="listbox"
+              aria-label={strings.composer.atMenuLabel}
+            >
               {atMenu.items.map((item, i) => (
                 <button
                   key={`${item.category ?? "item"}:${item.insert}:${i}`}
                   type="button"
-                  className={`at-item${i === Math.min(atIndex, atMenu.items.length - 1) ? " selected" : ""}`}
+                  className={cn(
+                    "at-item flex w-full cursor-pointer items-baseline gap-2 rounded-sm border-none bg-transparent px-2.5 py-[7px] text-left text-[length:var(--text-label)] text-text hover:bg-bg-input",
+                    i === Math.min(atIndex, atMenu.items.length - 1) && "selected bg-bg-input",
+                  )}
                   role="option"
                   aria-selected={i === Math.min(atIndex, atMenu.items.length - 1)}
                   onMouseDown={(e) => {
@@ -1280,36 +1345,47 @@ export default function ChatSurface({
                     pickAtItem(item);
                   }}
                 >
-                  {item.category != null && <span className="at-category">{item.category}</span>}
-                  <span className="at-label">{item.label}</span>
-                  {item.detail != null && <span className="at-detail">{item.detail}</span>}
+                  {item.category != null && (
+                    <span className="at-category min-w-8 font-semibold whitespace-nowrap text-accent-user">{item.category}</span>
+                  )}
+                  <span className="at-label whitespace-nowrap">{item.label}</span>
+                  {item.detail != null && (
+                    <span className="at-detail truncate text-caption text-text-dim">{item.detail}</span>
+                  )}
                 </button>
               ))}
             </div>
           )}
           {slashMenuOpen && (
-            <div className="slash-menu" role="listbox" aria-label="Slash commands">
+            <div
+              className="slash-menu absolute inset-x-0 bottom-full z-10 mb-1.5 max-h-[200px] overflow-y-auto rounded-md border border-stroke-tertiary bg-bg-elevated p-1 shadow-soft"
+              role="listbox"
+              aria-label="Slash commands"
+            >
               {slashItems.map((c, i) => (
                   <button
                     key={c.cmd}
                     type="button"
                     role="option"
                     aria-selected={i === Math.min(slashIndex, slashItems.length - 1)}
-                    className={`slash-item${i === Math.min(slashIndex, slashItems.length - 1) ? " selected" : ""}`}
+                    className={cn(
+                      "slash-item flex w-full cursor-pointer items-baseline gap-2 rounded-sm border-none bg-transparent px-2.5 py-[7px] text-left text-[length:var(--text-label)] text-text hover:bg-bg-input",
+                      i === Math.min(slashIndex, slashItems.length - 1) && "selected bg-bg-input",
+                    )}
                     onMouseDown={(e) => {
                       e.preventDefault(); // don't blur the textarea
                       pickSlash(c.cmd, c.args);
                     }}
                   >
-                    <span className="slash-cmd">{c.cmd}</span>
-                    <span className="slash-desc">{c.desc}</span>
+                    <span className="slash-cmd min-w-[70px] font-semibold whitespace-nowrap text-accent-user">{c.cmd}</span>
+                    <span className="slash-desc truncate text-caption text-text-dim">{c.desc}</span>
                   </button>
                 ))}
             </div>
           )}
           <textarea
             ref={textareaRef}
-            className="min-h-[36px]"
+            className="min-h-[36px] max-h-[148px] flex-1 resize-none overflow-y-auto border-none bg-transparent px-0 py-2 text-text [font:inherit] leading-[1.4] focus:outline-none focus-visible:outline-none disabled:opacity-60"
             aria-label={strings.composer.messageInputLabel}
             rows={1}
             value={draft}
@@ -1375,7 +1451,7 @@ export default function ChatSurface({
             onModelChanged={onModelChanged}
           />
         </form>
-        <div className="composer-hint">
+        <div className="composer-hint px-1 pt-1.5 text-right text-micro text-text-dim">
           ⌘↵ send · Shift+↵ newline{agentRunning ? " · Esc stop" : ""}{distillLocked ? " · distilling…" : ""}
         </div>
       </div>

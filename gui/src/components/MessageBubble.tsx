@@ -4,6 +4,7 @@ import { Check, X } from "lucide-react";
 import { basename } from "../files";
 import type { OdoEvent, RecallItem } from "../types";
 import Markdown, { highlightText } from "./Markdown";
+import { Badge } from "./ui/badge";
 
 // Display limits for tool call/result rendering (K3 F3: named consts
 // instead of magic numbers scattered in the switch arm).
@@ -110,26 +111,30 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
   switch (event.type) {
     case "user_message":
       body = (
-        <div className="bubble bubble-user">
+        <div className="bubble bubble-user group/bubble self-end bg-accent-user text-white flex flex-col rounded-[12px_12px_4px_12px] shadow-[0_1px_2px_rgba(0,0,0,0.25)] max-w-[82%] px-3.5 py-2.5 whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <div className="bubble-text">{highlightText(p.text ?? "", highlight, "u")}</div>
           {p.attachments != null && p.attachments.length > 0 && (
-            <div className="attachment-chips">
+            <div className="attachment-chips flex flex-wrap gap-1.5 pt-1.5">
               {p.attachments.map((a) => (
-                <span className="attachment-chip" key={a} title={a}>
+                <span
+                  className="attachment-chip inline-flex items-center gap-1.5 rounded-[12px] border border-border bg-bg-input px-2 py-0.5 font-mono text-caption"
+                  key={a}
+                  title={a}
+                >
                   <code>{basename(a)}</code>
                 </span>
               ))}
             </div>
           )}
           {p.recall != null && p.recall.length > 0 && (
-            <div className="recall-chip" title={recallTooltip(normalizeRecall(p.recall))}>
+            <div className="recall-chip inline-block mt-1.5 rounded-lg border border-white/28 bg-white/8 px-2 py-px font-mono text-micro text-white/72" title={recallTooltip(normalizeRecall(p.recall))}>
               {recallChipLabel(normalizeRecall(p.recall))}
             </div>
           )}
           {onEditUserMessage && (p.text ?? "") !== "" && (
             <button
               type="button"
-              className="bubble-edit-btn"
+              className="bubble-edit-btn mt-1 self-end rounded border border-border bg-transparent px-1.5 py-px text-[10px] text-text-dim cursor-pointer opacity-0 transition-opacity group-hover/bubble:opacity-100 focus-visible:opacity-100 hover:text-text hover:border-accent"
               aria-label="Edit and resend this message"
               title="Edit and resend"
               onClick={() => onEditUserMessage(p.text ?? "")}
@@ -143,7 +148,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
 
     case "agent_text":
       body = (
-        <div className="bubble bubble-agent">
+        <div className="bubble bubble-agent w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-transparent text-[var(--agent-text)] border border-stroke-tertiary rounded-none px-3.5 py-2.5 whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <div className="bubble-text">
             <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />
           </div>
@@ -153,10 +158,10 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
 
     case "agent_thinking":
       body = (
-        <div className="bubble bubble-thinking">
-          <details>
-            <summary>Thinking…</summary>
-            <div className="bubble-thinking-text">
+        <div className="bubble bubble-thinking self-start bg-transparent text-text-dim text-caption px-1 py-0.5 w-full max-w-[82%] rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <details className="group/thinking">
+            <summary className="cursor-pointer text-text-dim italic select-none group-open/thinking:mb-1">Thinking…</summary>
+            <div className="bubble-thinking-text whitespace-pre-wrap font-mono text-text-dim opacity-80 py-1 px-2 border-l-2 border-border ml-1 max-h-[300px] overflow-auto">
               <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />
             </div>
           </details>
@@ -192,22 +197,22 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
             return (
               <span key={k}>
                 {i > 0 && " · "}
-                <span className="tool-arg-key">{k}</span>: <span className="tool-arg-val">{highlightText(truncated + ellipsis, highlight, `ta${i}`)}</span>
+                <span className="tool-arg-key text-tok-keyword">{k}</span>: <span className="tool-arg-val text-tok-string">{highlightText(truncated + ellipsis, highlight, `ta${i}`)}</span>
               </span>
             );
           });
         } else {
           // Long: show count + collapsible
           argsSummary = (
-            <details className="tool-args-details">
-              <summary>{entries.length} args</summary>
-              <div className="tool-args-list">
+            <details className="tool-args-details inline">
+              <summary className="inline cursor-pointer text-text-dim text-micro">{entries.length} args</summary>
+              <div className="tool-args-list mt-1 ml-4 flex flex-col gap-0.5">
                 {entries.map(([k, v], i) => {
                   const sv = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
                   return (
-                    <div key={k} className="tool-arg-row" title={sv}>
-                      <span className="tool-arg-key">{k}</span>
-                      <span className="tool-arg-val">{highlightText(sv.slice(0, DETAIL_ARG_MAX), highlight, `ta${i}`)}</span>
+                    <div key={k} className="tool-arg-row flex gap-1.5 text-micro" title={sv}>
+                      <span className="tool-arg-key shrink-0 min-w-[60px] text-tok-keyword">{k}</span>
+                      <span className="tool-arg-val text-tok-string">{highlightText(sv.slice(0, DETAIL_ARG_MAX), highlight, `ta${i}`)}</span>
                     </div>
                   );
                 })}
@@ -218,14 +223,14 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       } else {
         // Non-object (string, array): render verbatim, not re-encoded
         const rawStr = typeof args === "string" ? args : JSON.stringify(args);
-        argsSummary = <span className="tool-arg-raw">{highlightText(rawStr.slice(0, INLINE_ARG_MAX), highlight, "ta")}</span>;
+        argsSummary = <span className="tool-arg-raw text-text-dim">{highlightText(rawStr.slice(0, INLINE_ARG_MAX), highlight, "ta")}</span>;
       }
       body = (
-        <div className="bubble bubble-tool">
-          <code className="tool-call-line">
-            <span className="tool-arrow" aria-hidden>→</span>{" "}
-            <span className="tool-name">{highlightText(toolName, highlight, "tc")}</span>
-            {argsSummary != null && <span className="tool-args"> {argsSummary}</span>}
+        <div className="bubble bubble-tool self-start bg-transparent text-text-dim font-mono text-caption px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <code className="tool-call-line flex items-baseline gap-0.5 flex-wrap">
+            <span className="tool-arrow text-text-dim opacity-60 shrink-0" aria-hidden>→</span>{" "}
+            <span className="tool-name text-tok-fn font-medium">{highlightText(toolName, highlight, "tc")}</span>
+            {argsSummary != null && <span className="tool-args text-text-dim"> {argsSummary}</span>}
           </code>
         </div>
       );
@@ -241,20 +246,20 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
         ? resultText.slice(0, RESULT_CLAMP) + `\n… (${(resultBytes - RESULT_CLAMP).toLocaleString()} more chars)`
         : resultText;
       body = (
-        <div className="bubble bubble-tool">
+        <div className="bubble bubble-tool self-start bg-transparent text-text-dim font-mono text-caption px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <details>
             <summary>
               <code>
-                <span className="tool-arrow" aria-hidden>←</span>{" "}
+                <span className="tool-arrow text-text-dim opacity-60 shrink-0" aria-hidden>←</span>{" "}
                 {highlightText(toolName, highlight, "tr")}
-                {resultBytes > 0 && <span className="tool-result-size"> · {(resultBytes > 1024 ? `${(resultBytes / 1024).toFixed(1)} KB` : `${resultBytes} B`)}</span>}
+                {resultBytes > 0 && <span className="tool-result-size text-text-dim text-[10px]"> · {(resultBytes > 1024 ? `${(resultBytes / 1024).toFixed(1)} KB` : `${resultBytes} B`)}</span>}
               </code>
             </summary>
-            <pre>{highlightText(clamped, highlight, "tb")}</pre>
+            <pre className="mt-1.5 max-h-[240px] overflow-auto bg-bg-raised border border-border rounded-sm p-2">{highlightText(clamped, highlight, "tb")}</pre>
             {resultBytes > RESULT_CLAMP && (
               <button
                 type="button"
-                className="tool-result-copy"
+                className="tool-result-copy mt-1 bg-transparent border border-border rounded text-text-dim text-[10px] px-2 py-0.5 cursor-pointer hover:text-text hover:border-accent"
                 title="Copy full result"
                 onClick={() => {
                   navigator.clipboard?.writeText(resultText)?.then(() => {
@@ -274,16 +279,16 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
 
     case "agent_done":
       body = (
-        <div className="bubble bubble-done">
-          <span className="bubble-icon"><Check size={14} /></span> {highlightText(p.summary ?? "Agent finished", highlight, "d")}
+        <div className="bubble bubble-done self-start bg-transparent text-ok-text border border-ok max-w-[82%] px-3.5 py-2.5 rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <span className="bubble-icon font-bold mr-1"><Check size={14} /></span> {highlightText(p.summary ?? "Agent finished", highlight, "d")}
         </div>
       );
       break;
 
     case "agent_error":
       body = (
-        <div className="bubble bubble-error">
-          <span className="bubble-icon"><X size={14} /></span> {highlightText(p.error ?? "Agent failed", highlight, "e")}
+        <div className="bubble bubble-error self-start bg-err-surface border border-err text-err-surface-text max-w-[82%] px-3.5 py-2.5 rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <span className="bubble-icon font-bold mr-1"><X size={14} /></span> {highlightText(p.error ?? "Agent failed", highlight, "e")}
         </div>
       );
       break;
@@ -299,20 +304,20 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       // action "distill" and no diff (ADR-0002); render it as a memory event.
       if (p.action === "distill") {
         body = (
-          <div className="bubble bubble-review">
-            <span className="badge badge-other" title={p.wiki_path ?? "distilled to wiki"}>
+          <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <Badge variant="other" className="badge badge-other" title={p.wiki_path ?? "distilled to wiki"}>
               Distilled · epoch {p.epoch ?? "?"}
-            </span>
+            </Badge>
           </div>
         );
       } else if (p.action === "curate") {
         // M5: the curator journals its pass the same way (ADR-0002) — render
         // it as a memory event, not the diff-style "curate diff #?".
         body = (
-          <div className="bubble bubble-review">
-            <span className="badge badge-other" title="curator rewrote wiki topics + index.md">
+          <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <Badge variant="other" className="badge badge-other" title="curator rewrote wiki topics + index.md">
               Curated {p.topics ?? "?"} topics
-            </span>
+            </Badge>
           </div>
         );
       } else if (p.action === "run_prompt" && p.origin === "parked_goal") {
@@ -324,27 +329,30 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
           return null;
         }
         body = (
-          <div className="bubble bubble-review">
-            <span className="badge badge-other" title="a parked goal was resumed into a run">
+          <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <Badge variant="other" className="badge badge-other" title="a parked goal was resumed into a run">
               resumed parked goal
-            </span>
+            </Badge>
           </div>
         );
       } else if (p.action === "parked_goal_dropped") {
         // W6: the human dropped one queued goal; the drop is journaled.
         body = (
-          <div className="bubble bubble-review">
-            <span className="badge badge-other" title="a parked goal was dropped from the queue">
+          <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <Badge variant="other" className="badge badge-other" title="a parked goal was dropped from the queue">
               dropped parked goal
-            </span>
+            </Badge>
           </div>
         );
       } else {
         body = (
-          <div className="bubble bubble-review">
-            <span className={`badge badge-${REVIEW_LABEL[p.action ?? ""] ? p.action : "other"}`}>
+          <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <Badge
+              variant={REVIEW_LABEL[p.action ?? ""] ? (p.action as "accept" | "reject") : "other"}
+              className={`badge badge-${REVIEW_LABEL[p.action ?? ""] ? p.action : "other"}`}
+            >
               {REVIEW_LABEL[p.action ?? ""] ?? p.action ?? "reviewed"} diff #{p.diff_id ?? "?"}
-            </span>
+            </Badge>
           </div>
         );
       }
@@ -355,17 +363,17 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       // learner, curator, index, pins, note, ledger). Render as a subtle
       // system-event badge instead of raw JSON (K3 review P1 fix).
       body = (
-        <div className="bubble bubble-review">
-          <span className="badge badge-other" title={p.detail ?? ""}>
+        <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <Badge variant="other" className="badge badge-other" title={p.detail ?? ""}>
             memory · {p.layer ?? "unknown"}{p.cause ? ` · ${p.cause}` : ""}
-          </span>
+          </Badge>
         </div>
       );
       break;
 
     default:
       body = (
-        <div className="bubble bubble-unknown">
+        <div className="bubble bubble-unknown self-start bg-bg-raised text-text-dim font-mono text-caption max-w-[82%] px-3.5 py-2.5 rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <code>
             {event.type}: {JSON.stringify(p)}
           </code>

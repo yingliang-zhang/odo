@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult } from "../types";
 import LoadingInline from "./LoadingInline";
+import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
@@ -16,8 +17,8 @@ import { cn } from "../lib/utils";
 //
 // P1-P4: styles migrated to Tailwind utilities; class names survive as
 // inert identity markers (e2e hooks in skills-proposals.spec/ledger.spec).
-// Rules shared with other panels stay in app.css: verdict badges
-// (DiffViewer), mem-body/mem-section-title/mem-file (LedgerPanel),
+// Verdict badges are served by ui/badge.tsx. Rules shared with other panels
+// stay in app.css: mem-body/mem-section-title/mem-file (LedgerPanel),
 // wiki-hint/wiki-content (WikiBrowser), settings-save/settings-error
 // (SettingsPanel).
 
@@ -121,12 +122,17 @@ function SkillProposalRow({
         {p.contradicts && <div className="mem-meta mem-meta-warn mt-[3px] text-[11px] text-[var(--warn)]">⚠ {p.contradicts}</div>}
         {p.reviews && p.reviews.length > 0 && (
           <div className="mem-verdicts flex flex-wrap gap-1 mt-1">
-            {/* verdict-badge CSS stays in app.css (DiffViewer shares it);
-                the className strings are also e2e hooks. */}
+            {/* Verdict badges served by ui/badge.tsx variants (the .verdict-*
+                rules in app.css are deleted by the DiffViewer migration);
+                the className strings stay as e2e hooks. */}
             {p.reviews.map((r: ReviewResult, i: number) => (
-              <span key={i} className={`verdict-badge verdict-${r.verdict}`}>
+              <Badge
+                key={i}
+                variant={r.verdict === "accept" || r.verdict === "reject" || r.verdict === "needs_fixes" ? (r.verdict as "accept" | "reject" | "needs_fixes") : "other"}
+                className={cn("verdict-badge", `verdict-${r.verdict}`, "capitalize")}
+              >
                 {r.model}: {r.verdict}
-              </span>
+              </Badge>
             ))}
           </div>
         )}

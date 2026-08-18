@@ -3,6 +3,7 @@ import { Check } from "lucide-react";
 import { tokenize, type Language } from "../highlight";
 import FileRefContextMenu from "./FileRefContextMenu";
 import { Dialog, DialogContent } from "./ui/dialog";
+import { cn } from "../lib/utils";
 
 // Belt B: a small dependency-free markdown renderer for agent output and
 // wiki notes. Line-based block parsing (headings, fenced code, lists,
@@ -131,7 +132,7 @@ function CodeSpan({ text, highlight, highlightKey, projectRoot }: {
   return (
     <>
       <code
-        className="bubble-inline-code file-ref-span"
+        className="bubble-inline-code file-ref-span rounded-[4px] bg-code-chip-bg px-1 font-mono text-[0.92em]"
         onContextMenu={(e) => {
           e.preventDefault();
           setMenu({ x: e.clientX, y: e.clientY });
@@ -169,7 +170,7 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
       nodes.push(<em key={key}>{parseInline(m[2].slice(1, -1), highlight, key, projectRoot)}</em>);
     } else if (m[3] !== undefined) {
       // ~~strikethrough~~
-      nodes.push(<del key={key}>{parseInline(m[3].slice(2, -2), highlight, key, projectRoot)}</del>);
+      nodes.push(<del key={key} className="text-text-dim">{parseInline(m[3].slice(2, -2), highlight, key, projectRoot)}</del>);
     } else if (m[4] !== undefined) {
       const codeText = m[4].slice(1, -1);
       if (looksLikeFilePath(codeText)) {
@@ -178,7 +179,7 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
         );
       } else {
         nodes.push(
-          <code key={key} className="bubble-inline-code">
+          <code key={key} className="bubble-inline-code rounded-[4px] bg-code-chip-bg px-1 font-mono text-[0.92em]">
             {highlightText(codeText, highlight, key)}
           </code>,
         );
@@ -207,7 +208,7 @@ function ZoomableImage({ src, alt }: { src: string; alt: string }) {
       <img
         src={src}
         alt={alt}
-        className="md-inline-img"
+        className="md-inline-img my-1 max-w-full cursor-zoom-in rounded-md border border-border transition-opacity duration-150 hover:opacity-90"
         loading="lazy"
         tabIndex={0}
         role="button"
@@ -221,7 +222,7 @@ function ZoomableImage({ src, alt }: { src: string; alt: string }) {
           className="flex cursor-zoom-out items-center justify-center border-none bg-transparent p-0 shadow-none"
           onClick={() => setZoomed(false)}
         >
-          <img src={src} alt={alt} className="md-img-zoomed" />
+          <img src={src} alt={alt} className="md-img-zoomed max-h-[90vh] max-w-[90vw] rounded-[4px] object-contain" />
         </DialogContent>
       </Dialog>
     </>
@@ -250,7 +251,7 @@ function renderLink(
     return <Fragment key={key}>{highlightText(`${label}(${url})`, highlight, key)}</Fragment>;
   }
   return (
-    <a key={key} href={url} target="_blank" rel="noreferrer">
+    <a key={key} href={url} target="_blank" rel="noreferrer" className="text-link">
       {parseInline(label, highlight, key)}
     </a>
   );
@@ -400,6 +401,25 @@ function parseBlocks(content: string): Block[] {
   return blocks;
 }
 
+// Heading typography per level (was the .markdown h1-h4 rules). First block
+// zeroes its top margin via the mt-0 conditional (was :first-child rules).
+const HEADING_CLS: Record<1 | 2 | 3 | 4, string> = {
+  1: "mb-1 mt-2.5 text-[18px] font-semibold leading-[1.3]",
+  2: "mb-1 mt-2.5 text-[16px] font-semibold leading-[1.3]",
+  3: "mb-1 mt-2.5 text-[15px] font-semibold leading-[1.3]",
+  4: "mb-1 mt-2.5 text-[14px] font-semibold leading-[1.3]",
+};
+
+// GFM alert callout tones (was .md-alert-note/-warning/-important/-tip/-caution).
+// box = left border + tinted background; label = label text color.
+const ALERT_TONE: Record<string, { box: string; label: string }> = {
+  note: { box: "border-l-link bg-link/6", label: "text-link" },
+  warning: { box: "border-l-warn bg-warn/6", label: "text-warn" },
+  important: { box: "border-l-warn bg-warn/6", label: "text-warn" },
+  tip: { box: "border-l-ok-text bg-ok/6", label: "text-ok-text" },
+  caution: { box: "border-l-err bg-err/6", label: "text-err" },
+};
+
 // M11 F3: code block with language label + copy button.
 function CodeBlock({ block, highlight, index }: { block: Extract<Block, { kind: "code" }>; highlight: string | undefined; index: number }) {
   const key = `b${index}`;
@@ -414,14 +434,14 @@ function CodeBlock({ block, highlight, index }: { block: Extract<Block, { kind: 
   };
 
   return (
-    <div className="bubble-code-wrap" key={key}>
-      <div className="bubble-code-header">
-        {langLabel && <span className="bubble-code-lang">{langLabel}</span>}
-        <button type="button" className="bubble-code-copy" onClick={copy} aria-label="Copy code">
+    <div className={cn("bubble-code-wrap my-1.5 overflow-hidden rounded-sm border border-border", index === 0 && "mt-0")} key={key}>
+      <div className="bubble-code-header flex items-center justify-between border-b border-border bg-bg-raised px-2 py-0.5 text-micro">
+        {langLabel && <span className="bubble-code-lang font-mono text-[10px] uppercase tracking-[0.04em] text-text-dim">{langLabel}</span>}
+        <button type="button" className="bubble-code-copy cursor-pointer rounded-[4px] border-none bg-transparent px-1.5 py-0.5 text-micro text-text-dim hover:bg-bg hover:text-text" onClick={copy} aria-label="Copy code">
           {copied ? <Check size={11} /> : "Copy"}
         </button>
       </div>
-      <pre className="bubble-code">
+      <pre className="bubble-code m-0 overflow-x-auto bg-bg px-2.5 py-2 font-mono text-caption">
         <code>
           {block.text.split("\n").map((line, li) => (
             <Fragment key={li}>
@@ -453,63 +473,64 @@ function renderBlock(block: Block, index: number, highlight: string | undefined,
     }
     case "heading": {
       const Tag = `h${block.level}` as "h1" | "h2" | "h3" | "h4";
-      return <Tag key={key}>{parseInline(block.text, highlight, key, projectRoot)}</Tag>;
+      return <Tag key={key} className={cn(HEADING_CLS[block.level], index === 0 && "mt-0")}>{parseInline(block.text, highlight, key, projectRoot)}</Tag>;
     }
     case "ul":
       return (
-        <ul key={key}>
+        <ul key={key} className={cn("my-1 pl-[22px]", index === 0 && "mt-0")}>
           {block.items.map((item, ii) => {
             // GFM task list: - [ ] or - [x]
             const taskMatch = item.match(/^\[([ x])\]\s+(.*)$/i);
             if (taskMatch) {
               const checked = taskMatch[1].toLowerCase() === "x";
               return (
-                <li key={ii} className="md-task-item">
-                  <input type="checkbox" checked={checked} readOnly aria-label={`Task: ${taskMatch[2]}`} />
-                  <span className={checked ? "md-task-done" : ""}>{parseInline(taskMatch[2], highlight, `${key}-${ii}`, projectRoot)}</span>
+                <li key={ii} className="md-task-item my-0.5 flex list-none items-baseline gap-1.5">
+                  <input type="checkbox" className="m-0 accent-ok-text" checked={checked} readOnly aria-label={`Task: ${taskMatch[2]}`} />
+                  <span className={checked ? "md-task-done text-text-dim line-through" : ""}>{parseInline(taskMatch[2], highlight, `${key}-${ii}`, projectRoot)}</span>
                 </li>
               );
             }
-            return <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`, projectRoot)}</li>;
+            return <li key={ii} className="my-0.5">{parseInline(item, highlight, `${key}-${ii}`, projectRoot)}</li>;
           })}
         </ul>
       );
     case "ol":
       return (
-        <ol key={key}>
+        <ol key={key} className={cn("my-1 pl-[22px]", index === 0 && "mt-0")}>
           {block.items.map((item, ii) => (
-            <li key={ii}>{parseInline(item, highlight, `${key}-${ii}`, projectRoot)}</li>
+            <li key={ii} className="my-0.5">{parseInline(item, highlight, `${key}-${ii}`, projectRoot)}</li>
           ))}
         </ol>
       );
     case "quote":
-      return <blockquote key={key}>{parseInline(block.text, highlight, key, projectRoot)}</blockquote>;
+      return <blockquote key={key} className={cn("my-1.5 border-l-[3px] border-solid border-l-[color:var(--blockquote-border)] px-2.5 py-0.5 text-text-dim", index === 0 && "mt-0")}>{parseInline(block.text, highlight, key, projectRoot)}</blockquote>;
     case "alert": {
       // GFM alert callout: colored left-border box matching the alert type.
+      const tone = ALERT_TONE[block.alertType] ?? ALERT_TONE.note;
       return (
-        <div key={key} className={`md-alert md-alert-${block.alertType}`}>
-          <div className="md-alert-label">{block.alertType.toUpperCase()}</div>
-          <div className="md-alert-body">{parseInline(block.text, highlight, key, projectRoot)}</div>
+        <div key={key} className={cn(`md-alert md-alert-${block.alertType} my-2 rounded-sm border-l-[3px] border-solid px-3 py-1.5`, tone.box)}>
+          <div className={cn("md-alert-label mb-0.5 text-micro font-semibold tracking-[0.05em]", tone.label)}>{block.alertType.toUpperCase()}</div>
+          <div className="md-alert-body text-label text-text-dim">{parseInline(block.text, highlight, key, projectRoot)}</div>
         </div>
       );
     }
     case "hr":
-      return <hr key={key} />;
+      return <hr key={key} className="my-2 border-0 border-t border-border" />;
     case "table": {
       return (
-        <table key={key} className="md-table">
+        <table key={key} className="md-table my-1.5 w-full border-collapse text-caption">
           <thead>
             <tr>
               {block.headers.map((h, hi) => (
-                <th key={hi}>{parseInline(h, highlight, `${key}-h${hi}`)}</th>
+                <th key={hi} className="border border-border bg-bg-raised px-2 py-1 text-left font-semibold">{parseInline(h, highlight, `${key}-h${hi}`)}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {block.rows.map((row, ri) => (
-              <tr key={ri}>
+              <tr key={ri} className="even:bg-bg-raised">
                 {block.headers.map((_, ci) => (
-                  <td key={ci}>{parseInline(row[ci] ?? "", highlight, `${key}-r${ri}c${ci}`)}</td>
+                  <td key={ci} className="border border-border px-2 py-1 text-left">{parseInline(row[ci] ?? "", highlight, `${key}-r${ri}c${ci}`)}</td>
                 ))}
               </tr>
             ))}
@@ -518,14 +539,14 @@ function renderBlock(block: Block, index: number, highlight: string | undefined,
       );
     }
     case "para":
-      return <p key={key}>{parseInline(block.text, highlight, key, projectRoot)}</p>;
+      return <p key={key} className={cn("my-1.5", index === 0 && "mt-0")}>{parseInline(block.text, highlight, key, projectRoot)}</p>;
   }
 }
 
 export default memo(function Markdown({ content, className, highlight, projectRoot }: Props) {
   const blocks = parseBlocks(content);
   return (
-    <div className={className !== undefined ? `markdown ${className}` : "markdown"}>
+    <div className={cn("markdown", className)}>
       {blocks.map((b, bi) => renderBlock(b, bi, highlight, projectRoot))}
     </div>
   );

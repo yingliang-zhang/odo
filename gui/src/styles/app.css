@@ -4,11 +4,17 @@
 :root {
   --bg: #0f1115;
   --bg-raised: #1a1d24;
+  /* StatusBar surface: flat in both themes (nothing scrolls beneath the
+     fixed footer, so the old translucent+blur bg was invisible). */
+  --statusbar-bg: var(--bg-raised);
   --bg-input: #21252d;
   /* The one elevation between raised and input — used by popovers that
      float over both (slash menu). Was referenced but never defined. */
   --bg-elevated: #161a20;
   --border: var(--stroke-secondary); /* alias for backward compat */
+  /* Markdown blockquote left rail — stronger in the light theme (used to
+     be a [data-theme] override rule). */
+  --blockquote-border: var(--border);
   --text: #d8dce4;
   --text-dim: #7d8593;
   --accent-user: #0A84FF;
@@ -119,6 +125,7 @@
   --bg-input: #fff;
   --bg-elevated: #fbfbfc;
   --border: var(--stroke-secondary); /* alias for backward compat */
+  --blockquote-border: var(--stroke-primary);
   --text: #1a1a1a;
   --text-dim: #666;
   --accent-user: #0066CC;
@@ -155,8 +162,9 @@
   --warn-text: #a16207;
 }
 
-/* Frosted vibrancy: translucent top/status bars need light-theme-aware
-   backgrounds so AA text contrast holds in both themes. */
+/* Frosted vibrancy: the translucent top bar needs a light-theme-aware
+   background so AA text contrast holds in both themes. (The status bar is
+     flat now — see --statusbar-bg; the old per-theme override rules are gone.) */
 [data-theme="light"] .app-topbar {
   background: rgba(255, 255, 255, 0.88);
 }
@@ -169,20 +177,12 @@
   color: #fff;
 }
 
-[data-theme="light"] .app-statusbar {
-  background: rgba(255, 255, 255, 0.88);
-}
-
 /* In the light theme the agent message is a flat elevated surface, so
-   links and blockquotes use the standard page-link/dim colors instead of
-   the white-range values that served the old saturated-purple bubble. */
+   links use the standard page-link color instead of the white-range value
+   that served the old saturated-purple bubble. (The blockquote rail moved
+   to the per-theme --blockquote-border token.) */
 [data-theme="light"] .bubble-agent a {
   color: var(--link);
-}
-
-[data-theme="light"] .bubble-agent blockquote {
-  color: var(--text-dim);
-  border-left-color: var(--stroke-primary);
 }
 
 /* Belt D: visible keyboard focus on every interactive element. Inputs keep
@@ -425,61 +425,11 @@ body {
   min-height: 0;
 }
 
-/* M9 Phase 1: status bar — 24px footer */
-.app-statusbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: var(--statusbar-height);
-  flex-shrink: 0;
-  padding: 0 12px;
-  background: rgba(26, 29, 36, 0.88);
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
-  border-top: 1px solid var(--stroke-tertiary);
-  font-size: var(--text-micro);
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
-.status-item {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-/* Clickable session-facts button (tri-model header gap analysis: CWD copy). */
-.status-fact-btn {
-  background: none;
-  border: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  padding: 0 4px;
-  border-radius: 4px;
-  transition: background 0.15s;
-  max-width: min(40vw, 360px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.status-fact-btn:hover {
-  background: var(--bg-input, rgba(255, 255, 255, 0.05));
-}
-/* Tri-model header gap: live turn duration in status bar */
-.status-turn-duration {
-  font-variant-numeric: tabular-nums;
-  color: var(--text-dim);
-  margin-left: 2px;
-}
-
-.status-spacer {
-  flex: 1;
-}
-
-.status-run {
-  color: var(--accent-user);
-}
+/* M9 Phase 1 status bar rules deleted (.app-statusbar/.status-item/
+   .status-fact-btn(+hover)/.status-turn-duration/.status-spacer/.status-run):
+   Tailwind utilities on the elements in StatusBar.tsx — class names survive
+   as inert e2e/theme hooks. The backdrop blur is dropped on purpose:
+   --statusbar-bg is a flat raised token now, translucent+blur was invisible. */
 
 .app-main {
   display: flex;
@@ -535,16 +485,6 @@ body {
 .error-banner .dismiss-btn:hover {
   color: var(--err-surface-hover-text);
   background: rgba(0, 0, 0, 0.25);
-}
-
-/* J: spinner shown while /panel or /vision blocks on the daemon side. */
-.panel-thinking {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  color: var(--text-dim);
-  font-size: 13px;
 }
 
 /* ---------- Toast viewport ---------- */
@@ -687,6 +627,7 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
   .ws-dot.pulse,
   .spin,
@@ -764,353 +705,11 @@ body {
   white-space: pre;
 }
 
-/* Unified sidebar row: icon + label + optional trailing count badge. */
-.ws-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--text-dim);
-}
-.ws-dot.dot-accent {
-  background: var(--accent-user);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-user) 22%, transparent);
-}
-.ws-dot.dot-bg {
-  background: var(--bg-run);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg-run) 22%, transparent);
-}
-.ws-dot.dot-amber {
-  background: var(--warn);
-}
-.ws-dot.dot-idle {
-  background: var(--text-dim);
-  opacity: 0.35;
-}
+/* Unified sidebar row status dot: .ws-dot base + .dot-accent/.dot-bg/
+   .dot-amber/.dot-idle rules became inline utilities (Sidebar.tsx dotClass
+   map + StatusBar's WS_DOT_BG); markers kept as e2e/theme hooks. */
 .ws-dot.pulse {
   animation: ws-pulse 1.2s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ws-dot.pulse {
-    animation: none;
-  }
-}
-
-/* ---------- Fold chip ---------- */
-
-/* Persistent fold marker at the top of the chat log (epoch-fold root fix):
-   announces how many events the latest distill folded out of view and
-   carries the reversible actions (expand the record / open the note). */
-.fold-chip {
-  align-self: center;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 100%;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  color: var(--text-dim);
-  font-size: 12px;
-  padding: 4px 12px;
-}
-
-.fold-chip-text code {
-  font-family: var(--mono);
-}
-
-.fold-chip-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-dim);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 1px 8px;
-}
-
-.fold-chip-btn:hover {
-  border-color: var(--accent-user);
-  color: var(--accent-user);
-}
-
-/* ---------- Chat surface ---------- */
-
-.chat-surface {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-
-.message-list-wrap {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-}
-
-.message-list {
-  flex: 1;
-  min-height: 120px;
-  overflow-y: auto;
-  padding: 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.new-output-pill {
-  position: absolute;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--accent-user);
-  color: #fff;
-  border: none;
-  border-radius: 16px;
-  padding: 4px 14px;
-  font-size: 12px;
-  cursor: pointer;
-  z-index: 10;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-}
-
-.new-output-pill:hover {
-  opacity: 0.9;
-}
-
-/* Belt D: first-run empty state — a guided card instead of a dim hint. */
-.empty-state {
-  margin: auto;
-  max-width: 480px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 28px 32px;
-  text-align: center;
-}
-
-.empty-state h2 {
-  margin: 0 0 6px;
-  font-size: 18px;
-  color: var(--accent-user);
-}
-
-.empty-state p {
-  margin: 0 0 16px;
-  font-size: 13px;
-}
-
-.empty-state .example-prompt {
-  display: block;
-  width: 100%;
-  margin-top: 8px;
-  padding: 9px 12px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.empty-state .example-prompt:hover {
-  border-color: var(--accent-user);
-  color: var(--accent-user);
-}
-
-.empty-state .shortcuts {
-  display: flex;
-  justify-content: center;
-  gap: 16px;
-  margin-top: 18px;
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
-.chat-composer {
-  flex-shrink: 0;
-  border-top: 1px solid var(--stroke-tertiary);
-  background: var(--bg-raised);
-  padding: 10px 16px 8px;
-}
-
-.chat-composer.drag-over {
-  box-shadow: inset 0 0 0 2px var(--accent-user);
-}
-
-/* One unified rounded field (Apple Notes style): the form is the shell,
-   the textarea is borderless inside it. Focus lifts the whole shell with a
-   soft accent ring instead of the old per-input outline. */
-.chat-input {
-  position: relative;
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--stroke-secondary);
-  border-radius: var(--radius-lg);
-  padding: 6px 6px 6px 14px;
-  transition: border-color 0.18s var(--ease-standard), box-shadow var(--dur) var(--ease-standard);
-}
-
-.chat-input:focus-within {
-  border-color: var(--accent-user);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-user) 25%, transparent);
-}
-
-.composer-hint {
-  padding: 6px 4px 0;
-  font-size: 11px;
-  color: var(--text-dim);
-  text-align: right;
-}
-
-/* Slash command autocomplete menu */
-.slash-menu {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  right: 0;
-  background: var(--bg-elevated);
-  border: 1px solid var(--stroke-tertiary);
-  border-radius: var(--radius-md);
-  margin-bottom: 6px;
-  max-height: 200px;
-  overflow-y: auto;
-  z-index: 10;
-  box-shadow: var(--shadow-soft);
-  padding: 4px;
-}
-.slash-menu .slash-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 10px;
-  background: transparent !important;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font-size: 13px;
-}
-.slash-menu .slash-item:hover,
-.slash-menu .slash-item.selected {
-  background: var(--bg-input) !important;
-}
-.slash-cmd {
-  font-weight: 600;
-  color: var(--accent-user);
-  white-space: nowrap;
-  min-width: 70px;
-}
-.slash-desc {
-  color: var(--text-dim);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* P3: @-mention completion popup — same anchor as the slash menu (above the
-   composer, from its top-left). */
-.at-menu {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  right: 0;
-  background: var(--bg-elevated);
-  border: 1px solid var(--stroke-tertiary);
-  border-radius: var(--radius-md);
-  margin-bottom: 6px;
-  max-height: 200px;
-  overflow-y: auto;
-  z-index: 10;
-  box-shadow: var(--shadow-soft);
-  padding: 4px;
-}
-.at-menu .at-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 10px;
-  background: transparent !important;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font-size: 13px;
-}
-.at-menu .at-item:hover,
-.at-menu .at-item.selected {
-  background: var(--bg-input) !important;
-}
-.at-category {
-  font-weight: 600;
-  color: var(--accent-user);
-  white-space: nowrap;
-  min-width: 32px;
-}
-.at-label {
-  white-space: nowrap;
-}
-.at-detail {
-  color: var(--text-dim);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.attachment-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 10px 16px 0;
-}
-
-/* M12: the daemon's auto-distill disclosure above the composer — hairline
-   chip in the attachment-chip family, with a text-link Cancel action and
-   an amber variant for the coverage-honesty pause. */
-.auto-distill-chip {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 4px;
-  margin: 10px 16px 0;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 2px 10px;
-  font-size: 12px;
-  font-family: var(--mono);
-  color: var(--text-dim);
-}
-
-.auto-distill-chip .chip-link {
-  background: none;
-  border: none;
-  color: var(--accent);
-  cursor: pointer;
-  font: inherit;
-  padding: 0;
-  line-height: 1;
-}
-
-.auto-distill-chip .chip-link:hover {
-  text-decoration: underline;
-}
-
-.auto-distill-chip.blocked {
-  color: var(--warn, #d19a4a);
 }
 
 /* M12 (D-todo): the composer "Plan · N open" chip and popover migrated to
@@ -1179,29 +778,6 @@ body {
 /* ModelPill CSS migrated to Tailwind utilities in ModelPill.tsx (Phase 4).
    Old .model-pill, .model-pill-menu, .model-pill-item, .model-pill-custom
    rules deleted — Radix DropdownMenu handles positioning/portal/styling. */
-
-/* Message edit button (tri-model gap analysis: message actuation). */
-.bubble-edit-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-dim);
-  font-size: 10px;
-  padding: 1px 6px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s;
-  margin-top: 4px;
-  align-self: flex-end;
-}
-.bubble-user:hover .bubble-edit-btn,
-.bubble-edit-btn:focus-visible {
-  opacity: 1;
-}
-.bubble-edit-btn:hover {
-  color: var(--text);
-  border-color: var(--accent);
-}
 
 /* W6 (goal queue): the composer "Queue · N" chip and its popover — the
    parked-goal FIFO. Popover chrome migrated to Radix Popover + Tailwind
@@ -1296,269 +872,19 @@ body {
   color: var(--err-text);
 }
 
-.attachment-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 2px 8px;
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.attachment-chip .chip-remove {
-  background: none;
-  border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  font: inherit;
-  padding: 0;
-  line-height: 1;
-}
-
-.attachment-chip .chip-remove:hover {
-  color: var(--err-text);
-}
-
-.chat-input > input,
-.chat-input > textarea {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: var(--text);
-  padding: 8px 0;
-  font: inherit;
-}
-
-.chat-input > textarea {
-  resize: none;
-  overflow-y: auto;
-  max-height: 148px;
-  line-height: 1.4;
-}
-
-.chat-input > input:focus,
-.chat-input > textarea:focus {
-  border: none;
-  outline: none;
-}
-.chat-input > input:focus-visible,
-.chat-input > textarea:focus-visible {
-  outline: none;
-}
-
-.chat-input > input:disabled,
-.chat-input > textarea:disabled {
-  opacity: 0.6;
-}
-
-.bubble .attachment-chips {
-  padding: 6px 0 0;
-}
-
 /* ---------- Bubbles ---------- */
 
-/* Hermes-flat: the agent's output is a full-bleed reading surface with a
-   hairline top rule instead of a colored bubble; the user's own input stays
-   a compact accent bubble so the exchange reads at a glance (Apple
-   Messages pattern). */
-.bubble {
-  max-width: 82%;
-  padding: 10px 14px;
-  border-radius: var(--radius-lg);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: var(--text-body);
-  line-height: 1.6;
-}
+/* Bubble layout/variants, thinking/tool families and status bubbles
+   migrated to Tailwind utilities in MessageBubble.tsx and ChatSurface.tsx
+   (the streaming preview); class names remain as inert DOM hooks.
+   @keyframes bubble-in (in the keyframes block) stays; so does
+   [data-theme="light"] .bubble-agent a (markdown link colors).
+   --chat-column-width (default 100%, full-bleed) caps the agent column —
+   set to a fixed px/rem value for a reading-width constraint. */
 
-/* Enter: brush-in from slightly below, Apple-style rise. */
-.bubble {
-  animation: bubble-in 0.18s var(--ease-out);
-}
-
-.bubble-user {
-  align-self: flex-end;
-  background: var(--accent-user);
-  color: #fff;
-  display: flex;
-  flex-direction: column;
-  border-radius: 12px 12px 4px 12px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-}
-
-/* Agent output sits on a flat elevated surface — no fill, just a hairline
-   so long-form content (tables, code, diffs) gets the full column.
-   --chat-column-width defaults to 100% (full-bleed) matching Hermes's
-   --composer-width: 100% change (commit 006a4a8873). Set to a fixed px/rem
-   value for a reading-width constraint. */
-.bubble-agent {
-  width: 100%;
-  max-width: var(--chat-column-width, 100%);
-  margin: 0 auto;
-  background: transparent;
-  color: var(--agent-text);
-  border: 1px solid var(--stroke-tertiary);
-  border-radius: 0;
-}
-
-/* M11 F2: agent thinking — collapsible, muted, no bubble bg */
-.bubble-thinking {
-  align-self: flex-start;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 12px;
-  padding: 2px 4px;
-  width: 100%;
-}
-.bubble-thinking > details > summary {
-  cursor: pointer;
-  color: var(--text-dim);
-  font-style: italic;
-  user-select: none;
-}
-.bubble-thinking > details[open] > summary {
-  margin-bottom: 4px;
-}
-.bubble-thinking-text {
-  white-space: pre-wrap;
-  font-family: var(--mono);
-  color: var(--text-dim);
-  opacity: 0.8;
-  padding: 4px 8px;
-  border-left: 2px solid var(--border);
-  margin-left: 4px;
-  max-height: 300px;
-  overflow: auto;
-}
-
-.bubble-tool {
-  align-self: flex-start;
-  background: transparent;
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 2px 4px;
-}
-
-.bubble-tool pre {
-  margin: 6px 0 0;
-  max-height: 240px;
-  overflow: auto;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px;
-}
-
-/* Item 3: tool call one-line card + key:value args.
-   Scoped under .bubble-tool to avoid bleeding onto ToolTicker
-   which also uses .tool-name/.tool-args (DSF finding). */
-.bubble-tool .tool-call-line {
-  display: flex;
-  align-items: baseline;
-  gap: 2px;
-  flex-wrap: wrap;
-}
-.bubble-tool .tool-arrow {
-  color: var(--text-dim);
-  opacity: 0.6;
-  flex-shrink: 0;
-}
-.bubble-tool .tool-name {
-  color: var(--tok-fn, var(--link));
-  font-weight: 500;
-}
-.bubble-tool .tool-args {
-  color: var(--text-dim);
-}
-.bubble-tool .tool-arg-key {
-  color: var(--tok-keyword, #c08ae0);
-}
-.bubble-tool .tool-arg-val {
-  color: var(--tok-string, #d8a657);
-}
-.bubble-tool .tool-arg-raw {
-  color: var(--text-dim);
-}
-.bubble-tool .tool-args-details {
-  display: inline;
-}
-.bubble-tool .tool-args-details > summary {
-  display: inline;
-  cursor: pointer;
-  color: var(--text-dim);
-  font-size: 11px;
-}
-.bubble-tool .tool-args-list {
-  margin: 4px 0 0 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.bubble-tool .tool-arg-row {
-  display: flex;
-  gap: 6px;
-  font-size: 11px;
-}
-.bubble-tool .tool-arg-row .tool-arg-key {
-  flex-shrink: 0;
-  min-width: 60px;
-}
-.bubble-tool .tool-result-size {
-  color: var(--text-dim);
-  font-size: 10px;
-}
-.bubble-tool .tool-result-copy {
-  margin-top: 4px;
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-dim);
-  font-size: 10px;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-.bubble-tool .tool-result-copy:hover {
-  color: var(--text);
-  border-color: var(--accent);
-}
-
-.bubble-done {
-  align-self: flex-start;
-  background: transparent;
-  color: var(--ok-text);
-  border: 1px solid var(--ok);
-}
-
-.bubble-error {
-  align-self: flex-start;
-  background: var(--err-surface);
-  border: 1px solid var(--err);
-  color: var(--err-surface-text);
-}
-
-.bubble-review {
-  align-self: center;
-  background: transparent;
-  padding: 2px 4px;
-}
-
-.bubble-unknown {
-  align-self: flex-start;
-  background: var(--bg-raised);
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.bubble-icon {
-  font-weight: 700;
-  margin-right: 4px;
-}
-
+/* .badge base + .badge-accept/-reject/-other stay: LedgerPanel still
+   consumes them (blocked/refresh/actor variants ui/badge.tsx doesn't
+   cover). */
 .badge {
   display: inline-block;
   border-radius: 10px;
@@ -1569,14 +895,9 @@ body {
 
 /* ---------- M7 streaming preview ---------- */
 
-/* The in-flight block: dimmed + italic so it reads as provisional next to
-   the journaled bubbles. Replaced wholesale on every poll. */
-.bubble-preview {
-  opacity: 0.6;
-  font-style: italic;
-}
-
-/* Text previews end in a pulsing caret (ws-pulse is the existing pulse). */
+/* Preview dim/italic and spinner layout migrated to utilities on
+   ChatSurface.tsx's PreviewBubble. Text previews end in a pulsing caret
+   (ws-pulse is the existing pulse). */
 .preview-caret {
   display: inline-block;
   width: 8px;
@@ -1585,12 +906,6 @@ body {
   vertical-align: text-bottom;
   background: currentColor;
   animation: ws-pulse 1.1s ease-in-out infinite;
-}
-
-/* Tool previews lead with a spinning LoaderCircle (.spin on the SVG). */
-.preview-spinner {
-  display: inline-flex;
-  align-items: center;
 }
 
 .badge-accept {
@@ -1630,143 +945,16 @@ body {
 
 /* ---------- Diff viewer ---------- */
 
-.diff-card {
-  border-top: 1px solid var(--border);
-  background: var(--bg-raised);
-  display: flex;
-  flex-direction: column;
-}
-
-/* Tri-model: aggregate churn summary bar */
-.diff-churn-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 16px;
-  font-size: var(--text-caption);
-  border-bottom: 1px solid var(--border);
-}
-.diff-churn-bar .churn-add { color: var(--diff-add-text); font-weight: 500; }
-.diff-churn-bar .churn-del { color: var(--diff-del-text); font-weight: 500; }
-.diff-churn-files { color: var(--text-dim); }
-
-/* Tri-model right sidebar gap: editable commit message row on Accept */
-.diff-commit-editor {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 16px;
-  border-bottom: 1px solid var(--border);
-}
-.diff-commit-input {
-  flex: 1;
-  min-width: 0;
-  padding: 4px 8px;
-  font-size: var(--text-caption);
-  background: var(--bg-input, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  color: inherit;
-}
-.diff-commit-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.diff-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.diff-title {
-  font-weight: 600;
-}
-
-/* M15 (O-1 rung-0): the autonomy one-liner — a muted hint, never an
-   action surface. margin-right: auto keeps the toggle/actions pinned
-   right whether or not the hint is present. */
-.diff-autonomy {
-  margin-left: 12px;
-  margin-right: auto;
-  color: var(--text-dim);
-  font-size: var(--text-micro);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.diff-actions {
-  display: flex;
-  gap: 8px;
-}
+/* Card chrome, header/autonomy, churn bar, and commit-editor rules deleted:
+   migrated to Tailwind utilities in DiffViewer.tsx (class names survive as
+   inert DOM hooks). */
 
 /* btn-accept/btn-reject/btn-review/btn-comments style rules deleted (Phase
    6): DiffViewer now uses the CVA Button; the class names survive as inert
    identity markers for e2e selectors. */
-.diff-empty {
-  color: var(--text-dim);
-  padding: 12px 16px;
-}
-
-.diff-body {
-  margin: 0;
-  padding: 8px 0;
-  overflow: auto;
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.45;
-  background: var(--bg);
-}
-
-.diff-line {
-  padding: 0 16px;
-  white-space: pre;
-  word-break: normal;
-  overflow-x: auto;
-  position: relative;
-}
-
-.diff-add {
-  background: var(--diff-add-bg);
-  color: var(--diff-add-text);
-}
-
-.diff-del {
-  background: var(--diff-del-bg);
-  color: var(--diff-del-text);
-}
-
-.diff-hunk {
-  color: var(--text-dim);
-  font-style: italic;
-}
-
-.diff-gutter {
-  user-select: none;
-}
-
-/* #10: Line number gutter — real file line numbers from hunk headers */
-.diff-linenum {
-  display: inline-block;
-  width: 3em;
-  min-width: 3em;
-  text-align: right;
-  padding-right: 8px;
-  user-select: none;
-  color: var(--text-dim);
-  opacity: 0.55;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Variants referenced by DiffViewer (#10 + split view): the gutter color
-   tracks the row's add/del/context tint. */
-.diff-linenum-new { color: var(--diff-add-text); }
-.diff-linenum-old { color: var(--diff-del-text); }
-.diff-linenum-ctx { color: var(--text-dim); }
+/* diff-empty/.diff-body/.diff-line + add/del/hunk tints, .diff-gutter, and
+   the .diff-linenum gutter family deleted: migrated to Tailwind utilities
+   in DiffViewer.tsx. */
 
 /* ---------- Belt D: diff view toggle + split view ---------- */
 
@@ -1843,171 +1031,11 @@ body {
   word-break: normal;
 }
 
-.diff-line-old {
-  background: var(--diff-del-bg);
-  color: var(--diff-del-text);
-}
-
-.diff-line-new {
-  background: var(--diff-add-bg);
-  color: var(--diff-add-text);
-}
-
-/* Context rows sit on the column background — explicitly no tint. */
-.diff-line-context {
-  background: transparent;
-}
-
-/* Padding rows where the other column had the change. */
-.diff-line-empty {
-  background: transparent;
-}
-
-.diff-truncated {
-  padding: 8px 16px;
-  color: var(--text-dim);
-  font-style: italic;
-  border-top: 1px dashed var(--border);
-}
-
-/* P1-3: inline diff comment affordance */
-.diff-comment-btn {
-  position: absolute;
-  right: 6px;
-  top: 2px;
-  background: none;
-  border: none;
-  font-size: 12px;
-  cursor: pointer;
-  opacity: 0.4;
-  transition: opacity 0.15s ease;
-  padding: 0;
-  line-height: 1;
-}
-.diff-line:hover .diff-comment-btn,
-.diff-comment-btn.has-comment {
-  opacity: 1;
-}
-.diff-comment-box {
-  border-top: 1px solid var(--border);
-  padding: 8px 16px;
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-.diff-comment-box textarea {
-  flex: 1;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: var(--text-caption);
-  padding: 6px 8px;
-  resize: vertical;
-}
-.diff-comment-close {
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  padding: 4px 10px;
-  cursor: pointer;
-  font-size: var(--text-caption);
-  white-space: nowrap;
-}
-.diff-comment-close:hover {
-  color: var(--text);
-  border-color: var(--accent-user);
-}
-/* ---------- D0: diff file navigation chips ---------- */
-
-.diff-file-nav {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-raised);
-}
-
-/* Chips never shrink — the row scrolls horizontally instead. */
-.diff-file-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-input);
-  color: var(--text);
-  font: inherit;
-  font-family: var(--mono);
-  font-size: 11px;
-  padding: 2px 10px;
-  cursor: pointer;
-}
-
-.diff-file-chip:hover:not(:disabled) {
-  border-color: var(--text-dim);
-}
-
-/* Past the truncation cap: listed for context, but nothing is rendered
-   below to scroll to. */
-.diff-file-chip.truncated {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.diff-file-status {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-  background: var(--warn);
-}
-
-.diff-file-status[data-status="add"] {
-  background: var(--ok);
-}
-
-.diff-file-status[data-status="del"] {
-  background: var(--err);
-}
-
-.diff-file-status[data-status="mod"] {
-  background: var(--warn);
-}
-
-.diff-file-status[data-status="rename"] {
-  background: var(--link);
-}
-
-.diff-file-name {
-  white-space: nowrap;
-}
-
-.diff-file-churn {
-  display: inline-flex;
-  gap: 4px;
-}
-
-.churn-add {
-  color: var(--diff-add-text);
-}
-
-.churn-del {
-  color: var(--diff-del-text);
-}
-
-.diff-file-nav-note {
-  margin-left: auto;
-  flex: 0 0 auto;
-  color: var(--text-dim);
-  font-size: 11px;
-  font-style: italic;
-}
+/* Split row tints (.diff-line-old/-new/-context/-empty), .diff-truncated,
+   and the P1-3 comment affordance (.diff-comment-btn reveal, comment
+   box/close) deleted: migrated to Tailwind utilities in DiffViewer.tsx. */
+/* D0 file-nav chip rules (.diff-file-nav/-chip, status dots, churn colors,
+   nav note) deleted: migrated to Tailwind utilities in DiffViewer.tsx. */
 
 /* Token highlighting (see highlight.ts). Colors must read on the tinted
    add/del backgrounds as well as plain context lines. */
@@ -2209,133 +1237,13 @@ body {
 /* ---------- M2: diff review ---------- */
 
 /* .btn-review deleted (Phase 6): CVA Button variant="default". */
-.diff-card.review-rejected {
-  border-top: 2px solid var(--err);
-  box-shadow: inset 0 0 0 1px rgba(195, 74, 74, 0.35);
-}
-
-.review-error {
-  padding: 10px 16px;
-  color: var(--err-text);
-  font-size: 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.review-results {
-  border-bottom: 1px solid var(--border);
-  padding: 4px 0;
-}
-
-/* A4-lite: consensus badge — deterministic unanimous tally */
-.review-consensus {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.review-consensus-label {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.review-empty {
-  padding: 10px 16px;
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
-.review-item {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.review-item:last-child {
-  border-bottom: none;
-}
-
-.review-item-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.review-model {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text);
-}
-
-.verdict-badge {
-  display: inline-block;
-  border-radius: 10px;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: capitalize;
-}
-
-.verdict-accept {
-  background: rgba(63, 163, 95, 0.15);
-  color: var(--ok-text);
-  border: none;
-}
-
-.verdict-reject {
-  background: rgba(195, 74, 74, 0.12);
-  color: var(--err-text);
-  border: none;
-}
-
-.verdict-needs_fixes {
-  background: rgba(204, 167, 66, 0.12);
-  color: var(--warn);
-  border: none;
-}
-
-.review-comments {
-  margin: 8px 0 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  white-space: pre-wrap;
-}
-
-/* ---------- M3: memory recall chip ---------- */
-
-/* Sits on the blue user bubble; quieter than the attachment chips so memory
-   recall reads as metadata, not content. */
-.recall-chip {
-  display: inline-block;
-  margin-top: 6px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 12px;
-  padding: 1px 8px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.72);
-}
+/* Review chrome (.diff-card.review-rejected, review-error/-results/
+   -consensus/-empty/-item/-model/-comments) and the verdict-badge family
+   deleted: migrated to Tailwind utilities + the CVA Badge in DiffViewer.tsx
+   (MemoryPanel consumes the same Badge); class names survive as inert e2e
+   hooks. */
 
 /* ---------- M3: run status bar (spec §3a) ---------- */
-
-/* Fixed between the scrolling message list and the composer, so it stays
-   visible regardless of scroll position. */
-.run-status {
-  flex-shrink: 0;
-  padding: 4px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------- Belt C: run grouping (spec §Fix 1) ---------- */
 
 /* Run group: must be a flex column so child bubbles retain their
    align-self (left/right) alignment from .message-list's flex context.
@@ -2344,71 +1252,8 @@ body {
    scroll-to-match via data-seq). The newest run-group is always
    rendered normally because stick-to-bottom keeps it in view. */
 .run-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
   content-visibility: auto;
   contain-intrinsic-size: auto 200px;
-}
-
-/* Run separator: a thin line with the run metadata line sitting on top
-   of each group. */
-.run-header {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 8px 4px 2px;
-  border-top: 1px solid var(--stroke-tertiary);
-  color: var(--text-dim);
-  font-size: var(--text-caption);
-  font-variant-numeric: tabular-nums;
-}
-
-/* The bare .run-status class belongs to the live-run bar under the
-   message list (M3); scoped overrides keep the header icon inline. */
-.run-header .run-status {
-  padding: 0;
-  border-top: none;
-  background: none;
-  font-family: inherit;
-  font-size: inherit;
-}
-
-.run-header .run-status.done {
-  color: var(--ok-text);
-}
-
-.run-header .run-status.error {
-  color: var(--err-text);
-}
-
-.run-header .run-status.running {
-  color: var(--accent-user);
-}
-
-/* Consecutive tool events collapse under one native <details> toggle. */
-.tool-group {
-  margin: 4px 0;
-}
-
-.tool-group summary {
-  cursor: pointer;
-  color: var(--text-dim);
-  font-size: 12px;
-  padding: 2px 4px;
-  border-radius: 4px;
-  user-select: none;
-}
-
-.tool-group summary:hover {
-  color: var(--text);
-  background: var(--bg-input);
-}
-
-.tool-group[open] summary {
-  color: var(--text);
-  margin-bottom: 4px;
 }
 
 /* ---------- M3: workstream badges (spec §3c) ---------- */
@@ -2511,269 +1356,6 @@ body {
 /* MessageBubble's data-seq jump anchor; layout stays with the bubbles. */
 .bubble-mount {
   display: contents;
-}
-
-.markdown h1,
-.markdown h2,
-.markdown h3,
-.markdown h4 {
-  margin: 10px 0 4px;
-  line-height: 1.3;
-  font-weight: 600;
-}
-
-.markdown h1:first-child,
-.markdown h2:first-child,
-.markdown h3:first-child,
-.markdown h4:first-child,
-.markdown p:first-child,
-.markdown ul:first-child,
-.markdown ol:first-child,
-.markdown blockquote:first-child,
-.markdown .bubble-code-wrap:first-child {
-  margin-top: 0;
-}
-
-/* M11 F4: GFM tables */
-.md-table {
-  border-collapse: collapse;
-  width: 100%;
-  margin: 6px 0;
-  font-size: 12px;
-}
-.md-table th,
-.md-table td {
-  border: 1px solid var(--border);
-  padding: 4px 8px;
-  text-align: left;
-}
-.md-table th {
-  background: var(--bg-raised);
-  font-weight: 600;
-}
-.md-table tbody tr:nth-child(even) {
-  background: var(--bg-raised);
-}
-
-.markdown h1 { font-size: 18px; }
-.markdown h2 { font-size: 16px; }
-.markdown h3 { font-size: 15px; }
-.markdown h4 { font-size: 14px; }
-
-.markdown p {
-  margin: 6px 0;
-}
-
-.markdown ul,
-.markdown ol {
-  margin: 4px 0;
-  padding-left: 22px;
-}
-
-.markdown li {
-  margin: 2px 0;
-}
-
-.markdown blockquote {
-  margin: 6px 0;
-  padding: 2px 10px;
-  border-left: 3px solid var(--border);
-  color: var(--text-dim);
-}
-
-.markdown hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 8px 0;
-}
-
-/* GFM alert callouts (Item 7). */
-.md-alert {
-  margin: 8px 0;
-  padding: 6px 12px;
-  border-radius: 6px;
-  border-left: 3px solid var(--border);
-}
-.md-alert-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  margin-bottom: 2px;
-}
-.md-alert-body {
-  color: var(--text-dim);
-  font-size: 13px;
-}
-.md-alert-note { border-left-color: var(--link); background: rgba(122, 162, 247, 0.06); }
-.md-alert-note .md-alert-label { color: var(--link); }
-.md-alert-warning, .md-alert-important { border-left-color: var(--warn); background: rgba(204, 167, 66, 0.06); }
-.md-alert-warning .md-alert-label, .md-alert-important .md-alert-label { color: var(--warn); }
-.md-alert-tip { border-left-color: var(--ok-text); background: rgba(63, 163, 95, 0.06); }
-.md-alert-tip .md-alert-label { color: var(--ok-text); }
-.md-alert-caution { border-left-color: var(--err, #c34a4a); background: rgba(195, 74, 74, 0.06); }
-.md-alert-caution .md-alert-label { color: var(--err, #c34a4a); }
-
-/* GFM task lists (Item 7). */
-.md-task-item {
-  list-style: none;
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-.md-task-item input[type="checkbox"] {
-  margin: 0;
-  accent-color: var(--ok-text);
-}
-.md-task-done {
-  text-decoration: line-through;
-  color: var(--text-dim);
-}
-
-/* Strikethrough (Item 7). */
-.markdown del {
-  color: var(--text-dim);
-}
-
-/* Inline images + click-to-zoom lightbox. */
-.md-inline-img {
-  max-width: 100%;
-  border-radius: 8px;
-  cursor: zoom-in;
-  margin: 4px 0;
-  border: 1px solid var(--border);
-  transition: opacity 0.15s;
-}
-.md-inline-img:hover {
-  opacity: 0.9;
-}
-/* Image lightbox migrated to Radix Dialog (Phase 5); .md-img-lightbox and
-   the now-unused md-img-fade-in keyframes deleted. */
-.md-img-zoomed {
-  max-width: 90vw;
-  max-height: 90vh;
-  border-radius: 4px;
-  object-fit: contain;
-}
-
-.markdown a {
-  color: var(--link);
-}
-
-/* Fenced code block (also used by chat search's <mark> inside tokens). */
-.markdown .bubble-code-wrap {
-  margin: 6px 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.bubble-code-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 2px 8px;
-  background: var(--bg-raised);
-  border-bottom: 1px solid var(--border);
-  font-size: 11px;
-}
-.bubble-code-lang {
-  color: var(--text-dim);
-  font-family: var(--mono);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 10px;
-}
-.bubble-code-copy {
-  background: none;
-  border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.bubble-code-copy:hover {
-  background: var(--bg);
-  color: var(--text);
-}
-.markdown .bubble-code {
-  margin: 0;
-  padding: 8px 10px;
-  background: var(--bg);
-  font-family: var(--mono);
-  font-size: 12px;
-  overflow-x: auto;
-  border: none;
-  border-radius: 0;
-}
-
-.bubble-inline-code {
-  background: var(--code-chip-bg);
-  border-radius: 4px;
-  padding: 0 4px;
-  font-family: var(--mono);
-  font-size: 0.92em;
-}
-
-/* ---------- Belt B: chat search (⌘F) ---------- */
-
-.search-bar {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--panel-float);
-  backdrop-filter: blur(6px);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-}
-
-.search-bar input {
-  width: 220px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  padding: 5px 9px;
-  font: inherit;
-}
-
-.search-bar input:focus {
-  outline: none;
-  border-color: var(--accent-user);
-}
-
-.search-count {
-  color: var(--text-dim);
-  font-size: 12px;
-  min-width: 44px;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.search-bar button {
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: var(--text-dim);
-  font: inherit;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-
-.search-bar button:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--bg-input);
-}
-
-.search-bar button:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 mark {
@@ -2887,67 +1469,12 @@ mark {
    utilities on .context-panel in ContextPanel.tsx (z-index 90, below the
    settings overlay at 100). */
 
-/* ---------- M9 Phase 5: StatusBar badges + adapter ---------- */
+/* ---------- M9 Phase 5: StatusBar badges + adapter ----------
 
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-dim);
-  font-size: 10px;
-  font-family: var(--mono);
-  padding: 1px 5px;
-  cursor: pointer;
-  line-height: 1.4;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.status-badge:hover {
-  color: var(--text);
-  background: var(--bg-input);
-  border-color: var(--text-dim);
-}
-
-/* Wave A (#1): background-run dropdown + StatusBar popover family —
-   migrated to Radix Popover + Tailwind (Phase 6). .bg-runs-wrap and the
-   .bg-runs-menu positioning/surface chrome deleted; .bg-runs-menu survives
-   as an inert marker class on PopoverContent. Row content styles stay. */
-.bg-run-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 5px 7px;
-  background: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.bg-run-row:hover {
-  background: var(--bg-input);
-}
-
-.bg-run-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bg-run-state {
-  flex-shrink: 0;
-  color: var(--text-dim);
-  font-size: 10px;
-}
+   .status-badge(+hover) chrome and the .bg-run-row(+hover)/.bg-run-name/
+   .bg-run-state family deleted: STATUS_BADGE/BG_RUN_ROW utility strings in
+   StatusBar.tsx; classes survive as inert e2e/theme hooks (the waves A
+   bg-flash-* rules below STAY — flash animations layered on the markers). */
 
 /* Wave A (#1): completion flash — a bg run drained from the list; the ok
    tint matches the accept badge. `role=status` span, so no hover/cursor. */
@@ -2969,19 +1496,13 @@ mark {
   background: color-mix(in srgb, var(--bg-run) 15%, transparent);
 }
 
-/* ---------- GUI Wave B: context meter + review-panel chip ---------- */
+/* ---------- GUI Wave B: context meter + review-panel chip ----------
 
-/* Wave B #5: the meter button keeps the neutral badge chrome; only the
-   ring stroke and the inline percent tint by pressure tier. */
-.ctx-meter {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.ctx-meter.meter-ok { color: var(--ok-text); }
-.ctx-meter.meter-warn { color: var(--warn); }
-.ctx-meter.meter-err { color: var(--err-text); }
+   Wave B #5 (unchanged behavior): the meter button keeps the neutral badge
+   chrome; only the ring stroke and the inline percent tint by pressure tier.
+   Deleted: .ctx-meter gap + .meter-ok/-warn/-err color rules — the tier tint
+   is now a cn() map on METER_TIERS in StatusBar.tsx (markers kept). The
+   .ctx-ring* geometry below STAYS. */
 
 /* Ring starts at 12 o'clock: unconsumed context is the neutral track. */
 .ctx-ring {
@@ -3003,105 +1524,18 @@ mark {
   transition: stroke-dasharray var(--dur) var(--ease-standard);
 }
 
-/* Popovers widen the Radix PopoverContent base — a long path never grows
-   past the window edge. */
-.ctx-meter-popover,
-.panel-chip-popover,
-.omp-usage-popover {
-  min-width: 260px;
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: 8px;
-}
-
-/* Section titles match the skills-list micro-caps convention. */
-.ctx-pop-title {
-  padding: 2px 4px 6px;
-  color: var(--text-dim);
-  font-size: var(--text-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.ctx-layers-title {
-  padding-top: 6px;
-  border-top: 1px solid var(--stroke-tertiary);
-}
-
-.ctx-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 2px 4px;
-  font-size: var(--text-micro);
-}
-
-.ctx-key {
-  flex-shrink: 0;
-  width: 64px;
-  color: var(--text-dim);
-}
-
-.ctx-val {
-  min-width: 0;
-  color: var(--text);
-}
-
-.ctx-dim {
-  color: var(--text-dim);
-}
-
-/* Verbatim receipt keys: one per line, scrollable when the daemon
-   injected many layers (the list IS the journal truth, never grouped). */
-.ctx-layers {
-  margin: 0;
-  padding: 0 4px;
-  list-style: none;
-  max-height: 160px;
-  overflow-y: auto;
-}
-
-.ctx-layer {
-  padding: 1px 0;
-  font-size: var(--text-micro);
-  color: var(--text);
-  overflow-wrap: anywhere;
-}
-
-/* Wave B #9: panel rows mirror .bg-run-row but are display-only (no
-   click target — the chip points at Settings for edits). */
-.panel-model-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
-}
-
-.panel-model-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-micro);
-  color: var(--text);
-}
-
-.panel-model-provider {
-  flex-shrink: 0;
-  color: var(--text-dim);
-  font-size: 10px;
-}
+/* StatusBar popover + OMP family deleted: shared popover shell
+   (.ctx-meter-popover/.panel-chip-popover/.omp-usage-popover), section
+   titles (.ctx-pop-title/.ctx-layers-title), rows (.ctx-row/.ctx-key/
+   .ctx-val/.ctx-dim), the verbatim layers list (.ctx-layers/.ctx-layer),
+   Wave B #9 .panel-model-*, the .auto-land-chip base chrome +
+   .is-blocked/.is-suspended tints, .auto-land-popover, .auto-land-row-icon,
+   the .auto-land-row.is-* tints, .auto-land-row-detail, and the whole .omp-*
+   family (usage chip, grievance badge/sections, provider groups, limit
+   rows/bars/status/resets, grievances) — all now Tailwind utilities + cn()
+   tier maps in StatusBar.tsx; class names survive as inert e2e/theme hooks. */
 
 /* ---------- Auto-land pipeline chip (design lock: GUI-only Phase 1) ---------- */
-
-/* Neutral badge chrome like the panel chip; only the phase tint differs.
-   Active phases keep the spinner icon — no background noise while working. */
-.auto-land-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
 
 /* Landed is a brief green flash (≤4s), same posture as .bg-flash-done. */
 .auto-land-chip.is-landed {
@@ -3109,239 +1543,6 @@ mark {
   border-color: var(--ok-text);
   background: rgba(63, 163, 95, 0.15);
   animation: overlay-fade 0.15s var(--ease-standard);
-}
-
-.auto-land-chip.is-blocked {
-  color: var(--err-text);
-  border-color: var(--err-text);
-}
-
-.auto-land-chip.is-suspended {
-  color: var(--warn);
-  border-color: var(--warn);
-}
-
-/* Popover: one clickable row per tracked diff (Review tab is the jump
-   target). Row chrome reuses .bg-run-row; the phase tint lives on the
-   icon and the trailing detail. */
-.auto-land-popover {
-  min-width: 240px;
-}
-
-.auto-land-row-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-}
-
-.auto-land-row.is-blocked .auto-land-row-icon,
-.auto-land-row.is-blocked .auto-land-row-detail {
-  color: var(--err-text);
-}
-
-.auto-land-row.is-suspended .auto-land-row-icon,
-.auto-land-row.is-suspended .auto-land-row-detail {
-  color: var(--warn);
-}
-
-.auto-land-row.is-landed .auto-land-row-icon,
-.auto-land-row.is-landed .auto-land-row-detail {
-  color: var(--ok-text);
-}
-
-.auto-land-row-detail {
-  flex-shrink: 0;
-  margin-left: auto;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-dim);
-  font-size: var(--text-micro);
-}
-
-/* Wave B #8: per-turn stats strip — an extra span inside .run-header,
-   dimmer than the header's own facts (the header stays the narrative;
-   the strip is auxiliary telemetry). */
-.run-turn-stats {
-  color: var(--text-dim);
-  font-size: 10px;
-}
-
-/* Item 10: diff review outcome badge in the run header. */
-.run-diff-outcome {
-  font-size: 10px;
-  font-weight: 500;
-  padding: 1px 6px;
-  border-radius: 4px;
-  margin-left: 4px;
-}
-.run-diff-outcome.accept {
-  color: var(--ok-text);
-  background: rgba(63, 163, 95, 0.1);
-}
-.run-diff-outcome.reject {
-  color: var(--err, #c34a4a);
-  background: rgba(195, 74, 74, 0.1);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-
-/* ---------- P2 (OMP stats): usage chip + popover ---------- */
-
-.omp-usage-chip {
-  gap: 4px;
-}
-
-.omp-usage-chip.omp-unavailable {
-  opacity: 0.6;
-}
-
-.omp-grievance-badge {
-  margin-left: 2px;
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-  background: var(--err-surface);
-  color: var(--err-surface-text);
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 14px;
-}
-
-.omp-usage-popover {
-  min-width: 300px;
-}
-
-.omp-section {
-  padding: 4px;
-  font-size: var(--text-micro);
-  color: var(--text-dim);
-}
-
-.omp-loading {
-  color: var(--text-dim);
-}
-
-.omp-error-text {
-  color: var(--err-text);
-  font-size: var(--text-micro);
-  padding: 4px;
-}
-
-.omp-error-line {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.omp-dim {
-  color: var(--text-dim);
-  font-size: var(--text-micro);
-  padding: 4px;
-}
-
-.omp-provider-group {
-  padding: 6px 4px;
-  border-top: 1px solid var(--stroke-tertiary);
-}
-
-.omp-provider-group:first-of-type {
-  border-top: none;
-}
-
-.omp-provider-name {
-  font-size: var(--text-micro);
-  font-weight: 600;
-  color: var(--text);
-  padding: 2px 0 4px;
-}
-
-.omp-limit-row {
-  padding: 2px 0 4px 8px;
-}
-
-.omp-limit-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.omp-limit-label {
-  font-size: var(--text-micro);
-  color: var(--text-dim);
-}
-
-.omp-limit-value {
-  font-size: var(--text-micro);
-  color: var(--text);
-}
-
-.omp-limit-pct {
-  color: var(--text-dim);
-}
-
-.omp-bar-track {
-  height: 4px;
-  margin: 3px 0 2px;
-  border-radius: 2px;
-  background: var(--bg-tertiary);
-  overflow: hidden;
-}
-
-.omp-bar-fill {
-  height: 100%;
-  border-radius: 2px;
-  transition: width 0.3s ease;
-}
-
-.omp-bar-fill.meter-ok {
-  background: var(--ok);
-}
-
-.omp-bar-fill.meter-warn {
-  background: var(--warn);
-}
-
-.omp-bar-fill.meter-err {
-  background: var(--err);
-}
-
-.omp-limit-resets {
-  font-size: 10px;
-  color: var(--text-dim);
-  padding-left: 8px;
-}
-
-.omp-limit-status {
-  color: var(--err-text);
-}
-
-.omp-grievances-section {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 4px 2px;
-  border-top: 1px solid var(--stroke-tertiary);
-}
-
-.omp-grievances-label {
-  font-size: var(--text-micro);
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.omp-grievances-count {
-  font-size: var(--text-micro);
-  color: var(--text);
-  font-weight: 600;
 }
 
 /* ---------- P1a: ReviewInbox (cross-workstream aggregate). Mirrors the

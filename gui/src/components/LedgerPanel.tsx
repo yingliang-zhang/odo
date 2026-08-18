@@ -60,9 +60,11 @@ const RISK_LEVEL_STYLE: Record<string, string> = {
   none: "clean",
 };
 
-// Outcome badges the chat transcript doesn't already style (badge-accept /
-// badge-reject / badge-other rules stay in app.css — DiffViewer and
-// MessageBubble share them). Values translated 1:1 from the deleted rules.
+// Outcome badges the transcript doesn't already style. The .badge base +
+// badge-accept/badge-reject/badge-other rules stay in app.css for this
+// panel alone — MessageBubble/DiffViewer/MemoryPanel now use the shared CVA
+// Badge (ui/badge.tsx). Delete the four rules when this panel migrates.
+// Values translated 1:1 from the deleted rules.
 const OUTCOME_BADGE_UTIL: Record<string, string> = {
   "badge-blocked": "bg-[rgba(204,167,66,0.14)] text-[var(--warn)] border border-[var(--warn)]",
   "badge-refresh":

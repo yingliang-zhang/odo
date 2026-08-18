@@ -5,6 +5,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { cn } from "../lib/utils";
 import {
   BYTES_PER_TOKEN,
   contextWindowTokens,
@@ -116,10 +117,41 @@ interface Props {
 // glm's ~35% trigger doesn't look alarming; see modelspec for the real
 // per-model triggers).
 const METER_TIERS = [
-  { max: 50, cls: "meter-ok" },
-  { max: 80, cls: "meter-warn" },
-  { max: Infinity, cls: "meter-err" },
+  { max: 50, cls: "meter-ok", color: "text-ok-text" },
+  { max: 80, cls: "meter-warn", color: "text-warn" },
+  { max: Infinity, cls: "meter-err", color: "text-err-text" },
 ];
+
+// Chip chrome — was .status-badge in app.css (deleted). The marker class
+// stays as an e2e/theme hook; the flash rules (.bg-flash-done/-new,
+// .auto-land-chip.is-landed) remain in app.css and, being unlayered, win
+// over these layered utilities exactly as they won over the old rules.
+const STATUS_BADGE =
+  "status-badge inline-flex cursor-pointer items-center gap-[3px] whitespace-nowrap rounded border border-border bg-transparent px-[5px] py-px font-mono text-[10px] leading-[1.4] text-text-dim tabular-nums hover:border-text-dim hover:bg-bg-input hover:text-text";
+
+// Clickable popover rows — was .bg-run-row/.bg-run-name/.bg-run-state.
+const BG_RUN_ROW =
+  "bg-run-row flex w-full cursor-pointer items-center gap-2 rounded-sm bg-transparent px-[7px] py-[5px] text-left text-text hover:bg-bg-input";
+const BG_RUN_NAME =
+  "bg-run-name min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap";
+const BG_RUN_STATE = "bg-run-state shrink-0 text-[10px] text-text-dim";
+
+// Background-run status dot — was .ws-dot + .ws-dot.dot-bg in app.css.
+// Base dot utilities mirror Sidebar's dotClass base.
+const WS_DOT_BG =
+  "ws-dot dot-bg pulse size-2 shrink-0 rounded-full bg-bg-run shadow-[0_0_0_2px_color-mix(in_srgb,var(--bg-run)_22%,transparent)]";
+
+// Popover section title — was .ctx-pop-title. Font sizes in cn()-merged
+// strings use the length: escape (twoMerge treats the bare text-micro theme
+// utility as a color and would drop it next to text-text-dim).
+const CTX_POP_TITLE =
+  "ctx-pop-title px-1 pb-1.5 pt-0.5 text-[length:var(--text-micro)] uppercase tracking-[0.06em] text-text-dim";
+// Receipt-layer list item — was .ctx-layer.
+const CTX_LAYER =
+  "ctx-layer wrap-anywhere py-px text-[length:var(--text-micro)] text-text";
+// Usage bar fill — was .omp-bar-fill.
+const OMP_BAR_FILL =
+  "omp-bar-fill h-full rounded-[2px] transition-[width] duration-300 ease-[ease]";
 
 // Wave B #5: context-pressure ring — the journaled byte total of the last
 // prompt vs the coding model's context window (window tokens × ~4
@@ -148,7 +180,7 @@ function ContextMeter({
   // freezing at the last send. Capped at 999% to match the old clamp.
   const liveBytes = snapshot.bytes + liveDelta;
   const pct = Math.min(999, Math.round((liveBytes / windowBytes) * 100));
-  const tier = METER_TIERS.find((t) => pct < t.max)!.cls;
+  const tier = METER_TIERS.find((t) => pct < t.max)!;
 
   // SVG ring: r=6 in a 14px box, circumference ≈ 37.7.
   const C = 2 * Math.PI * 6;
@@ -159,7 +191,7 @@ function ContextMeter({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={`status-badge ctx-meter ${tier}`}
+          className={cn(STATUS_BADGE, "ctx-meter gap-1", tier.cls, tier.color)}
           title={`Context: ${formatBytes(liveBytes)} of ~${formatTokens(windowBytes / BYTES_PER_TOKEN)} window${codingModel ? ` (${codingModel})` : ""}${liveDelta > 0 ? " · ~live estimate" : ""} — click for composition`}
           aria-haspopup="dialog"
           aria-expanded={open}
@@ -185,63 +217,63 @@ function ContextMeter({
         sideOffset={6}
         role="dialog"
         aria-label={strings.statusbar.promptCompositionLabel}
-        // bg-runs-menu survives as an inert identity marker (e2e
-        // background-runs.spec); its positioning CSS is deleted in app.css.
-        className="bg-runs-menu ctx-meter-popover"
+        // bg-runs-menu + ctx-meter-popover survive as inert identity markers
+        // (e2e background-runs.spec); sizing/padding now utilities.
+        className="bg-runs-menu ctx-meter-popover max-h-[60vh] min-w-[260px] overflow-y-auto p-2"
       >
-          <div className="ctx-pop-title">
+          <div className={CTX_POP_TITLE}>
             last prompt — seq #{snapshot.seq}
           </div>
-          <div className="ctx-row">
-            <span className="ctx-key">total</span>
-            <span className="ctx-val mono">
+          <div className="ctx-row flex items-baseline gap-2 px-1 py-0.5 text-micro">
+            <span className="ctx-key w-16 shrink-0 text-text-dim">total</span>
+            <span className="ctx-val mono min-w-0 text-text">
               {formatBytes(snapshot.bytes)}
-              {snapshot.sha16 != null && <span className="ctx-dim"> · sha16 {snapshot.sha16}</span>}
+              {snapshot.sha16 != null && <span className="ctx-dim text-text-dim"> · sha16 {snapshot.sha16}</span>}
             </span>
           </div>
-          <div className="ctx-row">
-            <span className="ctx-key">window</span>
-            <span className="ctx-val mono">
+          <div className="ctx-row flex items-baseline gap-2 px-1 py-0.5 text-micro">
+            <span className="ctx-key w-16 shrink-0 text-text-dim">window</span>
+            <span className="ctx-val mono min-w-0 text-text">
               ~{formatTokens(contextWindowTokens(codingModel))}
-              {codingModel != null && <span className="ctx-dim"> · {codingModel}</span>}
+              {codingModel != null && <span className="ctx-dim text-text-dim"> · {codingModel}</span>}
             </span>
           </div>
           {snapshot.replay != null && (
             <>
-              <div className="ctx-row">
-                <span className="ctx-key">replay</span>
-                <span className="ctx-val mono">
+              <div className="ctx-row flex items-baseline gap-2 px-1 py-0.5 text-micro">
+                <span className="ctx-key w-16 shrink-0 text-text-dim">replay</span>
+                <span className="ctx-val mono min-w-0 text-text">
                   {formatBytes(snapshot.replay.bytes)}
-                  <span className="ctx-dim">
+                  <span className="ctx-dim text-text-dim">
                     {" "}· seqs {snapshot.replay.first_seq}–{snapshot.replay.last_seq}
                   </span>
                 </span>
               </div>
               {snapshot.replay.dropped_seqs != null && snapshot.replay.dropped_seqs.length === 2 && (
-                <div className="ctx-row">
-                  <span className="ctx-key">dropped</span>
-                  <span className="ctx-val mono">
+                <div className="ctx-row flex items-baseline gap-2 px-1 py-0.5 text-micro">
+                  <span className="ctx-key w-16 shrink-0 text-text-dim">dropped</span>
+                  <span className="ctx-val mono min-w-0 text-text">
                     seqs {snapshot.replay.dropped_seqs[0]}–{snapshot.replay.dropped_seqs[1]}
-                    <span className="ctx-dim"> · odo journal range {snapshot.replay.dropped_seqs[0]} {snapshot.replay.dropped_seqs[1]}</span>
+                    <span className="ctx-dim text-text-dim"> · odo journal range {snapshot.replay.dropped_seqs[0]} {snapshot.replay.dropped_seqs[1]}</span>
                   </span>
                 </div>
               )}
             </>
           )}
           {snapshot.recallHeldBack != null && snapshot.recallHeldBack > 0 && (
-            <div className="ctx-row">
-              <span className="ctx-key">held back</span>
-              <span className="ctx-val mono">{snapshot.recallHeldBack} recall note{snapshot.recallHeldBack === 1 ? "" : "s"}</span>
+            <div className="ctx-row flex items-baseline gap-2 px-1 py-0.5 text-micro">
+              <span className="ctx-key w-16 shrink-0 text-text-dim">held back</span>
+              <span className="ctx-val mono min-w-0 text-text">{snapshot.recallHeldBack} recall note{snapshot.recallHeldBack === 1 ? "" : "s"}</span>
             </div>
           )}
-          <div className="ctx-pop-title ctx-layers-title">
+          <div className={cn(CTX_POP_TITLE, "ctx-layers-title border-t border-stroke-tertiary pt-1.5")}>
             injected layers — receipt keys, verbatim ({snapshot.layers.length})
           </div>
-          <ul className="ctx-layers">
+          <ul className="ctx-layers m-0 max-h-[160px] list-none overflow-y-auto px-1">
             {snapshot.layers.map((k) => (
-              <li key={k} className="ctx-layer mono">{k}</li>
+              <li key={k} className={cn(CTX_LAYER, "mono")}>{k}</li>
             ))}
-            {snapshot.layers.length === 0 && <li className="ctx-layer ctx-dim">no receipt journaled</li>}
+            {snapshot.layers.length === 0 && <li className={cn(CTX_LAYER, "ctx-dim text-text-dim")}>no receipt journaled</li>}
           </ul>
       </PopoverContent>
     </Popover>
@@ -259,7 +291,7 @@ function PanelChip({ models }: { models: PanelModel[] }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="status-badge panel-chip"
+          className={cn(STATUS_BADGE, "panel-chip")}
           title={`Review panel: ${models.map((m) => m.model).join(", ")} — composition set in Settings`}
           aria-haspopup="dialog"
           aria-expanded={open}
@@ -274,15 +306,15 @@ function PanelChip({ models }: { models: PanelModel[] }) {
         sideOffset={6}
         role="dialog"
         aria-label={strings.statusbar.reviewPanelLabel}
-        className="bg-runs-menu panel-chip-popover"
+        className="bg-runs-menu panel-chip-popover max-h-[60vh] min-w-[260px] overflow-y-auto p-2"
       >
-        <div className="ctx-pop-title">{strings.statusbar.reviewPanelReadonlyTitle}</div>
+        <div className={CTX_POP_TITLE}>{strings.statusbar.reviewPanelReadonlyTitle}</div>
         {models.map((m) => (
-           <div key={`${m.model}@${m.provider}`} className="panel-model-row">
-            <span className="panel-model-name mono" title={`${m.model}@${m.provider}`}>
+           <div key={`${m.model}@${m.provider}`} className="panel-model-row flex items-center gap-2 px-1.5 py-1">
+            <span className="panel-model-name mono min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-micro text-text" title={`${m.model}@${m.provider}`}>
               {m.model}
             </span>
-            <span className="panel-model-provider">{m.provider}</span>
+            <span className="panel-model-provider shrink-0 text-[10px] text-text-dim">{m.provider}</span>
           </div>
         ))}
       </PopoverContent>
@@ -352,6 +384,19 @@ function pipelineIcon(phase: PipelinePhase) {
   return <Ban size={11} aria-hidden="true" />;
 }
 
+// Phase tints — was .auto-land-chip.is-blocked/.is-suspended and the
+// .auto-land-row.is-* descendant rules in app.css. The is-landed flash
+// rule STAYS in app.css, so landed gets its marker but zero utilities.
+const PHASE_CHIP_TINT: Partial<Record<PipelinePhase, string>> = {
+  blocked: "border-err-text text-err-text",
+  suspended: "border-warn text-warn",
+};
+const PHASE_ROW_TINT: Partial<Record<PipelinePhase, string>> = {
+  blocked: "text-err-text",
+  suspended: "text-warn",
+  landed: "text-ok-text",
+};
+
 function PipelineChip({
   states,
   onOpenReview,
@@ -389,7 +434,7 @@ function PipelineChip({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={`status-badge auto-land-chip is-${dominant.phase}`}
+          className={cn(STATUS_BADGE, "auto-land-chip gap-1", `is-${dominant.phase}`, PHASE_CHIP_TINT[dominant.phase])}
           title={visible.map((s) => `diff ${s.diffId}: ${pipelineLabel(s)}`).join(" · ")}
           aria-haspopup="dialog"
           aria-expanded={open}
@@ -404,23 +449,23 @@ function PipelineChip({
         sideOffset={6}
         role="dialog"
         aria-label="Auto-land pipeline"
-        className="bg-runs-menu auto-land-popover"
+        className="bg-runs-menu auto-land-popover min-w-[240px]"
       >
-        <div className="ctx-pop-title">auto-land — current status</div>
+        <div className={CTX_POP_TITLE}>auto-land — current status</div>
         {visible.map((s) => (
           <button
             key={s.diffId}
             type="button"
-            className={`bg-run-row auto-land-row is-${s.phase}`}
+            className={cn(BG_RUN_ROW, "auto-land-row", `is-${s.phase}`)}
             title={pipelineLabel(s)}
             onClick={() => {
               setOpen(false);
               onOpenReview();
             }}
           >
-            <span className="auto-land-row-icon" aria-hidden="true">{pipelineIcon(s.phase)}</span>
-            <span className="bg-run-name">Diff #{s.diffId}</span>
-            <span className="auto-land-row-detail">{pipelineLabel(s)}</span>
+            <span className={cn("auto-land-row-icon inline-flex shrink-0", PHASE_ROW_TINT[s.phase])} aria-hidden="true">{pipelineIcon(s.phase)}</span>
+            <span className={BG_RUN_NAME}>Diff #{s.diffId}</span>
+            <span className={cn("auto-land-row-detail ml-auto max-w-[180px] shrink-0 overflow-hidden text-ellipsis whitespace-nowrap text-[length:var(--text-micro)] text-text-dim", PHASE_ROW_TINT[s.phase])}>{pipelineLabel(s)}</span>
           </button>
         ))}
       </PopoverContent>
@@ -435,10 +480,11 @@ function PipelineChip({
 // is missing or timed out.
 const OMP_POLL_INTERVAL = 60_000;
 
-function usageTier(pct: number): string {
-  if (pct >= 90) return "meter-err";
-  if (pct >= 70) return "meter-warn";
-  return "meter-ok";
+// Bar tiers mirror METER_TIERS' intent (was .omp-bar-fill.meter-*).
+function usageTier(pct: number): { cls: string; bar: string } {
+  if (pct >= 90) return { cls: "meter-err", bar: "bg-err" };
+  if (pct >= 70) return { cls: "meter-warn", bar: "bg-warn" };
+  return { cls: "meter-ok", bar: "bg-ok" };
 }
 
 function formatResetsAt(resetsAt: number): string {
@@ -501,7 +547,7 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
     return (
       <button
         type="button"
-        className="status-badge omp-usage-chip omp-unavailable"
+        className={cn(STATUS_BADGE, "omp-usage-chip omp-unavailable gap-1 opacity-60")}
         title="OMP stats unavailable"
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -518,14 +564,14 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="status-badge omp-usage-chip"
+          className={cn(STATUS_BADGE, "omp-usage-chip gap-1")}
           title={`OMP: ${reports.length} provider${reports.length !== 1 ? "s" : ""}${grievanceCount > 0 ? ` · ${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}` : ""} — click for details`}
           aria-haspopup="dialog"
           aria-expanded={open}
         >
         <Activity size={11} aria-hidden="true" />
         OMP{reports.length > 0 && ` · ${reports.length}p`}
-        {grievanceCount > 0 && <span className="omp-grievance-badge" aria-label={`${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}`}>{grievanceCount}</span>}
+        {grievanceCount > 0 && <span className="omp-grievance-badge ml-[2px] rounded-sm bg-err-surface px-1 text-[9px] font-semibold leading-[14px] text-err-surface-text" aria-label={`${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}`}>{grievanceCount}</span>}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -534,57 +580,58 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
         sideOffset={6}
         role="dialog"
         aria-label="OMP usage and grievances"
-        className="bg-runs-menu omp-usage-popover"
+        className="bg-runs-menu omp-usage-popover max-h-[60vh] min-w-[300px] overflow-y-auto p-2"
       >
-          <div className="ctx-pop-title">OMP usage — read-only (never journaled)</div>
-          {loading && data == null && <div className="omp-section omp-loading">loading…</div>}
-          {error && data == null && <div className="omp-section omp-error-text">error: {error}</div>}
+          <div className={CTX_POP_TITLE}>OMP usage — read-only (never journaled)</div>
+          {loading && data == null && <div className="omp-section omp-loading p-1 text-micro text-text-dim">loading…</div>}
+          {error && data == null && <div className="omp-section omp-error-text p-1 text-micro text-err-text">error: {error}</div>}
           {hasErrors && data?.errors && (
-            <div className="omp-section omp-error-text">
+            <div className="omp-section omp-error-text p-1 text-micro text-err-text">
               {data.errors.map((e, i) => (
-                <div key={i} className="mono omp-error-line">{e}</div>
+                <div key={i} className="mono omp-error-line break-words whitespace-pre-wrap">{e}</div>
               ))}
             </div>
           )}
           {reports.length === 0 && !loading && !error && (
-            <div className="omp-section omp-dim">no usage reports</div>
+            <div className="omp-section omp-dim p-1 text-micro text-text-dim">no usage reports</div>
           )}
           {reports.map((report: OmpUsageReport) => (
-            <div key={report.provider} className="omp-provider-group">
-              <div className="omp-provider-name mono">{report.provider}</div>
+            <div key={report.provider} className="omp-provider-group border-t border-stroke-tertiary px-1 py-1.5">
+              <div className="omp-provider-name mono pb-1 pt-0.5 font-semibold text-micro text-text">{report.provider}</div>
               {(report.limits ?? []).map((limit: OmpUsageLimit) => {
                 const rawPct = Number.isFinite(limit.amount.usedFraction) ? limit.amount.usedFraction * 100 : 0;
                 const pct = Math.round(Math.min(100, Math.max(0, rawPct)));
                 const used = Number.isFinite(limit.amount.used) ? limit.amount.used : 0;
                 const limitVal = Number.isFinite(limit.amount.limit) ? limit.amount.limit : 0;
                 const remaining = Number.isFinite(limit.amount.remaining) ? limit.amount.remaining : 0;
+                const { cls: tierCls, bar: tierBar } = usageTier(pct);
                 return (
-                  <div key={limit.id} className="omp-limit-row">
-                    <div className="omp-limit-header">
-                      <span className="omp-limit-label">{limit.label}</span>
-                      <span className="omp-limit-value mono">
+                  <div key={limit.id} className="omp-limit-row pb-1 pl-2 pt-0.5">
+                    <div className="omp-limit-header flex items-baseline justify-between gap-2">
+                      <span className="omp-limit-label text-micro text-text-dim">{limit.label}</span>
+                      <span className="omp-limit-value mono text-micro text-text">
                         {used}/{limitVal} {limit.amount.unit ?? ""}
-                        <span className="omp-limit-pct"> · {pct}%</span>
+                        <span className="omp-limit-pct text-text-dim"> · {pct}%</span>
                       </span>
                     </div>
-                    <div className="omp-bar-track">
+                    <div className="omp-bar-track mb-0.5 mt-[3px] h-1 overflow-hidden rounded-[2px] bg-bg-tertiary">
                       <div
-                        className={`omp-bar-fill ${usageTier(pct)}`}
+                        className={cn(OMP_BAR_FILL, tierCls, tierBar)}
                         style={{ width: `${Math.min(100, pct)}%` }}
                       />
                     </div>
-                    <div className="omp-limit-resets omp-dim mono">
+                    <div className="omp-limit-resets omp-dim mono pl-2 text-[10px] text-text-dim">
                       {remaining} remaining · {formatResetsAt(limit.window?.resetsAt ?? 0)}
-                      {limit.status !== "ok" && <span className="omp-limit-status"> · {limit.status}</span>}
+                      {limit.status !== "ok" && <span className="omp-limit-status text-err-text"> · {limit.status}</span>}
                     </div>
                   </div>
                 );
               })}
             </div>
           ))}
-          <div className="omp-grievances-section">
-            <span className="omp-grievances-label">grievances</span>
-            <span className="omp-grievances-count mono">
+          <div className="omp-grievances-section flex items-baseline justify-between gap-2 border-t border-stroke-tertiary px-1 pb-0.5 pt-1.5">
+            <span className="omp-grievances-label text-micro uppercase tracking-[0.06em] text-text-dim">grievances</span>
+            <span className="omp-grievances-count mono font-semibold text-micro text-text">
               {grievances == null ? "unavailable" : `${grievanceCount}`}
             </span>
           </div>
@@ -641,11 +688,11 @@ export default function StatusBar({
   const finished = bgNotice?.finished ?? [];
 
   return (
-    <footer className="app-statusbar">
+    <footer className="app-statusbar flex h-[var(--statusbar-height)] shrink-0 items-center gap-2 border-t border-stroke-tertiary bg-[var(--statusbar-bg)] px-3 font-mono text-micro text-text-dim tabular-nums">
       {/* Left: session facts — click to copy project root path */}
       <button
         type="button"
-        className="status-item status-fact-btn"
+        className="status-item status-fact-btn max-w-[min(40vw,360px)] cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap rounded bg-transparent px-1 transition-[background-color] duration-150 hover:bg-bg-input"
         title={pathCopied ? "Copied!" : projectRoot ? `Click to copy: ${projectRoot}` : "No project loaded"}
         onClick={() => {
           if (projectRoot) {
@@ -662,14 +709,14 @@ export default function StatusBar({
         {` · epoch ${epoch}`}
         {rootShort && ` · ${rootShort}`}
       </button>
-      <span className="status-spacer" />
+      <span className="status-spacer flex-1" />
       {/* Center-right: run indicators — foreground spinner, then the
           background chip (the only surface for runs outside the view). */}
       {agentRunning && (
-        <span className="status-item status-run">
+        <span className="status-item status-run overflow-hidden text-ellipsis whitespace-nowrap text-accent-user">
           <LoaderCircle size={11} className="spin" /> running
           {turnStartedAt != null && (
-            <span className="status-turn-duration">
+            <span className="status-turn-duration ml-[2px] tabular-nums text-text-dim">
               {(() => {
                 const secs = Math.max(0, Math.floor((now - turnStartedAt) / 1000));
                 const m = Math.floor(secs / 60);
@@ -681,7 +728,7 @@ export default function StatusBar({
         </span>
       )}
       {finished.length > 0 && (
-        <span className="status-badge bg-flash-done" role="status">
+        <span className={cn(STATUS_BADGE, "bg-flash-done")} role="status">
           <Check size={11} /> {finished.join(", ")} finished
         </span>
       )}
@@ -690,12 +737,12 @@ export default function StatusBar({
           <PopoverTrigger asChild>
             <button
               type="button"
-              className={`status-badge status-bg-runs${startedFlash ? " bg-flash-new" : ""}`}
+              className={cn(STATUS_BADGE, "status-bg-runs", startedFlash && "bg-flash-new")}
               title={`Background runs: ${backgroundRuns.map((r) => r.name).join(", ")} — click to list`}
               aria-haspopup="menu"
               aria-expanded={runsOpen}
             >
-              <span className="ws-dot dot-bg pulse" aria-hidden="true" />
+              <span className={WS_DOT_BG} aria-hidden="true" />
               {backgroundRuns.length} background run{backgroundRuns.length > 1 ? "s" : ""}
             </button>
           </PopoverTrigger>
@@ -711,15 +758,15 @@ export default function StatusBar({
                 key={run.id}
                 type="button"
                 role="menuitem"
-                className="bg-run-row"
+                className={BG_RUN_ROW}
                 onClick={() => {
                   setRunsOpen(false);
                   onJumpWorkstream(run.id);
                 }}
               >
-                <span className="ws-dot dot-bg pulse" aria-hidden="true" />
-                <span className="bg-run-name" title={run.name}>{run.name}</span>
-                <span className="bg-run-state">still running</span>
+                <span className={WS_DOT_BG} aria-hidden="true" />
+                <span className={BG_RUN_NAME} title={run.name}>{run.name}</span>
+                <span className={BG_RUN_STATE}>still running</span>
               </button>
             ))}
           </PopoverContent>
@@ -748,7 +795,7 @@ export default function StatusBar({
       {pendingDiffs > 0 && (
         <button
           type="button"
-          className="status-badge"
+          className={STATUS_BADGE}
           aria-label={`${pendingDiffs} pending diff${pendingDiffs > 1 ? "s" : ""}`}
           title={`${pendingDiffs} pending diff${pendingDiffs > 1 ? "s" : ""}`}
           onClick={() => onBadgeClick("changes")}
@@ -759,7 +806,7 @@ export default function StatusBar({
       {wikiNoteCount != null && wikiNoteCount > 0 && (
         <button
           type="button"
-          className="status-badge"
+          className={STATUS_BADGE}
           aria-label={`${wikiNoteCount} wiki notes`}
           title={`${wikiNoteCount} wiki notes`}
           onClick={() => onBadgeClick("wiki")}
@@ -770,7 +817,7 @@ export default function StatusBar({
       {pendingMemoryProposals > 0 && (
         <button
           type="button"
-          className="status-badge"
+          className={STATUS_BADGE}
           aria-label={`${pendingMemoryProposals} pending memory proposals`}
           title={`${pendingMemoryProposals} pending memory proposals`}
           onClick={() => onBadgeClick("memory")}

@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState, type UIEvent, type ReactNode } fr
 import { autonomyStatus, errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
 import FileRefContextMenu from "./FileRefContextMenu";
+import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { cn } from "../lib/utils";
 import type { AutonomyReport, Diff, ReviewResult } from "../types";
 
 interface Props {
@@ -22,6 +24,32 @@ interface Props {
 // Rendering ceiling: diffs are normally well under 500 lines; past this we
 // truncate rather than strain the DOM with unbounded spans.
 const MAX_LINES = 1000;
+
+// Tailwind replacements for the deleted app.css diff-viewer rules; the
+// marker classes (diff-line, diff-add, diff-linenum-*, …) stay on the
+// elements as inert DOM hooks for e2e selectors and theme overrides.
+// The kept unlayered `.diff-split .diff-line` rule still wins over these
+// layered utilities in split mode (px-3/nowrap), as it did over the old
+// unlayered base `.diff-line` rule.
+const DIFF_LINE =
+  "group/diffline relative overflow-x-auto px-4 whitespace-pre break-normal";
+
+// Replaces .diff-linenum (variant colors applied per use site).
+const LINENUM =
+  "inline-block w-[3em] min-w-[3em] pr-2 text-right select-none opacity-55 tabular-nums";
+
+// Replaces .diff-comment-btn; idle opacity 0.4, line-hover or has-comment
+// reveal to 1 (appended conditionally as `opacity-100` — twMerge wins).
+const COMMENT_BTN =
+  "absolute right-1.5 top-0.5 cursor-pointer p-0 text-caption leading-none opacity-40 transition-opacity duration-150 ease-[cubic-bezier(0.25,0.1,0.25,1)] group-hover/diffline:opacity-100";
+
+// Replaces .diff-file-status + its [data-status] variants (base = mod).
+const STATUS_DOT: Record<DiffFileSegment["status"], string> = {
+  add: "bg-ok",
+  del: "bg-err",
+  mod: "bg-warn",
+  rename: "bg-link",
+};
 
 function lineClass(line: string): string {
   if (line.startsWith("+") && !line.startsWith("+++")) return "diff-line diff-add";
@@ -310,7 +338,7 @@ function renderCode(prefix: string, code: string, lang: Language | null): ReactN
   const tokens = tokenize(code, lang);
   return (
     <>
-      <span className="diff-gutter">{prefix}</span>
+      <span className="diff-gutter select-none">{prefix}</span>
       {tokens.map((t, i) =>
         t.cls === null ? (
           t.text
@@ -488,15 +516,25 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   inlineRows.forEach((row, i) => {
     const isCode = row.isCode;
     rendered.push(
-      <div key={i} className={row.cls} data-line={row.srcIndex}>
+      <div
+        key={i}
+        className={cn(
+          row.cls,
+          DIFF_LINE,
+          row.cls.endsWith("diff-add") && "bg-diff-add-bg text-diff-add-text",
+          row.cls.endsWith("diff-del") && "bg-diff-del-bg text-diff-del-text",
+          row.cls.endsWith("diff-hunk") && "text-text-dim italic",
+        )}
+        data-line={row.srcIndex}
+      >
         {row.cls.endsWith("diff-add") ? (
           <>
-            <span className="diff-linenum diff-linenum-new">{row.newLine ?? ""}</span>
+            <span className={cn("diff-linenum diff-linenum-new", LINENUM, "text-diff-add-text")}>{row.newLine ?? ""}</span>
             {renderCode("+", row.line.slice(1), row.lang)}
           </>
         ) : row.cls.endsWith("diff-del") ? (
           <>
-            <span className="diff-linenum diff-linenum-old">{row.oldLine ?? ""}</span>
+            <span className={cn("diff-linenum diff-linenum-old", LINENUM, "text-diff-del-text")}>{row.oldLine ?? ""}</span>
             {renderCode("-", row.line.slice(1), row.lang)}
           </>
         ) : (
@@ -505,7 +543,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         {pending && isCode && onSendComments && (
           <button
             type="button"
-            className={`diff-comment-btn${comments.has(i) ? " has-comment" : ""}`}
+            className={cn("diff-comment-btn", COMMENT_BTN, comments.has(i) && "has-comment opacity-100")}
             aria-label={`Comment on line ${row.newLine ?? row.oldLine ?? i}`}
             onClick={() => setOpenLine((o) => (o === i ? null : i))}
           >
@@ -529,20 +567,20 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
     if (cell === null) {
       // Padding row: nbsp so the empty line keeps its height for alignment.
       return (
-        <div key={key} className="diff-line diff-line-empty">
+        <div key={key} className={cn("diff-line diff-line-empty", DIFF_LINE, "bg-transparent")}>
           {"\u00a0"}
         </div>
       );
     }
     if (cell.kind === "old") {
       return (
-        <div key={key} className="diff-line diff-line-old" data-line={cell.src}>
-          <span className="diff-linenum diff-linenum-old">{cell.lineNum ?? ""}</span>
+        <div key={key} className={cn("diff-line diff-line-old", DIFF_LINE, "bg-diff-del-bg text-diff-del-text")} data-line={cell.src}>
+          <span className={cn("diff-linenum diff-linenum-old", LINENUM, "text-diff-del-text")}>{cell.lineNum ?? ""}</span>
           {renderCode("-", cell.text, cell.lang)}
           {pending && cell.src != null && onSendComments && (
             <button
               type="button"
-              className={`diff-comment-btn${comments.has(cell.src) ? " has-comment" : ""}`}
+              className={cn("diff-comment-btn", COMMENT_BTN, comments.has(cell.src) && "has-comment opacity-100")}
               aria-label={`Comment on line ${cell.lineNum ?? cell.src}`}
               onClick={() => setOpenLine((o) => (o === cell.src ? null : cell.src!))}
             >
@@ -554,13 +592,13 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
     }
     if (cell.kind === "new") {
       return (
-        <div key={key} className="diff-line diff-line-new" data-line={cell.src}>
-          <span className="diff-linenum diff-linenum-new">{cell.lineNum ?? ""}</span>
+        <div key={key} className={cn("diff-line diff-line-new", DIFF_LINE, "bg-diff-add-bg text-diff-add-text")} data-line={cell.src}>
+          <span className={cn("diff-linenum diff-linenum-new", LINENUM, "text-diff-add-text")}>{cell.lineNum ?? ""}</span>
           {renderCode("+", cell.text, cell.lang)}
           {pending && cell.src != null && onSendComments && (
             <button
               type="button"
-              className={`diff-comment-btn${comments.has(cell.src) ? " has-comment" : ""}`}
+              className={cn("diff-comment-btn", COMMENT_BTN, comments.has(cell.src) && "has-comment opacity-100")}
               aria-label={`Comment on line ${cell.lineNum ?? cell.src}`}
               onClick={() => setOpenLine((o) => (o === cell.src ? null : cell.src!))}
             >
@@ -571,9 +609,9 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
       );
     }
     return (
-      <div key={key} className="diff-line diff-line-context" data-line={cell.src}>
+      <div key={key} className={cn("diff-line diff-line-context", DIFF_LINE, "bg-transparent")} data-line={cell.src}>
         {cell.lineNum != null && (
-          <span className="diff-linenum diff-linenum-ctx">{cell.lineNum}</span>
+          <span className={cn("diff-linenum diff-linenum-ctx", LINENUM, "text-text-dim")}>{cell.lineNum}</span>
         )}
         {cell.text}
       </div>
@@ -581,13 +619,22 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   };
 
   return (
-    <section className={`diff-card${hasReject ? " review-rejected" : ""}`}>
-      <header className="diff-header">
-        <span className="diff-title">
+    <section
+      className={cn(
+        "diff-card flex flex-col border-t border-border bg-bg-raised",
+        hasReject &&
+          "review-rejected border-t-2 border-err shadow-[inset_0_0_0_1px_rgba(195,74,74,0.35)]",
+      )}
+    >
+      <header className="diff-header flex items-center justify-between border-b border-border px-4 py-2">
+        <span className="diff-title font-semibold">
           Diff #{diff.id}
         </span>
         {autonomy !== null && (
-          <span className="diff-autonomy" title={autonomy.revert_check}>
+          <span
+            className="diff-autonomy ml-3 mr-auto overflow-hidden text-ellipsis whitespace-nowrap tabular-nums text-micro text-text-dim"
+            title={autonomy.revert_check}
+          >
             Auto-apply: {autonomy.auto_apply}
             {autonomyHint(autonomy)}
           </span>
@@ -613,7 +660,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           </span>
         )}
         {pending ? (
-          <span className="diff-actions">
+          <span className="diff-actions flex gap-2">
             {comments.size > 0 && (
               <Button
                 type="button"
@@ -663,19 +710,22 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
             </Button>
           </span>
         ) : (
-          <span className={`badge badge-${diff.status === "accepted" ? "accept" : "reject"}`}>
+          <Badge
+            variant={diff.status === "accepted" ? "accept" : "reject"}
+            className={cn("badge", diff.status === "accepted" ? "badge-accept" : "badge-reject")}
+          >
             {diff.status === "accepted" ? "Applied" : "Rejected"}
-          </span>
+          </Badge>
         )}
       </header>
       {/* Tri-model right sidebar gap: editable commit message on Accept.
           User sees the exact message before it lands; empty input falls
           back to the daemon default. */}
       {commitEditing && (
-        <div className="diff-commit-editor">
+        <div className="diff-commit-editor flex items-center gap-2 border-b border-border px-4 py-1.5">
           <input
             type="text"
-            className="diff-commit-input"
+            className="diff-commit-input min-w-0 flex-1 rounded-sm border border-border bg-bg-input px-2 py-1 text-caption text-inherit focus:border-accent focus:outline-none"
             value={commitMsg}
             autoFocus
             aria-label="Commit message"
@@ -719,47 +769,53 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
       )}
       {/* Tri-model: aggregate churn summary bar — +N −M across all files */}
       {(totalAdds > 0 || totalDels > 0) && (
-        <div className="diff-churn-bar" aria-label="Diff summary">
-          <span className="churn-add">+{totalAdds}</span>{" "}
-          <span className="churn-del">-{totalDels}</span>
-          <span className="diff-churn-files">
+        <div className="diff-churn-bar flex items-center gap-2 border-b border-border px-4 py-1 text-caption" aria-label="Diff summary">
+          <span className="churn-add font-medium text-diff-add-text">+{totalAdds}</span>{" "}
+          <span className="churn-del font-medium text-diff-del-text">-{totalDels}</span>
+          <span className="diff-churn-files text-text-dim">
             {fileSegments.length} file{fileSegments.length !== 1 ? "s" : ""}
           </span>
         </div>
       )}
-      {reviewError && <div className="review-error">{reviewError}</div>}
-      {sendError && <div className="review-error">Failed to send comments: {sendError}</div>}
+      {reviewError && <div className="review-error border-b border-border px-4 py-2.5 text-caption text-err-text">{reviewError}</div>}
+      {sendError && <div className="review-error border-b border-border px-4 py-2.5 text-caption text-err-text">Failed to send comments: {sendError}</div>}
       {reviews && (
-        <div className="review-results">
+        <div className="review-results border-b border-border py-1">
           {reviews.length === 0 && (
-            <div className="review-empty">No reviewers returned a verdict.</div>
+            <div className="review-empty px-4 py-2.5 text-caption text-text-dim">No reviewers returned a verdict.</div>
           )}
           {reviews.length > 0 && consensus && (
-            <div className="review-consensus">
-              <span className={`verdict-badge verdict-${consensus}`}>
+            <div className="review-consensus flex items-center gap-2 border-b border-border px-4 py-2">
+              <Badge
+                variant={consensus === "accept" || consensus === "reject" || consensus === "needs_fixes" ? consensus : "other"}
+                className={cn("verdict-badge", `verdict-${consensus}`, "capitalize")}
+              >
                 {consensus.replace("_", " ")}
-              </span>
-              <span className="review-consensus-label">
+              </Badge>
+              <span className="review-consensus-label text-micro text-text-dim">
                 {reviews.length} reviewer{reviews.length > 1 ? "s" : ""} · unanimous gate
               </span>
             </div>
           )}
           {reviews.map((r, i) => (
-            <div className="review-item" key={`${r.model}-${i}`}>
-              <div className="review-item-head">
-                <span className="review-model">{r.model}</span>
-                <span className={`verdict-badge verdict-${r.verdict}`}>
+            <div className="review-item border-b border-border px-4 py-2.5 last:border-b-0" key={`${r.model}-${i}`}>
+              <div className="review-item-head flex items-center gap-2.5">
+                <span className="review-model font-mono text-caption text-text">{r.model}</span>
+                <Badge
+                  variant={r.verdict === "accept" || r.verdict === "reject" || r.verdict === "needs_fixes" ? (r.verdict as "accept" | "reject" | "needs_fixes") : "other"}
+                  className={cn("verdict-badge", `verdict-${r.verdict}`, "capitalize")}
+                >
                   {r.verdict.replace("_", " ")}
-                </span>
+                </Badge>
               </div>
-              {r.comments !== "" && <p className="review-comments">{r.comments}</p>}
+              {r.comments !== "" && <p className="review-comments mt-2 whitespace-pre-wrap text-caption text-text-dim">{r.comments}</p>}
             </div>
           ))}
         </div>
       )}
       {/* D0: file navigation — chip row for multi-file diffs */}
       {fileSegments.length > 1 && (
-        <div className="diff-file-nav" role="group" aria-label="Files in this diff">
+        <div className="diff-file-nav flex items-center gap-1.5 overflow-x-auto border-b border-border bg-bg-raised px-4 py-1.5" role="group" aria-label="Files in this diff">
           {fileSegments.map((seg, i) => {
             const basename = seg.path.split("/").pop() || seg.path;
             const isTruncated = seg.lineIndex >= MAX_LINES;
@@ -768,7 +824,10 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
                 key={`${seg.path}-${i}`}
                 type="button"
                 role="button"
-                className={`diff-file-chip${isTruncated ? " truncated" : ""}`}
+                className={cn(
+                  "diff-file-chip inline-flex flex-none items-center gap-1.5 rounded-full border border-border bg-bg-input px-2.5 py-0.5 font-mono text-[length:var(--text-micro)] text-text cursor-pointer hover:not-disabled:border-text-dim",
+                  isTruncated && "truncated opacity-45 cursor-not-allowed",
+                )}
                 title={seg.path}
                 disabled={isTruncated}
                 onClick={() => scrollToFile(seg.lineIndex)}
@@ -777,24 +836,27 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
                   setFileRefMenu({ path: seg.path, x: e.clientX, y: e.clientY });
                 }}
               >
-                <span className="diff-file-status" data-status={seg.status} />
-                <span className="diff-file-name">{basename}</span>
-                <span className="diff-file-churn">
-                  <span className="churn-add">+{seg.adds}</span>{" "}
-                  <span className="churn-del">-{seg.dels}</span>
+                <span
+                  className={cn("diff-file-status size-[7px] flex-none rounded-full", STATUS_DOT[seg.status])}
+                  data-status={seg.status}
+                />
+                <span className="diff-file-name whitespace-nowrap">{basename}</span>
+                <span className="diff-file-churn inline-flex gap-1">
+                  <span className="churn-add text-diff-add-text">+{seg.adds}</span>{" "}
+                  <span className="churn-del text-diff-del-text">-{seg.dels}</span>
                 </span>
               </button>
             );
           })}
           {fileSegments.some((s) => s.lineIndex >= MAX_LINES) && (
-            <span className="diff-file-nav-note">
+            <span className="diff-file-nav-note ml-auto flex-none italic text-micro text-text-dim">
               Files beyond line {MAX_LINES} are not rendered (truncated diff).
             </span>
           )}
         </div>
       )}
       {diff.content === "" ? (
-        <div className="diff-empty">Diff file is empty or unreadable.</div>
+        <div className="diff-empty px-4 py-3 text-text-dim">Diff file is empty or unreadable.</div>
       ) : split ? (
         <div className="diff-split" ref={setDiffBodyRef}>
           <div
@@ -815,18 +877,22 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           </div>
         </div>
       ) : (
-        <pre className="diff-body" ref={setDiffBodyRef}>
+        <pre
+          className="diff-body m-0 overflow-auto bg-bg py-2 font-mono text-caption leading-[1.45]"
+          ref={setDiffBodyRef}
+        >
           {rendered}
           {truncatedNote !== null && (
-            <div className="diff-truncated">
+            <div className="diff-truncated border-t border-dashed border-border px-4 py-2 italic text-text-dim">
               {truncatedNote}
             </div>
           )}
         </pre>
       )}
       {openLine != null && pending && onSendComments && (
-        <div className="diff-comment-box">
+        <div className="diff-comment-box flex items-start gap-2 border-t border-border px-4 py-2">
           <textarea
+            className="flex-1 resize-y rounded-sm border border-border bg-bg-input px-2 py-1.5 font-mono text-caption text-text"
             value={comments.get(openLine) ?? ""}
             aria-label="Line comment"
             placeholder="Note for the agent…"
@@ -840,7 +906,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           />
           <button
             type="button"
-            className="diff-comment-close"
+            className="diff-comment-close cursor-pointer whitespace-nowrap rounded-sm border border-border bg-bg-input px-2.5 py-1 text-caption text-text-dim hover:border-accent-user hover:text-text"
             onClick={() => setOpenLine(null)}
           >
             Done

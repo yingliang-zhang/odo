@@ -21,10 +21,12 @@ function dotState(fg: boolean, bg: boolean, pending: number): DotState {
   return "idle";
 }
 const dotClass: Record<DotState, string> = {
-  running: "dot-accent pulse",
-  background: "dot-bg pulse",
-  pending: "dot-amber",
-  idle: "dot-idle",
+  running:
+    "dot-accent pulse bg-accent-user shadow-[0_0_0_2px_color-mix(in_srgb,var(--accent-user)_22%,transparent)]",
+  background:
+    "dot-bg pulse bg-bg-run shadow-[0_0_0_2px_color-mix(in_srgb,var(--bg-run)_22%,transparent)]",
+  pending: "dot-amber bg-warn",
+  idle: "dot-idle bg-text-dim opacity-35",
 };
 const dotLabel: Record<DotState, string> = {
   running: strings.sidebar.statusRunning,
@@ -366,7 +368,7 @@ export default function Sidebar({
               }
             }}
           >
-            <span className={cn("ws-dot", dotClass[ds])} aria-hidden="true" />
+            <span className={cn("ws-dot size-2 shrink-0 rounded-full bg-text-dim", dotClass[ds])} aria-hidden="true" />
             <span className="sr-only">{dotLabel[ds]}</span>
             <span className="ws-item-body flex min-w-0 flex-1 flex-col gap-px">
               <span className="ws-item-line flex min-w-0 items-center">
@@ -524,7 +526,7 @@ export default function Sidebar({
             )}
             aria-hidden="true"
           />
-          <span className={cn("ws-dot", dotClass[ds])} aria-hidden="true" />
+          <span className={cn("ws-dot size-2 shrink-0 rounded-full bg-text-dim", dotClass[ds])} aria-hidden="true" />
           <span className="sr-only">{dotLabel[ds]}</span>
           <span className="proj-name flex-1 overflow-hidden text-ellipsis whitespace-nowrap" title={p.root}>{p.name}</span>
           {pending > 0 && (
