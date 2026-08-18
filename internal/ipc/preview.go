@@ -87,6 +87,17 @@ func validatePreviewURL(raw string) error {
 	return nil
 }
 
+// redactPreviewURL returns the URL for journaling: a BASIC-auth password in
+// userinfo is masked (url.Redacted). The raw form still spawns the capture —
+// redaction only applies to the journaled record, never the wire args.
+func redactPreviewURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return u.Redacted()
+}
+
 // attachmentDir returns <root>/.odo/attachments, creating it — the
 // clipboard (save_attachment) and /preview captures share one store so
 // chips, vision receipts, and audits resolve identically. The caller wraps
@@ -213,7 +224,7 @@ func classifyPreviewFailure(ctx context.Context, err error, output string) error
 	tail := lastLines(output, 3)
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
-		return fmt.Errorf("preview screenshot timed out after %ds (navigation timeout or hung page) — is the dev server serving and responsive?", int(previewChildTimeout/time.Second))
+		return fmt.Errorf("preview screenshot timed out after %ds (navigation timeout, hung page, or the first run still downloading playwright — a warm-cache retry usually succeeds) — is the dev server serving and responsive?", int(previewChildTimeout/time.Second))
 	case strings.Contains(output, "Executable doesn't exist") || strings.Contains(output, "browserType.launch"):
 		return fmt.Errorf("preview's headless chromium is not installed — run: %s", previewInstallHint)
 	case strings.Contains(output, "net::ERR_CONNECTION_REFUSED"):
@@ -343,9 +354,11 @@ func (s *Server) handlePreviewQuery(ctx context.Context, c *store.Conversation, 
 	}
 
 	// The capture receipt: full-sha256 (audit-grade, the user_message's
-	// sha16 covers the wire bytes), size, and the per-shot wall time.
+	// sha16 covers the wire bytes), size, and the per-shot wall time. The
+	// URL is journaled redacted — a loopback BASIC-auth password must not
+	// persist verbatim (review finding: userinfo leaks into the journal).
 	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventPreviewCaptured, mustJSON(map[string]interface{}{
-		"url":     rawURL,
+		"url":     redactPreviewURL(rawURL),
 		"bytes":   len(shot.Data),
 		"sha256":  shot.Sha256,
 		"wait_ms": shot.WaitMs,

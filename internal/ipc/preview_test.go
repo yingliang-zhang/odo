@@ -463,6 +463,18 @@ func TestPreviewShotReceiptFields(t *testing.T) {
 	}
 }
 
+// TestPreviewURLRedaction pins the journal-side BASIC-auth masking:
+// passwords never persist verbatim in the preview_captured record; the
+// username and the host survive unchanged.
+func TestPreviewURLRedaction(t *testing.T) {
+	if got := redactPreviewURL("http://user:secret@localhost:3000/x"); got != "http://user:xxxxx@localhost:3000/x" {
+		t.Errorf("redact = %q", got)
+	}
+	if got := redactPreviewURL("http://localhost:1420"); got != "http://localhost:1420" {
+		t.Errorf("honest URL must pass through verbatim: %q", got)
+	}
+}
+
 // TestPreviewDeadlineKillsProcessGroup pins the per-shot lifecycle
 // guarantee (lock item 2, review finding D3): when the timeout fires, the
 // whole process GROUP dies — npx's node/chromium descendants must NOT be
