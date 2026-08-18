@@ -32,8 +32,8 @@ test("app boots with chat surface and composer", async ({ page }) => {
   // Composer textarea visible
   await expect(page.getByPlaceholder("Describe the change you want…")).toBeVisible();
 
-  // Send button exists
-  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+  // Send button exists (exact match — "Edit and resend" buttons also contain "Send")
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
 
   // Keyboard hint visible
   await expect(page.locator("text=⌘↵ send")).toBeVisible();
