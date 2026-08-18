@@ -360,59 +360,11 @@ body {
   padding: 3px 6px;
 }
 
-/* PR3: overflow menu (⋯) — dropdown for Curate/Pin/Wiki/Ledger */
+/* PR3: overflow menu (⋯) — migrated to Radix DropdownMenu (Phase 6). The
+   .topbar-overflow wrapper stays as the anchor for the hand-rolled pin
+   popover; menu/item/separator chrome dropped (Tailwind utilities now). */
 .topbar-overflow {
   position: relative;
-}
-
-.topbar-overflow-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 160px;
-  padding: 6px;
-  background: var(--panel-float);
-  backdrop-filter: blur(16px) saturate(160%);
-  -webkit-backdrop-filter: blur(16px) saturate(160%);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-panel);
-  animation: overlay-fade 0.12s var(--ease-standard);
-}
-
-.topbar-overflow-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12px;
-  padding: 6px 10px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.12s var(--ease-standard);
-}
-
-.topbar-overflow-item:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent-user) 10%, transparent);
-}
-
-.topbar-overflow-item:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.topbar-overflow-sep {
-  height: 1px;
-  margin: 3px 0;
-  background: var(--stroke-tertiary);
 }
 
 .topbar-overflow-badge {
@@ -1110,27 +1062,8 @@ body {
   word-break: break-word;
 }
 
-/* Tri-model right sidebar gap: inline file preview overlay (Esc-gated in App) */
-.file-preview-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 300;
-  animation: md-img-fade-in 0.15s ease-out;
-}
-.file-preview-dialog {
-  width: min(860px, 92vw);
-  max-height: 82vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg, 8px);
-  overflow: hidden;
-}
+/* Tri-model right sidebar gap: file preview dialog — overlay/wrapper chrome
+   removed in Phase 5 (Radix Dialog + Tailwind); content styles stay. */
 .file-preview-head {
   display: flex;
   align-items: center;
@@ -1702,36 +1635,10 @@ body {
   color: var(--warn, #d19a4a);
 }
 
-/* M12 (D-todo): the composer "Plan · N open" chip and its popover. The
-   chip wears the auto-distill hairline (same base class); the popover is
-   a small anchored list with done-checkbox, strike ✕, and a "+ add" row —
-   matching the slash menu's elevation. */
-.plan-chip-wrap {
-  position: relative;
-  align-self: flex-start;
-}
-
-.plan-chip.open {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.plan-popover {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 16px;
-  z-index: 40;
-  min-width: 240px;
-  max-width: 360px;
-  max-height: 260px;
-  overflow-y: auto;
-  background: var(--bg-elevated, var(--bg-input));
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  padding: 6px;
-}
-
+/* M12 (D-todo): the composer "Plan · N open" chip and popover migrated to
+   the todo stack + Radix Popover (QueueDock, Phase 6); wrapper/popover
+   chrome deleted. The list/row content styles below are still used by the
+   queue popover. */
 .plan-list {
   list-style: none;
   margin: 0;
@@ -1993,20 +1900,9 @@ body {
 }
 
 /* W6 (goal queue): the composer "Queue · N" chip and its popover — the
-   parked-goal FIFO. Same hairline chip + anchored popover family as the
-   Plan chip (shared classes carry the base geometry); these rules add the
-   queue-specific row layout: position, 2-line-clamped text, Resume/Drop
-   actions. */
-.queue-dock {
-  position: relative;
-  align-self: flex-start;
-}
-
-.queue-popover {
-  min-width: 300px;
-  max-width: 420px;
-}
-
+   parked-goal FIFO. Popover chrome migrated to Radix Popover + Tailwind
+   (Phase 6, .queue-dock/.queue-popover chrome deleted); the queue-specific
+   row layout content styles stay. */
 .queue-note {
   padding: 2px 6px 6px;
   font-size: 11px;
@@ -2632,30 +2528,9 @@ body {
   gap: 8px;
 }
 
-.btn-accept,
-.btn-reject {
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: #fff;
-  padding: 6px 14px;
-  font: inherit;
-  cursor: pointer;
-}
-
-.btn-accept {
-  background: var(--ok);
-}
-
-.btn-reject {
-  background: var(--err);
-}
-
-.btn-accept:disabled,
-.btn-reject:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
+/* btn-accept/btn-reject/btn-review/btn-comments style rules deleted (Phase
+   6): DiffViewer now uses the CVA Button; the class names survive as inert
+   identity markers for e2e selectors. */
 .diff-empty {
   color: var(--text-dim);
   padding: 12px 16px;
@@ -2869,23 +2744,6 @@ body {
   color: var(--text);
   border-color: var(--accent-user);
 }
-.btn-comments {
-  background: var(--bg-input);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 6px 14px;
-  font: inherit;
-  cursor: pointer;
-}
-.btn-comments:hover {
-  border-color: var(--accent-user);
-}
-.btn-comments:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* ---------- D0: diff file navigation chips ---------- */
 
 .diff-file-nav {
@@ -3010,32 +2868,10 @@ body {
   border-bottom: 1px solid var(--stroke-tertiary);
 }
 
-.settings-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px) saturate(110%);
-  -webkit-backdrop-filter: blur(4px) saturate(110%);
-  display: grid;
-  place-items: center;
-  z-index: 100;
-  animation: overlay-fade 0.16s ease-out;
-}
-
-.settings-panel {
-  position: relative;
-  width: 480px;
-  max-width: calc(100vw - 48px);
-  max-height: calc(100vh - 64px);
-  overflow: auto;
-  background: var(--bg-raised);
-  border: 1px solid var(--stroke-primary);
-  border-radius: 14px;
-  padding: 24px 28px;
-  box-shadow: var(--shadow-panel);
-  animation: sheet-in var(--dur) var(--ease-out);
-}
-
+/* Settings dialog migrated to Radix Dialog + Tailwind (Phase 5);
+   overlay/panel chrome deleted — width/padding live on the DialogContent
+   className. .settings-panel survives as an inert marker class. Inner
+   content styles (.settings-title, inspector, fields) stay. */
 .settings-title {
   margin: 0 0 18px;
   font-size: 17px;
@@ -3189,31 +3025,8 @@ body {
   grid-column: 1 / -1;
 }
 
-.settings-save {
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: var(--accent-user);
-  color: #fff;
-  padding: 7px 16px;
-  font: inherit;
-  cursor: pointer;
-}
-
-.settings-save:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.settings-close {
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  padding: 7px 16px;
-  font: inherit;
-  cursor: pointer;
-}
-
+/* .settings-save/.settings-close deleted (Phase 6): CVA Button variants.
+   .settings-save survives as an inert marker on MemoryPanel's Apply. */
 .settings-toast {
   position: absolute;
   top: 16px;
@@ -3228,21 +3041,7 @@ body {
 
 /* ---------- M2: diff review ---------- */
 
-.btn-review {
-  border: none;
-  border-radius: 6px;
-  background: var(--accent-user);
-  color: #fff;
-  padding: 6px 14px;
-  font: inherit;
-  cursor: pointer;
-}
-
-.btn-review:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
+/* .btn-review deleted (Phase 6): CVA Button variant="default". */
 .diff-card.review-rejected {
   border-top: 2px solid var(--err);
   box-shadow: inset 0 0 0 1px rgba(195, 74, 74, 0.35);
@@ -4176,29 +3975,13 @@ body {
 .md-inline-img:hover {
   opacity: 0.9;
 }
-.md-img-lightbox {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 9999;
-  cursor: zoom-out;
-  animation: md-img-fade-in 0.15s ease-out;
-}
+/* Image lightbox migrated to Radix Dialog (Phase 5); .md-img-lightbox and
+   the now-unused md-img-fade-in keyframes deleted. */
 .md-img-zoomed {
   max-width: 90vw;
   max-height: 90vh;
   border-radius: 4px;
   object-fit: contain;
-}
-@keyframes md-img-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
 }
 
 .markdown a {
@@ -4330,34 +4113,9 @@ mark {
 }
 
 /* ---------- Belt B: command palette (⌘K) ---------- */
-
-.palette-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  padding-top: 15vh;
-  z-index: 110;
-  animation: overlay-fade 0.16s ease-out;
-}
-
-.palette-panel {
-  width: 500px;
-  max-width: calc(100vw - 48px);
-  max-height: 400px;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 12px;
-  box-shadow: var(--shadow-panel);
-  animation: sheet-in var(--dur) var(--ease-out);
-}
+/* Migrated to Radix Dialog + Tailwind (Phase 5); .palette-overlay/
+   .palette-panel chrome deleted — classes survive as inert markers. The
+   15vh top anchoring lives on the DialogContent className. */
 
 .palette-input {
   width: 100%;
@@ -4599,32 +4357,10 @@ mark {
   border-color: var(--text-dim);
 }
 
-/* Wave A (#1): background-run dropdown — opens upward from the statusbar,
-   mirrors the topbar overflow menu's surface. */
-.bg-runs-wrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.bg-runs-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  right: 0;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 200px;
-  padding: 6px;
-  background: var(--panel-float);
-  backdrop-filter: blur(16px) saturate(160%);
-  -webkit-backdrop-filter: blur(16px) saturate(160%);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-panel);
-  animation: overlay-fade 0.12s var(--ease-standard);
-}
-
+/* Wave A (#1): background-run dropdown + StatusBar popover family —
+   migrated to Radix Popover + Tailwind (Phase 6). .bg-runs-wrap and the
+   .bg-runs-menu positioning/surface chrome deleted; .bg-runs-menu survives
+   as an inert marker class on PopoverContent. Row content styles stay. */
 .bg-run-row {
   display: flex;
   align-items: center;
@@ -4712,8 +4448,8 @@ mark {
   transition: stroke-dasharray var(--dur) var(--ease-standard);
 }
 
-/* Popovers widen the shared .bg-runs-menu surface — right-anchored like
-   the run list so a long path never grows past the window edge. */
+/* Popovers widen the Radix PopoverContent base — a long path never grows
+   past the window edge. */
 .ctx-meter-popover,
 .panel-chip-popover,
 .omp-usage-popover {

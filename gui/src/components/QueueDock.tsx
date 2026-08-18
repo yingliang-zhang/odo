@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Play, X } from "lucide-react";
 import type { ParkedGoal } from "../types";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 
 // W6 (goal queue): the composer's "Queue · N" chip — the GUI surface of
 // the durable parked-goal FIFO. Rows are DERIVED by the caller from the
@@ -36,27 +37,7 @@ export default function QueueDock({
   // Two-step inline drop confirm: the first click arms the row's button,
   // the second lands the drop. Rearmed per row; cleared on reconcile.
   const [dropArmedSeq, setDropArmedSeq] = useState<number | null>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  // Click-away or Escape closes the popover (PlanChip precedent — the
-  // slash menu's blur pattern doesn't fit non-composer buttons).
-  useEffect(() => {
-    if (!open) return;
-    const onDocDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDocDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // Click-away / Esc dismiss is owned by Radix Popover (Phase 6).
 
   // The journaled state caught up (or the click raced an auto-dequeue):
   // release the armed/busy rows when the derived queue changes.
@@ -97,18 +78,27 @@ export default function QueueDock({
   };
 
   return (
-    <div className="plan-chip-wrap queue-dock" ref={rootRef}>
-      <button
-        type="button"
-        className={`auto-distill-chip plan-chip queue-chip${open ? " open" : ""}`}
-        title={`${goals.length} parked goal${goals.length === 1 ? "" : "s"} — queued goals start when the current run finishes`}
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="auto-distill-chip queue-chip self-start data-[state=open]:border-[var(--accent)] data-[state=open]:text-[var(--text)]"
+          title={`${goals.length} parked goal${goals.length === 1 ? "" : "s"} — queued goals start when the current run finishes`}
+        >
+          Queue · {goals.length}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="start"
+        sideOffset={6}
+        alignOffset={16}
+        role="dialog"
+        aria-label="Parked goals"
+        // queue-popover survives as an inert identity marker (e2e
+        // parked-goals.spec); its sizing CSS is deleted in app.css.
+        className="queue-popover min-w-[300px] max-w-[420px] max-h-[260px] overflow-y-auto p-1.5"
       >
-        Queue · {goals.length}
-      </button>
-      {open && (
-        <div className="plan-popover queue-popover" role="dialog" aria-label="Parked goals">
           <div className="queue-note">queued goals start when the current run finishes</div>
           <ul className="plan-list">
             {goals.map((g, i) => (
@@ -159,8 +149,7 @@ export default function QueueDock({
               </li>
             ))}
           </ul>
-        </div>
-      )}
-    </div>
+      </PopoverContent>
+    </Popover>
   );
 }

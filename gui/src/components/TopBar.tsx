@@ -1,6 +1,13 @@
-import { FormEvent, useState, type ReactNode, useEffect, useRef } from "react";
+import { FormEvent, useState, type ReactNode } from "react";
 import { errorMessage } from "../api";
 import { Sparkles, FileText, Wand2, MapPin, BookOpen, Settings, PanelLeft, ChevronLeft, MoreHorizontal } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 
 // M9 Phase 1: TopBar — 32px bar above the main content area.
 // M9 Phase 4: owns the action row that used to live in the sidebar
@@ -117,8 +124,6 @@ export default function TopBar({
   const [pinText, setPinText] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
-  const [overflowOpen, setOverflowOpen] = useState(false);
-  const overflowRef = useRef<HTMLDivElement>(null);
 
   const handleCurate = async () => {
     if (curateBusy) return;
@@ -157,24 +162,8 @@ export default function TopBar({
     }
   };
 
-  // PR3: Close overflow menu on outside click or Escape.
-  useEffect(() => {
-    if (!overflowOpen) return;
-    const onClick = (e: MouseEvent) => {
-      if (overflowRef.current && !overflowRef.current.contains(e.target as Node)) {
-        setOverflowOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOverflowOpen(false);
-    };
-    document.addEventListener("mousedown", onClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [overflowOpen]);
+  // PR3 overflow menu: Radix DropdownMenu (Phase 6) — outside click, Esc
+  // dismiss, and keyboard nav built in.
 
   return (
     <header className="app-topbar">
@@ -207,84 +196,69 @@ export default function TopBar({
         />
 
         {/* PR3: Overflow menu — Curate, Pin, Wiki, Ledger */}
-        <div className="topbar-overflow" ref={overflowRef}>
-          <button
-            type="button"
-            className="topbar-action topbar-action-icon-only"
-            title="More actions (⌘K for command palette)"
-            aria-label="More actions"
-            aria-haspopup="menu"
-            aria-expanded={overflowOpen}
-            onClick={() => setOverflowOpen((v) => !v)}
-          >
-            <span className="topbar-action-icon" aria-hidden="true">
-              <MoreHorizontal size={14} />
-            </span>
-          </button>
-          {overflowOpen && (
-            <div className="topbar-overflow-menu" role="menu">
+        <div className="topbar-overflow">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                className="topbar-overflow-item"
-                role="menuitem"
+                className="topbar-action topbar-action-icon-only"
+                title="More actions (⌘K for command palette)"
+                aria-label="More actions"
+              >
+                <span className="topbar-action-icon" aria-hidden="true">
+                  <MoreHorizontal size={14} />
+                </span>
+              </button>
+            </DropdownMenuTrigger>
+            {/* topbar-overflow-menu/-item survive as inert identity markers
+                (e2e boot.spec); their CSS is deleted in app.css. */}
+            <DropdownMenuContent
+              align="end"
+              sideOffset={4}
+              className="topbar-overflow-menu flex flex-col gap-px p-1.5"
+            >
+              <DropdownMenuItem
+                className="topbar-overflow-item data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
                 disabled={curateBusy || actionsDisabled}
                 title="Rewrite wiki topic pages + index from all epoch notes"
-                onClick={() => {
-                  setOverflowOpen(false);
-                  void handleCurate();
-                }}
+                onSelect={() => void handleCurate()}
               >
                 <Wand2 size={14} />
                 <span>{curateBusy ? "Curating…" : "Curate"}</span>
-              </button>
-              <button
-                type="button"
-                className="topbar-overflow-item"
-                role="menuitem"
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="topbar-overflow-item data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
                 disabled={actionsDisabled}
                 title="Store a verbatim pin in .odo/pins.md"
-                onClick={() => {
-                  setOverflowOpen(false);
-                  togglePin();
-                }}
+                onSelect={togglePin}
               >
                 <MapPin size={14} />
                 <span>Pin</span>
-              </button>
-              <div className="topbar-overflow-sep" role="separator" />
-              <button
-                type="button"
-                className="topbar-overflow-item"
-                role="menuitem"
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="topbar-overflow-item data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
                 disabled={actionsDisabled}
                 title="Browse this workstream's distilled wiki notes"
-                onClick={() => {
-                  setOverflowOpen(false);
-                  onOpenWiki();
-                }}
+                onSelect={onOpenWiki}
               >
                 <FileText size={14} />
                 <span>Wiki</span>
                 {wikiNoteCount != null && (
                   <span className="topbar-overflow-badge">{wikiNoteCount}</span>
                 )}
-              </button>
-              <button
-                type="button"
-                className="topbar-overflow-item"
-                role="menuitem"
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="topbar-overflow-item data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
                 disabled={actionsDisabled}
                 title="Open .odo/ledger.md — daemon-written verified metrics"
-                onClick={() => {
-                  setOverflowOpen(false);
-                  onOpenLedger();
-                }}
+                onSelect={onOpenLedger}
               >
                 <BookOpen size={14} />
                 <span>Ledger</span>
-              </button>
-            </div>
-          )}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           {/* PR3: Pin popover — anchored under the overflow button */}
           {pinOpen && (

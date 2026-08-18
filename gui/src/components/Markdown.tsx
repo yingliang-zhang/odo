@@ -1,8 +1,8 @@
-import { Fragment, memo, useEffect, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { Fragment, memo, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 import { tokenize, type Language } from "../highlight";
 import FileRefContextMenu from "./FileRefContextMenu";
+import { Dialog, DialogContent } from "./ui/dialog";
 
 // Belt B: a small dependency-free markdown renderer for agent output and
 // wiki notes. Line-based block parsing (headings, fenced code, lists,
@@ -197,18 +197,11 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
   return nodes;
 }
 
-// ZoomableImage: click to open a full-screen lightbox overlay.
-// Esc or click-outside closes. No external dependencies.
+// ZoomableImage: click to open a full-screen lightbox dialog (Radix, Phase 5).
+// Esc, overlay click, or clicking the zoomed image closes. The Dialog handles
+// focus, portal, and the App Esc gate.
 function ZoomableImage({ src, alt }: { src: string; alt: string }) {
   const [zoomed, setZoomed] = useState(false);
-  useEffect(() => {
-    if (!zoomed) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setZoomed(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [zoomed]);
   return (
     <>
       <img
@@ -222,12 +215,15 @@ function ZoomableImage({ src, alt }: { src: string; alt: string }) {
         onClick={() => setZoomed(true)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setZoomed(true); } }}
       />
-      {zoomed && createPortal(
-        <div className="md-img-lightbox" role="dialog" aria-modal="true" aria-label={alt} onClick={() => setZoomed(false)}>
+      <Dialog open={zoomed} onOpenChange={setZoomed}>
+        <DialogContent
+          aria-label={alt}
+          className="flex cursor-zoom-out items-center justify-center border-none bg-transparent p-0 shadow-none"
+          onClick={() => setZoomed(false)}
+        >
           <img src={src} alt={alt} className="md-img-zoomed" />
-        </div>,
-        document.body,
-      )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

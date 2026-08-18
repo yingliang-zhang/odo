@@ -2,8 +2,9 @@
 // and run indicator. Absorbs everything System-ish that used to weigh down
 // the sidebar.
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import {
   BYTES_PER_TOKEN,
   contextWindowTokens,
@@ -103,30 +104,10 @@ interface Props {
   onBadgeClick: (tab: PanelTab) => void;
 }
 
-// One click-away + Escape closer for every StatusBar popover (bg-runs
-// menu, context meter, panel picker). The open flag must change on `open`
-// — the effect only arms while a menu is visible.
-function useCloseOnClickAway(
-  open: boolean,
-  ref: { current: HTMLElement | null },
-  close: () => void,
-): void {
-  useEffect(() => {
-    if (!open) return;
-    const onClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    document.addEventListener("mousedown", onClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, ref, close]);
-}
+// StatusBar popovers are Radix Popovers (Phase 6): outside-click dismiss,
+// Esc dismiss, and upward collision-aware positioning are built in. The
+// PopoverContent Esc gate (stopPropagation) keeps a bare Esc from reaching
+// App's agent-cancel handler.
 
 // Ring fill tiers, applied to stroke AND the inline percent text. The
 // thresholds are display-only — nothing in the system reads this percent.
@@ -160,8 +141,6 @@ function ContextMeter({
   liveDelta?: number;
 }) {
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  useCloseOnClickAway(open, wrapRef, () => setOpen(false));
 
   const windowBytes = contextWindowTokens(codingModel) * BYTES_PER_TOKEN;
   // Tri-model: add liveDelta (bytes accumulated since the last receipted
@@ -176,15 +155,15 @@ function ContextMeter({
   const fill = C * Math.min(1, pct / 100);
 
   return (
-    <span className="bg-runs-wrap ctx-meter-wrap" ref={wrapRef}>
-      <button
-        type="button"
-        className={`status-badge ctx-meter ${tier}`}
-        title={`Context: ${formatBytes(liveBytes)} of ~${formatTokens(windowBytes / BYTES_PER_TOKEN)} window${codingModel ? ` (${codingModel})` : ""}${liveDelta > 0 ? " · ~live estimate" : ""} — click for composition`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={`status-badge ctx-meter ${tier}`}
+          title={`Context: ${formatBytes(liveBytes)} of ~${formatTokens(windowBytes / BYTES_PER_TOKEN)} window${codingModel ? ` (${codingModel})` : ""}${liveDelta > 0 ? " · ~live estimate" : ""} — click for composition`}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+        >
         <Gauge size={11} aria-hidden="true" />
         <svg className="ctx-ring" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
           <circle className="ctx-ring-track" cx="7" cy="7" r="6" />
@@ -198,9 +177,18 @@ function ContextMeter({
           />
         </svg>
         ~{pct}%
-      </button>
-      {open && (
-        <div className="bg-runs-menu ctx-meter-popover" role="dialog" aria-label={strings.statusbar.promptCompositionLabel}>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="end"
+        sideOffset={6}
+        role="dialog"
+        aria-label={strings.statusbar.promptCompositionLabel}
+        // bg-runs-menu survives as an inert identity marker (e2e
+        // background-runs.spec); its positioning CSS is deleted in app.css.
+        className="bg-runs-menu ctx-meter-popover"
+      >
           <div className="ctx-pop-title">
             last prompt — seq #{snapshot.seq}
           </div>
@@ -255,9 +243,8 @@ function ContextMeter({
             ))}
             {snapshot.layers.length === 0 && <li className="ctx-layer ctx-dim">no receipt journaled</li>}
           </ul>
-        </div>
-      )}
-    </span>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -266,36 +253,40 @@ function ContextMeter({
 // ever shows what the daemon's review list holds.
 function PanelChip({ models }: { models: PanelModel[] }) {
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  useCloseOnClickAway(open, wrapRef, () => setOpen(false));
 
   return (
-    <span className="bg-runs-wrap" ref={wrapRef}>
-      <button
-        type="button"
-        className="status-badge panel-chip"
-        title={`Review panel: ${models.map((m) => m.model).join(", ")} — composition set in Settings`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="status-badge panel-chip"
+          title={`Review panel: ${models.map((m) => m.model).join(", ")} — composition set in Settings`}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+        >
+          <Boxes size={11} aria-hidden="true" />
+          Panel ×{models.length}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="end"
+        sideOffset={6}
+        role="dialog"
+        aria-label={strings.statusbar.reviewPanelLabel}
+        className="bg-runs-menu panel-chip-popover"
       >
-        <Boxes size={11} aria-hidden="true" />
-        Panel ×{models.length}
-      </button>
-      {open && (
-        <div className="bg-runs-menu panel-chip-popover" role="dialog" aria-label={strings.statusbar.reviewPanelLabel}>
-          <div className="ctx-pop-title">{strings.statusbar.reviewPanelReadonlyTitle}</div>
-          {models.map((m) => (
-             <div key={`${m.model}@${m.provider}`} className="panel-model-row">
-              <span className="panel-model-name mono" title={`${m.model}@${m.provider}`}>
-                {m.model}
-              </span>
-              <span className="panel-model-provider">{m.provider}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </span>
+        <div className="ctx-pop-title">{strings.statusbar.reviewPanelReadonlyTitle}</div>
+        {models.map((m) => (
+           <div key={`${m.model}@${m.provider}`} className="panel-model-row">
+            <span className="panel-model-name mono" title={`${m.model}@${m.provider}`}>
+              {m.model}
+            </span>
+            <span className="panel-model-provider">{m.provider}</span>
+          </div>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -369,8 +360,6 @@ function PipelineChip({
   onOpenReview: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  useCloseOnClickAway(open, wrapRef, () => setOpen(false));
 
   // Clock only — gates the transient landed window. One-shot timer armed
   // at the nearest expiry; when no flash remains, nothing ticks.
@@ -396,40 +385,46 @@ function PipelineChip({
   );
 
   return (
-    <span className="bg-runs-wrap" ref={wrapRef}>
-      <button
-        type="button"
-        className={`status-badge auto-land-chip is-${dominant.phase}`}
-        title={visible.map((s) => `diff ${s.diffId}: ${pipelineLabel(s)}`).join(" · ")}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={`status-badge auto-land-chip is-${dominant.phase}`}
+          title={visible.map((s) => `diff ${s.diffId}: ${pipelineLabel(s)}`).join(" · ")}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+        >
+          {pipelineIcon(dominant.phase)}
+          {pipelineLabel(dominant)}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="end"
+        sideOffset={6}
+        role="dialog"
+        aria-label="Auto-land pipeline"
+        className="bg-runs-menu auto-land-popover"
       >
-        {pipelineIcon(dominant.phase)}
-        {pipelineLabel(dominant)}
-      </button>
-      {open && (
-        <div className="bg-runs-menu auto-land-popover" role="dialog" aria-label="Auto-land pipeline">
-          <div className="ctx-pop-title">auto-land — current status</div>
-          {visible.map((s) => (
-            <button
-              key={s.diffId}
-              type="button"
-              className={`bg-run-row auto-land-row is-${s.phase}`}
-              title={pipelineLabel(s)}
-              onClick={() => {
-                setOpen(false);
-                onOpenReview();
-              }}
-            >
-              <span className="auto-land-row-icon" aria-hidden="true">{pipelineIcon(s.phase)}</span>
-              <span className="bg-run-name">Diff #{s.diffId}</span>
-              <span className="auto-land-row-detail">{pipelineLabel(s)}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </span>
+        <div className="ctx-pop-title">auto-land — current status</div>
+        {visible.map((s) => (
+          <button
+            key={s.diffId}
+            type="button"
+            className={`bg-run-row auto-land-row is-${s.phase}`}
+            title={pipelineLabel(s)}
+            onClick={() => {
+              setOpen(false);
+              onOpenReview();
+            }}
+          >
+            <span className="auto-land-row-icon" aria-hidden="true">{pipelineIcon(s.phase)}</span>
+            <span className="bg-run-name">Diff #{s.diffId}</span>
+            <span className="auto-land-row-detail">{pipelineLabel(s)}</span>
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -463,8 +458,6 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
   const [data, setData] = useState<OmpUsageMerged | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  useCloseOnClickAway(open, wrapRef, () => setOpen(false));
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -506,38 +499,43 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
 
   if (unavailable && !open) {
     return (
-      <span className="bg-runs-wrap" ref={wrapRef}>
-        <button
-          type="button"
-          className="status-badge omp-usage-chip omp-unavailable"
-          title="OMP stats unavailable"
-          aria-haspopup="dialog"
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-        >
-          <Activity size={11} aria-hidden="true" />
-          OMP unavailable
-        </button>
-      </span>
+      <button
+        type="button"
+        className="status-badge omp-usage-chip omp-unavailable"
+        title="OMP stats unavailable"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen(true)}
+      >
+        <Activity size={11} aria-hidden="true" />
+        OMP unavailable
+      </button>
     );
   }
 
   return (
-    <span className="bg-runs-wrap" ref={wrapRef}>
-      <button
-        type="button"
-        className="status-badge omp-usage-chip"
-        title={`OMP: ${reports.length} provider${reports.length !== 1 ? "s" : ""}${grievanceCount > 0 ? ` · ${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}` : ""} — click for details`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="status-badge omp-usage-chip"
+          title={`OMP: ${reports.length} provider${reports.length !== 1 ? "s" : ""}${grievanceCount > 0 ? ` · ${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}` : ""} — click for details`}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+        >
         <Activity size={11} aria-hidden="true" />
         OMP{reports.length > 0 && ` · ${reports.length}p`}
         {grievanceCount > 0 && <span className="omp-grievance-badge" aria-label={`${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}`}>{grievanceCount}</span>}
-      </button>
-      {open && (
-        <div className="bg-runs-menu omp-usage-popover" role="dialog" aria-label="OMP usage and grievances">
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="end"
+        sideOffset={6}
+        role="dialog"
+        aria-label="OMP usage and grievances"
+        className="bg-runs-menu omp-usage-popover"
+      >
           <div className="ctx-pop-title">OMP usage — read-only (never journaled)</div>
           {loading && data == null && <div className="omp-section omp-loading">loading…</div>}
           {error && data == null && <div className="omp-section omp-error-text">error: {error}</div>}
@@ -590,9 +588,8 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
               {grievances == null ? "unavailable" : `${grievanceCount}`}
             </span>
           </div>
-        </div>
-      )}
-    </span>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -617,9 +614,8 @@ export default function StatusBar({
   onBadgeClick,
 }: Props) {
   // Multi-target dropdown (Wave A #1): click opens the run list, a row
-  // click jumps. Click-away + Escape close it (TopBar overflow precedent).
+  // click jumps. Radix Popover handles dismiss/Esc (Phase 6).
   const [runsOpen, setRunsOpen] = useState(false);
-  const runsRef = useRef<HTMLSpanElement>(null);
   // GLM: clipboard copy feedback (2s Check, matches MessageBubble convention).
   const [pathCopied, setPathCopied] = useState(false);
   // Tri-model header gap: live turn duration tick.
@@ -629,7 +625,6 @@ export default function StatusBar({
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [agentRunning, turnStartedAt]);
-  useCloseOnClickAway(runsOpen, runsRef, () => setRunsOpen(false));
 
   // A run finishing empties the list — keep the flash clickable target
   // (and its dropdown) out of the render when nothing is left to jump to.
@@ -691,39 +686,44 @@ export default function StatusBar({
         </span>
       )}
       {backgroundRuns.length > 0 && (
-        <span className="bg-runs-wrap" ref={runsRef}>
-          <button
-            type="button"
-            className={`status-badge status-bg-runs${startedFlash ? " bg-flash-new" : ""}`}
-            title={`Background runs: ${backgroundRuns.map((r) => r.name).join(", ")} — click to list`}
-            aria-haspopup="menu"
-            aria-expanded={runsOpen}
-            onClick={() => setRunsOpen((v) => !v)}
+        <Popover open={runsOpen} onOpenChange={setRunsOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className={`status-badge status-bg-runs${startedFlash ? " bg-flash-new" : ""}`}
+              title={`Background runs: ${backgroundRuns.map((r) => r.name).join(", ")} — click to list`}
+              aria-haspopup="menu"
+              aria-expanded={runsOpen}
+            >
+              <span className="ws-dot dot-bg pulse" aria-hidden="true" />
+              {backgroundRuns.length} background run{backgroundRuns.length > 1 ? "s" : ""}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            side="top"
+            align="end"
+            sideOffset={6}
+            role="menu"
+            className="bg-runs-menu min-w-[200px]"
           >
-            <span className="ws-dot dot-bg pulse" aria-hidden="true" />
-            {backgroundRuns.length} background run{backgroundRuns.length > 1 ? "s" : ""}
-          </button>
-          {runsOpen && (
-            <div className="bg-runs-menu" role="menu">
-              {backgroundRuns.map((run) => (
-                <button
-                  key={run.id}
-                  type="button"
-                  role="menuitem"
-                  className="bg-run-row"
-                  onClick={() => {
-                    setRunsOpen(false);
-                    onJumpWorkstream(run.id);
-                  }}
-                >
-                  <span className="ws-dot dot-bg pulse" aria-hidden="true" />
-                  <span className="bg-run-name" title={run.name}>{run.name}</span>
-                  <span className="bg-run-state">still running</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </span>
+            {backgroundRuns.map((run) => (
+              <button
+                key={run.id}
+                type="button"
+                role="menuitem"
+                className="bg-run-row"
+                onClick={() => {
+                  setRunsOpen(false);
+                  onJumpWorkstream(run.id);
+                }}
+              >
+                <span className="ws-dot dot-bg pulse" aria-hidden="true" />
+                <span className="bg-run-name" title={run.name}>{run.name}</span>
+                <span className="bg-run-state">still running</span>
+              </button>
+            ))}
+          </PopoverContent>
+        </Popover>
       )}
       {/* Wave B: last-prompt pressure meter + review-panel peek, ahead of
           the actionable badges. */}

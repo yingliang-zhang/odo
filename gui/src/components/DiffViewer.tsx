@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type UIEvent, type ReactNode } fr
 import { autonomyStatus, errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
 import FileRefContextMenu from "./FileRefContextMenu";
+import { Button } from "./ui/button";
 import type { AutonomyReport, Diff, ReviewResult } from "../types";
 
 interface Props {
@@ -614,24 +615,32 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         {pending ? (
           <span className="diff-actions">
             {comments.size > 0 && (
-              <button
+              <Button
                 type="button"
+                variant="secondary"
+                size="sm"
+                // btn-comments survives as an inert identity marker; its CSS
+                // is deleted in app.css.
                 className="btn-comments"
                 disabled={sendingComments}
                 onClick={() => void sendComments()}
               >
                 {sendingComments ? "Sending…" : `Send comments (${comments.size})`}
-              </button>
+              </Button>
             )}
-            <button
+            <Button
+              variant="default"
+              size="sm"
               className="btn-review"
               disabled={acting || reviewing}
               title="Ask the configured review models to grade this diff"
               onClick={() => void runReview()}
             >
               {reviewing ? "Reviewing…" : "Review"}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
               className="btn-accept"
               disabled={acting || hasReject || agentRunning}
               title={agentRunning ? "Agent is running — review after it finishes" : "Accept with editable commit message"}
@@ -641,15 +650,17 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
               }}
             >
               Accept
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
               className="btn-reject"
               disabled={acting || agentRunning}
               title={agentRunning ? "Agent is running — review after it finishes" : undefined}
               onClick={() => void act(onReject)}
             >
               Reject
-            </button>
+            </Button>
           </span>
         ) : (
           <span className={`badge badge-${diff.status === "accepted" ? "accept" : "reject"}`}>
@@ -682,8 +693,10 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
               }
             }}
           />
-          <button
+          <Button
             type="button"
+            variant="default"
+            size="sm"
             className="btn-accept"
             disabled={acting}
             onClick={() => {
@@ -692,14 +705,16 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
             }}
           >
             Accept
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="secondary"
+            size="sm"
             className="btn-reject"
             onClick={() => setCommitEditing(false)}
           >
             Cancel
-          </button>
+          </Button>
         </div>
       )}
       {/* Tri-model: aggregate churn summary bar — +N −M across all files */}

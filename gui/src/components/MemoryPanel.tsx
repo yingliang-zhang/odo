@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
 import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult } from "../types";
 import LoadingInline from "./LoadingInline";
+import { Button } from "./ui/button";
 
 // M4 memory review (spec §7): the learner proposes rules at distill time
 // (journaled as one memory_propose batch per epoch); this panel is the human
@@ -379,15 +380,18 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
           </div>
           <div className="mem-foot">
             {batch && (
-              <button
+              <Button
                 type="button"
+                variant="default"
+                // settings-save survives as an inert identity marker (e2e
+                // skills-proposals.spec); its CSS is deleted in app.css.
                 className="settings-save"
                 disabled={applyBusy}
                 title={`Accept ${acceptedCount}, reject ${rejects.size}`}
                 onClick={() => void handleApply()}
               >
                 {applyBusy ? "Applying…" : `Apply (${acceptedCount} accepted)`}
-              </button>
+              </Button>
             )}
             {applyResult && <span className="mem-result">{applyResult}</span>}
           </div>

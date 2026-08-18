@@ -6,12 +6,12 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
-import { useFocusTrap } from "../focusTrap";
+import { Dialog, DialogContent } from "./ui/dialog";
 
-// Belt B (⌘K): fuzzy action launcher overlaying the shell, patterned on
-// settings-overlay. Two modes: the action list (filter by substring,
-// arrows navigate, Enter runs) and prompt mode for actions that need a
-// text argument (New Workstream name, Pin text) — Enter submits the text.
+// Belt B (⌘K): fuzzy action launcher over a Radix Dialog (Phase 5).
+// Two modes: the action list (filter by substring, arrows navigate, Enter
+// runs) and prompt mode for actions that need a text argument (New
+// Workstream name, Pin text) — Enter submits the text.
 
 export interface PaletteAction {
   id: string;
@@ -52,11 +52,6 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
   const [promptFor, setPromptFor] = useState<PaletteAction | null>(null);
   const [promptText, setPromptText] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  // Modal: Tab must cycle the panel, never escape to the page behind it.
-  // Initial focus lands on the first focusable — the input — matching the
-  // prompt-mode effect below.
-  const panelRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(panelRef);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -77,23 +72,6 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
   useEffect(() => {
     inputRef.current?.focus();
   }, [promptFor]);
-
-  // Esc: back out of prompt mode, else close. Window-level so it works
-  // regardless of focus; App's own Esc handler skips .palette-overlay, so
-  // it won't double-fire into blur/cancel.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (promptFor !== null) {
-        setPromptFor(null);
-        setPromptText("");
-      } else {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, promptFor]);
 
   const runAction = (action: PaletteAction) => {
     if (action.disabled) return;
@@ -148,14 +126,20 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
   const clampedSelected = Math.min(selected, Math.max(0, filtered.length - 1));
 
   return (
-    <div className="palette-overlay" onClick={onClose}>
-      <div
-        ref={panelRef}
-        className="palette-panel"
-        role="dialog"
-        aria-modal="true"
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent
         aria-label="Command palette"
-        onClick={(e) => e.stopPropagation()}
+        // Esc always closes — even from prompt mode. Pre-migration App's
+        // window-level palette gate fired alongside the palette's own
+        // listener, so a bare Esc closed the whole palette regardless of
+        // mode (shortcuts.spec contract). Radix's onEscapeKeyDown
+        // stopPropagation (in the wrapper) keeps it from reaching App's
+        // agent-cancel handler.
+        // palette-overlay + palette-panel survive as inert identity
+        // markers (e2e shortcuts.spec); their CSS is deleted in app.css.
+        // top-[15vh]/-translate-y-0 override the Dialog's default centering
+        // to match the old top-anchored palette placement.
+        className="palette-overlay palette-panel flex w-[500px] max-w-[calc(100vw-48px)] max-h-[400px] flex-col p-3 top-[15vh] -translate-y-0"
       >
         <input
           ref={inputRef}
@@ -192,7 +176,7 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
             ))}
           </div>
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

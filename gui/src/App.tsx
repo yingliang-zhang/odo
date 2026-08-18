@@ -919,39 +919,20 @@ export default function App() {
     if (panelOpen && panelTab === "review") void refreshInbox();
   }, [panelOpen, panelTab, refreshInbox]);
 
-  // Belt A global shortcuts. Modals close themselves on Escape through
-  // their own window listeners; the overlay check keeps a bare Escape from
-  // also acting on the composer while a dialog is up. Belt B adds ⌘F (chat
-  // search) and ⌘K (command palette); Esc closes the search bar before it
-  // reaches blur/cancel.
+  // Belt A global shortcuts. Radix Dialog/Popover/Menu layers (Phase 5/6)
+  // stop Esc propagation in capture phase, so this window listener never
+  // fires while one is open — only the hand-rolled overlays below still
+  // need DOM-class gates. Belt B adds ⌘F (chat search) and ⌘K (command
+  // palette); Esc closes the search bar before it reaches blur/cancel.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        // Modal/overlay takes priority — don't cancel the agent when closing a dialog
-        if (document.querySelector(".settings-overlay") != null) return;
-        if (document.querySelector(".palette-overlay") != null) {
-          setPaletteOpen(false);
-          return;
-        }
-        // Image lightbox (ZoomableImage) — its own Esc listener closes it,
-        // but without this gate a bare Esc would also cancel the agent.
-        if (document.querySelector(".md-img-lightbox") != null) return;
-        // ModelPill / QueueDock menus — their own Esc listeners close them,
-        // but without this gate a bare Esc would also cancel the agent.
-        if (document.querySelector(".model-pill-menu") != null) return;
-        if (document.querySelector(".queue-popover") != null) return;
-        // Workstream context menu — same pattern as above.
+        // Workstream context menu — its own Esc listener closes it, but
+        // without this gate a bare Esc would also cancel the agent. (Not a
+        // Radix layer yet, so the DOM-class gate stays.)
         if (document.querySelector(".ws-context-menu") != null) return;
         // @-mention completion menu — same pattern (tri-model review S2 fix).
         if (document.querySelector(".at-menu") != null) return;
-        // StatusBar popover family — their own listeners close them,
-        // but without this gate a bare Esc would also cancel the agent.
-        if (document.querySelector(".bg-runs-menu") != null) return;
-        // TopBar overflow menu — same pattern as above.
-        if (document.querySelector(".topbar-overflow-menu") != null) return;
-        // File preview overlay — its own Esc listener closes it; without
-        // this gate a bare Esc would also cancel the agent.
-        if (document.querySelector(".file-preview-overlay") != null) return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;

@@ -115,14 +115,15 @@ export default function FileRefContextMenu({
     setPreviewing(true);
   };
 
+  // FilePreview is a Radix Dialog (Phase 5): it portals itself, so no
+  // createPortal wrapper here.
   if (previewing) {
-    return createPortal(
+    return (
       <FilePreview
         path={path}
         projectRoot={projectRoot}
         onClose={onClose}
-      />,
-      document.body,
+      />
     );
   }
 

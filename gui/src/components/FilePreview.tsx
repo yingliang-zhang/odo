@@ -3,14 +3,14 @@
 // from the daemon's read_file IPC (same containment rule as open_path:
 // canonicalize-then-prefix-check against the project root and ~/.odo).
 // Syntax highlighting reuses the diff viewer's tokenizer. Esc / backdrop
-// click closes; the overlay is registered in App.tsx's Esc gate so a bare
-// Esc never cancels the agent.
+// click closes via Radix Dialog (Phase 5) — its Esc gate keeps a bare Esc
+// from reaching App's agent-cancel handler.
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { readFile, errorMessage } from "../api";
 import { languageFromPath, tokenize } from "../highlight";
-import { useFocusTrap } from "../focusTrap";
+import { Dialog, DialogContent } from "./ui/dialog";
 
 interface Props {
   path: string; // project-root-relative OR absolute — daemon resolves
@@ -24,10 +24,6 @@ export default function FilePreview({ path, projectRoot, onClose }: Props) {
   const [content, setContent] = useState("");
   const [resolved, setResolved] = useState("");
   const [truncated, setTruncated] = useState(false);
-  // Modal focus: the trap moves focus into the dialog on open (the close
-  // button is the first focusable) and restores it to the trigger on close.
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(dialogRef);
 
   useEffect(() => {
     let alive = true;
@@ -51,34 +47,14 @@ export default function FilePreview({ path, projectRoot, onClose }: Props) {
     };
   }, [path, projectRoot]);
 
-  // Esc closes (App.tsx's gate keeps this from reaching the agent cancel).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   const lang = languageFromPath(path);
   const lines = content.split("\n");
 
   return (
-    <div
-      className="file-preview-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Preview of ${path}`}
-      onClick={onClose}
-    >
-      <div
-        className="file-preview-dialog"
-        ref={dialogRef}
-        tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent
+        aria-label={`Preview of ${path}`}
+        className="flex w-[min(860px,92vw)] max-h-[82vh] flex-col overflow-hidden p-0"
       >
         <div className="file-preview-head">
           <span className="file-preview-path" title={resolved || path}>
@@ -118,7 +94,7 @@ export default function FilePreview({ path, projectRoot, onClose }: Props) {
             </code>
           </pre>
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

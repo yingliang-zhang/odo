@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { errorMessage, getSettings, unwrap, updateSettings } from "../api";
-import { useFocusTrap } from "../focusTrap";
 import { SUDO_MODELS, SUDO_PROVIDER, type Settings } from "../types";
 import LoadingInline from "./LoadingInline";
+import { Button } from "./ui/button";
+import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 
 const SAVED_TOAST_MS = 3000;
 
@@ -115,9 +116,7 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
     document.documentElement.dataset.theme = next;
   };
   const toastTimer = useRef<number | null>(null);
-  // Belt D: modal focus trap (Tab cycles, focus restores on close).
-  const panelRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(panelRef);
+  // Focus trap + Esc + overlay close are owned by Radix Dialog (Phase 5).
 
   useEffect(() => {
     let cancelled = false;
@@ -137,15 +136,6 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
       cancelled = true;
     };
   }, [projectRoot]);
-
-  // Escape closes, like every other modal affordance.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   useEffect(() => {
     return () => clearTimeout(toastTimer.current ?? undefined);
@@ -174,17 +164,12 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
   };
 
   return (
-    <div className="settings-overlay" onClick={onClose}>
-      <div
-        className="settings-panel"
-        role="dialog"
-        aria-modal="true"
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent
         aria-label="Settings"
-        ref={panelRef}
-        tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
+        className="settings-panel w-[480px] max-w-[calc(100vw-48px)] px-7 py-6"
       >
-        <h2 className="settings-title">Settings</h2>
+        <DialogTitle className="settings-title">Settings</DialogTitle>
 
         {loading && <LoadingInline />}
         {error && <div className="settings-error">{error}</div>}
@@ -333,22 +318,18 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
             </div>
 
             <div className="settings-actions">
-              <button type="submit" className="settings-save" disabled={saving}>
+              <Button type="submit" variant="default" disabled={saving}>
                 {saving ? "Saving…" : "Save"}
-              </button>
-              <button
-                type="button"
-                className="settings-close"
-                onClick={onClose}
-              >
+              </Button>
+              <Button type="button" variant="secondary" onClick={onClose}>
                 Close
-              </button>
+              </Button>
             </div>
           </form>
         )}
 
         {savedToast && <div className="settings-toast">Settings saved</div>}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
