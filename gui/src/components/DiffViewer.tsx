@@ -626,13 +626,13 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           "review-rejected border-t-2 border-err shadow-[inset_0_0_0_1px_rgba(195,74,74,0.35)]",
       )}
     >
-      <header className="diff-header flex items-center justify-between border-b border-border px-4 py-2">
-        <span className="diff-title font-semibold">
+      <header className="diff-header flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border px-4 py-2">
+        <span className="diff-title whitespace-nowrap font-semibold">
           Diff #{diff.id}
         </span>
         {autonomy !== null && (
           <span
-            className="diff-autonomy ml-3 mr-auto overflow-hidden text-ellipsis whitespace-nowrap tabular-nums text-micro text-text-dim"
+            className="diff-autonomy mr-auto shrink overflow-hidden text-ellipsis whitespace-nowrap tabular-nums text-micro text-text-dim"
             title={autonomy.revert_check}
           >
             Auto-apply: {autonomy.auto_apply}
@@ -640,7 +640,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           </span>
         )}
         {diff.content !== "" && (
-          <span className="diff-toggle" role="group" aria-label="Diff view mode">
+          <span className="diff-toggle shrink-0" role="group" aria-label="Diff view mode">
             <button
               type="button"
               className={split ? "" : "active"}
@@ -660,7 +660,7 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
           </span>
         )}
         {pending ? (
-          <span className="diff-actions flex gap-2">
+          <span className="diff-actions ml-auto flex shrink-0 gap-2">
             {comments.size > 0 && (
               <Button
                 type="button"
