@@ -120,7 +120,7 @@ export default function WorkstreamContextMenu({
     <div
       ref={menuRef}
       className={cn(
-        "fixed z-[200] min-w-[160px]",
+        "fixed z-[200] min-w-[160px] ws-context-menu",
         "bg-[var(--bg-elevated)] border border-[var(--border)]",
         "rounded-[var(--radius-md)] p-1 shadow-[var(--shadow-panel)]",
       )}
@@ -136,6 +136,7 @@ export default function WorkstreamContextMenu({
             "flex items-center gap-2 w-full px-2 py-1.5 text-xs",
             "rounded-[var(--radius-sm)] cursor-pointer text-left",
             "bg-transparent border-none text-[var(--text)]",
+            "hover:bg-[var(--bg-hover)] transition-colors",
             item.danger && "text-[var(--err-text)]",
           )}
           autoFocus={i === 0}

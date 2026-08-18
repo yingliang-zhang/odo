@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import { updateSettings } from "../api";
 import {
@@ -41,11 +41,9 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
   const [customText, setCustomText] = useState("");
 
   // Sync from parent when settings reload.
-  // Note: removed useEffect — Radix controls open state internally.
-  // We still sync model from parent.
-  if (currentModel && currentModel !== model && !customMode) {
-    setModel(currentModel);
-  }
+  useEffect(() => {
+    setModel(currentModel ?? "");
+  }, [currentModel]);
 
   const selectModel = async (m: string) => {
     setModel(m);
@@ -71,13 +69,13 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
               "model-pill min-h-[38px] flex items-center gap-1",
               "bg-[var(--bg-input)] border border-[var(--border)]",
               "rounded-[var(--radius-md)] text-[var(--text-dim)] text-xs",
-              "px-2 py-1 cursor-pointer hover:text-[var(--text)]",
-              "data-[state=open]:text-[var(--text)]",
+              "px-2 py-1 cursor-pointer hover:text-[var(--text)] hover:border-[var(--accent)]",
+              "data-[state=open]:text-[var(--text)] data-[state=open]:border-[var(--accent)]",
             )}
             title={`Coding model: ${model}`}
             aria-label={`Coding model: ${shortLabel}`}
           >
-            <span className="model-pill-label">{shortLabel}</span>
+            <span className="model-pill-label max-w-[120px] truncate">{shortLabel}</span>
             <ChevronDown size={10} aria-hidden />
           </button>
         </DropdownMenuTrigger>
@@ -94,7 +92,7 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
           ))}
           <DropdownMenuSeparator />
           {customMode ? (
-            <div className="px-2 py-1">
+            <div className="px-2 py-1" onKeyDown={(e) => e.stopPropagation()}>
               <input
                 type="text"
                 value={customText}
@@ -112,19 +110,19 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
                     e.stopPropagation();
                     const text = customText.trim();
                     if (text !== "") void selectModel(text);
-                  } else if (e.key === "Escape") {
-                    e.stopPropagation();
-                    setCustomMode(false);
-                    setCustomText("");
                   }
                 }}
               />
             </div>
           ) : (
-            <DropdownMenuItem onClick={() => {
-              setCustomMode(true);
-              setCustomText(model);
-            }}>
+            <DropdownMenuItem
+              onSelect={(e) => {
+                // Prevent Radix from auto-closing the menu on item select.
+                e.preventDefault();
+                setCustomMode(true);
+                setCustomText(model);
+              }}
+            >
               <span className="ml-[14px]">Other…</span>
             </DropdownMenuItem>
           )}
