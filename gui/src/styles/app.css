@@ -205,6 +205,14 @@
   outline-offset: 1px;
 }
 
+/* The composer draws its OWN focus treatment (border-color on the wrapper) —
+   the generic ring painted a second inner blue rectangle around the textarea
+   (specificity 0,2,0 beat Tailwind's outline-none utility). */
+.chat-input :focus,
+.chat-input :focus-visible {
+  outline: none;
+}
+
 /* Screen-reader-only text: present in the a11y tree, invisible on screen. */
 .sr-only {
   position: absolute;

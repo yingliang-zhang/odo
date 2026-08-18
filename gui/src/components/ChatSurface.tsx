@@ -1321,7 +1321,7 @@ export default function ChatSurface({
           </div>
         )}
         <form
-          className="chat-input relative flex items-end gap-2 rounded-lg border border-stroke-secondary bg-bg-input py-1.5 pr-1.5 pl-3.5 transition-[border-color] duration-[180ms] ease-[var(--ease-standard)] focus-within:border-accent-user"
+          className="chat-input relative flex items-end gap-2 rounded-lg border border-stroke-secondary bg-bg-input py-1.5 pr-1.5 pl-3.5 transition-[border-color] duration-[180ms] ease-[var(--ease-standard)] focus-within:border-[var(--stroke-primary)]"
           onSubmit={handleSubmit}
         >
           {atMenu && (
