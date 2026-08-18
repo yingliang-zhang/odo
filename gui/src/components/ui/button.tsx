@@ -12,13 +12,13 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-[var(--accent-user)] text-white border border-transparent",
+          "bg-[var(--accent-user)] text-[var(--bg)] border border-transparent",
         secondary:
           "bg-[var(--bg-input)] text-[var(--text)] border border-[var(--border)]",
         ghost:
           "bg-transparent text-[var(--text-dim)] hover:bg-[var(--bg-hover)] border border-transparent",
         danger:
-          "bg-[var(--err)] text-white border border-transparent",
+          "bg-[var(--err)] text-[var(--bg)] border border-transparent",
         outline:
           "bg-transparent text-[var(--text)] border border-[var(--border)]",
       },

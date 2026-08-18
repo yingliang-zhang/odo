@@ -5,13 +5,16 @@
    Existing app.css is imported AFTER Tailwind so unlayered app.css rules
    win over Tailwind's layered utilities — this is intentional during the
    migration: old styles keep working, new components use Tailwind utilities.
-   As each component migrates, its old CSS is deleted in the same commit. */
+   As each component migrates, its old CSS is deleted in the same commit.
+
+   Note: Tailwind's default palette is NOT nulled (no --color-*: initial).
+   Components should use Odo token utilities (bg-[var(--bg)] etc.) instead
+   of Tailwind defaults (bg-gray-500 etc.). ESLint enforcement deferred. */
 
 @import "tailwindcss";
 
-/* Null the default color palette — only Odo's tokens should be available.
-   This prevents accidental use of Tailwind's built-in colors (red-500 etc.)
-   and enforces the token system. */
+/* Map Odo's design tokens to Tailwind's utility system.
+   @theme inline resolves var() at use-site, not at :root. */
 @theme inline {
   /* Colors — map to existing CSS custom properties */
   --color-bg: var(--bg);
@@ -56,6 +59,18 @@
   --color-tok-comment: var(--tok-comment);
   --color-tok-number: var(--tok-number);
   --color-tok-fn: var(--tok-fn);
+
+  /* Shadows */
+  --shadow-soft: var(--shadow-soft);
+  --shadow-panel: var(--shadow-panel);
+
+  /* Motion */
+  --ease-out: var(--ease-out);
+  --ease-standard: var(--ease-standard);
+  --ease-spring: var(--ease-spring);
+  --duration-fast: var(--dur-fast);
+  --duration: var(--dur);
+  --duration-slow: var(--dur-slow);
 
   /* Radius scale (maps to existing tokens) */
   --radius-sm: var(--radius-sm);
