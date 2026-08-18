@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yingliang-zhang/odo/internal/moa"
@@ -37,9 +38,6 @@ const (
 	// rendering before capture.
 	previewViewport = "1440,900"
 	previewSettleMs = "3000"
-	// previewChildTimeout bounds the whole per-shot subprocess (npx
-	// resolution, browser launch, navigation, capture).
-	previewChildTimeout = 45 * time.Second
 
 	// previewDefaultPrompt is the analysis prompt when the user gives none.
 	previewDefaultPrompt = "Analyze this screenshot as a UI reviewer: list layout issues, style inconsistencies, overflow/misalignment. Be specific with locations."
@@ -48,6 +46,11 @@ const (
 	// on a missing-browser failure.
 	previewInstallHint = "PATH=~/.hermes/node/bin:$PATH npx playwright install chromium"
 )
+
+// previewChildTimeout bounds the whole per-shot subprocess (npx resolution,
+// browser launch, navigation, capture). A var (not const) so the timeout
+// test can shrink it — never touched in production paths.
+var previewChildTimeout = 45 * time.Second
 
 // previewAllowedHosts is the v1 URL allowlist (url.Hostname() values,
 // compared lower-cased): loopback only.
@@ -174,6 +177,14 @@ func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot,
 		"--viewport-size="+previewViewport,
 		"--wait-for-timeout="+previewSettleMs,
 		rawURL, out)
+	// Per-shot lifecycle guarantee (lock item 2): on the deadline, kill the
+	// whole process GROUP, not just npx — npx spawns node, which spawns the
+	// headless chromium; killing only the top PID orphans the subtree
+	// (review finding D3). Same pattern as internal/adapter/omp.go.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	cmd.Env = previewChildEnv()
 	start := time.Now()
 	output, err := cmd.CombinedOutput()

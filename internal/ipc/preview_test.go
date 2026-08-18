@@ -10,6 +10,7 @@ package ipc
 // launches in tests.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,8 +20,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 )
@@ -156,6 +160,12 @@ func TestPreviewHostAllowlist(t *testing.T) {
 		{"http://foo.localhost", "restricted to localhost"},
 		{"http://localhost.", "restricted to localhost"},
 		{"http://192.168.1.5", "restricted to localhost"},
+		// Userinfo confused-deputy vectors: Hostname() must strip the
+		// `userinfo@` prefix — a future url.Host regression would silently
+		// re-allow these (review finding D7).
+		{"http://localhost:3000@evil.com/x", "restricted to localhost"},
+		{"http://***@evil.com/x", "restricted to localhost"},
+		{"http://0x7f000001", "restricted to localhost"},
 		{"ftp://localhost/x", "scheme must be http or https"},
 		{"notaurl", "scheme must be http or https"},
 	}
@@ -450,5 +460,53 @@ func TestPreviewShotReceiptFields(t *testing.T) {
 	}
 	if full := hex.EncodeToString(sum[:]); len(full) != 64 {
 		t.Errorf("full sha256 hex = %d chars, want 64", len(full))
+	}
+}
+
+// TestPreviewDeadlineKillsProcessGroup pins the per-shot lifecycle
+// guarantee (lock item 2, review finding D3): when the timeout fires, the
+// whole process GROUP dies — npx's node/chromium descendants must NOT be
+// orphaned. A hanging mock npx spawns a grandchild sleeper; the deadline
+// error must surface, and the grandchild must be gone.
+func TestPreviewDeadlineKillsProcessGroup(t *testing.T) {
+	old := previewChildTimeout
+	previewChildTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { previewChildTimeout = old })
+
+	// Isolate HOME so hermesNodeBin() finds no real npx and resolution
+	// falls back to the PATH mock (same isolation as seedPreviewRig).
+	t.Setenv("HOME", t.TempDir())
+
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("MOCK_CHILD_PID", pidFile)
+	installMockNpx(t, `#!/bin/sh
+sleep 30 &
+echo $! > "$MOCK_CHILD_PID"
+exec sleep 30
+`)
+	ctx := context.Background()
+	_, err := runPreviewScreenshot(ctx, "http://localhost:1420", filepath.Join(t.TempDir(), "out.png"))
+	if err == nil || !strings.Contains(err.Error(), "timed out after") {
+		t.Fatalf("err = %v, want the deadline-class error", err)
+	}
+
+	pidRaw, rerr := os.ReadFile(pidFile)
+	if rerr != nil {
+		t.Fatalf("mock never recorded its grandchild pid: %v", rerr)
+	}
+	pid, cerr := strconv.Atoi(strings.TrimSpace(string(pidRaw)))
+	if cerr != nil {
+		t.Fatalf("child pid: %v", cerr)
+	}
+	// Group kill is expected immediate; allow a short settle anyway.
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		if kerr := syscall.Kill(pid, 0); kerr == syscall.ESRCH {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild pid %d survived the deadline — process group not killed", pid)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
