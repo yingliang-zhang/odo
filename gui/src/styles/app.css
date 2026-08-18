@@ -2830,6 +2830,7 @@ body {
 .theme-toggle button {
   flex: 1;
   text-align: center;
+  padding: 8px 14px;
 }
 
 .diff-toggle button + button,
@@ -3221,8 +3222,8 @@ body {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 4px 6px;
-  min-height: 36px;
+  padding: 5px 6px;
+  min-height: 39px;
 }
 .model-chips:focus-within {
   border-color: var(--accent-user);
@@ -3270,7 +3271,7 @@ body {
 }
 
 .settings-save {
-  border: none;
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--accent-user);
   color: #fff;
