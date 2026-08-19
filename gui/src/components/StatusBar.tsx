@@ -696,7 +696,7 @@ export default function StatusBar({
       {/* Left: session facts — click to copy project root path */}
       <button
         type="button"
-        className="status-item status-fact-btn max-w-[min(40vw,360px)] cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap rounded bg-transparent px-1 transition-[background-color] duration-150 hover:bg-bg-input"
+        className="status-item status-fact-btn inline-flex max-w-[min(40vw,360px)] cursor-pointer items-center gap-[3px] rounded bg-transparent px-1 transition-[background-color] duration-150 hover:bg-bg-input"
         title={pathCopied ? "Copied!" : projectRoot ? `Click to copy: ${projectRoot}` : "No project loaded"}
         onClick={() => {
           if (projectRoot) {
@@ -708,19 +708,23 @@ export default function StatusBar({
         }}
       >
         {pathCopied && <Check size={10} aria-hidden />}
-        {workstreamName ?? "—"}
-        {conversationId != null && ` · #${conversationId}`}
-        {` · epoch ${epoch}`}
-        {rootShort && ` · ${rootShort}`}
+        {/* Truncating text wrapper: flex parents can't ellipsis raw text
+            nodes — min-w-0 lets the span shrink below content width. */}
+        <span className="min-w-0 truncate">
+          {workstreamName ?? "—"}
+          {conversationId != null && ` · #${conversationId}`}
+          {` · epoch ${epoch}`}
+          {rootShort && ` · ${rootShort}`}
+        </span>
       </button>
       <span className="status-spacer flex-1" />
       {/* Center-right: run indicators — foreground spinner, then the
           background chip (the only surface for runs outside the view). */}
       {agentRunning && (
-        <span className="status-item status-run overflow-hidden text-ellipsis whitespace-nowrap text-accent-user">
-          <LoaderCircle size={11} className="spin" /> running
+        <span className="status-item status-run inline-flex items-center gap-[3px] overflow-hidden text-ellipsis whitespace-nowrap text-accent-user">
+          <LoaderCircle size={11} className="spin" aria-hidden /> running
           {turnStartedAt != null && (
-            <span className="status-turn-duration ml-[2px] tabular-nums text-text-dim">
+            <span className="status-turn-duration tabular-nums text-text-dim">
               {(() => {
                 const secs = Math.max(0, Math.floor((now - turnStartedAt) / 1000));
                 const m = Math.floor(secs / 60);
