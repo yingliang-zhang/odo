@@ -283,6 +283,17 @@ type WikiNoteInfo struct {
 	ModifiedAt string `json:"modified_at"`
 }
 
+// PanelProgress is the live fan-out tally of an in-flight /panel consult:
+// Done model legs answered of the current Total batch. The daemon keeps it
+// in memory only (the previewEvent precedent — never journaled) and hands
+// a COPY to every poll_events response so the GUI's spinner row can show
+// progress during multi-minute consults; absent when no panel is in flight
+// for the polled conversation.
+type PanelProgress struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
+}
+
 // Response is one result line on the socket. Fields are present only when
 // relevant to the command (see docs/milestones for the shapes).
 type Response struct {
@@ -298,19 +309,23 @@ type Response struct {
 	// M7 live streaming: the active run's transient in-flight block preview
 	// (partial:true; never journaled — rebuilt on every poll). Streaming is
 	// true while a preview is present.
-	Preview     *adapter.AgentEvent `json:"preview,omitempty"`
-	Streaming   bool                `json:"streaming,omitempty"`
-	Diff        *DiffInfo           `json:"diff,omitempty"`
-	Diffs       []DiffInfo          `json:"diffs,omitempty"`
-	DiffID      int64               `json:"diff_id,omitempty"`
-	Applied     bool                `json:"applied,omitempty"`
-	WikiPath    string              `json:"wiki_path,omitempty"`
-	Epoch       int                 `json:"epoch,omitempty"`
-	Reviews     []ReviewResult      `json:"reviews,omitempty"`
-	Consensus   string              `json:"consensus,omitempty"` // A4-lite+v2: deterministic tally — accept requires unanimity
-	Settings    *Settings           `json:"settings,omitempty"`
-	WikiNotes   []WikiNoteInfo      `json:"wiki_notes,omitempty"`
-	WikiContent string              `json:"wiki_content,omitempty"`
+	Preview   *adapter.AgentEvent `json:"preview,omitempty"`
+	Streaming bool                `json:"streaming,omitempty"`
+	// poll_events: live /panel leg tally for the polled conversation (a
+	// copy of the daemon's in-memory progress — never journaled). Drives
+	// the GUI spinner row's N/M counter during multi-minute consults.
+	PanelProgress *PanelProgress `json:"panel_progress,omitempty"`
+	Diff          *DiffInfo      `json:"diff,omitempty"`
+	Diffs         []DiffInfo     `json:"diffs,omitempty"`
+	DiffID        int64          `json:"diff_id,omitempty"`
+	Applied       bool           `json:"applied,omitempty"`
+	WikiPath      string         `json:"wiki_path,omitempty"`
+	Epoch         int            `json:"epoch,omitempty"`
+	Reviews       []ReviewResult `json:"reviews,omitempty"`
+	Consensus     string         `json:"consensus,omitempty"` // A4-lite+v2: deterministic tally — accept requires unanimity
+	Settings      *Settings      `json:"settings,omitempty"`
+	WikiNotes     []WikiNoteInfo `json:"wiki_notes,omitempty"`
+	WikiContent   string         `json:"wiki_content,omitempty"`
 	// read_memory: contents of the daemon-constructed canonical files
 	// (missing files come back as "").
 	MemoryContent  string `json:"memory_content,omitempty"`

@@ -50,7 +50,7 @@ import { deriveLoopStates, loopMode } from "./loop";
 import { derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
-import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
+import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PanelProgress, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
 import { strings } from "./strings";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
@@ -145,6 +145,11 @@ export default function App() {
   // otherwise let the first to settle hide the spinner while a later
   // consult is still holding.
   const [panelThinking, setPanelThinking] = useState(0);
+  // /panel heartbeat: the daemon's live leg tally from poll_events (never
+  // journaled). Shown in the spinner row as "N/M back"; also keeps the
+  // row visible when a consult outlives THIS window's send (e.g. the GUI
+  // reopened mid-consult while the daemon still fans out).
+  const [panelProgress, setPanelProgress] = useState<PanelProgress | null>(null);
   // M7: transient streaming preview (never journaled), rebuilt every poll.
   const [preview, setPreview] = useState<PreviewEvent | null>(null);
   const [diff, setDiff] = useState<Diff | null>(null);
@@ -595,6 +600,7 @@ export default function App() {
       if (resp.agent_running) setTurnStartedAt(Date.now());
       else setTurnStartedAt(null);
       setPreview(null); // bootstrap carries no preview; the next poll restores it
+      setPanelProgress(null); // same for the /panel tally — the next poll restores it
       setDiff(resp.diff ?? null);
       setDiffs([]);
       // M9 P2: reset the bootstrap latch so the first poll after a new
@@ -704,6 +710,19 @@ export default function App() {
             return prev;
           }
           return nextPreview;
+        });
+        // /panel heartbeat — replaced wholesale per poll; the shallow
+        // compare keeps the render tree quiet on no-change ticks (the
+        // preview pattern above).
+        const nextPanelProgress = resp.panel_progress ?? null;
+        setPanelProgress((prev) => {
+          if (prev === nextPanelProgress) return prev;
+          if (prev != null && nextPanelProgress != null &&
+              prev.done === nextPanelProgress.done &&
+              prev.total === nextPanelProgress.total) {
+            return prev;
+          }
+          return nextPanelProgress;
         });
         // The daemon always reports the latest diff (any status); only a
         // pending one is actionable in the UI.
@@ -1722,7 +1741,10 @@ export default function App() {
           events={events}
           agentRunning={agentRunning}
           preview={preview}
-          panelThinking={panelThinking > 0}
+          // A daemon-side consult that outlived this window's send (GUI
+          // reopened mid-/panel) still shows the spinner via the tally.
+          panelThinking={panelThinking > 0 || panelProgress != null}
+          panelProgress={panelProgress}
           sendDisabled={!booted}
           onSend={handleSend}
           onCancel={handleCancel}

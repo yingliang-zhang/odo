@@ -128,10 +128,10 @@ type runMeta struct {
 // Server dispatches IPC commands against the store, adapters, and worktree
 // manager for one project.
 type Server struct {
-	store          *store.Store
-	projectRoot    string
-	resolvedRoot   string                     // projectRoot after EvalSymlinks (registry exclusion compares resolved forms)
-	mgr            *worktree.Manager
+	store        *store.Store
+	projectRoot  string
+	resolvedRoot string // projectRoot after EvalSymlinks (registry exclusion compares resolved forms)
+	mgr          *worktree.Manager
 	// adaptersMu guards the adapter registry: writes happen pre-serve
 	// (NewServer/RegisterAdapter) AND post-serve (M19 registers the
 	// loop_implementer override under "loop" at first spawn) — every read
@@ -203,6 +203,11 @@ type Server struct {
 	autoPending  map[int64]*autoPendingEntry // conversationID -> scheduled (not yet fired) auto-distill
 	autoInFlight map[int64]*autoInFlight     // conversationID -> firing/fired auto-distill cancel handle
 	slashing     map[int64]int               // conversationID -> live /panel+//vision queries (fold-integrity gate)
+	// Live /panel leg tally per conversation: registered at fan-out,
+	// incremented per answering leg, deleted when the last panel of the
+	// conversation ends. Poll-side heartbeat only (never journaled — the
+	// previewEvent precedent).
+	panelProg map[int64]*PanelProgress
 
 	// Test seams (zero in production): autoIdle overrides the prefs-resolved
 	// idle (bypasses the 15s daemon floor); autoJitter caps the T2 startup
@@ -252,16 +257,27 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		autoPending:  make(map[int64]*autoPendingEntry),
 		autoInFlight: make(map[int64]*autoInFlight),
 		slashing:     make(map[int64]int),
+		panelProg:    make(map[int64]*PanelProgress),
 		loops:        make(map[int64]struct{}),
 		autoJitter:   autoStartupJitterMax,
 	}
 	s.adapters[""] = ad
 	s.adapters["omp"] = ad
 	ensureProjectRegistered(projectRoot)
+	// Orphaned asks: a restart (crash or stray kill) strands every in-flight
+	// run/slash consult — the user_message is journaled, the terminal
+	// agent_done/agent_error never landed, and the GUI shows the question
+	// with zero signal (2026-08-19 SIGQUIT incident). Close each with one
+	// agent_error{cause:daemon_restart}. This folds the OLD journal only,
+	// so it runs FIRST — before the recoveries below can journal fresh
+	// expectation rows for the work they resume.
+	s.recoverOrphanedRequests(context.Background())
 	// W6: recover the durable parked-goal queues from the journal and
 	// dequeue for free conversations — at daemon startup, after the store
 	// is open and before serving (NewServer is the only touchable init
-	// hook; main.go's wiring stays untouched).
+	// hook; main.go's wiring stays untouched). Dequeue journals a
+	// run_prompt receipt, never a fresh user_message (fix-int-w6 lock), so
+	// nothing here re-opens the orphan fold above.
 	s.recoverParkedGoals(context.Background())
 	// Steer queue: the pre-restart open steers' owning runs died with the
 	// old process (memory-only queue) — close the ledger once per
@@ -1566,13 +1582,22 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 			preview = meta.previewEvent
 		}
 	}
+	// /panel heartbeat: hand the poller a COPY of the live tally — legs
+	// bump Done under s.mu and the response encodes after this handler
+	// drops the lock, so the shared pointer would race.
+	var panelProg *PanelProgress
+	if tally := s.panelProg[c.ID]; tally != nil {
+		cp := *tally
+		panelProg = &cp
+	}
 	return Response{
-		Events:       events,
-		AgentRunning: new(agentRunning),
-		Preview:      preview,
-		Streaming:    preview != nil,
-		Diff:         s.latestDiffInfo(ctx, c.ID),
-		Diffs:        s.pendingDiffInfos(ctx, c.ID),
+		Events:        events,
+		AgentRunning:  new(agentRunning),
+		Preview:       preview,
+		Streaming:     preview != nil,
+		PanelProgress: panelProg,
+		Diff:          s.latestDiffInfo(ctx, c.ID),
+		Diffs:         s.pendingDiffInfos(ctx, c.ID),
 	}, nil
 }
 
@@ -1837,6 +1862,81 @@ func (s *Server) recoverOpenSteers(ctx context.Context) {
 		}
 		if open := deriveOpenSteers(events); len(open) > 0 {
 			s.journalSteersDropped(ctx, c.ID, open, "daemon_restart")
+		}
+	}
+}
+
+// deriveOrphanedRequest folds one conversation's journal for an unanswered
+// ask: a user_message that created an expectation (a run or slash consult
+// whose terminal agent_done/agent_error was due) with no terminal row
+// behind it — the crash/kill shape. The expectation-carrier test is
+// field-keyed (the settle.go originGoal precedent — never text-keyed):
+// every user_message expects a terminal EXCEPT steers (closed by
+// run_prompt/steer_dropped rows), parked goals (closed by run_prompt
+// receipts; the park decision carries "park":true), and /loop control
+// rows (context_scope "/loop", closed by loop event rows). Parse failures
+// skip the row (recoverOpenSteers precedent).
+func deriveOrphanedRequest(events []store.Event) (pending bool) {
+	for _, ev := range events {
+		switch ev.Type {
+		case store.EventUserMessage:
+			var p struct {
+				Steer bool   `json:"steer"`
+				Park  bool   `json:"park"`
+				Scope string `json:"context_scope"`
+			}
+			if json.Unmarshal(ev.Payload, &p) != nil {
+				continue
+			}
+			if p.Steer || p.Park || p.Scope == "/loop" {
+				continue
+			}
+			pending = true
+		case store.EventAgentDone, store.EventAgentError:
+			pending = false
+		}
+	}
+	return pending
+}
+
+// recoverOrphanedRequests runs at NewServer (the recoverOpenSteers
+// precedent) BEFORE the other boot recoveries: a daemon restart strands
+// every in-flight ask — the journaled user_message never got its terminal
+// agent_done/agent_error and the GUI shows the question with zero signal
+// (2026-08-19: a stray SIGQUIT killed the daemon mid-/panel; WAL showed
+// the question, nothing after). The sweep closes each stranded ask with
+// one agent_error{cause:"daemon_restart"} so the GUI renders a failure
+// bubble instead of silence; the closure row clears the fold on the next
+// boot (idempotent). Best-effort like the sibling sweeps: failures log
+// per conversation and never stop the daemon from serving.
+func (s *Server) recoverOrphanedRequests(ctx context.Context) {
+	p, err := s.store.GetProjectByRoot(ctx, s.projectRoot)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			// Unregistered project (fresh repo) — nothing to close, no noise.
+			log.Printf("orphan-requests: startup scan: %v", err)
+		}
+		return
+	}
+	convs, err := s.store.ListActiveConversations(ctx, p.ID)
+	if err != nil {
+		log.Printf("orphan-requests: startup scan: %v", err)
+		return
+	}
+	for _, c := range convs {
+		events, err := s.store.ListEvents(ctx, c.ID, 0)
+		if err != nil {
+			log.Printf("orphan-requests: startup scan conversation %d: %v", c.ID, err)
+			continue
+		}
+		if !deriveOrphanedRequest(events) {
+			continue
+		}
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentError, mustJSON(map[string]interface{}{
+			"error": "daemon restarted while this request was in flight — no reply was recorded; resend the message",
+			"cause": "daemon_restart",
+		})); err != nil {
+			log.Printf("orphan-requests: close conversation %d: %v", c.ID, err)
 		}
 	}
 }
@@ -2881,12 +2981,40 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	if aerr := s.assertSlashReceipts(block, receipt, convBlock); aerr != nil {
 		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("slash receipt assertion failed: %w", aerr))
 	}
+	// Fan-out progress heartbeat (poll-side, never journaled): the tally
+	// registered here flows to poll_events so the GUI's spinner row can
+	// count legs during multi-minute consults. Concurrent panels on one
+	// conversation share the batch entry — Total sums, the last panel to
+	// end deletes it; every answering leg (answer or error) bumps Done.
+	s.mu.Lock()
+	prog := s.panelProg[c.ID]
+	if prog == nil {
+		prog = &PanelProgress{}
+		s.panelProg[c.ID] = prog
+	}
+	prog.Total += len(models)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if tally := s.panelProg[c.ID]; tally != nil {
+			tally.Total -= len(models)
+			if tally.Total <= 0 {
+				delete(s.panelProg, c.ID)
+			}
+		}
+		s.mu.Unlock()
+	}()
 	results := make([]PanelResult, len(models))
 	var wg sync.WaitGroup
 	for i, m := range models {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				s.mu.Lock()
+				prog.Done++
+				s.mu.Unlock()
+			}()
 			label := m.model + "@" + m.provider
 			resp, calls, err := client.QueryWithTools(ctx, m.model, system, text, tools, exec.Execute, 0)
 			if err != nil {

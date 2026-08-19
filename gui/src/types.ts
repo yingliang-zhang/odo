@@ -277,6 +277,15 @@ export interface EventPayload {
   wait_ms?: number;
 }
 
+// /panel heartbeat: the daemon's in-memory fan-out tally for the polled
+// conversation (never journaled — the previewEvent precedent). done legs
+// have answered of the total batch; drives the panel spinner row's N/M
+// counter during multi-minute consults. Absent when no panel is in flight.
+export interface PanelProgress {
+  done: number;
+  total: number;
+}
+
 // M7 live streaming: the transient in-flight block preview returned by
 // poll_events while a run streams. Never journaled — replaced wholesale on
 // every poll and dropped when the block completes.
@@ -415,6 +424,8 @@ export interface PollEventsResponse {
   // M7: transient in-flight block preview (partial:true), or null.
   preview?: PreviewEvent | null;
   streaming?: boolean;
+  // /panel heartbeat: live fan-out tally for this conversation, or null.
+  panel_progress?: PanelProgress | null;
   diff?: Diff | null;
   diffs?: Diff[];
 }

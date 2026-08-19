@@ -168,6 +168,7 @@ func main() {
 		log.Printf("received %s, shutting down", sig)
 		listener.Close()
 	}()
+	installSIGQUITImmunity()
 
 	log.Printf("project %s", root)
 	log.Printf("journal %s", filepath.Join(mgr.StateDir(), "journal.sqlite"))
@@ -193,6 +194,33 @@ func main() {
 		log.Printf("close journal: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// installSIGQUITImmunity makes the daemon survive SIGQUIT. The runtime's
+// default action (goroutine dump + exit) turns a stray kill -3 / terminal
+// ^\ into a daemon kill — 2026-08-19 an unnoticed SIGQUIT ended a daemon
+// mid-/panel, stranding a multi-minute consult with no answer journaled.
+// signal.Notify displaces the default; each delivery is logged for
+// forensics, then dropped. A deliberate goroutine-dump crash is still
+// available via SIGABRT (untouched).
+//
+// The returned channel receives one token per consumed SIGQUIT
+// (non-blocking — bursts coalesce) so tests can observe delivery without
+// racing the consumer; main ignores it.
+func installSIGQUITImmunity() <-chan struct{} {
+	quitCh := make(chan os.Signal, 1)
+	delivered := make(chan struct{}, 1)
+	signal.Notify(quitCh, syscall.SIGQUIT)
+	go func() {
+		for sig := range quitCh {
+			log.Printf("received %s, ignoring (SIGQUIT immunity)", sig)
+			select {
+			case delivered <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return delivered
 }
 
 // exitCodeAlreadyRunning is the daemon's distinct exit for the

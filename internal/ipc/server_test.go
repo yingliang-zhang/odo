@@ -4478,6 +4478,229 @@ func TestSteerLedgerClosedOnDaemonRestart(t *testing.T) {
 	}
 }
 
+// TestDeriveOrphanedRequest pins the fold's expectation matrix: every
+// user_message opens an expectation closed by agent_done/agent_error,
+// EXCEPT the no-terminal class — steers, parked goals, /loop control rows
+// (field-keyed, never text-keyed) — and unparseable payloads skip
+// (recoverOpenSteers precedent).
+func TestDeriveOrphanedRequest(t *testing.T) {
+	msg := func(seq int, payload string) store.Event {
+		return store.Event{Seq: seq, Type: store.EventUserMessage, Payload: json.RawMessage(payload)}
+	}
+	term := func(seq int, typ string) store.Event {
+		return store.Event{Seq: seq, Type: typ, Payload: json.RawMessage(`{}`)}
+	}
+	cases := []struct {
+		name    string
+		events  []store.Event
+		pending bool
+	}{
+		{"empty", nil, false},
+		{"answered ask", []store.Event{msg(1, `{"text":"hi"}`), term(2, store.EventAgentDone)}, false},
+		{"failed ask answered", []store.Event{msg(1, `{"text":"hi"}`), term(2, store.EventAgentError)}, false},
+		{"stranded ask", []store.Event{msg(1, `{"text":"do the thing"}`)}, true},
+		{"stranded slash ask", []store.Event{msg(1, `{"text":"/panel q","context_scope":"full"}`)}, true},
+		{"stranded run then err", []store.Event{msg(1, `{"text":"a"}`), msg(2, `{"text":"b"}`), term(3, store.EventAgentError)}, false},
+		{"steer skipped", []store.Event{msg(1, `{"text":"nudge","steer":true}`)}, false},
+		{"parked skipped", []store.Event{msg(1, `{"text":"goal","park":true}`)}, false},
+		{"loop control skipped", []store.Event{msg(1, `{"text":"/loop status","context_scope":"/loop"}`)}, false},
+		{"interleave: steer after stranded ask keeps it open", []store.Event{msg(1, `{"text":"a"}`), msg(2, `{"text":"nudge","steer":true}`)}, true},
+		{"unparseable skipped", []store.Event{{Seq: 1, Type: store.EventUserMessage, Payload: json.RawMessage(`{broken`)}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deriveOrphanedRequest(tc.events); got != tc.pending {
+				t.Errorf("deriveOrphanedRequest = %v, want %v", got, tc.pending)
+			}
+		})
+	}
+}
+
+// TestOrphanedRequestClosedOnDaemonRestart pins the 2026-08-19 failure: a
+// daemon kill (a stray SIGQUIT took a live /panel down) strands an
+// in-flight ask — user_message journaled, terminal agent_done/agent_error
+// never landed — and the GUI showed the question with zero signal.
+// recoverOrphanedRequests folds the journal at NewServer and closes each
+// stranded ask with one agent_error{cause:daemon_restart}. The answered
+// ask is untouched, a live steer is closed by the sibling steer sweep
+// (not by an error row), a parked goal is resumed rather than error-
+// closed, and a second boot folds the closure row (idempotent).
+func TestOrphanedRequestClosedOnDaemonRestart(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	writePrefs(t, home, "") // hermetic prefs: no auto-land noise
+	rig := startRig(t, root)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Stage the crash shape directly in the journal (RPC sends would run
+	// to completion against the stub and close their own expectation —
+	// the crash kills the legs BETWEEN journal and terminal).
+	stages := []struct {
+		typ     string
+		payload string
+	}{
+		{store.EventUserMessage, `{"text":"answered ask"}`},
+		{store.EventAgentDone, `{}`},
+		{store.EventUserMessage, `{"text":"mid-run nudge","steer":true}`},
+		{store.EventUserMessage, `{"text":"later goal","park":true}`},
+		{store.EventUserMessage, `{"text":"/panel stranded question","context_scope":"full"}`},
+	}
+	for _, s := range stages {
+		if _, err := rig.store.AppendEvent(context.Background(), convID, s.typ, s.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rig.stop(t)
+
+	mgr := worktree.NewManager(root)
+	if err := mgr.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs: %v", err)
+	}
+	st, err := store.Open(filepath.Join(mgr.StateDir(), "journal.sqlite"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+	errorRows := func() []map[string]interface{} {
+		events, err := st.ListEvents(context.Background(), convID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []map[string]interface{}
+		for _, e := range events {
+			if e.Type != store.EventAgentError {
+				continue
+			}
+			var p map[string]interface{}
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatalf("event %d: %v", e.ID, err)
+			}
+			out = append(out, p)
+		}
+		return out
+	}
+	newBootServer := func() *Server {
+		srv := NewServer(st, root, adapter.NewOMP(mgr.StateDir()), mgr)
+		srv.autoDisabled = true // same dark-launch as startRig: no timer noise
+		return srv
+	}
+
+	// First boot: exactly one closure — the stranded /panel ask. The
+	// answered ask provokes none; the parked goal dequeues into a stub run
+	// (no user_message, fix-int-w6 contract), and the steer is the sibling
+	// sweep's ledger, not this one's.
+	_ = newBootServer()
+	rows := errorRows()
+	if len(rows) != 1 {
+		t.Fatalf("agent_error rows after first boot = %d, want exactly 1 (stranded ask closure)\nrows: %v", len(rows), rows)
+	}
+	if got := rows[0]["cause"]; got != "daemon_restart" {
+		t.Errorf("agent_error cause = %v, want daemon_restart", got)
+	}
+
+	// Second boot: the closure row clears the fold — idempotent, no
+	// double-close.
+	_ = newBootServer()
+	if got := len(errorRows()); got != 1 {
+		t.Errorf("agent_error rows after second boot = %d, want still 1 (recovery is idempotent)", got)
+	}
+}
+
+// TestPanelProgressHeartbeat pins the poll-side /panel tally: while a
+// consult holds the send RPC (legs still answering), poll_events reports
+// {done,total}; once the last leg answers the tally is gone (never
+// journaled, never stale past the consult).
+func TestPanelProgressHeartbeat(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	writePrefs(t, home, "review: pm1@test, pm2@test\n")
+	// Gate the MoA stub per arrival order: the first leg answers
+	// immediately, the second parks on release — a deterministic
+	// {done:1,total:2} mid-flight observation window.
+	release := make(chan struct{})
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) >= 2 {
+			<-release
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": "panel-answer"}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// The /panel RPC holds for the whole consult (daemon contract), so it
+	// runs on its own connection in a goroutine — rig.call would block the
+	// test goroutine. Errors land on the result channel.
+	type sendResult struct {
+		ok  bool
+		err string
+	}
+	sendDone := make(chan sendResult, 1)
+	go func() {
+		conn, err := net.Dial("unix", rig.sock)
+		if err != nil {
+			sendDone <- sendResult{err: err.Error()}
+			return
+		}
+		defer conn.Close()
+		if err := json.NewEncoder(conn).Encode(Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel heartbeat check"}); err != nil {
+			sendDone <- sendResult{err: err.Error()}
+			return
+		}
+		var resp Response
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			sendDone <- sendResult{err: err.Error()}
+			return
+		}
+		sendDone <- sendResult{ok: resp.OK, err: resp.Error}
+	}()
+
+	// Poll until the first leg's answer lands in the tally: 1 of 2.
+	var prog *PanelProgress
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID})
+		if resp.PanelProgress != nil {
+			prog = resp.PanelProgress
+			if prog.Total == 2 && prog.Done == 1 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if prog == nil || prog.Total != 2 || prog.Done != 1 {
+		t.Fatalf("mid-flight panel_progress = %+v, want {done:1 total:2}", prog)
+	}
+
+	close(release)
+	res := <-sendDone
+	if !res.ok {
+		t.Fatalf("/panel RPC: %s", res.err)
+	}
+	// Consult over: the tally is unregistered before the RPC returns, so
+	// the very next poll must report nothing — no stale progress rows.
+	if resp := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID}); resp.PanelProgress != nil {
+		t.Fatalf("panel_progress after completion = %+v, want absent", resp.PanelProgress)
+	}
+}
+
 // failStartAdapter errors every Start — the post-receipt admission
 // failure seam (agent_start) without scripting the whole stub agent.
 type failStartAdapter struct{ err error }

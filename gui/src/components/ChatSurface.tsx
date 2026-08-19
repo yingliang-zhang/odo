@@ -16,7 +16,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
 import { deriveTurnStats, formatBytes, formatTokens } from "../stats";
 import type { TurnStats } from "../stats";
-import type { AutoDistillCountdown, OdoEvent, PreviewEvent } from "../types";
+import type { AutoDistillCountdown, OdoEvent, PanelProgress, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
 import Markdown from "./Markdown";
 import PlanChip from "./PlanChip";
@@ -59,6 +59,9 @@ interface Props {
   preview?: PreviewEvent | null;
   // J: spinner shown while /panel or /vision blocks on the daemon side.
   panelThinking?: boolean;
+  // /panel heartbeat: the daemon's live fan-out tally (N legs answered of
+  // M), rendered in the spinner row. Null when no panel is in flight.
+  panelProgress?: PanelProgress | null;
   sendDisabled: boolean;
   // W6 (goal queue): park queues the message as a parked goal; at most one
   // of steer/park is true (parkArmed forces steer off — the daemon refuses
@@ -471,6 +474,7 @@ export default function ChatSurface({
   agentRunning,
   preview,
   panelThinking,
+  panelProgress,
   sendDisabled,
   onSend,
   onResumeParked,
@@ -1487,7 +1491,7 @@ export default function ChatSurface({
           <div className="mx-auto flex w-full max-w-[var(--chat-column-width,100%)] flex-col">
           <div className="panel-thinking flex items-center gap-1.5 px-4 py-2 text-label text-text-dim">
             <LoaderCircle size={14} className="spin" />
-            <span>Panel consulting models…</span>
+            <span>Panel consulting models…{panelProgress ? ` · ${Math.min(panelProgress.done, panelProgress.total)}/${panelProgress.total} back` : ""}</span>
           </div>
           </div>
         )}

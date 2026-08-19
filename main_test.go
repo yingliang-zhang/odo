@@ -6,8 +6,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
+
+// SIGQUIT immunity: the daemon must survive a stray kill -3 (the runtime's
+// default action would dump goroutines and exit mid-consult — 2026-08-19
+// it took a live /panel down unnoticed). The test drives the production
+// installer and asserts the signal ARRIVES on the immune channel, i.e. the
+// default fatal action was displaced; the process reaching the assertion
+// at all proves nobody acted on the default.
+func TestSIGQUITImmunity(t *testing.T) {
+	delivered := installSIGQUITImmunity()
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGQUIT); err != nil {
+		t.Fatalf("kill self: %v", err)
+	}
+	select {
+	case <-delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGQUIT never reached the immunity handler — default action still armed")
+	}
+}
 
 // M6 (§9) test 12: `odo wiki read <page>` runs against plain files in the
 // cwd — no daemon. Covers the happy path (exit 0, exact content on stdout)

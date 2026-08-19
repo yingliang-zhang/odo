@@ -23,6 +23,7 @@ import type {
   MemoryProposal,
   MemoryProposalsResponse,
   OdoEvent,
+  PanelProgress,
   PendingCountsResponse,
   PinResponse,
   PollEventsResponse,
@@ -524,6 +525,12 @@ export const runState = { foreground: false };
 // journaled, replaced wholesale per poll like the daemon's.
 export const previewState: { current: PreviewEvent | null } = { current: null };
 
+// /panel heartbeat knob (same pattern as previewState): the daemon reports
+// a live leg tally in poll_events while a consult fans out — memory-only,
+// gone the moment the consult ends. E2E sets it to drive the spinner
+// row's N/M counter independently of the advisorySend hold.
+export const panelProgressState: { current: PanelProgress | null } = { current: null };
+
 // Advisory-slash knob (/panel, /vision, /preview — same pattern as
 // runState): the daemon answers those synchronously inside send_message,
 // so the RPC outlasts the whole consult. hold parks the mock's reply
@@ -800,6 +807,7 @@ export function makePollResponse(convId: number, afterSeq?: number): PollEventsR
     agent_running: runState.foreground,
     preview: previewState.current,
     streaming: false,
+    panel_progress: panelProgressState.current,
     diff: convId === 1 ? pendingDiff : null,
     diffs: convId === 1 ? [pendingDiff] : [],
   };

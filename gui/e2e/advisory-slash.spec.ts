@@ -24,7 +24,52 @@ test.afterEach(async ({ page }) => {
     fx.advisorySend.fail = null;
     fx.advisorySend.released = false;
     fx.advisorySend.releaseError = null;
+    fx.panelProgressState.current = null;
   });
+});
+
+test("the spinner row shows the panel's live N/M progress from poll heartbeats", async ({ page }) => {
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
+    fx.advisorySend.hold = true;
+  });
+
+  const textarea = page.getByPlaceholder("Describe the change you want…");
+  await textarea.fill("/panel show me progress");
+  await textarea.press("Meta+Enter");
+
+  // No heartbeat yet: the row renders without a tally.
+  const spinner = page.locator(".panel-thinking");
+  await expect(spinner).toBeVisible();
+  await expect(spinner).toHaveText(/Panel consulting models…$/);
+
+  // The daemon's poll-side tally arrives on the next heartbeat tick.
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    fx.panelProgressState.current = { done: 1, total: 3 };
+  });
+  await expect(spinner).toContainText("1/3 back");
+
+  // A daemon-side consult also lights the row on its own — the tally
+  // arriving after this window's RPC cleared keeps the spinner alive.
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    fx.panelProgressState.current = { done: 2, total: 3 };
+    fx.releaseAdvisorySends();
+  });
+  await expect(spinner).toContainText("2/3 back");
+
+  // Consult over: tally gone, answer journaled, row cleared.
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    fx.panelProgressState.current = null;
+  });
+  await expect(page.locator(".bubble-agent", { hasText: "Mock panel advisory answer." })).toBeVisible();
+  await expect(spinner).toHaveCount(0);
 });
 
 test("/panel clears the composer immediately and typing stays live while the panel consults", async ({ page }) => {
