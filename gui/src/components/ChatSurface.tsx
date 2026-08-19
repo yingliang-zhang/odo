@@ -755,12 +755,39 @@ export default function ChatSurface({
   }, []);
 
   // Belt A: auto-grow the composer with the draft up to the 6-row cap.
-  useEffect(() => {
+  // WebKit counts a WRAPPED placeholder in textarea.scrollHeight (a narrow
+  // composer — e.g. window-width slack eaten by the open context panel —
+  // wraps the placeholder onto 2-3 lines), so the mount-time measurement
+  // bakes placeholder height in and only the first keystroke corrects it.
+  // Strip the placeholder for the measurement; it restores before paint.
+  const fitComposer = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta) return;
+    const ph = ta.placeholder;
+    ta.placeholder = "";
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
-  }, [draft]);
+    ta.placeholder = ph;
+  }, []);
+  useEffect(fitComposer, [draft, fitComposer]);
+  // Refit on width changes too (context panel toggle, window resize,
+  // sidebar collapse): the effect above only runs when the draft changes,
+  // and a width change alters wrapping without touching the draft. Gate on
+  // width so our own height writes don't retrigger the observer.
+  const composerWidthRef = useRef(0);
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta || typeof ResizeObserver === "undefined") return; // jsdom / legacy webview
+    composerWidthRef.current = ta.offsetWidth;
+    const ro = new ResizeObserver(() => {
+      const w = ta.offsetWidth;
+      if (w === composerWidthRef.current) return;
+      composerWidthRef.current = w;
+      fitComposer();
+    });
+    ro.observe(ta);
+    return () => ro.disconnect();
+  }, [fitComposer]);
 
   // P3: @-mention sources. Workstreams are project-scoped (the project root
   // travels on each resolve ctx); wiki notes are conversation-scoped, so the
