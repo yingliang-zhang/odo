@@ -1978,9 +1978,19 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		// stays pending on a violation; the user can still reject it.
 		// Both patch sides are guarded: renaming a file out of wiki/ is a
 		// memory write too, not just writing into it.
+		//
+		// Two protection layers (2026-08-19 restore):
+		//   (1) memory paths (.odo/, wiki/) — invariant 1, refused for
+		//       EVERY actor, human Accept included (the click still lands
+		//       an agent-produced patch into daemon-owned content).
+		//   (2) protectedGateFiles — refused ONLY for a non-human actor
+		//       (autoActor, loopActor, …); the human Accept click IS the
+		//       designed escape ("changes to these files go through the
+		//       accept path", 2026-08-15 tri-model consensus). Blocking it
+		//       here for the human left gate diffs un-landable at all.
 		patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
 		if gerr == nil {
-			if perr := rejectProtectedPaths(patchPaths); perr != nil {
+			if perr := rejectExecutorPaths(patchPaths, actor); perr != nil {
 				_, _ = s.store.AppendEvent(ctx, d.ConversationID, store.EventAgentError,
 					mustJSON(map[string]interface{}{"error": "accept_diff: " + perr.Error()}))
 				return Response{}, perr
@@ -3536,6 +3546,31 @@ func isProtectedPath(p string) bool {
 func rejectProtectedPaths(paths []string) error {
 	for _, f := range paths {
 		if isProtectedPath(f) {
+			return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
+		}
+	}
+	return nil
+}
+
+// rejectExecutorPaths is the accept-time guard inside handleDiffAction,
+// with two DIFFERENT refusal scopes that the now-replaced unconditional
+// call had collapsed into one:
+//
+//   - .odo/ and wiki/ — invariant 1: refused for EVERY actor. Even a human
+//     Accept click lands the agent-produced patch into daemon-owned
+//     content, so the daemon itself must stay the enforcement point.
+//   - protectedGateFiles — refused ONLY for a non-human actor (autoActor,
+//     loopActor, any named pipeline actor; the human Accept click carries
+//     actor ""). The human Accept click is the 2026-08-15 tri-model
+//     escape: gate diffs "require explicit human review via the normal
+//     accept path". The single-scope refusal made every gate-file
+//     change un-landable from the GUI.
+func rejectExecutorPaths(paths []string, actor string) error {
+	if actor != "" {
+		return rejectProtectedPaths(paths)
+	}
+	for _, f := range paths {
+		if lp := strings.ToLower(f); strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/") {
 			return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
 		}
 	}

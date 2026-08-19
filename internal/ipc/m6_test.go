@@ -693,6 +693,69 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 	}
 }
 
+// TestHumanAcceptGateSourceAllowed (2026-08-15 consensus restore): a diff
+// touching a protected gate source (internal/ipc/autoland.go et al.) must
+// REFUSE the auto-land actor but still land via the human Accept click —
+// "gone through the accept path" was the designed escape; the executor
+// had collapsed both into one refusal, leaving gate diffs un-landable
+// (M19 diff 3 hit exactly this). Memory paths (.odo//wiki/) stay refused
+// for every actor.
+func TestHumanAcceptGateSourceAllowed(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	ctx := context.Background()
+
+	seed := func(name, patch string) store.Diff {
+		t.Helper()
+		p := filepath.Join(root, ".odo", "diffs", name)
+		if err := os.WriteFile(p, []byte(patch), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		head, err := git.CurrentSHA(root)
+		if err != nil {
+			t.Fatalf("CurrentSHA: %v", err)
+		}
+		d, err := rig.store.InsertDiff(ctx, convID, p, head, "")
+		if err != nil {
+			t.Fatalf("InsertDiff: %v", err)
+		}
+		return d
+	}
+
+	// Human accept of a gate-source diff: allowed, applied, committed.
+	gatePatch := "diff --git a/internal/ipc/autoland.go b/internal/ipc/autoland.go\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/internal/ipc/autoland.go\n@@ -0,0 +1 @@\n+package generated\n"
+	dHuman := seed("gate-human.diff", gatePatch)
+	resp := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: dHuman.ID})
+	if !resp.Applied {
+		t.Fatalf("human accept of gate-source diff: applied = false (resp %+v) — the 2026-08-15 escape path is broken", resp)
+	}
+	if got := readFileStr(t, filepath.Join(root, "internal/ipc/autoland.go")); got != "package generated\n" {
+		t.Errorf("gate file after human accept = %q, want the applied content", got)
+	}
+
+	// Auto actor on another gate file: still refused (double-layer with
+	// autoLandCheck's pre-panel protected_path block).
+	gatePatch2 := "diff --git a/internal/ipc/settle.go b/internal/ipc/settle.go\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/internal/ipc/settle.go\n@@ -0,0 +1 @@\n+package generated\n"
+	dAuto := seed("gate-auto.diff", gatePatch2)
+	before := eventsTypes(t, rig, convID)
+	if _, err := rig.server.handleDiffAction(ctx, dAuto.ID, "accept", autoActor, ""); err == nil ||
+		!strings.Contains(err.Error(), "internal/ipc/settle.go") {
+		t.Fatalf("auto accept of gate-source diff err = %v, want a protected-path refusal naming internal/ipc/settle.go", err)
+	}
+	if got, err := rig.store.GetDiff(ctx, dAuto.ID); err != nil || got.Status != store.DiffPending {
+		t.Errorf("auto-refused gate diff status = %v (%v), want pending", got.Status, err)
+	}
+	after := eventsTypes(t, rig, convID)
+	if len(after) <= len(before) || after[len(after)-1] != "agent_error" {
+		t.Errorf("auto refusal: events %v → %v, want an agent_error appended", before, after)
+	}
+}
+
 // TestLedgerZeroProposalsNoCrossEpoch (K3 review fix): a zero-proposal
 // distill following a proposing distill must show "proposals: 0", NOT
 // inherit the previous epoch's memory_propose count.
