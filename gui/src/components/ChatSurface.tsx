@@ -7,6 +7,7 @@ import {
   KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -535,6 +536,12 @@ export default function ChatSurface({
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // True between compositionstart and compositionend. React 19 ignores
+  // mid-composition input events, so `draft` trails the DOM while a CJK
+  // IME session is live; the value-sync effect below must not write in
+  // that window (a stale write aborts the composition — the "steering
+  // text washed away by stream updates" bug).
+  const composingRef = useRef(false);
   // Belt A stick-to-bottom: true while the user is pinned to the newest
   // output. Only a deliberate gesture disengages — wheel-up over the
   // stream, a touch drag toward older output, or a scrollbar-thumb drag
@@ -770,6 +777,18 @@ export default function ChatSurface({
     ta.placeholder = ph;
   }, []);
   useEffect(fitComposer, [draft, fitComposer]);
+  // The composer textarea is UNCONTROLLED (defaultValue, no `value` prop):
+  // React 19 drops `input` events that arrive mid-composition, so with a
+  // controlled binding any re-render during a CJK IME session wrote the
+  // stale draft back into the node and aborted the composition — while a
+  // run streams, the 350ms polls + 1s heartbeat made that near-instant.
+  // Instead, programmatic draft writes (send-clear, slash pick, edit
+  // fill) reach the DOM here, and only outside an active composition;
+  // compositionend realigns `draft` with the committed text.
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    if (ta && !composingRef.current && ta.value !== draft) ta.value = draft;
+  }, [draft]);
   // Refit on width changes too (context panel toggle, window resize,
   // sidebar collapse): the effect above only runs when the draft changes,
   // and a width change alters wrapping without touching the draft. Gate on
@@ -855,8 +874,7 @@ export default function ChatSurface({
   // default), Esc stops a run or clears the draft. Escape is swallowed here
   // so App's global handler (blur/cancel for focus elsewhere) doesn't
   // double-fire.
-  const handleDraftChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
-    const val = e.target.value;
+  const handleDraftChangeValue = (val: string, caret: number | null) => {
     setDraft(val);
     // V13 token: survives only while the draft still starts with the
     // accepted command word — an edit inside the token clears it.
@@ -876,9 +894,12 @@ export default function ChatSurface({
     }
     // P3 @-mention completion: `@` opens the popup only at a word start
     // (line start or after whitespace) — emails and code never trigger.
-    const atQuery = detectAtQuery(val, e.target.selectionStart);
+    const atQuery = caret == null ? null : detectAtQuery(val, caret);
     if (atQuery != null) queueAtResolve(atQuery);
     else closeAtMenu();
+  };
+  const handleDraftChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
+    handleDraftChangeValue(e.target.value, e.target.selectionStart);
   };
 
   // Slash commands matching the current filter — single source for the
@@ -1377,9 +1398,11 @@ export default function ChatSurface({
           </div>
         ))}
         {panelThinking && (
+          <div className="mx-auto flex w-full max-w-[var(--chat-column-width,100%)] flex-col">
           <div className="panel-thinking flex items-center gap-1.5 px-4 py-2 text-label text-text-dim">
             <LoaderCircle size={14} className="spin" />
             <span>Panel consulting models…</span>
+          </div>
           </div>
         )}
           {runGroups.map((group, groupIdx) => (
@@ -1438,8 +1461,17 @@ export default function ChatSurface({
             </div>
             </RunGroupBoundary>
           ))}
-          {preview && <PreviewBubble preview={preview} projectRoot={projectRoot} />}
-          <ToolTicker running={agentRunning} events={events} />
+          {preview && (
+            // ui/message-stream: preview + live ticker share the centered
+            // chat column with the run-groups; unwrapped they rendered
+            // full-bleed beside the padded bubbles.
+            <div className="mx-auto flex w-full max-w-[var(--chat-column-width,100%)] flex-col">
+              <PreviewBubble preview={preview} projectRoot={projectRoot} />
+            </div>
+          )}
+          <div className="mx-auto flex w-full max-w-[var(--chat-column-width,100%)] flex-col">
+            <ToolTicker running={agentRunning} events={events} />
+          </div>
         </div>
         </div>
         {newOutput && (
@@ -1609,8 +1641,21 @@ export default function ChatSurface({
             className="relative z-10 min-h-[36px] max-h-[148px] w-full resize-none overflow-y-auto border-none bg-transparent px-0 py-2 text-text [font:inherit] leading-[1.4] focus:outline-none focus-visible:outline-none disabled:opacity-60"
             aria-label={strings.composer.messageInputLabel}
             rows={1}
-            value={draft}
+            // Uncontrolled by design (see the value-sync effect above):
+            // controlled `value` let any mid-composition re-render clobber
+            // live CJK IME text.
+            defaultValue=""
             onChange={handleDraftChange}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+              // React 19 fires no change events for composition text, so
+              // sync the committed string into `draft` here.
+              const ta = textareaRef.current;
+              if (ta) handleDraftChangeValue(ta.value, ta.selectionStart);
+            }}
             onBlur={() => {
               // Delay close so click registration on menu items fires first.
               setTimeout(() => {

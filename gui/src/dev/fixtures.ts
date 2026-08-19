@@ -26,6 +26,7 @@ import type {
   PendingCountsResponse,
   PinResponse,
   PollEventsResponse,
+  PreviewEvent,
   Project,
   ProjectEntry,
   ReadMemoryResponse,
@@ -518,6 +519,11 @@ export const runningWorkstreams: number[] = [];
 // runningWorkstreams; this covers the FOREGROUND case (steer/park mutex).
 export const runState = { foreground: false };
 
+// M7 preview knob (same pattern as runState): the mock's poll response
+// mirrors this so e2e can simulate a streaming in-flight block — never
+// journaled, replaced wholesale per poll like the daemon's.
+export const previewState: { current: PreviewEvent | null } = { current: null };
+
 // W6 (goal queue): per-workstream parked-goal depth, keyed like
 // pendingCounts. Kept in step with the journaled events by
 // syncParkedGoals (the same derivation the daemon applies — mock parity:
@@ -767,7 +773,7 @@ export function makePollResponse(convId: number, afterSeq?: number): PollEventsR
     ok: true,
     events: events.filter((e) => e.conversation_id === convId && e.seq > (afterSeq ?? Number.MAX_SAFE_INTEGER)),
     agent_running: runState.foreground,
-    preview: null,
+    preview: previewState.current,
     streaming: false,
     diff: convId === 1 ? pendingDiff : null,
     diffs: convId === 1 ? [pendingDiff] : [],
