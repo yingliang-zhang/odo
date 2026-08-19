@@ -37,7 +37,7 @@ test("bg chip opens dropdown listing still-running workstreams; row click jumps"
   await expect(chip).toContainText("1 background run");
 
   await chip.click();
-  const menu = page.locator(".bg-runs-menu");
+  const menu = page.locator(".runs-menu");
   const row = menu.locator(".bg-run-row", { hasText: "feat-sidebar-tree" });
   await expect(row).toHaveCount(1);
   await expect(row).toContainText("still running");
@@ -57,13 +57,13 @@ test("multiple bg runs all listed in the dropdown; click-away closes without jum
   await expect(chip).toContainText("2 background runs", BG_REFRESH);
 
   await chip.click();
-  const rows = page.locator(".bg-runs-menu .bg-run-row");
+  const rows = page.locator(".runs-menu .bg-run-row");
   await expect(rows).toHaveCount(2);
   await expect(rows.nth(0)).toContainText("feat-sidebar-tree");
   await expect(rows.nth(1)).toContainText("fix-daemon-binary");
 
   await page.locator(".app-main").click({ position: { x: 5, y: 5 } });
-  await expect(page.locator(".bg-runs-menu")).toHaveCount(0);
+  await expect(page.locator(".runs-menu")).toHaveCount(0);
   await expect(page.locator(".app-statusbar")).toContainText("main");
 });
 

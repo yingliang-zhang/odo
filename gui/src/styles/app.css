@@ -1475,7 +1475,8 @@ mark {
 /* ---------- M9 Phase 1: Context Panel (right side) ---------- */
 
 /* .context-panel/.panel-resize/.panel-head/.panel-tabs/.panel-tab(+.active)/
-   .panel-tab-badge/.panel-close/.panel-body deleted (Phase 7): Tailwind
+   .panel-tab-badge/.panel-body deleted (Phase 7; .panel-close went with the
+   in-header close X, replaced by the TopBar toggle): Tailwind
    utilities + CVA Button in ContextPanel.tsx; the <1000px overlay media
    query is expressed as max-[999px]: utilities there. Class names survive
    as inert e2e/identity hooks. @keyframes panel-in stays (shared entrance

@@ -4,17 +4,15 @@
 // Phase 3: Wiki/Memory/Ledger tabs get their content.
 
 import { type ReactNode, useRef, useState } from "react";
-import { GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, Inbox, X } from "lucide-react";
+import { GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, Inbox } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import RunGroupBoundary from "./RunGroupBoundary";
-import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
 export type PanelTab = "changes" | "review" | "wiki" | "memory" | "ledger" | "skills";
 
 interface Props {
   open: boolean;
-  onClose: () => void;
   activeTab: PanelTab;
   onTabChange: (tab: PanelTab) => void;
   // Badge counts for each tab (null/undefined = no badge)
@@ -39,7 +37,6 @@ const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
 
 export default function ContextPanel({
   open,
-  onClose,
   activeTab,
   onTabChange,
   changesBadge,
@@ -143,20 +140,6 @@ export default function ContextPanel({
             );
           })}
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className={cn(
-            "panel-close shrink-0 h-[18px] w-[26px] p-0 rounded",
-            "hover:text-[var(--text)] hover:bg-[var(--bg-input)]",
-          )}
-          aria-label="Close panel"
-          title="Close (⌘J)"
-          onClick={onClose}
-        >
-          <X size={14} />
-        </Button>
       </div>
       <div className="panel-body flex-1 min-h-0 overflow-y-auto p-2">
         <RunGroupBoundary resetKey={activeTab} fallbackNote="other tabs are unaffected">

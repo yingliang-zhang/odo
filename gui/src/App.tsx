@@ -1589,6 +1589,8 @@ export default function App() {
         workstreamName={workstream?.name ?? null}
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
         sidebarCollapsed={sidebarCollapsed}
+        panelOpen={panelOpen}
+        onTogglePanel={() => setPanelOpen((v) => !v)}
         onDistill={handleDistill}
         onOpenWiki={() => openPanelTab("wiki")}
         onCurate={handleCurate}
@@ -1758,7 +1760,6 @@ export default function App() {
       </main>
       <ContextPanel
         open={panelOpen}
-        onClose={() => setPanelOpen(false)}
         activeTab={panelTab}
         onTabChange={setPanelTab}
         changesBadge={diffs.length > 0 ? diffs.length : undefined}

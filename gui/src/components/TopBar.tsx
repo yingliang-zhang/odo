@@ -1,6 +1,6 @@
 import { FormEvent, useState, type ReactNode } from "react";
 import { errorMessage } from "../api";
-import { Sparkles, FileText, Wand2, MapPin, BookOpen, Settings, PanelLeft, ChevronLeft, MoreHorizontal } from "lucide-react";
+import { Sparkles, FileText, Wand2, MapPin, BookOpen, Settings, PanelLeft, PanelRight, ChevronLeft, ChevronRight, MoreHorizontal } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,6 +24,9 @@ interface Props {
   workstreamName: string | null;
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
+  // Right context panel — the left sidebar toggle's mirror (⌘J).
+  panelOpen: boolean;
+  onTogglePanel: () => void;
   // Actions (moved from the Sidebar in P4). onDistill/onCurate never
   // reject — failures surface in App's error banner. onPin rejects so the
   // popover can show the refusal inline (e.g. overflow names the pin).
@@ -109,6 +112,8 @@ export default function TopBar({
   workstreamName,
   sidebarCollapsed,
   onToggleSidebar,
+  panelOpen,
+  onTogglePanel,
   onDistill,
   onOpenWiki,
   onCurate,
@@ -303,6 +308,19 @@ export default function TopBar({
           title="Settings (⌘,)"
           onClick={onOpenSettings}
         />
+
+        {/* Right context panel toggle — mirrors the sidebar toggle on the
+            left (same nav-btn chrome); replaces the panel's old in-header
+            close X. */}
+        <button
+          type="button"
+          className="topbar-nav-btn"
+          aria-label="Toggle panel"
+          title="Toggle panel (⌘J)"
+          onClick={onTogglePanel}
+        >
+          {panelOpen ? <ChevronRight size={14} /> : <PanelRight size={14} />}
+        </button>
       </div>
     </header>
   );

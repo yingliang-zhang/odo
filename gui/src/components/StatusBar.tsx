@@ -218,9 +218,13 @@ function ContextMeter({
         sideOffset={6}
         role="dialog"
         aria-label={strings.statusbar.promptCompositionLabel}
-        // bg-runs-menu + ctx-meter-popover survive as inert identity markers
-        // (e2e background-runs.spec); sizing/padding now utilities.
-        className="bg-runs-menu ctx-meter-popover max-h-[60vh] min-w-[260px] overflow-y-auto p-2"
+        // runs-menu + ctx-meter-popover survive as inert identity markers
+        // (e2e background-runs.spec); sizing/padding now utilities. The
+        // marker must NOT keep the old `bg-` prefix: twMerge reads any
+        // `bg-*` class as the background-color group and drops the
+        // PopoverContent base `bg-[var(--bg-elevated)]`, leaving the
+        // popover transparent.
+        className="runs-menu ctx-meter-popover max-h-[60vh] min-w-[260px] overflow-y-auto p-2"
       >
           <div className={CTX_POP_TITLE}>
             last prompt — seq #{snapshot.seq}
@@ -307,7 +311,7 @@ function PanelChip({ models }: { models: PanelModel[] }) {
         sideOffset={6}
         role="dialog"
         aria-label={strings.statusbar.reviewPanelLabel}
-        className="bg-runs-menu panel-chip-popover max-h-[60vh] min-w-[260px] overflow-y-auto p-2"
+        className="runs-menu panel-chip-popover max-h-[60vh] min-w-[260px] overflow-y-auto p-2"
       >
         <div className={CTX_POP_TITLE}>{strings.statusbar.reviewPanelReadonlyTitle}</div>
         {models.map((m) => (
@@ -429,7 +433,7 @@ function PipelineChip({
         sideOffset={6}
         role="dialog"
         aria-label="Auto-land pipeline"
-        className="bg-runs-menu auto-land-popover min-w-[240px]"
+        className="runs-menu auto-land-popover min-w-[240px]"
       >
         <div className={CTX_POP_TITLE}>auto-land — current status</div>
         {visible.map((s) => (
@@ -560,7 +564,7 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
         sideOffset={6}
         role="dialog"
         aria-label="OMP usage and grievances"
-        className="bg-runs-menu omp-usage-popover max-h-[60vh] min-w-[300px] overflow-y-auto p-2"
+        className="runs-menu omp-usage-popover max-h-[60vh] min-w-[300px] overflow-y-auto p-2"
       >
           <div className={CTX_POP_TITLE}>OMP usage — read-only (never journaled)</div>
           {loading && data == null && <div className="omp-section omp-loading p-1 text-micro text-text-dim">loading…</div>}
@@ -735,7 +739,7 @@ export default function StatusBar({
             align="end"
             sideOffset={6}
             role="menu"
-            className="bg-runs-menu min-w-[200px]"
+            className="runs-menu min-w-[200px]"
           >
             {backgroundRuns.map((run) => (
               <button

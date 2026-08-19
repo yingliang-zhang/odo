@@ -47,12 +47,15 @@ test("switch panel tabs", async ({ page }) => {
   await expect(changesTab).toHaveAttribute("aria-selected", "true");
 });
 
-test("panel close button works", async ({ page }) => {
-  // Open panel first
-  await page.keyboard.press("Meta+j");
+test("topbar toggle opens and closes the panel", async ({ page }) => {
+  // The panel's in-header close X was replaced by a TopBar toggle button
+  // mirroring the left sidebar's.
+  const toggle = page.getByRole("button", { name: "Toggle panel" });
+  await expect(page.locator(".context-panel")).toBeHidden();
+
+  await toggle.click();
   await expect(page.locator(".context-panel")).toBeVisible();
 
-  // Click close button
-  await page.getByRole("button", { name: "Close panel" }).click();
+  await toggle.click();
   await expect(page.locator(".context-panel")).toBeHidden();
 });

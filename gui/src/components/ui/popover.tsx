@@ -3,7 +3,7 @@ import { cn } from "../../lib/utils";
 
 /**
  * Popover — Radix UI wrapper styled with Odo tokens via Tailwind.
- * Replaces hand-rolled bg-runs-menu, QueueDock popover, TopBar overflow.
+ * Replaces hand-rolled runs-menu, QueueDock popover, TopBar overflow.
  *
  * Esc gate contract (tri-model 3/3): onEscapeKeyDown stops propagation.
  */
