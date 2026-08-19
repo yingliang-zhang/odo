@@ -536,20 +536,50 @@ export default function ChatSurface({
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Belt A stick-to-bottom: true while the user is pinned to the newest
-  // output; scrolling up disengages, the "↓ new output" pill re-engages.
+  // output. Only a deliberate gesture disengages — wheel-up over the
+  // stream, a touch drag toward older output, or a scrollbar-thumb drag
+  // upward. Scroll EVENTS alone never disengage: content-visibility size
+  // resolution and scroll anchoring shift scrollTop without user intent,
+  // and treating those as "scrolled away" silently killed the follow
+  // during live runs ("working" shown, view frozen mid-stream).
   const stickRef = useRef(true);
   const [newOutput, setNewOutput] = useState(false);
+  // Our own writes land in scroll events too; stick updates ignore scroll
+  // events for a beat after each programmatic write.
+  const programmaticUntilRef = useRef(0);
+  // Scrollbar-thumb drag: armed by a pointerdown in the right gutter.
+  // While armed, scroll events report real user intent and the auto-pin
+  // stops fighting the drag.
+  const dragScrollRef = useRef(false);
+  const touchYRef = useRef<number | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
-  // Belt A stick-to-bottom (spec §Fix 2): track whether the user is pinned
-  // to the newest output. Programmatic scrolls fire this handler too; they
-  // land at the bottom, so sticking survives our own auto-scroll.
+  const pinToBottom = useCallback(() => {
+    const el = listRef.current;
+    if (!el || dragScrollRef.current) return;
+    programmaticUntilRef.current = performance.now() + 250;
+    el.scrollTop = el.scrollHeight;
+  }, []);
+
   const handleListScroll = () => {
     const el = listRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
-    stickRef.current = nearBottom;
-    if (nearBottom) setNewOutput(false);
+    if (!dragScrollRef.current && performance.now() < programmaticUntilRef.current) return;
+    // Re-engage on any landing at the bottom (scroll down, pill click,
+    // drag to bottom); never disengage here — gestures do that.
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX) {
+      stickRef.current = true;
+      setNewOutput(false);
+    }
   };
+
+  // Disarm the scrollbar-drag latch on release anywhere (the pointer can
+  // leave the gutter mid-drag).
+  useEffect(() => {
+    const disarm = () => { dragScrollRef.current = false; };
+    window.addEventListener("pointerup", disarm);
+    return () => window.removeEventListener("pointerup", disarm);
+  }, []);
 
   // Auto-follow only while stuck; otherwise surface the pill. New events
   // while scrolled up are exactly the case the pill exists for.
@@ -560,24 +590,38 @@ export default function ChatSurface({
       setNewOutput(true);
       return;
     }
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    pinToBottom();
     // Preview changes poll-by-poll without touching events.length, so it
     // joins the follow-the-tail trigger too.
-  }, [events.length, preview]);
+  }, [events.length, preview, pinToBottom]);
 
   // A run flipping state (done banner appearing, ticker hiding) also nudges
   // the view, but never yanks a reader back down.
   useEffect(() => {
-    const el = listRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [agentRunning]);
+    if (stickRef.current) pinToBottom();
+  }, [agentRunning, pinToBottom]);
+
+  // Re-pin on growth the event counter can't see: content-visibility size
+  // resolution, markdown/code settling, image loads, <details> toggles,
+  // composer growth shrinking the viewport. Without this the initial pin
+  // can land viewports above the true bottom with no later trigger.
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return; // jsdom / legacy webview
+    const list = listRef.current;
+    const content = contentRef.current;
+    if (!list || !content) return;
+    const ro = new ResizeObserver(() => {
+      if (stickRef.current) pinToBottom();
+    });
+    ro.observe(content);
+    ro.observe(list);
+    return () => ro.disconnect();
+  }, [pinToBottom]);
 
   const scrollToBottom = () => {
     stickRef.current = true;
     setNewOutput(false);
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    pinToBottom();
   };
 
   const addAttachments = (paths: string[]) => {
@@ -1081,6 +1125,9 @@ export default function ChatSurface({
     if (!searchOpen || trimmedQuery === "") return;
     if (matches.length === 0) return;
     const target = listRef.current?.querySelector(`[data-seq="${matches[clampedIdx].seq}"] .bubble`) || listRef.current?.querySelector(`[data-seq="${matches[clampedIdx].seq}"]`);
+    // Jumping to a match is deliberate navigation away from the tail;
+    // without this the follow would yank back down on the next poll.
+    if (target) stickRef.current = false;
     target?.scrollIntoView({ block: "center" });
   }, [searchOpen, trimmedQuery, matches, clampedIdx]);
 
@@ -1184,11 +1231,37 @@ export default function ChatSurface({
           </div>
         )}
         <div
-          className="message-list flex min-h-[120px] flex-1 flex-col gap-2.5 overflow-y-auto px-6 py-5"
+          className="message-list min-h-[120px] flex-1 overflow-y-auto px-6 py-5"
           ref={listRef}
           onScroll={handleListScroll}
+          onWheel={(e) => {
+            // Wheel-up over the stream is the leave-the-tail gesture —
+            // except over the live ticker's own scroller, where it peeks
+            // at earlier tool lines without disengaging the follow.
+            if (e.deltaY < 0 && !(e.target instanceof HTMLElement && e.target.closest(".tool-ticker-list"))) {
+              stickRef.current = false;
+            }
+          }}
+          onTouchStart={(e) => { touchYRef.current = e.touches[0]?.clientY ?? null; }}
+          onTouchMove={(e) => {
+            // Finger dragging down reveals older output (scrollTop drops).
+            const startY = touchYRef.current;
+            const y = e.touches[0]?.clientY;
+            if (startY != null && y != null && y - startY > 4) stickRef.current = false;
+          }}
+          onPointerDown={(e) => {
+            // Pointer in the right gutter = scrollbar-thumb drag; until
+            // pointerup the scroll events are real user intent.
+            const el = listRef.current;
+            if (el && e.clientX > el.getBoundingClientRect().right - 16) dragScrollRef.current = true;
+          }}
           aria-live="polite"
         >
+        {/* Column wrapper: carries the flex layout the scroll container
+            itself used to, and gives ResizeObserver one box whose growth
+            triggers the re-pin (Item 4 content-visibility size resolution
+            included). */}
+        <div ref={contentRef} className="flex min-h-full flex-col gap-2.5">
         {fold && (
           <div
             className="fold-chip flex max-w-full items-center gap-2 self-center rounded-[10px] border border-border bg-bg-raised px-3 py-1 text-caption text-text-dim"
@@ -1340,6 +1413,7 @@ export default function ChatSurface({
           ))}
           {preview && <PreviewBubble preview={preview} projectRoot={projectRoot} />}
           <ToolTicker running={agentRunning} events={events} />
+        </div>
         </div>
         {newOutput && (
           <button
