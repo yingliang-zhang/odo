@@ -470,7 +470,16 @@ export const defaultSettings: Settings = {
   // the e2e's pref-off case is the exercised deviation. The mock's
   // get/update_settings round-trip this key.
   auto_apply: "main",
+  // M19 (V11): mirrors the daemon's fail-to-default — on unless prefs.md
+  // carries an explicit off-shape value. loop.spec.ts's pref-off case
+  // mutates this through the same settings round-trip.
+  loop_notify_on_complete: true,
 };
+
+// E2E probe for the dual Esc gate: the mock's cancel case increments this,
+// so a menu-open Esc that leaked to the app-level handler is observable
+// (background: 16 prior regressions where Esc cancelled the running agent).
+export const cancelCount = { n: 0 };
 
 // ---------- Memory ----------
 

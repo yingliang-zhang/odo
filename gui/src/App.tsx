@@ -17,6 +17,7 @@ import {
   listTopics,
   listWiki,
   listWorkstreams,
+  loopCtl,
   memoryProposals,
   renameWorkstream,
   pendingCounts as fetchPendingCounts,
@@ -43,7 +44,8 @@ import StatusBar from "./components/StatusBar";
 import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
-import { notifyRunDone } from "./notify";
+import { notifyRunDone, notifyLoopTerminal } from "./notify";
+import { deriveLoopStates, loopMode } from "./loop";
 import { derivePipelineStates } from "./pipeline";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
 import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
@@ -427,6 +429,12 @@ export default function App() {
   // holds — the meter reads the newest carrier (user_message send/slash or
   // run_prompt continuation) straight off the event stream.
   const lastPrompt = useMemo(() => deriveLastPrompt(events), [events]);
+
+  // M19 (/loop) V1: the chip + notification watcher fold the ACTIVE
+  // conversation's journal (same scope guarantee as the pipeline chip).
+  // Pure re-derivation — loops continue daemon-side while the GUI is
+  // closed, so state can never be latched here.
+  const loopStates = useMemo(() => deriveLoopStates(events), [events]);
   const reviewPanel = useMemo(
     () => parseReviewModels(appSettings?.review_models ?? ""),
     [appSettings],
@@ -441,6 +449,38 @@ export default function App() {
     () => derivePipelineStates(events, diffs.map((d) => d.id), appSettings?.auto_apply === "main"),
     [events, diffs, appSettings],
   );
+
+  // M19 (V11): ONE system notification per (loop, terminal kind), pref-
+  // gated (loop_notify_on_complete, default ON), journaled back via
+  // loop_ctl notified so a GUI reopen never re-fires. The fold's
+  // terminalKinds is the first-sight set and notifiedKinds the journaled
+  // receipts; the session ref covers the gap before the receipt lands on
+  // a poll. Keyed per conversation — loop ids are conversation-scoped
+  // seqs, so two workstreams can share an id+kind pair.
+  const loopNotifiedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (appSettings?.loop_notify_on_complete === false) return;
+    const convId = conversation?.id;
+    if (convId == null) return;
+    for (const st of loopStates) {
+      for (const kind of st.terminalKinds) {
+        const key = `${convId}:${st.id}:${kind}`;
+        if (st.notifiedKinds.includes(kind) || loopNotifiedRef.current.has(key)) continue;
+        loopNotifiedRef.current.add(key);
+        void notifyLoopTerminal(loopMode(st), kind, st.rounds.length, st.spentTokens);
+        loopCtl(convId, "notified", {
+          loopId: st.id,
+          text: kind,
+          projectRoot: projectRootRef.current ?? undefined,
+        }).catch(() => {
+          // Receipt journaling failed (daemon unreachable): the session
+          // ref still suppresses local re-fire today; the next GUI boot
+          // finds no journaled receipt and retries. Never throw — the
+          // watcher runs inside the render-effect path.
+        });
+      }
+    }
+  }, [loopStates, appSettings, conversation?.id]);
 
   // Background runs: daemon-reported running workstreams minus the one in
   // view. Invisible from the chat surface (panel sessions, other ws) — the
@@ -934,6 +974,10 @@ export default function App() {
         if (document.querySelector(".ws-context-menu") != null) return;
         // @-mention completion menu — same pattern (tri-model review S2 fix).
         if (document.querySelector(".at-menu") != null) return;
+        // M19 (V13): the slash menu — layer (a) of the dual Esc gate: its
+        // composer's own onKeyDown stopPropagation is layer (b). Both must
+        // hold; a bare Esc here cancels the running agent.
+        if (document.querySelector(".slash-menu") != null) return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;
@@ -1668,6 +1712,11 @@ export default function App() {
           projectRoot={project?.root_path ?? null}
           onTodoChanged={() => pollNowRef.current()}
           onTodoError={(m) => setError(m)}
+          // M19 (/loop) V1: the chip folds from `events` (already passed
+          // above); stop/resume nudge the same prompt-repoll path.
+          loops={loopStates}
+          onLoopChanged={() => pollNowRef.current()}
+          onLoopError={(m) => setError(m)}
           codingModel={appSettings?.coding_model ?? null}
           onModelChanged={() => {
             void refreshSettings();

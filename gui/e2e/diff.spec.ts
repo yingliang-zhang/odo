@@ -22,8 +22,18 @@ test("accept diff applies it and shows badge", async ({ page }) => {
   await page.keyboard.press("Meta+j");
   await expect(page.locator(".diff-card")).toBeVisible();
 
-  // Click Accept
-  await page.locator(".btn-accept").click();
+  // Accept is a two-step flow (DiffViewer "Tri-model right sidebar gap"): the
+  // header button opens an inline editor for the commit message; accepting it
+  // (button or Enter) fires accept_diff. Code intent is badge-on-resolve —
+  // the resolved card persists as a record card rendering "badge badge-accept"
+  // + "Applied" (DiffViewer.tsx; ui/badge.tsx documents those classes as the
+  // e2e hooks) — so this test walks the full accept flow and asserts the badge.
+  await page.locator(".diff-header .btn-accept").click();
+  const editor = page.locator(".diff-commit-editor");
+  await expect(editor).toBeVisible();
+  // Editor is prefilled with the daemon default; user can edit before it lands.
+  await expect(editor.locator(".diff-commit-input")).toHaveValue("odo: accept diff #1");
+  await editor.locator(".btn-accept").click();
 
   // After accept, the diff card should show "Applied" badge
   await expect(page.locator(".badge-accept")).toBeVisible();

@@ -45,6 +45,7 @@ import type {
   ListTopicsResponse,
   ListWikiResponse,
   ListWorkstreamsResponse,
+  LoopCtlResponse,
   MemoryProposalsResponse,
   ParkedGoalResponse,
   PendingCountsResponse,
@@ -195,6 +196,26 @@ export function saveAttachment(
 // ended before the cancel landed — a benign race, so callers may ignore it.
 export function cancel(conversationId: number, projectRoot?: string): Promise<CancelResponse> {
   return invoke<CancelResponse>("cancel", { conversationId, projectRoot: projectRoot ?? null });
+}
+
+// M19 (/loop): GUI chip buttons + notification receipts (design lock:
+// GUI-only IPC). stop/resume resolve the active loop daemon-side — the
+// chip passes no loop_id; notified carries loop_id + terminal kind in
+// `text` (the daemon dedups per terminal kind: a journaled receipt makes
+// re-fires impossible).
+export function loopCtl(
+  conversationId: number,
+  action: "stop" | "resume" | "notified",
+  opts?: { loopId?: number; text?: string; loopBudget?: number; projectRoot?: string },
+): Promise<LoopCtlResponse> {
+  return invoke<LoopCtlResponse>("loop_ctl", {
+    conversationId,
+    action,
+    loopId: opts?.loopId ?? null,
+    text: opts?.text ?? null,
+    loopBudget: opts?.loopBudget ?? null,
+    projectRoot: opts?.projectRoot ?? null,
+  });
 }
 
 // W6 (goal queue): activate one parked goal now. The daemon refuses with

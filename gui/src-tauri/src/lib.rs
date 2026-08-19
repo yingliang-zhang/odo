@@ -442,6 +442,35 @@ async fn drop_parked_goal(conversation_id: i64, goal_seq: i64, project_root: Opt
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// M19 (/loop): GUI-only control surface — chip stop/resume buttons and
+// the notification receipt (design lock). stop/resume resolve the active
+// loop daemon-side (no loop_id); notified carries loop_id + text = the
+// terminal kind; resume may carry loop_budget for the raise flag.
+#[tauri::command]
+async fn loop_ctl(
+    conversation_id: i64,
+    action: String,
+    loop_id: Option<i64>,
+    text: Option<String>,
+    loop_budget: Option<i64>,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let mut req = json!({"cmd": "loop_ctl", "conversation_id": conversation_id, "action": action});
+    if let Some(id) = loop_id {
+        req["loop_id"] = json!(id);
+    }
+    if let Some(t) = text {
+        if !t.is_empty() {
+            req["text"] = json!(t);
+        }
+    }
+    if let Some(b) = loop_budget {
+        req["loop_budget"] = json!(b);
+    }
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 #[tauri::command]
 async fn create_workstream(project_root: Option<String>, name: String) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
@@ -1390,6 +1419,7 @@ pub fn run() {
             cancel,
             resume_parked_goal,
             drop_parked_goal,
+            loop_ctl,
             poll_events,
             accept_diff,
             reject_diff,

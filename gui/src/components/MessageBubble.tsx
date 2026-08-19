@@ -2,6 +2,7 @@ import { memo, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { basename } from "../files";
+import { loopEventLabel } from "../loop";
 import type { OdoEvent, RecallItem } from "../types";
 import Markdown, { highlightText } from "./Markdown";
 import { Badge } from "./ui/badge";
@@ -370,6 +371,22 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
         </div>
       );
       break;
+
+    case "loop_event": {
+      // M19 (/loop) V1: the discriminated loop journal's ONE bubble case —
+      // a compact bookkeeping badge (kind + key fields via loopEventLabel),
+      // never agent text. Like the other system rows it survives the
+      // distill fold filter untouched (only distill markers collapse).
+      const { label, title } = loopEventLabel(event);
+      body = (
+        <div className="bubble bubble-review loop-event-bubble self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <Badge variant="other" className="badge badge-other" title={title}>
+            {label}
+          </Badge>
+        </div>
+      );
+      break;
+    }
 
     case "preview_captured":
       // /preview's capture receipt: subtle system-event badge (the

@@ -4,6 +4,7 @@
 // so api.ts code is unchanged — only the transport is swapped.
 
 import * as fx from "./fixtures";
+import { deriveLoopStates } from "../loop";
 
 // Detect Tauri webview: __TAURI_INTERNALS__ is injected by Tauri v2.
 function isTauri(): boolean {
@@ -99,7 +100,60 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true, event: fx.ev("user_message", { text: args?.text ?? "" }, convId) };
     }
     case "cancel": {
+      fx.cancelCount.n += 1;
       return { ok: true };
+    }
+    // M19 (/loop): chip buttons + notification receipt. Journals the
+    // daemon-true row so the poll path delivers exactly what
+    // loop_journal.go's journalLoop would (the fold reads payload.kind);
+    // stop/resume resolve the active loop daemon-side — the mock mirrors
+    // that with the same fold the GUI runs.
+    case "loop_ctl": {
+      const convId = args?.conversationId ?? 1;
+      const action = args?.action ?? "";
+      if (action === "notified") {
+        const event = fx.ev("loop_event", {
+          kind: "loop_notified",
+          loop_id: args?.loopId ?? 0,
+          terminal_kind: args?.text ?? "",
+          origin: "loop_ctl",
+          spent_tokens: 0,
+        }, convId);
+        fx.events.push(event);
+        return { ok: true, event };
+      }
+      const live = deriveLoopStates(fx.events.filter((e) => e.conversation_id === convId))
+        .filter((l) => l.status === "active" || l.status === "suspended")
+        .pop();
+      if (live == null) {
+        return { ok: false, error: "loop: no active loop for this conversation" };
+      }
+      if (action === "stop") {
+        const event = fx.ev("loop_event", {
+          kind: "loop_stopped",
+          loop_id: live.id,
+          detail: "stopped from the GUI",
+          origin: "loop_ctl",
+          spent_tokens: live.spentTokens,
+        }, convId);
+        fx.events.push(event);
+        return { ok: true, event };
+      }
+      if (action === "resume") {
+        if (live.status !== "suspended") {
+          return { ok: false, error: `loop: the loop is not suspended (status ${live.status})` };
+        }
+        const event = fx.ev("loop_event", {
+          kind: "loop_resumed",
+          loop_id: live.id,
+          cause: live.cause,
+          origin: "loop_ctl",
+          spent_tokens: live.spentTokens,
+        }, convId);
+        fx.events.push(event);
+        return { ok: true, event };
+      }
+      return { ok: false, error: `loop_ctl: unknown action "${action}"` };
     }
     // W6 (goal queue): a human resume journals run_prompt{origin:
     // "parked_goal", goal_seqs:[seq]} WITHOUT an actor (the daemon's

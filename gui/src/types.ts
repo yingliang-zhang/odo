@@ -49,6 +49,7 @@ export type EventType =
   | "review_action"
   | "memory_update"
   | "preview_captured"
+  | "loop_event"
   | (string & {});
 
 // Payload keys by event type (ADR-0002):
@@ -75,6 +76,23 @@ export type EventType =
 //                       its slash user_message. sha256 is the full hex of
 //                       the PNG; the user_message's image_sha16 covers
 //                       the same bytes as the wire preimage.
+//   loop_event        M19 (/loop) — ONE discriminated type per design
+//                       lock V1: kind ∈ loop_started | loop_design_lock |
+//                       loop_task_spawn | loop_task_done |
+//                       loop_audit_round | loop_verdict | loop_fix_spawn |
+//                       loop_suspended | loop_completed | loop_stopped |
+//                       loop_budget_exceeded | loop_recovered |
+//                       loop_resumed | loop_notified. Common keys: kind,
+//                       loop_id (seq of loop_started — the started row
+//                       itself carries loop_id 0 and IS the id), mode
+//                       (audit|tasks|tasks_final), actor "auto_loop" (or
+//                       origin "loop_ctl" on GUI rows), spent_tokens
+//                       (cumulative). Per-kind extras ride the daemon's
+//                       journal contract (internal/ipc/loop_journal.go);
+//                       the fold below consumes: max_rounds,
+//                       budget_tokens, base, tasks, task, status,
+//                       verdict, cause, terminal_kind, round,
+//                       subject_sha16.
 // M6: one recall payload entry. Fixed markers (user.md/memory.md/pins.md/
 // index.md) carry path only; keyword-selected notes carry matched_terms
 // (omitted when the note ranked in purely by newest-first fallback).
@@ -177,6 +195,31 @@ export interface EventPayload {
   round?: number;
   outcome?: string;
   phase?: string;
+  // M19 (/loop): loop_event discriminated-type keys (V1 — the single
+  // consumer touch-point). `loop_id` is the loop_started row's seq on
+  // every later row; the started row itself carries 0. Fix/implement
+  // lands and verify/land failures do NOT ride this type — they stay
+  // review_action{accept | auto_land_blocked{reason:"loop_*"},
+  // actor:"auto_loop"} rows, attributing to the newest non-terminal loop
+  // (the Go fold's rule, mirrored in loop.ts).
+  kind?: string;
+  loop_id?: number;
+  mode?: string; // audit | tasks | tasks_final
+  spent_tokens?: number; // cumulative ledger at row time
+  max_rounds?: number;
+  budget_tokens?: number;
+  base?: string;
+  tasks?: string[]; // loop_started's Mode B task list
+  task?: number; // loop_design_lock / loop_task_spawn / loop_task_done
+  status?: string; // loop_task_done: landed|settle_blocked|vetoed|design_infra|skipped
+  verdict?: string; // loop_verdict: clean|fix|audit_infra|stall|round_cap
+  subject_sha16?: string; // loop_audit_round's audited diff subject
+  terminal_kind?: string; // loop_notified's receipt key
+  rounds?: number; // loop_completed's total audited rounds
+  fixes_landed?: number; // loop_completed summary
+  findings_count?: number; // loop_audit_round / loop_fix_spawn actionable findings
+  budget?: number; // loop_resumed's optional budget raise
+  prompt_tokens_est?: number; // spawn-time prompt estimate (chars/4)
   // Read-only run/verify log (tri-model right sidebar gap): moa_review rows
   // from the auto-land pipeline carry the verify that attested the landing —
   // the command and its capped output tail (previously prompt-ephemeral
@@ -321,6 +364,17 @@ export interface CancelResponse {
   error?: string;
 }
 
+// M19 (/loop): daemon `loop_ctl` — design gate + chip stop/resume +
+// notification receipts. Stop/resume journal their row and carry it back;
+// notified is idempotent (a journaled receipt short-circuits to ok with
+// no event). ok:false names the fold-level refusal ("no active loop",
+// "not suspended").
+export interface LoopCtlResponse {
+  ok: boolean;
+  error?: string;
+  event?: OdoEvent;
+}
+
 export interface PollEventsResponse {
   ok: boolean;
   error?: string;
@@ -435,6 +489,11 @@ export interface Settings {
   max_concurrent_runs: string;
   // M15 (O-1 rung-0): off|branch|main|all — parsed and displayed only.
   auto_apply: string;
+  // M19 (V11): daemon's loop_notify_on_complete pref, resolved
+  // fail-to-default ON (an explicit off-shape pref value reports false).
+  // Read-only over IPC — hand-edited in prefs.md. Optional because a
+  // pre-M19 daemon never sends it; absent reads as ON by the watcher.
+  loop_notify_on_complete?: boolean;
 }
 
 // P1-1: Known sudo-provider models (Hermes custom_providers). Hardcoded for

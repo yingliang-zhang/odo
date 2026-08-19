@@ -18,10 +18,12 @@ import type { AutoDistillCountdown, OdoEvent, PreviewEvent } from "../types";
 import MessageBubble from "./MessageBubble";
 import Markdown from "./Markdown";
 import PlanChip from "./PlanChip";
+import LoopChip from "./LoopChip";
 import QueueDock from "./QueueDock";
 import { saveAttachment } from "../api";
 import { deriveTodoState } from "../todo";
 import { deriveParkedGoals } from "../parked";
+import type { LoopState } from "../loop";
 import { detectAtQuery, registerCompletionSource, resolveCompletions } from "../completions";
 import type { CompletionItem } from "../completions";
 import { makeWikiSource, makeWorkstreamSource } from "../completion-sources";
@@ -96,6 +98,11 @@ interface Props {
   projectRoot?: string | null;
   onTodoChanged?: () => void;
   onTodoError?: (message: string) => void;
+  // M19 (/loop) V1: the loop chip's journal-folded states (App derives
+  // them); stop/resume ride loop_ctl and re-poll promptly like todos.
+  loops?: LoopState[];
+  onLoopChanged?: () => void;
+  onLoopError?: (message: string) => void;
   // Model pill: shows the current coding model in the composer, lets
   // the user switch per-message without opening Settings.
   codingModel?: string | null;
@@ -409,11 +416,20 @@ const EXAMPLE_PROMPTS = [
   "Distill a summary of recent decisions",
 ];
 
-// Slash command autocomplete: / prefix shows available commands.
+// Slash command autocomplete (V13, Hermes-parity): typing "/" at the
+// composer start opens the FULL list immediately and filtering narrows
+// it; entries carry a one-line description; /loop's subcommands are
+// first-class entries (mirrors the daemon's four routing prefixes in
+// internal/ipc/rules_audit.go rulesAuditSlashCommands).
 const SLASH_COMMANDS = [
   { cmd: "/panel",  desc: "MoA thinking — fan out to N review models",          args: " <text>" },
   { cmd: "/vision", desc: "Vision analysis — send to K3 with image content blocks", args: " <text>" },
   { cmd: "/preview", desc: "Screenshot a localhost page and analyze it", args: " <url> [prompt]" },
+  { cmd: "/loop audit", desc: "Audit→fix→land until clean (SEED lands pending diffs first)", args: "" },
+  { cmd: "/loop tasks", desc: "Work a task list through design-locked implement runs", args: "" },
+  { cmd: "/loop status", desc: "Fold dump of every loop on this conversation", args: "" },
+  { cmd: "/loop stop", desc: "Terminal stop — cancels the in-flight loop run", args: "" },
+  { cmd: "/loop resume", desc: "Clear a suspend and re-tick (optional budget=T)", args: "" },
 ];
 
 export default function ChatSurface({
@@ -441,6 +457,9 @@ export default function ChatSurface({
   projectRoot = null,
   onTodoChanged,
   onTodoError,
+  loops = [],
+  onLoopChanged,
+  onLoopError,
   codingModel = null,
   onModelChanged,
   loading = false,
@@ -476,6 +495,9 @@ export default function ChatSurface({
   const [slashFilter, setSlashFilter] = useState("");
   // Keyboard-driven active row for the slash menu (0 = first).
   const [slashIndex, setSlashIndex] = useState(0);
+  // V13: the accepted command word renders as a highlighted token overlay
+  // in the composer until the text runs or the token span is edited.
+  const [slashToken, setSlashToken] = useState<string | null>(null);
   // P3 @-mention completion popup: resolved items for the live @query.
   const [atMenu, setAtMenu] = useState<{ items: CompletionItem[]; query: string } | null>(null);
   // Keyboard-driven active row for the @ popup.
@@ -628,6 +650,7 @@ export default function ChatSurface({
       await onSend(text, attachments, steer, parkArmed);
       setDraft("");
       setAttachments([]);
+      setSlashToken(null);
       setParkArmed(false); // one-shot: park targets the submitted goal only
     } catch {
       // onSend already surfaced the error; keep the draft (and the armed
@@ -737,8 +760,16 @@ export default function ChatSurface({
   const handleDraftChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setDraft(val);
-    // Slash command autocomplete: show menu when typing /word (no space yet)
-    if (val.startsWith("/") && !val.includes(" ") && val.indexOf("/") === 0) {
+    // V13 token: survives only while the draft still starts with the
+    // accepted command word — an edit inside the token clears it.
+    if (slashToken != null && !(val === slashToken || val.startsWith(slashToken + " "))) {
+      setSlashToken(null);
+    }
+    // Slash command autocomplete (V13): "word [subcommand]" at the
+    // composer start opens the menu — the space after the command word
+    // keeps it open so /loop's subcommand entries stay reachable; args
+    // territory (a second space) or a non-"/" draft closes it.
+    if (/^\/(?:\S*\s?\S*)?$/.test(val)) {
       setSlashFilter(val.slice(1));
       setSlashIndex(0);
       setSlashMenuOpen(true);
@@ -758,10 +789,12 @@ export default function ChatSurface({
     (c) => slashFilter === "" || c.cmd.startsWith("/" + slashFilter),
   );
 
-  // Apply a slash command (mouse or Enter): replace the draft, close the
-  // menu, and park the caret right after the command word.
+  // Apply a slash command (mouse or Enter/Tab): replace the draft, close
+  // the menu, park the caret right after the command word, and mark the
+  // command as the highlighted composer token (V13).
   const pickSlash = (cmd: string, args: string) => {
     setDraft(cmd + args);
+    setSlashToken(cmd);
     setSlashMenuOpen(false);
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
@@ -813,7 +846,9 @@ export default function ChatSurface({
       if (item) pickAtItem(item);
       return;
     }
-    if (slashMenuOpen && slashItems.length > 0 && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+    // V13: Tab accepts exactly like Enter (Hermes-parity); without the
+    // preventDefault Tab would walk focus out of the composer.
+    if (slashMenuOpen && slashItems.length > 0 && (e.key === "Enter" || e.key === "Tab") && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       e.preventDefault();
       const c = slashItems[Math.min(slashIndex, slashItems.length - 1)];
@@ -838,6 +873,7 @@ export default function ChatSurface({
         onCancel();
       } else {
         setDraft("");
+        setSlashToken(null);
       }
     }
   };
@@ -1281,6 +1317,16 @@ export default function ChatSurface({
           inFlight={distillInFlight}
           onDisarm={onDisarmAutoDistill}
         />
+        {/* M19 (/loop) V1: the live auto-loop's fold — active and
+            suspended loops only; terminal states show as bookkeeping
+            bubbles + the system notification. */}
+        <LoopChip
+          conversationId={conversationId}
+          projectRoot={projectRoot}
+          loops={loops}
+          onChanged={() => onLoopChanged?.()}
+          onError={(m) => onLoopError?.(m)}
+        />
         <PlanChip
           conversationId={conversationId}
           projectRoot={projectRoot}
@@ -1357,7 +1403,7 @@ export default function ChatSurface({
               ))}
             </div>
           )}
-          {slashMenuOpen && (
+          {slashMenuOpen && slashItems.length > 0 && (
             <div
               className="slash-menu absolute inset-x-0 bottom-full z-10 mb-1.5 max-h-[200px] overflow-y-auto rounded-md border border-stroke-tertiary bg-bg-elevated p-1 shadow-soft"
               role="listbox"
@@ -1384,9 +1430,26 @@ export default function ChatSurface({
                 ))}
             </div>
           )}
-          <textarea
+          {/* V13 token overlay (Hermes-parity): the accepted slash command
+              renders as a highlighted pill behind the textarea's own text.
+              The overlay mirrors the textarea's text flow (same font/
+              leading/padding/wrap) so the pill covers exactly the command
+              span; the rest of the draft is visibility:hidden — laid out,
+              never painted. The textarea stacks above (z-10, transparent
+              bg), so its text and caret repaint over the pill untouched. */}
+          <div className="relative min-w-0 flex-1">
+            {slashToken != null && draft.startsWith(slashToken) && (
+              <div
+                className="slash-token-overlay pointer-events-none absolute inset-0 z-0 overflow-hidden whitespace-pre-wrap break-words px-0 py-2 leading-[1.4]"
+                aria-hidden="true"
+              >
+                <span className="composer-slash-token rounded-[3px] bg-accent-user/20">{slashToken}</span>
+                <span className="invisible">{draft.slice(slashToken.length)}</span>
+              </div>
+            )}
+            <textarea
             ref={textareaRef}
-            className="min-h-[36px] max-h-[148px] flex-1 resize-none overflow-y-auto border-none bg-transparent px-0 py-2 text-text [font:inherit] leading-[1.4] focus:outline-none focus-visible:outline-none disabled:opacity-60"
+            className="relative z-10 min-h-[36px] max-h-[148px] w-full resize-none overflow-y-auto border-none bg-transparent px-0 py-2 text-text [font:inherit] leading-[1.4] focus:outline-none focus-visible:outline-none disabled:opacity-60"
             aria-label={strings.composer.messageInputLabel}
             rows={1}
             value={draft}
@@ -1412,6 +1475,7 @@ export default function ChatSurface({
             disabled={sendDisabled || sending || distillLocked}
             autoFocus
           />
+          </div>
           {agentRunning && (
             <Button
               type="button"

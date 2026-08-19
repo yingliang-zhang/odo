@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { strings } from "../src/strings";
 
 // Sidebar: project tree expand/collapse, workstream switch, create, rename, delete,
 // project switch (without collapsing tree state).
@@ -113,7 +114,9 @@ test("remove non-active project via hover action; active project has no affordan
   await hdrHead.hover();
   await hdrHead.getByRole("button", { name: "Remove supersplat-hdr from list" }).click();
   await expect(hdrHead.locator(".ws-delete-confirm-text")).toHaveText("Remove?");
-  await hdrHead.getByRole("button", { name: "Confirm remove supersplat-hdr" }).click();
+  // Derive the confirm aria-label from the strings source (Sidebar.tsx builds
+  // it as `${confirmRemoveTitle} ${p.name}`) — don't hand-copy the literal.
+  await hdrHead.getByRole("button", { name: `${strings.sidebar.confirmRemoveTitle} supersplat-hdr` }).click();
 
   // Row gone from the tree; active project untouched.
   await expect(sidebar.locator(".proj-row", { hasText: "supersplat-hdr" })).toHaveCount(0);
