@@ -80,6 +80,12 @@ const (
 	// removes the entry ("clean the junk drawer").
 	CmdResumeParkedGoal = "resume_parked_goal"
 	CmdDropParkedGoal   = "drop_parked_goal"
+	// drop_queued_steer (Hermes steer queue): the manual drop twin of
+	// drop_parked_goal for the transient steer queue — removes one
+	// still-queued steer from the conversation's active run and journals
+	// review_action{action:"steer_dropped", steer_seq}. Already-consumed
+	// or dropped seqs refuse cleanly (a benign reconcile, journal-neutral).
+	CmdDropQueuedSteer = "drop_queued_steer"
 	// R-W4 (Design-MoA): design_moa fans a goal out to blind-sealed
 	// proposal legs (the prefs review: models over read-only repo tools),
 	// then consolidates them into one DESIGN LOCK via a single
@@ -124,8 +130,12 @@ type Request struct {
 	// queued goal — instead of starting a run; steer and park are mutually
 	// exclusive (refused pre-journal). GoalSeq selects one parked goal for
 	// resume_parked_goal / drop_parked_goal (0 = the queue head).
-	Park     bool      `json:"park,omitempty"`
-	GoalSeq  int       `json:"goal_seq,omitempty"`
+	Park    bool `json:"park,omitempty"`
+	GoalSeq int  `json:"goal_seq,omitempty"`
+	// SteerSeq selects one queued steer for drop_queued_steer — the seq of
+	// its user_message{steer:true} journal row (the parked GoalSeq shape;
+	// int64 because journal seqs leave the process as int64 elsewhere).
+	SteerSeq int64     `json:"steer_seq,omitempty"`
 	Adapter  string    `json:"adapter,omitempty"`
 	Settings *Settings `json:"settings,omitempty"`
 	Path     string    `json:"path,omitempty"`  // read_wiki: wiki note path; read_skill/update_skill: skill filename

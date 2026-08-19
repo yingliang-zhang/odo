@@ -97,6 +97,19 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         fx.events.push(event);
         return { ok: true, event, parked: fx.syncParkedGoals(convId) };
       }
+      // Steer queue: steer journals user_message{steer:true} for the
+      // running agent — pushed into the fixture journal (same pattern as
+      // park above) because the steer derivation is journal-only: the
+      // returned row must also be poll-visible.
+      if (args?.steer) {
+        const payload: Record<string, unknown> = { text: args?.text ?? "", steer: true };
+        if (Array.isArray(args?.attachments) && args.attachments.length > 0) {
+          payload.attachments = args.attachments;
+        }
+        const event = fx.ev("user_message", payload, convId);
+        fx.events.push(event);
+        return { ok: true, event };
+      }
       return { ok: true, event: fx.ev("user_message", { text: args?.text ?? "" }, convId) };
     }
     case "cancel": {
@@ -174,6 +187,23 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       const event = fx.ev("review_action", { action: "parked_goal_dropped", goal_seq: seq }, convId);
       fx.events.push(event);
       return { ok: true, parked: fx.syncParkedGoals(convId) };
+    }
+    // Steer queue: the derivation is journal-only, so the mock needs no
+    // mock-side queue structure — the drop just journals
+    // steer_dropped{steer_seq} and the poll loop closes the row. An
+    // unknown seq mirrors the daemon's benign reconcile refusal.
+    case "drop_queued_steer": {
+      const convId = args?.conversationId ?? 1;
+      const seq = args?.steerSeq ?? 0;
+      const known = fx.events.some(
+        (e) => e.conversation_id === convId && e.seq === seq && e.type === "user_message" && e.payload?.steer,
+      );
+      if (!known) {
+        return { ok: false, error: `no queued steer with seq ${seq}` };
+      }
+      const event = fx.ev("review_action", { action: "steer_dropped", steer_seq: seq }, convId);
+      fx.events.push(event);
+      return { ok: true };
     }
     case "poll_events": {
       return fx.makePollResponse(args?.conversationId ?? 1, args?.afterSeq ?? undefined);

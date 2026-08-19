@@ -157,6 +157,11 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
         <div className="bubble bubble-user group/bubble relative self-end bg-accent-user text-white flex flex-col rounded-[12px_12px_4px_12px] shadow-[0_1px_2px_rgba(0,0,0,0.25)] max-w-[82%] px-3.5 pt-2.5 pb-[26px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <CopyBubbleButton text={p.text ?? ""} />
           <div className="bubble-text">{highlightText(p.text ?? "", highlight, "u")}</div>
+          {p.steer && (
+            <div className="steer-tag inline-block mt-1.5 self-end rounded-lg border border-white/28 bg-white/8 px-2 py-px font-mono text-micro text-white/72" title="steered the running agent — consumed by the follow-up run">
+              steer
+            </div>
+          )}
           {p.attachments != null && p.attachments.length > 0 && (
             <div className="attachment-chips flex flex-wrap gap-1.5 pt-1.5">
               {p.attachments.map((a) => (
@@ -385,6 +390,46 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
           <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
             <Badge variant="other" className="badge badge-other" title="a parked goal was resumed into a run">
               resumed parked goal
+            </Badge>
+          </div>
+        );
+      } else if (
+        p.action === "run_prompt" &&
+        (p.origin === "continuation" || p.origin === "retry") &&
+        (p.steer_seqs?.length ?? 0) > 0
+      ) {
+        // Steer-carrying receipts only: a steerless retry falling in here
+        // would render a chip claiming drained steers that never existed
+        // (panel diff #9). Steerless receipts fall through to the generic
+        // badge — the pre-steer-queue behavior for that row shape.
+        // Steer queue: a drained-steer receipt — the run it started
+        // streams visibly, so it leaves only a quiet one-line system chip
+        // (same visual family as the human parked-goal resume above;
+        // labels live inline here like the parked-goal strings do).
+        body = (
+          <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <Badge
+              variant="other"
+              className="badge badge-other"
+              title={p.origin === "retry" ? "the drained steers rode the retry prompt" : "queued steers became the follow-up run"}
+            >
+              {p.origin === "retry" ? "Retry" : "Steer follow-up"}
+            </Badge>
+          </div>
+        );
+      } else if (p.action === "steer_dropped") {
+        // Steer queue: a queued steer left the ledger. The human drop
+        // (single steer_seq) reads like the parked-goal one; the drain's
+        // batch abandonment carries steer_seqs + cause so the transcript
+        // can say why the continuation never happened.
+        body = (
+          <div className="bubble bubble-review self-center bg-transparent px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <Badge
+              variant="other"
+              className="badge badge-other"
+              title={p.cause ? `queued steers abandoned — ${p.cause}` : "a queued steer was dropped"}
+            >
+              {(p.steer_seqs?.length ?? 1) > 1 ? `dropped ${p.steer_seqs!.length} queued steers` : "dropped queued steer"}
             </Badge>
           </div>
         );

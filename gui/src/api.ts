@@ -52,6 +52,7 @@ import type {
   PinResponse,
   PollEventsResponse,
   ProjectEntry,
+  QueuedSteerResponse,
   ReadMemoryResponse,
   ReadPinsResponse,
   ReadWikiResponse,
@@ -230,6 +231,13 @@ export function resumeParkedGoal(conversationId: number, goalSeq: number, projec
 // the junk drawer" path). Always available, even while a run is active.
 export function dropParkedGoal(conversationId: number, goalSeq: number, projectRoot?: string): Promise<ParkedGoalResponse> {
   return invoke<ParkedGoalResponse>("drop_parked_goal", { conversationId, goalSeq, projectRoot: projectRoot ?? null });
+}
+
+// Steer queue: journal a human drop for one queued steer. Only the run
+// that owns the steer can close it, so the caller treats an ok:false
+// refusal as a benign reconcile, not an error.
+export function dropQueuedSteer(conversationId: number, steerSeq: number, projectRoot?: string): Promise<QueuedSteerResponse> {
+  return invoke<QueuedSteerResponse>("drop_queued_steer", { conversationId, steerSeq, projectRoot: projectRoot ?? null });
 }
 
 export function listWorkstreams(projectRoot: string): Promise<ListWorkstreamsResponse> {

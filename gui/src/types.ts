@@ -121,6 +121,15 @@ export interface EventPayload {
   goal_seqs?: number[];
   goal_seq?: number;
   actor?: string;
+  // Steer queue (Hermes-style busy run): user_message carries steer:true
+  // when the message journaled as a mid-run instruction; review_action
+  // rows close the ledger — run_prompt{steer_seqs} marks the
+  // continuation/retry run that consumed the drained steers,
+  // steer_dropped{steer_seqs|steer_seq, cause?} journals abandonment
+  // (drain batch, with cause) or a human drop (single seq, no cause).
+  steer?: boolean;
+  steer_seqs?: number[];
+  steer_seq?: number;
   // M3: memory recall — user_message journals what was injected into the
   // prompt. Fixed markers come first in daemon order: ~/.odo/user.md →
   // .odo/memory.md (M4) → .odo/pins.md (M5) → wiki/index.md (M5), then the
@@ -353,6 +362,14 @@ export interface ParkedGoal {
   text: string;
 }
 
+// Steer queue: one queued mid-run instruction, derived from the journal
+// (gui/src/steer_queue.ts mirrors the daemon's drain ledger): the seq of
+// its user_message{steer:true} row plus the verbatim text.
+export interface QueuedSteer {
+  seq: number;
+  text: string;
+}
+
 // Daemon `resume_parked_goal` / `drop_parked_goal` response. ok:false
 // (e.g. "no parked goal with seq N") is a benign reconcile — an
 // auto-dequeue raced the click, and the next poll reflects it.
@@ -360,6 +377,16 @@ export interface ParkedGoalResponse {
   ok: boolean;
   error?: string;
   parked?: number;
+}
+
+// Daemon `drop_queued_steer` response (mirrors ParkedGoalResponse's
+// envelope, minus the queue depth — the steer queue is journal-derived
+// only and rides no pending_counts field). ok:false ("no queued steer
+// with seq N") is a benign reconcile — the drain consumed the steer
+// first, and the next poll reflects it.
+export interface QueuedSteerResponse {
+  ok: boolean;
+  error?: string;
 }
 
 // Belt A: cancel carries no payload; ok:false ("no active run") is the

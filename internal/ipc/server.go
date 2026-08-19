@@ -26,6 +26,42 @@ import (
 	"github.com/yingliang-zhang/odo/internal/worktree"
 )
 
+// queuedSteer is one steer-queued message: the seq of its
+// user_message{steer:true} journal row (the consumption identity, same
+// precedent as parkedGoal.seq) plus the verbatim text. The seq lets the
+// ledger close on every journaled steer: a later run_prompt{steer_seqs}
+// consumes it, a steer_dropped row abandons it.
+type queuedSteer struct {
+	seq  int64
+	text string
+}
+
+// steerTexts flattens a drained queue to its verbatim texts — the
+// continuation/retry prompt assembly input. Nil-safe (nil in, nil out).
+func steerTexts(queued []queuedSteer) []string {
+	if len(queued) == 0 {
+		return nil
+	}
+	texts := make([]string, len(queued))
+	for i, q := range queued {
+		texts[i] = q.text
+	}
+	return texts
+}
+
+// steerSeqs flattens a drained queue to its journal seqs — the
+// consumption/drop linkage. Nil-safe (nil in, nil out).
+func steerSeqs(queued []queuedSteer) []int64 {
+	if len(queued) == 0 {
+		return nil
+	}
+	seqs := make([]int64, len(queued))
+	for i, q := range queued {
+		seqs[i] = q.seq
+	}
+	return seqs
+}
+
 // runMeta tracks one in-flight (or recently finished) agent run in memory.
 // Run bookkeeping is intentionally NOT journaled: after a daemon restart no
 // agent process is alive, and pending diffs are reviewed from the journal +
@@ -40,6 +76,11 @@ type runMeta struct {
 	consumed       int  // adapter events already journaled
 	finished       bool // terminal adapter event (done/error) journaled
 	errored        bool // terminal adapter event was agent_error
+	// cancelled marks a user-killed run (the cancel op): the kill surfaces
+	// in drainRun as an adapter agent_error, indistinguishable from a
+	// genuine agent error without this flag — steer_dropped's cause split
+	// ("cancelled" vs "errored") hinges on the distinction.
+	cancelled bool
 	// M7: the run's transient streaming preview (adapter event with
 	// partial:true), rebuilt by each drainRun while the run is live. Never
 	// journaled; handlePollEvents passes it through verbatim.
@@ -47,7 +88,7 @@ type runMeta struct {
 	// A2-lite: queued steering messages collected during the run. On run
 	// completion, drainRun triggers a continuation run with these as the
 	// prompt (verbatim, never LLM-summarized — Hermes verify-handoff rule).
-	queuedSteers []string
+	queuedSteers []queuedSteer
 	// M16: the verbatim trigger text of this run (the send's text, or the
 	// queued steers for a continuation) — the SAME string journaled as the
 	// user_message payload. Copied, not re-read: the auto-land review
@@ -222,6 +263,10 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// is open and before serving (NewServer is the only touchable init
 	// hook; main.go's wiring stays untouched).
 	s.recoverParkedGoals(context.Background())
+	// Steer queue: the pre-restart open steers' owning runs died with the
+	// old process (memory-only queue) — close the ledger once per
+	// conversation so the GUI never repopulates undeletable ghost rows.
+	s.recoverOpenSteers(context.Background())
 	// M19 (V7): restart recovery for /loop — mid-audit/design loops
 	// (side-effect-free) re-run; mid-run loops suspend restart_mid_run.
 	s.recoverLoops(context.Background())
@@ -381,6 +426,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleResumeParkedGoal(ctx, req)
 	case CmdDropParkedGoal:
 		resp, err = s.handleDropParkedGoal(ctx, req)
+	case CmdDropQueuedSteer:
+		resp, err = s.handleDropQueuedSteer(ctx, req)
 	case CmdPollEvents:
 		resp, err = s.handlePollEvents(ctx, req)
 	case CmdAcceptDiff:
@@ -1372,16 +1419,28 @@ func memoryMapBlock(projectRoot string) string {
 	return b.String()
 }
 
-// handleSteering journals a steering message for a conversation without
-// starting a new run. If a run is active, the text is queued in the run's
-// meta; when the run completes, drainRun auto-starts a continuation run
-// with the queued texts as the prompt (A2-lite: queue-continuation).
-// Previously this called adapter.Send which wrote to steering.txt — a dead
-// path the wrapper never reads. The UI showed "delivered" but the agent
-// never saw the message. Now the message is honestly queued and delivered
-// via a fresh run on completion.
+// handleSteering journals a steering message onto the conversation's
+// ACTIVE run. The text is queued in the run's meta; when the run
+// completes, drainRun auto-starts a continuation run with the queued
+// texts as the prompt (A2-lite: queue-continuation). Previously this
+// called adapter.Send which wrote to steering.txt — a dead path the
+// wrapper never reads. The UI showed "delivered" but the agent never saw
+// the message. Now the message is honestly queued and delivered via a
+// fresh run on completion.
+//
+// Fail-closed (Hermes steer queue): with no live run there is no queue
+// to receive the steer — a journal-only steer would orphan (nothing ever
+// consumes or drops it), and a meta whose run already finished would
+// strand the text in a dead struct. Both are refused pre-journal, and
+// the refusal is NOT a human send (suspendLoopOnHumanSendLocked stays
+// out of it).
 // Caller holds s.mu (called from handleSendMessage).
 func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req Request) (Response, error) {
+	runID, ok := s.byConv[c.ID]
+	meta := s.runs[runID]
+	if !ok || meta == nil || meta.finished {
+		return Response{}, fmt.Errorf("steer: no active run for conversation %d", c.ID)
+	}
 	msgPayload := map[string]interface{}{"text": req.Text, "steer": true}
 	if len(req.Attachments) > 0 {
 		msgPayload["attachments"] = req.Attachments
@@ -1392,17 +1451,46 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 	}
 	// M19 (V8): a steer is a human send — it suspends an active loop.
 	s.suspendLoopOnHumanSendLocked(ctx, c.ID)
+	// A2-lite: queue the steering text for the continuation run, keyed by
+	// its journal seq so the ledger can close on it (run_prompt{steer_seqs}
+	// consumption, steer_dropped abandonment). The agent will see it as
+	// the prompt of the next run, not mid-run.
+	meta.queuedSteers = append(meta.queuedSteers, queuedSteer{seq: int64(ev.Seq), text: req.Text})
+	return Response{Event: &ev}, nil
+}
+
+// handleDropQueuedSteer is the manual steer-queue drop — drop_parked_goal's
+// twin for the transient steer queue: the human's decision is journaled as
+// review_action{action:"steer_dropped", steer_seq} (no actor, no cause —
+// the parked_goal_dropped shape) and the entry leaves the active run's
+// queue, so the drain's continuation never sees it. An absent seq means
+// the steer was already consumed or dropped — a reconciled state (the
+// poll reflects it), so the refusal journals nothing.
+func (s *Server) handleDropQueuedSteer(ctx context.Context, req Request) (Response, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, err := s.checkConversation(ctx, req.ConversationID)
+	if err != nil {
+		return Response{}, err
+	}
 	runID, ok := s.byConv[c.ID]
 	meta := s.runs[runID]
 	if ok && meta != nil && !meta.finished {
-		// A2-lite: queue the steering text for the continuation run.
-		// The agent will see it as the prompt of the next run, not mid-run.
-		meta.queuedSteers = append(meta.queuedSteers, req.Text)
-		return Response{Event: &ev}, nil
+		for i, q := range meta.queuedSteers {
+			if q.seq != req.SteerSeq {
+				continue
+			}
+			if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+				"action":    "steer_dropped",
+				"steer_seq": req.SteerSeq,
+			})); err != nil {
+				return Response{}, err
+			}
+			meta.queuedSteers = append(meta.queuedSteers[:i], meta.queuedSteers[i+1:]...)
+			return Response{}, nil
+		}
 	}
-	// No active run: the steering message is journaled only (user can
-	// send a normal message to start a new run).
-	return Response{Event: &ev}, nil
+	return Response{}, fmt.Errorf("no queued steer with seq %d", req.SteerSeq)
 }
 
 // handleCancel SIGKILLs the conversation's active run through its adapter
@@ -1427,6 +1515,11 @@ func (s *Server) handleCancel(ctx context.Context, req Request) (Response, error
 		if err := s.adapterFor(meta.adapter).Cancel(ctx, runID); err != nil {
 			return Response{}, fmt.Errorf("cancel: %w", err)
 		}
+		// Noted before the kill's drain lands: the adapter's terminal event
+		// also arrives as agent_error, so without this mark the drain could
+		// not tell a user kill from a genuine agent error (steer_dropped's
+		// cause reads it).
+		meta.cancelled = true
 		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventAgentError,
 			mustJSON(map[string]interface{}{"error": "cancelled by user"})); err != nil {
 			return Response{}, err
@@ -1489,8 +1582,8 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 // Memory layers are re-read fresh (ADR-0003: each run gets current state).
 // Runs in a goroutine because drainRun holds s.mu; this function takes
 // its own lock.
-func (s *Server) startContinuationRun(conversationID, workstreamID int64, queuedTexts []string) {
-	s.startFollowupRun(conversationID, workstreamID, queuedTexts, false)
+func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued []queuedSteer) {
+	s.startFollowupRun(conversationID, workstreamID, steerTexts(queued), steerSeqs(queued), false)
 }
 
 // startRetryRun is the run_verdict retry entry (epoch-8): same machinery
@@ -1500,12 +1593,13 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 // false-stop retries into drainRun's synchronous admission below, so only
 // the continuation path rides the goroutine entry now.
 //
-// startFollowupRun is the goroutine entry (continuation path): drops are
-// silent — a superseded continuation deserves no journal noise.
-func (s *Server) startFollowupRun(conversationID, workstreamID int64, queuedTexts []string, isRetry bool) {
+// startFollowupRun is the goroutine entry (continuation path): admission
+// failure still closes the ledger — steerSeqs reaching a non-admitted run
+// are journaled steer_dropped inside startFollowupRunLocked.
+func (s *Server) startFollowupRun(conversationID, workstreamID int64, queuedTexts []string, steerSeqs []int64, isRetry bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.startFollowupRunLocked(conversationID, workstreamID, queuedTexts, isRetry)
+	s.startFollowupRunLocked(conversationID, workstreamID, queuedTexts, steerSeqs, isRetry)
 }
 
 // startFollowupRunLocked performs the admission + start with the caller
@@ -1516,22 +1610,38 @@ func (s *Server) startFollowupRun(conversationID, workstreamID int64, queuedText
 // journaled retry_fired=true — a ledger lie AND a journal-silent wedge).
 // Under the drain's own lock a send cannot interleave, so the verdict row
 // reflects the true admission outcome.
-func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queuedTexts []string, isRetry bool) (admitted bool, dropReason string) {
+//
+// steerSeqs carries the drained steers' journal seqs (nil for a steerless
+// retry). Admission consumes them — the run_prompt row links steer_seqs —
+// and every refusal BEFORE that row lands closes the ledger with a
+// steer_dropped row HERE (this function is the last place both the seqs
+// and the refusal reason coexist — a goroutine entry would otherwise lose
+// them silently). A refusal AFTER the receipt closes nothing: consumption
+// is the steers' exactly-one ending and a drop row would contradict it.
+func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queuedTexts []string, steerSeqs []int64, isRetry bool) (admitted bool, dropReason string) {
 	ctx := context.Background()
 	prompt := strings.Join(queuedTexts, "\n\n")
+
+	// Ledger-close closure: a non-admitted run abandons its steers; the
+	// drop is journaled with the refusal as cause (a no-op for steerless
+	// calls, so every return below routes through it uniformly).
+	drop := func(reason string) (bool, string) {
+		s.journalSteersDropped(ctx, conversationID, steerSeqs, reason)
+		return false, reason
+	}
 
 	// Re-check: don't start if a run is already active for this conversation
 	// (user may have sent a normal message in the window between drain and
 	// this goroutine).
 	if runID, ok := s.byConv[conversationID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
-			return false, "active_run" // a new run already started; drop the continuation
+			return drop("active_run") // a new run already started; drop the continuation
 		}
 	}
 	// Respect the concurrency cap.
 	if cap := resolveMaxConcurrent(); s.activeRunCount() >= cap {
 		log.Printf("a2-continuation: skipping — concurrency cap %d reached", cap)
-		return false, "concurrency_cap"
+		return drop("concurrency_cap")
 	}
 
 	// M11 P0: don't start a continuation during distill — same guard as
@@ -1539,13 +1649,13 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 	// a continuation run journal events into the epoch the distill is rolling.
 	if _, ok := s.distilling[conversationID]; ok {
 		log.Printf("a2-continuation: skipping — distill in progress for conversation %d", conversationID)
-		return false, "distill_active"
+		return drop("distill_active")
 	}
 
 	w, err := s.store.GetWorkstream(ctx, workstreamID)
 	if err != nil {
 		log.Printf("a2-continuation: get workstream: %v", err)
-		return false, "workstream_lookup"
+		return drop("workstream_lookup")
 	}
 
 	// R1: continuation runs replay the current epoch too — the previous
@@ -1555,7 +1665,7 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 		// M18 W2 item 4: fail closed, no silent drop — the breach is a
 		// journaled agent_error, the adapter never starts.
 		_ = s.failRun(ctx, conversationID, fmt.Errorf("prompt receipt assertion failed: %w", assertErr))
-		return false, "receipt_assert_failed"
+		return drop("receipt_assert_failed")
 	}
 
 	// M18 W2 item 4: the continuation/retry anchors the same unified
@@ -1563,20 +1673,31 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 	// steers are already journaled, so NO user_message duplicate is
 	// written (chat surface discipline). actor:auto_panel marks it
 	// pipeline mechanics: the fold render excludes it (Item 1 whitelist).
+	// steer_seqs is the consumption linkage: admitted steers are claimed
+	// by this run (a retry's own goal has no seq — only its steers do).
+	// The key is omitted when empty: a steerless row stays byte-identical.
 	origin := "continuation"
 	if isRetry {
 		origin = "retry"
 	}
 	row := map[string]interface{}{"action": "run_prompt", "actor": autoActor, "origin": origin}
+	if len(steerSeqs) > 0 {
+		row["steer_seqs"] = steerSeqs
+	}
 	for k, v := range receiptPayload {
 		row[k] = v
 	}
 	if _, err := s.store.AppendEvent(ctx, conversationID, store.EventReviewAction, mustJSON(row)); err != nil {
 		// Journal-first: starting unlogged would break evidence-before-action.
 		log.Printf("a2-continuation: journal run_prompt: %v", err)
-		return false, "journal_run_prompt"
+		return drop("journal_run_prompt")
 	}
 
+	// Past this point the receipt has CONSUMED the steers in the ledger: a
+	// failure here must return WITHOUT journalSteersDropped — closing them
+	// again would mark one steer both consumed (run_prompt{steer_seqs}) and
+	// abandoned (steer_dropped), breaking the exactly-one-ending invariant
+	// (panel diff #9). The pre-receipt precedent (HEAD: plain returns).
 	runDirID := worktree.NewRunID()
 	wtPath, err := s.mgr.Create(runDirID)
 	if err != nil {
@@ -1604,6 +1725,134 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 	}
 	s.byConv[conversationID] = runID
 	return true, ""
+}
+
+// journalSteersDropped closes the steer ledger on an abandoned batch:
+// review_action{action:"steer_dropped", steer_seqs, cause} with actor
+// autoPanel (pipeline mechanics, like run_prompt — the drain and the
+// followup admission gates journal it, never the human). A journaled
+// steer must end exactly one of two ways — consumed by a run_prompt's
+// steer_seqs or explicitly dropped here — so the GUI's journal-derived
+// queue never shows a ghost. An empty seqs slice no-ops: paths shared by
+// steerless retries route through this uniformly. Journal failures log
+// but never wedge the drain (journalAuto's posture).
+func (s *Server) journalSteersDropped(ctx context.Context, conversationID int64, seqs []int64, cause string) {
+	if len(seqs) == 0 {
+		return
+	}
+	if _, err := s.store.AppendEvent(ctx, conversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action":     "steer_dropped",
+		"actor":      autoActor,
+		"steer_seqs": seqs,
+		"cause":      cause,
+	})); err != nil {
+		log.Printf("steer-queue: journal steer_dropped for conversation %d: %v", conversationID, err)
+	}
+}
+
+// deriveOpenSteers folds one conversation's seq-ascending journal
+// (ListEvents(_, _, 0)) to the steers no row ever closed:
+// user_message{steer:true, non-empty text} minus run_prompt{steer_seqs}
+// consumption and steer_dropped{steer_seq | steer_seqs} closure. The Go
+// mirror of the GUI's journal fold (gui/src/steer_queue.ts
+// deriveSteerQueue) — the two MUST read the same journal the same way.
+// Its only daemon consumer is the startup sweep below.
+func deriveOpenSteers(events []store.Event) []int64 {
+	var open []int64
+	consumed := map[int64]bool{}
+	for _, ev := range events {
+		switch ev.Type {
+		case store.EventUserMessage:
+			var p struct {
+				Text  string `json:"text"`
+				Steer bool   `json:"steer"`
+			}
+			if json.Unmarshal(ev.Payload, &p) != nil || !p.Steer || strings.TrimSpace(p.Text) == "" {
+				continue
+			}
+			open = append(open, int64(ev.Seq))
+		case store.EventReviewAction:
+			var p struct {
+				Action    string  `json:"action"`
+				SteerSeq  *int64  `json:"steer_seq"`
+				SteerSeqs []int64 `json:"steer_seqs"`
+			}
+			if json.Unmarshal(ev.Payload, &p) != nil {
+				continue
+			}
+			switch p.Action {
+			case "run_prompt":
+				for _, s := range p.SteerSeqs {
+					consumed[s] = true
+				}
+			case "steer_dropped":
+				if p.SteerSeq != nil {
+					consumed[*p.SteerSeq] = true
+				}
+				for _, s := range p.SteerSeqs {
+					consumed[s] = true
+				}
+			}
+		}
+	}
+	var out []int64
+	for _, s := range open {
+		if !consumed[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// recoverOpenSteers runs at NewServer (the recoverParkedGoals precedent):
+// a daemon restart strands every queued steer — runMeta.queuedSteers is
+// memory-only by design, so the runs owning the journal's open steers
+// died with the old process and no drain will ever close them. Without
+// this sweep the GUI's journal-derived queue repopulates those rows as
+// immortal, undeletable entries (handleDropQueuedSteer refuses: no active
+// run owns them — panel diff #9 finding 1). The sweep closes the ledger
+// once per conversation as a batched steer_dropped{cause:"daemon_restart"},
+// so the rows die with a visible reason; a second boot folds the closure
+// rows and no-ops (idempotent). Best-effort: failures log per
+// conversation and never stop the daemon from serving.
+func (s *Server) recoverOpenSteers(ctx context.Context) {
+	p, err := s.store.GetProjectByRoot(ctx, s.projectRoot)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			// Unregistered project (fresh repo) — nothing to close, no noise.
+			log.Printf("steer-queue: startup scan: %v", err)
+		}
+		return
+	}
+	convs, err := s.store.ListActiveConversations(ctx, p.ID)
+	if err != nil {
+		log.Printf("steer-queue: startup scan: %v", err)
+		return
+	}
+	for _, c := range convs {
+		events, err := s.store.ListEvents(ctx, c.ID, 0)
+		if err != nil {
+			log.Printf("steer-queue: startup scan conversation %d: %v", c.ID, err)
+			continue
+		}
+		if open := deriveOpenSteers(events); len(open) > 0 {
+			s.journalSteersDropped(ctx, c.ID, open, "daemon_restart")
+		}
+	}
+}
+
+// steerDropCause names why a drained queue could not continue from this
+// run's terminal state: a user kill (cancel), an agent-reported error
+// (errored), or a clean finish that never gets a continuation slot
+// (run_terminal — loop takeovers and diff-machinery failures).
+func steerDropCause(meta *runMeta) string {
+	if meta.cancelled {
+		return "cancelled"
+	}
+	if meta.errored {
+		return "errored"
+	}
+	return "run_terminal"
 }
 
 // activeRunCount returns the number of non-finished runs across all
@@ -1743,6 +1992,9 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		_, _ = s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError,
 			mustJSON(map[string]interface{}{"error": fmt.Sprintf("extract diff: %v", err)}))
 		meta.finished = true // mark finished so polling stops even on diff failure
+		// A broken diff path admits no continuation: the drained steers
+		// close out as dropped instead of vanishing journal-silent.
+		s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
 		// M12: the run ended — the window grew, so evaluate auto-distill too.
 		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 		return nil
@@ -1756,8 +2008,11 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		if meta.loopID != 0 {
 			// M19: a loop fix/implement run produced no diff — failure
 			// matrix fix_no_diff / run_tainted (no continuations, no
-			// false-stop retry: the loop resumes explicitly).
+			// false-stop retry: the loop resumes explicitly). The loop's
+			// no-continuation shape also owns the steers' ending: dropped,
+			// journaled, never continued.
 			s.loopNoDiffAfterRun(ctx, meta, verdict)
+			s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
 			s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 			return nil
 		}
@@ -1777,8 +2032,12 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			// journal-silent wedge).
 			log.Printf("run-verdict: retrying false-stop run for conversation %d", meta.conversationID)
 			texts := make([]string, 0, 1+len(queuedSteers))
-			texts = append(append(texts, meta.goal), queuedSteers...)
-			admitted, dropReason := s.startFollowupRunLocked(meta.conversationID, meta.workstreamID, texts, true)
+			texts = append(append(texts, meta.goal), steerTexts(queuedSteers)...)
+			// The steers ride the retry as its prompt suffix: admitted is
+			// consumption (the run_prompt row links their seqs — the goal
+			// itself has none); refused is a journaled steer_dropped inside
+			// startFollowupRunLocked. Either way the ledger closes.
+			admitted, dropReason := s.startFollowupRunLocked(meta.conversationID, meta.workstreamID, texts, steerSeqs(queuedSteers), true)
 			s.journalRunVerdict(ctx, meta, verdict, admitted)
 			if !admitted {
 				log.Printf("run-verdict: retry for conversation %d not admitted: %s", meta.conversationID, dropReason)
@@ -1807,10 +2066,16 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			}
 			if len(queuedSteers) > 0 && !meta.errored {
 				go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
-			} else if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
-				// M12 (T1/T3): run-finished is an auto-distill evaluation
-				// point — arm the idle timer or fire urgently.
-				s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+			} else {
+				// An errored (or cancelled) run continues nothing: the
+				// drained steers must not vanish journal-silent — close
+				// the ledger on them (a no-op when the queue was empty).
+				s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
+				if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
+					// M12 (T1/T3): run-finished is an auto-distill evaluation
+					// point — arm the idle timer or fire urgently.
+					s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+				}
 			}
 		}
 		return nil
@@ -1825,6 +2090,9 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			"error": "diff save failed: " + derr.Error(),
 		}))
 		meta.finished = true
+		// Same ledger-close as the extract path: no diff row, no
+		// continuation, so the drained steers drop on the record.
+		s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
 		// M12: the run ended — the window grew, so evaluate auto-distill too.
 		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 		return nil
@@ -1895,12 +2163,17 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// run with full memory-layer injection, not a silent file it never reads.
 	if len(queuedSteers) > 0 && !meta.errored {
 		go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
-	} else if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
-		// M12 (T1/T3): idle/urgent auto-distill evaluation at run finish.
-		// Skipped when the parked-goal queue took this drain's one
-		// successor slot (W6: steer continuations outrank parked goals;
-		// at most one continuation OR activation per finished run).
-		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+	} else {
+		// An errored (or cancelled) run continues nothing: close the
+		// ledger on the drained steers (a no-op when the queue was empty).
+		s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
+		if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
+			// M12 (T1/T3): idle/urgent auto-distill evaluation at run finish.
+			// Skipped when the parked-goal queue took this drain's one
+			// successor slot (W6: steer continuations outrank parked goals;
+			// at most one continuation OR activation per finished run).
+			s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+		}
 	}
 	return nil
 }

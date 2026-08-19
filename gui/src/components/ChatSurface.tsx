@@ -25,6 +25,8 @@ import QueueDock from "./QueueDock";
 import { saveAttachment } from "../api";
 import { deriveTodoState } from "../todo";
 import { deriveParkedGoals } from "../parked";
+import { deriveActivePrompt, deriveSteerQueue, latestRunSteerSeqs } from "../steer_queue";
+import SteerQueue from "./SteerQueue";
 import type { LoopState } from "../loop";
 import { detectAtQuery, registerCompletionSource, resolveCompletions } from "../completions";
 import type { CompletionItem } from "../completions";
@@ -65,6 +67,9 @@ interface Props {
   // daemon's resume_parked_goal / drop_parked_goal.
   onResumeParked?: (seq: number) => Promise<void>;
   onDropParked?: (seq: number) => Promise<void>;
+  // Steer queue: the SteerQueue panel's manual drop, forwarded to the
+  // daemon's drop_queued_steer.
+  onDropSteer?: (seq: number) => Promise<void>;
   // Belt A: abort the running agent (Stop button / Esc).
   onCancel: () => void;
   // M1 memory distiller: the conversation's current epoch, surfaced by the
@@ -469,6 +474,7 @@ export default function ChatSurface({
   onSend,
   onResumeParked,
   onDropParked,
+  onDropSteer,
   onCancel,
   epoch,
   conversationId,
@@ -509,6 +515,15 @@ export default function ChatSurface({
   // todoItems (full journal, same as the daemon), so a workstream switch
   // or daemon restart repopulates the dock on bootstrap replay.
   const parkedGoals = useMemo(() => deriveParkedGoals(events), [events]);
+  // Steer queue: the busy run's pinned prompt + its journaled mid-run
+  // instructions — same derivation rule as parkedGoals (full journal, same
+  // as the daemon's drain ledger), so the poll loop reconciles every
+  // consumption and drop without dedicated IPC. latestRunSteerSeqs shares
+  // deriveActivePrompt's starter scan, so the joined-steer count can never
+  // drift from the prompt it labels.
+  const steerQueue = useMemo(() => deriveSteerQueue(events), [events]);
+  const activePrompt = useMemo(() => deriveActivePrompt(events), [events]);
+  const activeSteerCount = useMemo(() => latestRunSteerSeqs(events)?.length ?? 0, [events]);
   // W6: the composer park toggle. Armed → submit parks the goal instead of
   // sending/steering. A conversation switch disarms: park intent never
   // leaks across workstreams.
@@ -1545,6 +1560,17 @@ export default function ChatSurface({
           onChanged={() => onTodoChanged?.()}
           onError={(m) => onTodoError?.(m)}
           disabled={sendDisabled || distillLocked}
+        />
+        {/* Steer queue: the busy run's pinned prompt + queued steers,
+            derived from the journal — the panel hides itself when neither
+            is live. */}
+        <SteerQueue
+          activePrompt={activePrompt}
+          activeSteerCount={activeSteerCount}
+          pending={steerQueue}
+          agentRunning={agentRunning}
+          distillLocked={distillLocked}
+          onDropSteer={onDropSteer}
         />
         {/* W6 (goal queue): the parked-goal FIFO for this conversation,
             derived from the journal — hidden when the queue is empty. */}

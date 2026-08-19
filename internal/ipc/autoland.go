@@ -550,15 +550,31 @@ func provisionVerifyDeps(projectRoot, worktreePath string, diffPaths []string) {
 // journaled inline before the extraction.
 func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPaths []string) verifyGateOutcome {
 	provisionVerifyDeps(projectRoot, worktreePath, diffPaths)
-	verifyCmd, err := verifyCommand(worktreePath, diffPaths)
+	verifyCmds, err := verifyCommands(worktreePath, diffPaths)
 	if err != nil {
 		return verifyGateOutcome{reason: "verify_unconfigured",
 			detail: "no usable " + verifyCmdFile + " at the repo root — the verify gate is mandatory for auto-land"}
 	}
-	verifyTail, err := runVerify(ctx, worktreePath, verifyCmd)
-	if err != nil {
-		return verifyGateOutcome{reason: "verify_failed",
-			detail: capDetail(verifyCmd + " → " + err.Error() + "\n" + verifyTail)}
+	// Scope-union execution: a mixed-scope diff (go+gui, diff #9) resolves
+	// to several commands — every one must pass, first failure blocks.
+	verifyCmd := strings.Join(verifyCmds, " && ")
+	var out strings.Builder
+	for _, cmd := range verifyCmds {
+		tail, err := runVerify(ctx, worktreePath, cmd)
+		if tail != "" {
+			if out.Len() > 0 {
+				out.WriteString("\n")
+			}
+			out.WriteString(tail)
+		}
+		if err != nil {
+			return verifyGateOutcome{reason: "verify_failed",
+				detail: capDetail(cmd + " → " + err.Error() + "\n" + out.String())}
+		}
+	}
+	verifyTail := out.String()
+	if len(verifyTail) > autoLandVerifyTailBytes {
+		verifyTail = verifyTail[len(verifyTail)-autoLandVerifyTailBytes:]
 	}
 	// Verify-evidence gate (M18 batch B): exit 0 that proves nothing. A
 	// verify whose output tail carries ZERO test evidence (no PASS token,
@@ -573,25 +589,31 @@ func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPa
 	return verifyGateOutcome{ok: true, cmd: verifyCmd, tail: verifyTail}
 }
 
-// verifyCommand reads the worktree's .odo-verify: the first non-empty,
-// non-# line is the shell command the verify gate runs at the worktree
-// root. Absent or contentless means the gate cannot run (blocked,
-// fail-closed).
+// verifyCommands reads the worktree's .odo-verify and resolves the command
+// list the gate runs sequentially at the worktree root. Absent or
+// contentless means the gate cannot run (blocked, fail-closed).
 //
-// Path-scoped verify (Fix 3, zero-manual-accept): lines starting with
-// "glob:" define a path-scoped command. If ALL diff paths match the glob,
-// that command is used instead of the bare fallback line. Example:
+// Path-scoped verify (Fix 3, zero-manual-accept), scope-union selection
+// (panel diff #9 finding 3): a "glob: command" line runs whenever the
+// diff TOUCHES that scope (≥1 path matches); the bare fallback line
+// ADDITIONALLY runs when any diff path sits outside every glob's scope.
+// The previous all-paths-match rule silently disqualified the gui line on
+// mixed-scope diffs: diff #9's ~700 frontend lines landed on go vet alone.
+// Example:
 //
 //	gui/**: cd gui && npx tsc --noEmit && npx playwright test --reporter=line
 //	go build ./... && go vet ./... && go test ./...
 //
-// The bare fallback line (no glob prefix) runs for any diff that doesn't
-// match a glob. Supply-chain gate blocks .odo-verify self-modification.
-func verifyCommand(worktreePath string, diffPaths []string) (string, error) {
+// A pure-gui diff runs the gui line only; a pure-go diff the fallback
+// only; a mixed diff both, file order then fallback. Supply-chain gate
+// blocks .odo-verify self-modification.
+func verifyCommands(worktreePath string, diffPaths []string) ([]string, error) {
 	data, err := os.ReadFile(worktreePath + string(os.PathSeparator) + verifyCmdFile)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	type scopedLine struct{ glob, cmd string }
+	var scoped []scopedLine
 	var fallback string
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -604,8 +626,8 @@ func verifyCommand(worktreePath string, diffPaths []string) (string, error) {
 		if idx := strings.Index(line, ": "); idx > 0 {
 			glob := line[:idx]
 			cmd := line[idx+2:]
-			if strings.ContainsAny(glob, "*/") && glob != "" && cmd != "" && allPathsMatch(diffPaths, glob) {
-				return cmd, nil
+			if strings.ContainsAny(glob, "*/") && glob != "" && cmd != "" {
+				scoped = append(scoped, scopedLine{glob, cmd})
 			}
 			continue
 		}
@@ -614,24 +636,36 @@ func verifyCommand(worktreePath string, diffPaths []string) (string, error) {
 			fallback = line
 		}
 	}
-	if fallback != "" {
-		return fallback, nil
-	}
-	return "", fmt.Errorf("%s has no command line", verifyCmdFile)
-}
-
-// allPathsMatch reports whether every path in paths matches the glob
-// pattern using filepath.Match semantics (with ** support via path.Match).
-func allPathsMatch(paths []string, glob string) bool {
-	if len(paths) == 0 {
-		return false
-	}
-	for _, p := range paths {
-		if !pathMatch(p, glob) {
-			return false
+	uncovered := len(diffPaths) == 0
+	for _, p := range diffPaths {
+		inside := false
+		for _, sc := range scoped {
+			if pathMatch(p, sc.glob) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			uncovered = true
+			break
 		}
 	}
-	return true
+	var cmds []string
+	for _, sc := range scoped {
+		for _, p := range diffPaths {
+			if pathMatch(p, sc.glob) {
+				cmds = append(cmds, sc.cmd)
+				break
+			}
+		}
+	}
+	if uncovered && fallback != "" {
+		cmds = append(cmds, fallback)
+	}
+	if len(cmds) == 0 {
+		return nil, fmt.Errorf("%s has no command line", verifyCmdFile)
+	}
+	return cmds, nil
 }
 
 // pathMatch checks a single path against a glob, supporting ** for

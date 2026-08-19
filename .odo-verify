@@ -4,7 +4,9 @@
 # Diffs touching THIS file are blocked by the supply-chain gate (self-
 # modification always requires a human).
 #
-# Path-scoped verify (Fix 3): glob-prefixed lines run when ALL diff paths
-# match the glob. The bare fallback line runs for any other diff.
+# Path-scoped verify (Fix 3, scope-union since diff #9): a glob-prefixed
+# line runs whenever the diff TOUCHES that scope (>=1 path matches); the
+# bare fallback line additionally runs when any diff path sits outside
+# every glob's scope. A mixed go+gui diff therefore runs BOTH commands.
 gui/**: cd gui && npx tsc --noEmit && npx playwright test --reporter=line
 go build ./... && go vet ./... && go test ./...

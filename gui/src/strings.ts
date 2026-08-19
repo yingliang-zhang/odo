@@ -53,6 +53,14 @@ export interface Strings {
     reviewPanelLabel: string;
     reviewPanelReadonlyTitle: string;
   };
+  steerQueue: {
+    title: (n: number) => string;
+    activeLabel: string;
+    activeJoined: (n: number) => string;
+    drop: string;
+    dropConfirm: string;
+    dropTitle: string;
+  };
 }
 
 export const en: Strings = {
@@ -105,6 +113,14 @@ export const en: Strings = {
     promptCompositionLabel: "Prompt composition",
     reviewPanelLabel: "Review panel",
     reviewPanelReadonlyTitle: "review panel — read-only (⌘, to change)",
+  },
+  steerQueue: {
+    title: (n) => (n === 1 ? "Queued steer · 1" : `Queued steers · ${n}`),
+    activeLabel: "Processing",
+    activeJoined: (n) => `Processing ${n} queued steers`,
+    drop: "Drop",
+    dropConfirm: "Drop?",
+    dropTitle: "Drop this queued steer — it will not reach the agent",
   },
 };
 

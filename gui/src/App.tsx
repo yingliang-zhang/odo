@@ -27,6 +27,7 @@ import {
   removeProject,
   resumeParkedGoal,
   dropParkedGoal,
+  dropQueuedSteer,
   sendMessage,
   unwrap,
 } from "./api";
@@ -927,6 +928,20 @@ export default function App() {
     }
   }, [conversation, project, refreshPendingCounts]);
 
+  // Steer queue: manual drop from the SteerQueue panel. Same benign-
+  // reconcile posture as the goal drop (an ok:false race against the
+  // drain never reaches the banner), but no refreshPendingCounts — the
+  // steer queue is journal-derived only and rides no pending_counts
+  // field; the journaled steer_dropped row closes it via the poll loop.
+  const handleDropSteer = useCallback(async (seq: number) => {
+    if (!conversation) return;
+    try {
+      await dropQueuedSteer(conversation.id, seq, project?.root_path ?? undefined);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [conversation, project]);
+
   // Belt A: stop the running agent. ok:false ("no active run") is the
   // expected race against a run that finished on its own — the next poll
   // tick reconciles the UI, so only transport failures reach the banner.
@@ -1736,6 +1751,9 @@ export default function App() {
           // Resume/Drop; rows derive from `events` (already passed above).
           onResumeParked={handleResumeParked}
           onDropParked={handleDropParked}
+          // Steer queue: the panel's Drop; rows derive from `events`
+          // (already passed above).
+          onDropSteer={handleDropSteer}
         />
       </main>
       <ContextPanel

@@ -105,33 +105,67 @@ func TestAutoLandCheck(t *testing.T) {
 	}
 }
 
-func TestVerifyCommand(t *testing.T) {
+func TestVerifyCommands(t *testing.T) {
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".odo-verify"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	want := func(t *testing.T, dir string, paths []string, want ...string) {
+		t.Helper()
+		cmds, err := verifyCommands(dir, paths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(cmds, "\x00") != strings.Join(want, "\x00") {
+			t.Errorf("cmds = %q, want %q", cmds, want)
+		}
+	}
 	t.Run("missing file is fail-closed", func(t *testing.T) {
-		if _, err := verifyCommand(t.TempDir(), nil); err == nil {
+		if _, err := verifyCommands(t.TempDir(), nil); err == nil {
 			t.Fatal("no .odo-verify: want error")
 		}
 	})
 	t.Run("comments only is fail-closed", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, ".odo-verify"), []byte("# nothing\n\n  \n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := verifyCommand(dir, nil); err == nil {
+		dir := write(t, "# nothing\n\n  \n")
+		if _, err := verifyCommands(dir, nil); err == nil {
 			t.Fatal("comment-only .odo-verify: want error")
 		}
 	})
 	t.Run("first non-comment line wins", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, ".odo-verify"), []byte("# comment\n\ngo test ./...\n# later\n"), 0o644); err != nil {
-			t.Fatal(err)
+		dir := write(t, "# comment\n\ngo test ./...\n# later\n")
+		want(t, dir, nil, "go test ./...")
+	})
+	t.Run("glob-only file with unmatched paths is fail-closed", func(t *testing.T) {
+		dir := write(t, "gui/**: cd gui && npx tsc --noEmit\n")
+		if _, err := verifyCommands(dir, []string{"internal/ipc/x.go"}); err == nil {
+			t.Fatal("no fallback and no scope touched: want error")
 		}
-		cmd, err := verifyCommand(dir, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cmd != "go test ./..." {
-			t.Errorf("cmd = %q, want %q", cmd, "go test ./...")
-		}
+	})
+
+	// Scope-union selection (panel diff #9 finding 3): mixed diffs run
+	// BOTH their touched scope and the fallback — the old all-paths-match
+	// rule dropped the gui command for exactly this shape.
+	const scoped = "gui/**: cd gui && npx tsc --noEmit\ngo build ./... && go test ./...\n"
+	guiCmd := "cd gui && npx tsc --noEmit"
+	goCmd := "go build ./... && go test ./..."
+	t.Run("pure-gui diff runs the scoped command only", func(t *testing.T) {
+		want(t, write(t, scoped), []string{"gui/src/a.ts", "gui/e2e/b.spec.ts"}, guiCmd)
+	})
+	t.Run("pure-go diff runs the fallback only", func(t *testing.T) {
+		want(t, write(t, scoped), []string{"internal/ipc/x.go", "go.mod"}, goCmd)
+	})
+	t.Run("mixed diff runs scope then fallback", func(t *testing.T) {
+		want(t, write(t, scoped), []string{"internal/ipc/server.go", "gui/src/App.tsx"}, guiCmd, goCmd)
+	})
+	t.Run("no scoped lines always falls back", func(t *testing.T) {
+		want(t, write(t, goCmd+"\n"), []string{"gui/src/a.ts"}, goCmd)
+	})
+	t.Run("nil paths with glob line present falls back", func(t *testing.T) {
+		want(t, write(t, scoped), nil, goCmd)
 	})
 }
 

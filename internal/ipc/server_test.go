@@ -1184,9 +1184,12 @@ func TestBootstrapByWorkstream(t *testing.T) {
 	}
 }
 
-// TestSteering covers steer=true messages: they journal a user_message
-// without starting a run, queue the text for the continuation run (A2-lite),
-// and are journaled silently when no agent is active.
+// TestSteering covers steer=true messages: journaled as user_message rows
+// only while a run is ACTIVE, queued there for the continuation run
+// (A2-lite). A conversation with no live run refuses fail-closed —
+// journal-only steers orphaned in the journal with nothing to ever close
+// the ledger on them (Hermes steer queue: every journaled steer ends
+// consumed or explicitly dropped).
 func TestSteering(t *testing.T) {
 	t.Run("active run queues the steer text", func(t *testing.T) {
 		root := initRepo(t)
@@ -1207,6 +1210,16 @@ func TestSteering(t *testing.T) {
 		steered := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Also add a second line.", Steer: true})
 		if steered.Event == nil || steered.Event.Type != store.EventUserMessage || steered.Event.Seq != 2 {
 			t.Fatalf("steer event = %+v, want user_message seq 2", steered.Event)
+		}
+
+		// The queue entry carries its journal identity: seq 2 (the steer
+		// row just journaled) plus the verbatim text.
+		rig.server.mu.Lock()
+		meta := rig.server.runs[rig.server.byConv[convID]]
+		rig.server.mu.Unlock()
+		if meta == nil || len(meta.queuedSteers) != 1 ||
+			meta.queuedSteers[0].seq != 2 || meta.queuedSteers[0].text != "Also add a second line." {
+			t.Fatalf("queuedSteers = %+v, want one entry {seq 2, the steer text}", meta)
 		}
 
 		// A2-lite: the steer text is queued in the run's meta (not written
@@ -1247,7 +1260,7 @@ func TestSteering(t *testing.T) {
 		}
 	})
 
-	t.Run("no active run journals only", func(t *testing.T) {
+	t.Run("no active run refuses cleanly", func(t *testing.T) {
 		root := initRepo(t)
 		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 		rig := startRig(t, root)
@@ -1255,12 +1268,44 @@ func TestSteering(t *testing.T) {
 
 		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 		convID := boot.Conversation.ID
-		steered := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "queued", Steer: true})
-		if steered.Event == nil || steered.Event.Type != store.EventUserMessage {
-			t.Fatalf("steer event = %+v", steered.Event)
+		// Fail-closed: with no run there is no queue to receive the steer
+		// — refuse pre-journal rather than orphan the row.
+		resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "queued", Steer: true})
+		if !strings.Contains(resp.Error, "steer: no active run for conversation") {
+			t.Errorf("steer error = %q, want the fail-closed refusal", resp.Error)
 		}
-		if got, want := fmt.Sprint(rig.allEventTypes(t, convID)), "[user_message]"; got != want {
-			t.Errorf("events = %s, want %s", got, want)
+		if got := rig.allEventTypes(t, convID); len(got) != 0 {
+			t.Errorf("events = %v, want NOTHING journaled for a refused orphan steer", got)
+		}
+	})
+
+	t.Run("finished run refuses cleanly", func(t *testing.T) {
+		root := initRepo(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+		rig.pollUntilDone(t, convID)
+
+		// The meta survives completion; a steer landing on it would append
+		// to a dead run's queue and be lost — refuse like the no-run case.
+		resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "too late", Steer: true})
+		if !strings.Contains(resp.Error, "steer: no active run for conversation") {
+			t.Errorf("steer error = %q, want the fail-closed refusal", resp.Error)
+		}
+		// The journal stayed at the first run's shape: no steer row.
+		users := 0
+		for _, ev := range mustListEvents(t, rig.store, convID) {
+			if ev.Type == store.EventUserMessage {
+				users++
+			}
+		}
+		if users != 1 {
+			t.Errorf("user_message count = %d, want 1 (the refused steer journaled nothing)", users)
 		}
 	})
 }
@@ -4056,11 +4101,37 @@ func TestSendFailsClosedOnReceiptBreach(t *testing.T) {
 	}
 }
 
+// waitRunPromptRow waits for a follow-up run's review_action
+// {action:"run_prompt", origin:<origin>} receipt and returns the decoded
+// payload — journaled BEFORE the follow-up's adapter starts (journal-
+// first), so polling is the race-free observation.
+func waitRunPromptRow(t *testing.T, rig *testRig, convID int64, origin string) map[string]interface{} {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		for _, ev := range mustListEvents(t, rig.store, convID) {
+			if ev.Type != store.EventReviewAction {
+				continue
+			}
+			var p map[string]interface{}
+			if json.Unmarshal(ev.Payload, &p) == nil && p["action"] == "run_prompt" && p["origin"] == origin {
+				return p
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the %s run_prompt row never journaled", origin)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // TestContinuationJournalsRunPrompt: a steer-queued continuation anchors
 // its unified receipt closure on review_action{action:"run_prompt",
 // origin:"continuation"} (actor:auto_panel so the fold whitelist excludes
 // it) — byte-matching the continuation's captured prompt — and journals NO
-// user_message duplicate (the steers are already journaled).
+// user_message duplicate (the steers are already journaled). The row ALSO
+// carries steer_seqs, the exact consumption linkage: the queued seqs are
+// claimed by this run, never silently folded into a raw prompt.
 func TestContinuationJournalsRunPrompt(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
@@ -4078,26 +4149,7 @@ func TestContinuationJournalsRunPrompt(t *testing.T) {
 
 	// The continuation admission journals the row BEFORE its adapter
 	// starts (journal-first) — wait for it, then drain the run it spawned.
-	deadline := time.Now().Add(15 * time.Second)
-	var row map[string]interface{}
-	for row == nil {
-		for _, ev := range mustListEvents(t, rig.store, convID) {
-			if ev.Type != store.EventReviewAction {
-				continue
-			}
-			var p map[string]interface{}
-			if json.Unmarshal(ev.Payload, &p) == nil && p["action"] == "run_prompt" {
-				row = p
-				break
-			}
-		}
-		if row == nil {
-			if time.Now().After(deadline) {
-				t.Fatal("the continuation's run_prompt row never journaled")
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
+	row := waitRunPromptRow(t, rig, convID, "continuation")
 	pollDone(t, rig, convID)
 
 	if got := row["origin"]; got != "continuation" {
@@ -4105,6 +4157,13 @@ func TestContinuationJournalsRunPrompt(t *testing.T) {
 	}
 	if got := row["actor"]; got != autoActor {
 		t.Errorf("actor = %v, want %q — the Item-1 fold whitelist keys on it", got, autoActor)
+	}
+	// Consumption linkage: the steer was seq 2 (send=1, steer=2). A
+	// steerless continuation/retry row omits the key entirely — payload
+	// byte-stability downstream depends on that.
+	seqs, _ := row["steer_seqs"].([]interface{})
+	if len(seqs) != 1 || seqs[0] != float64(2) {
+		t.Errorf("run_prompt steer_seqs = %v, want [2] (the consumed steer row)", row["steer_seqs"])
 	}
 	b, err := os.ReadFile(promptFileForText(t, root, steerText))
 	if err != nil {
@@ -4128,5 +4187,414 @@ func TestContinuationJournalsRunPrompt(t *testing.T) {
 	}
 	if users != 2 {
 		t.Errorf("user_message count = %d, want 2 (send + steer; continuation wrote no duplicate)", users)
+	}
+}
+
+// TestDropQueuedSteer pins the manual drop op: a queued steer the human
+// drops leaves the active run's queue with a review_action
+// {action:"steer_dropped", steer_seq} receipt (no actor, no cause — the
+// parked_goal_dropped shape), the continuation then carries only the
+// surviving steer, and an absent seq (never queued, or already consumed)
+// refuses journal-neutral — the benign race the GUI treats as a
+// reconcile.
+func TestDropQueuedSteer(t *testing.T) {
+	t.Run("drop removes the steer and journals the single-seq row", func(t *testing.T) {
+		root := initRepo(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+		// The slow stub runs 3s: both steers (seq 2, seq 3) land mid-run.
+		steerA := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "first note", Steer: true})
+		steerB := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "second note", Steer: true})
+		seqA := steerA.Event.Seq
+		seqB := steerB.Event.Seq
+
+		// The human drops A while the run is still live.
+		drop := rig.call(t, Request{Cmd: CmdDropQueuedSteer, ConversationID: convID, SteerSeq: int64(seqA)})
+		if !drop.OK {
+			t.Fatalf("drop_queued_steer: %s", drop.Error)
+		}
+
+		// The runtime queue kept only B.
+		rig.server.mu.Lock()
+		meta := rig.server.runs[rig.server.byConv[convID]]
+		rig.server.mu.Unlock()
+		if meta == nil || len(meta.queuedSteers) != 1 ||
+			meta.queuedSteers[0].seq != int64(seqB) || meta.queuedSteers[0].text != "second note" {
+			t.Fatalf("queuedSteers after drop = %+v, want [{seq %d, second note}]", meta, seqB)
+		}
+
+		// The drop row: single-seq form, no actor (a human decision), no
+		// cause (that field belongs to the pipeline's batch closes).
+		drops := payloadsByAction(t, allEvents(t, rig, convID), "steer_dropped")
+		if len(drops) != 1 {
+			t.Fatalf("steer_dropped rows = %d, want exactly 1", len(drops))
+		}
+		if got := drops[0]["steer_seq"]; got != float64(seqA) {
+			t.Errorf("steer_dropped steer_seq = %v, want %d", got, seqA)
+		}
+		if _, ok := drops[0]["cause"]; ok {
+			t.Errorf("manual drop row carried cause: %v (batch closes own that field)", drops[0])
+		}
+		if _, ok := drops[0]["actor"]; ok {
+			t.Errorf("manual drop row carried actor: %v (human decisions carry none)", drops[0])
+		}
+
+		// The continuation consumes only B: its run_prompt links B's seq,
+		// and its prompt contains B's text but NOT A's (proof the drop
+		// really removed A, not just journaled over it).
+		rig.pollUntilDone(t, convID)
+		row := waitRunPromptRow(t, rig, convID, "continuation")
+		seqs, _ := row["steer_seqs"].([]interface{})
+		if len(seqs) != 1 || seqs[0] != float64(seqB) {
+			t.Errorf("continuation steer_seqs = %v, want [%d] (A was dropped)", row["steer_seqs"], seqB)
+		}
+		pollDone(t, rig, convID)
+		b, err := os.ReadFile(promptFileForText(t, root, "second note"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A's journaled steer row replays into the prompt as HISTORY (one
+		// occurrence); the queued-prompt suffix — where a failed drop
+		// would repeat it — must not carry it at all.
+		if n := strings.Count(string(b), "first note"); n != 1 {
+			t.Errorf("continuation prompt carried %d x dropped steer text, want exactly 1 (journal replay only)", n)
+		}
+		if n := strings.Count(string(b), "second note"); n != 2 {
+			t.Errorf("continuation prompt carried %d x surviving steer text, want 2 (replay + queued suffix)", n)
+		}
+		if got := len(payloadsByAction(t, allEvents(t, rig, convID), "steer_dropped")); got != 1 {
+			t.Errorf("steer_dropped rows after continuation = %d, want 1 (consumption is not a drop)", got)
+		}
+	})
+
+	t.Run("absent seq refuses journal-neutral", func(t *testing.T) {
+		root := initRepo(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+		rig := startRig(t, root)
+		defer rig.stop(t)
+
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+		convID := boot.Conversation.ID
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+		steered := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "mid-run note", Steer: true})
+		seq := steered.Event.Seq
+
+		// Never-queued seq: exact contract refusal, nothing journaled.
+		resp := rig.callExpectErr(t, Request{Cmd: CmdDropQueuedSteer, ConversationID: convID, SteerSeq: 99})
+		if resp.Error != "no queued steer with seq 99" {
+			t.Errorf("drop error = %q, want the exact contract refusal", resp.Error)
+		}
+
+		// The queued steer survives the bogus drop and is consumed by the
+		// continuation — after which dropping IT refuses the same way:
+		// consumed already closes the ledger, so the refusal must not
+		// journal a drop row ever.
+		rig.pollUntilDone(t, convID)
+		row := waitRunPromptRow(t, rig, convID, "continuation")
+		seqs, _ := row["steer_seqs"].([]interface{})
+		if len(seqs) != 1 || seqs[0] != float64(seq) {
+			t.Fatalf("continuation steer_seqs = %v, want [%d] (bogus drop lost nothing)", row["steer_seqs"], seq)
+		}
+		resp = rig.callExpectErr(t, Request{Cmd: CmdDropQueuedSteer, ConversationID: convID, SteerSeq: int64(seq)})
+		if resp.Error != fmt.Sprintf("no queued steer with seq %d", seq) {
+			t.Errorf("consumed-seq drop error = %q, want the exact contract refusal", resp.Error)
+		}
+		if got := len(payloadsByAction(t, allEvents(t, rig, convID), "steer_dropped")); got != 0 {
+			t.Errorf("steer_dropped rows = %d, want 0 (both refusals were journal-neutral)", got)
+		}
+	})
+}
+
+// TestSteerDroppedOnCancel: a user kill abandons the run's steers WITH it
+// — drainRun continues nothing off an errored run, so the drained queue
+// closes as one batch steer_dropped{steer_seqs, cause:"cancelled"} (the
+// cancel mark split from a genuine agent error), journaled exactly once.
+func TestSteerDroppedOnCancel(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	steerA := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "first note", Steer: true})
+	steerB := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "second note", Steer: true})
+	seqA, seqB := steerA.Event.Seq, steerB.Event.Seq
+
+	rig.call(t, Request{Cmd: CmdCancel, ConversationID: convID})
+
+	// Drain the killed run to terminal (cancel-op shape: the adapter's own
+	// agent_error follows the already-journaled "cancelled by user").
+	pollDone(t, rig, convID)
+
+	drops := payloadsByAction(t, allEvents(t, rig, convID), "steer_dropped")
+	if len(drops) != 1 {
+		t.Fatalf("steer_dropped rows = %d, want exactly 1 for the abandoned batch", len(drops))
+	}
+	if got := drops[0]["cause"]; got != "cancelled" {
+		t.Errorf("steer_dropped cause = %v, want cancelled (user kill, not an agent error)", got)
+	}
+	if got := drops[0]["actor"]; got != autoActor {
+		t.Errorf("steer_dropped actor = %v, want %q (pipeline closes, not the human)", got, autoActor)
+	}
+	seqs, _ := drops[0]["steer_seqs"].([]interface{})
+	if len(seqs) != 2 || seqs[0] != float64(seqA) || seqs[1] != float64(seqB) {
+		t.Errorf("steer_dropped steer_seqs = %v, want [%d %d]", drops[0]["steer_seqs"], seqA, seqB)
+	}
+	if got := len(payloadsByAction(t, allEvents(t, rig, convID), "run_prompt")); got != 0 {
+		t.Errorf("run_prompt rows = %d, want 0 (a cancelled run fires no continuation)", got)
+	}
+}
+
+// failStubWrapper sleeps long enough for steers to land mid-run, then
+// exits 1 — the adapter drains it as a genuine agent_error, never the
+// user-kill mark: exactly one side of the cause split below.
+const failStubWrapper = `#!/bin/sh
+sleep 2
+echo "agent exploded" >&2
+exit 1
+`
+
+// TestSteerDroppedOnAgentError: the genuine-error side of the cancel
+// split — an agent-errored run abandons its queue as
+// steer_dropped{steer_seqs, cause:"errored"}, and the error journal
+// shape otherwise matches the pre-queue behavior.
+func TestSteerDroppedOnAgentError(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, failStubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "try and fail"})
+	steerA := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "first note", Steer: true})
+	steerB := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "second note", Steer: true})
+	seqA, seqB := steerA.Event.Seq, steerB.Event.Seq
+
+	pollDone(t, rig, convID)
+
+	drops := payloadsByAction(t, allEvents(t, rig, convID), "steer_dropped")
+	if len(drops) != 1 {
+		t.Fatalf("steer_dropped rows = %d, want exactly 1 for the abandoned batch", len(drops))
+	}
+	if got := drops[0]["cause"]; got != "errored" {
+		t.Errorf("steer_dropped cause = %v, want errored (agent error, not a user kill)", got)
+	}
+	seqs, _ := drops[0]["steer_seqs"].([]interface{})
+	if len(seqs) != 2 || seqs[0] != float64(seqA) || seqs[1] != float64(seqB) {
+		t.Errorf("steer_dropped steer_seqs = %v, want [%d %d]", drops[0]["steer_seqs"], seqA, seqB)
+	}
+	if got := len(payloadsByAction(t, allEvents(t, rig, convID), "run_prompt")); got != 0 {
+		t.Errorf("run_prompt rows = %d, want 0 (an errored run fires no continuation)", got)
+	}
+}
+
+// TestSteerLedgerClosedOnDaemonRestart pins panel diff #9 finding 1: a
+// restart strands every queued steer (runMeta.queuedSteers is memory-only
+// by design), and without recovery the GUI's journal-derived queue would
+// repopulate them as immortal, un-droppable rows. recoverOpenSteers folds
+// the journal at NewServer and closes the ledger exactly once per
+// conversation — one batched steer_dropped{cause:"daemon_restart"} —
+// and a second boot folds the closure rows and no-ops (idempotent).
+func TestSteerLedgerClosedOnDaemonRestart(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	rig := startRig(t, root)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	// The slow stub runs 3s: both steers land mid-run and sit in the
+	// memory-only queue (the crash shape — no drain ever closes them).
+	steerA := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "first note", Steer: true})
+	steerB := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "second note", Steer: true})
+	seqA, seqB := steerA.Event.Seq, steerB.Event.Seq
+	// Crash: stop with the run live. The journaled steers stay open.
+	rig.stop(t)
+
+	mgr := worktree.NewManager(root)
+	if err := mgr.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs: %v", err)
+	}
+	st, err := store.Open(filepath.Join(mgr.StateDir(), "journal.sqlite"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+	steerDrops := func() []map[string]interface{} {
+		events, err := st.ListEvents(context.Background(), convID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []map[string]interface{}
+		for _, e := range events {
+			if e.Type != store.EventReviewAction {
+				continue
+			}
+			var p map[string]interface{}
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatalf("event %d: %v", e.ID, err)
+			}
+			if p["action"] == "steer_dropped" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+
+	// First boot after the crash: one batched closure for both open seqs.
+	_ = NewServer(st, root, adapter.NewOMP(mgr.StateDir()), mgr)
+	drops := steerDrops()
+	if len(drops) != 1 {
+		t.Fatalf("steer_dropped rows = %d, want exactly 1 (batched daemon_restart close)", len(drops))
+	}
+	if got := drops[0]["cause"]; got != "daemon_restart" {
+		t.Errorf("steer_dropped cause = %v, want daemon_restart", got)
+	}
+	if got := drops[0]["actor"]; got != autoActor {
+		t.Errorf("steer_dropped actor = %v, want %q (pipeline closes, not the human)", got, autoActor)
+	}
+	seqs, _ := drops[0]["steer_seqs"].([]interface{})
+	if len(seqs) != 2 || seqs[0] != float64(seqA) || seqs[1] != float64(seqB) {
+		t.Errorf("steer_dropped steer_seqs = %v, want [%d %d]", drops[0]["steer_seqs"], seqA, seqB)
+	}
+
+	// Second boot: the closure row folds in — idempotent, no double-close.
+	_ = NewServer(st, root, adapter.NewOMP(mgr.StateDir()), mgr)
+	if got := len(steerDrops()); got != 1 {
+		t.Errorf("steer_dropped rows after second boot = %d, want still 1 (recovery is idempotent)", got)
+	}
+}
+
+// failStartAdapter errors every Start — the post-receipt admission
+// failure seam (agent_start) without scripting the whole stub agent.
+type failStartAdapter struct{ err error }
+
+func (a failStartAdapter) Start(context.Context, string, string) (string, error) { return "", a.err }
+func (failStartAdapter) Send(context.Context, string, string) error              { return nil }
+func (failStartAdapter) Events(context.Context, string, int) ([]adapter.AgentEvent, error) {
+	return nil, nil
+}
+func (failStartAdapter) Cancel(context.Context, string) error { return nil }
+func (failStartAdapter) Close(context.Context, string) error  { return nil }
+
+// TestSteerRetryAgentStartFailureNoDoubleClose pins panel diff #9 finding
+// "double-close": the retry's run_prompt receipt lands BEFORE the adapter
+// starts (journal-first, evidence-before-action), so a post-receipt
+// failure must NOT also journal steer_dropped — one steer ends exactly
+// once (consumed OR dropped, never both).
+func TestSteerRetryAgentStartFailureNoDoubleClose(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir()) // hermetic prefs: no auto-land noise
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, silentSlowStub))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "fs-trigger-token do the thing"})
+	// The silent stub runs 2s: the steer lands mid-run and rides the
+	// automatic retry verdict when run 1 drains as false_stop.
+	steer := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "also this", Steer: true})
+	seqS := steer.Event.Seq
+
+	// The retry's adapter start fails: swap the default adapter BEFORE
+	// the drain that fires the verdict's synchronous retry admission.
+	rig.server.adaptersMu.Lock()
+	rig.server.adapters[""] = failStartAdapter{err: fmt.Errorf("injected start failure")}
+	rig.server.adaptersMu.Unlock()
+
+	rig.pollUntilDone(t, convID)
+
+	// The retry receipt stands (journal-first consumed the steer)…
+	row := waitRunPromptRow(t, rig, convID, "retry")
+	seqs, _ := row["steer_seqs"].([]interface{})
+	if len(seqs) != 1 || seqs[0] != float64(seqS) {
+		t.Errorf("retry run_prompt steer_seqs = %v, want [%d]", row["steer_seqs"], seqS)
+	}
+	// …and NO steer_dropped row contradicts it (the double-close the
+	// panel caught: consumed AND abandoned for one seq).
+	if got := len(payloadsByAction(t, allEvents(t, rig, convID), "steer_dropped")); got != 0 {
+		t.Errorf("steer_dropped rows = %d, want 0 — a post-receipt failure closes nothing (the receipt already consumed)", got)
+	}
+}
+
+// silentSlowStub is the false-stop signature (exit 0, ZERO output) on a
+// steer-landing delay: run 1 counts as false_stop and earns the single
+// automatic retry.
+const silentSlowStub = `#!/bin/sh
+output_file="$3"
+sleep 2
+: > "$output_file"
+exit 0
+`
+
+// TestFalseStopRetryConsumesSteers: steers queued against a false-stop
+// run ride the automatic retry (verbatim goal + steer texts, the pre-
+// queue assembly), so they are CONSUMED — the retry's run_prompt carries
+// their seqs and NO steer_dropped row ever lands (the goal itself has no
+// seq: the retry can drop only steers).
+func TestFalseStopRetryConsumesSteers(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir()) // hermetic prefs: no auto-land noise
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, silentSlowStub))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "fs-steer-token do the thing"})
+	steered := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "and this too", Steer: true})
+	seq := steered.Event.Seq
+
+	// The retry registers SYNCHRONOUSLY inside run 1's drain (round-2
+	// panel fix), so AgentRunning never goes false across the hand-off —
+	// this one pollUntilDone consumes the retry's full lifecycle.
+	rig.pollUntilDone(t, convID)
+	// Guard the TestFalseStopRetryOnce flush: only needed if admission
+	// ever goes asynchronous again.
+	rig.server.mu.Lock()
+	retryRunning := rig.server.byConv[convID] != ""
+	rig.server.mu.Unlock()
+	if retryRunning {
+		rig.pollUntilDone(t, convID)
+	}
+
+	// Exactly one follow-up run — the retry — and it claims the steer.
+	runs := payloadsByAction(t, allEvents(t, rig, convID), "run_prompt")
+	if len(runs) != 1 {
+		t.Fatalf("run_prompt rows = %d, want exactly 1 (the retry)", len(runs))
+	}
+	if got := runs[0]["origin"]; got != "retry" {
+		t.Errorf("run_prompt origin = %v, want retry (false-stop retry, not a continuation)", got)
+	}
+	seqs, _ := runs[0]["steer_seqs"].([]interface{})
+	if len(seqs) != 1 || seqs[0] != float64(seq) {
+		t.Errorf("retry steer_seqs = %v, want [%d] (the steer rode the retry)", runs[0]["steer_seqs"], seq)
+	}
+	if got := len(payloadsByAction(t, allEvents(t, rig, convID), "steer_dropped")); got != 0 {
+		t.Errorf("steer_dropped rows = %d, want 0 (admission consumed the steer)", got)
+	}
+
+	// The retry prompt is the verbatim goal joined with the steer text —
+	// assembly behavior unchanged by the identity threading.
+	b, err := os.ReadFile(promptFileForText(t, root, "and this too"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "fs-steer-token do the thing") {
+		t.Error("retry prompt missing the verbatim goal ahead of the steer texts")
 	}
 }
