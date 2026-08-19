@@ -39,6 +39,20 @@ type Settings struct {
 	// passes --prewalk --prewalk-into=<model> to OMP, switching to the
 	// smol model after the plan's todo list exists.
 	PrewalkModel string `json:"prewalk_model"`
+	// M19 (V11): loop_notify_on_complete (default on) — the GUI fires ONE
+	// system notification on a loop's first terminal row and journals
+	// loop_notified. Read-only over IPC (UpdateSettings never writes it;
+	// the pref is hand-edited in prefs.md).
+	LoopNotifyOnComplete bool `json:"loop_notify_on_complete"`
+}
+
+// loopNotifyOff marks the loop_notify_on_complete: off pref values.
+func loopNotifyOff(v string) bool {
+	switch strings.ToLower(v) {
+	case "off", "false", "0", "no", "never":
+		return true
+	}
+	return false
 }
 
 // autoApplyValues are the valid auto_apply pref values (rung-0 contract).
@@ -153,6 +167,8 @@ func ReadSettings() Settings {
 		s.AutoApply = "off"
 	}
 	s.PrewalkModel = LoadPrefsRaw("prewalk_model")
+	// M19 (V11): default on; any explicit off-shape value disables.
+	s.LoopNotifyOnComplete = !loopNotifyOff(LoadPrefsRaw("loop_notify_on_complete"))
 	return s
 }
 

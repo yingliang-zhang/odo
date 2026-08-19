@@ -57,6 +57,11 @@ type OMP struct {
 	timeout      string
 	prefsKey     string // prefs.md key to read model from ("coding" or "orchestrator")
 	prewalkModel string // prefs.md `prewalk_model` — empty = off
+	// M19 (loop_implementer): when fixedModel is set, it beats the prefs
+	// key — a per-instance model override for loop-spawned runs that never
+	// touches what normal sends resolve (V12).
+	fixedModel    string
+	fixedProvider string
 
 	mu           sync.Mutex // guards runs + configLogged; run results sync via done channel
 	runs         map[string]*ompRun
@@ -232,11 +237,24 @@ func NewOMPForKey(stateDir, key string) *OMP {
 	return o
 }
 
+// NewOMPModelOverride creates an OMP adapter pinned to an explicit
+// model@provider pair (the prefs.md `loop_implementer:` value for
+// loop-spawned runs, M19 V12). The pinned pair wins over every prefs key;
+// provider is wrapped in the same custom: scheme resolveModelConfig uses.
+func NewOMPModelOverride(stateDir, model, provider string) *OMP {
+	o := NewOMP(stateDir)
+	o.fixedModel, o.fixedProvider = model, provider
+	return o
+}
+
 // resolveModelConfig resolves the wrapper's --hermes-model / --hermes-provider
 // args. The prefs.md key (e.g. "coding" or "orchestrator") determines which
 // model line is read. Falls back to the M0 defaults.
 func (a *OMP) resolveModelConfig() (model, providerArg string) {
 	model, provider := LoadPrefsByKey(a.prefsKey)
+	if a.fixedModel != "" {
+		model, provider = a.fixedModel, a.fixedProvider
+	}
 	if model == "" {
 		model = defaultModel
 	}

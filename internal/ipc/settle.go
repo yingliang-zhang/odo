@@ -554,6 +554,11 @@ func (s *Server) originGoal(ctx context.Context, conversationID int64) string {
 		if _, marked := parseAutoReviseMarker(ev.Payload); marked {
 			continue
 		}
+		// M19: loop fix/implement prompts are daemon-synthesized too —
+		// never an origin goal.
+		if _, marked := parseLoopFixMarker(ev.Payload); marked {
+			continue
+		}
 		var p struct {
 			Text  string `json:"text"`
 			Slash string `json:"context_scope"`
@@ -672,7 +677,7 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 	if err != nil {
 		return false, "worktree_create: " + err.Error()
 	}
-	ad := s.adapters[""] // default adapter
+	ad := s.adapterFor("") // default adapter
 	runID, err := ad.Start(ctx, wtPath, fullPrompt)
 	if err != nil {
 		_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree

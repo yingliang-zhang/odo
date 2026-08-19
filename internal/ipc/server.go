@@ -74,6 +74,14 @@ type runMeta struct {
 	toolCalls int
 	thinkings int
 	isRetry   bool // false-stop retry run — immune to a further auto-retry
+	// M19 (/loop): loop provenance. Non-zero loopID marks a loop-spawned
+	// run ("fix" for Mode A audits, "implement" for Mode B tasks);
+	// drainRun's terminal tail skips maybeAutoLand for these and drives
+	// the loop's own pipeline instead (C1).
+	loopID    int64
+	loopKind  string
+	loopRound int
+	loopTask  int
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -82,9 +90,15 @@ type Server struct {
 	store          *store.Store
 	projectRoot    string
 	resolvedRoot   string                     // projectRoot after EvalSymlinks (registry exclusion compares resolved forms)
+	mgr            *worktree.Manager
+	// adaptersMu guards the adapter registry: writes happen pre-serve
+	// (NewServer/RegisterAdapter) AND post-serve (M19 registers the
+	// loop_implementer override under "loop" at first spawn) — every read
+	// must go through adapterFor/adapterNamed; direct map reads would race
+	// the post-serve write (Go maps: concurrent read+write is fatal).
+	adaptersMu     sync.RWMutex
 	adapters       map[string]adapter.Adapter // "" and "omp" = default adapter
 	distillAdapter adapter.Adapter            // uses orchestrator model from prefs.md
-	mgr            *worktree.Manager
 
 	// mu (M11 P0) guards every piece of in-memory run bookkeeping below it:
 	// runs, byConv, distilling, curating, designing, and each runMeta's
@@ -107,6 +121,13 @@ type Server struct {
 	designing  bool               // a design_moa pass is in flight (R-W4; the curating precedent)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
 	curateWG   sync.WaitGroup     // detached auto-curates (M17: drained at Wait/teardown)
+	// M19 (/loop): loops is the liveness-only claim that a tick chain or
+	// driver goroutine is driving a conversation's loop (the designing
+	// precedent; the journal fold is the state). loopWG keeps blocking
+	// audit/design MoA fan-outs off the IPC thread, drained at Wait()
+	// like curateWG.
+	loops  map[int64]struct{}
+	loopWG sync.WaitGroup
 
 	// acceptMu serializes the accept critical section (Q6 #6, previously
 	// unadjudicated): two concurrent accepts — human + auto-land, or two
@@ -190,6 +211,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		autoPending:  make(map[int64]*autoPendingEntry),
 		autoInFlight: make(map[int64]*autoInFlight),
 		slashing:     make(map[int64]int),
+		loops:        make(map[int64]struct{}),
 		autoJitter:   autoStartupJitterMax,
 	}
 	s.adapters[""] = ad
@@ -200,6 +222,9 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// is open and before serving (NewServer is the only touchable init
 	// hook; main.go's wiring stays untouched).
 	s.recoverParkedGoals(context.Background())
+	// M19 (V7): restart recovery for /loop — mid-audit/design loops
+	// (side-effect-free) re-run; mid-run loops suspend restart_mid_run.
+	s.recoverLoops(context.Background())
 	// Re-trigger auto-land for pending diffs that were stranded by a
 	// daemon restart. maybeAutoLand is normally called from drainRun on
 	// run completion; a restart after the run drained but before the
@@ -244,7 +269,9 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 // RegisterAdapter makes ad selectable via the send_message "adapter" field
 // under the given name (e.g. "omp-alt" in tests).
 func (s *Server) RegisterAdapter(name string, ad adapter.Adapter) {
+	s.adaptersMu.Lock()
 	s.adapters[name] = ad
+	s.adaptersMu.Unlock()
 }
 
 // SetDistillAdapter sets the adapter used for distill runs (uses the
@@ -256,10 +283,23 @@ func (s *Server) SetDistillAdapter(ad adapter.Adapter) {
 // adapterFor resolves a run/request adapter name to its Adapter. Unknown
 // names fall back to the default adapter.
 func (s *Server) adapterFor(name string) adapter.Adapter {
-	if ad, ok := s.adapters[name]; ok {
+	ad, ok := s.adapterNamed(name)
+	if ok {
 		return ad
 	}
+	s.adaptersMu.RLock()
+	defer s.adaptersMu.RUnlock()
 	return s.adapters[""]
+}
+
+// adapterNamed resolves a registry key, reporting existence (the
+// send_message unknown-adapter check and M19's register-once probe —
+// adapterFor's default fallback cannot express absence).
+func (s *Server) adapterNamed(name string) (adapter.Adapter, bool) {
+	s.adaptersMu.RLock()
+	defer s.adaptersMu.RUnlock()
+	ad, ok := s.adapters[name]
+	return ad, ok
 }
 
 // Serve accepts connections and handles each on its own goroutine (since
@@ -292,6 +332,8 @@ func (s *Server) Serve(listener net.Listener) error {
 func (s *Server) Wait() {
 	s.wg.Wait()
 	s.curateWG.Wait()
+	// M19: loop driver goroutines (audit/design MoA fan-outs) drain too.
+	s.loopWG.Wait()
 }
 
 // handleConn processes requests on a connection until EOF. Requests and
@@ -369,6 +411,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleListAllPendingDiffs(ctx, req)
 	case CmdDesignMoa:
 		resp, err = s.handleDesignMoa(ctx, req)
+	case CmdLoopCtl:
+		resp, err = s.handleLoopCtl(ctx, req)
 	case CmdReadWiki:
 		resp, err = s.handleReadWiki(ctx, req)
 	case CmdReadMemory:
@@ -646,8 +690,8 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// The run/distill gates live inside the handler (M12): the gate and the
 	// slash-slot registration must be one critical section, or a distill
 	// starting between the two folds the slash answer into last_seq unseen.
-	// cmd_recall_audit.go's auditSlashCommands mirrors the three slash routes
-	// below (/panel, /vision, /preview) — keep them in sync: slash
+	// cmd_recall_audit.go's auditSlashCommands mirrors the four slash routes
+	// below (/panel, /vision, /preview, /loop) — keep them in sync: slash
 	// user_messages journal no recall key, so the audit excludes them from
 	// the miss class.
 	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/panel"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
@@ -676,6 +720,16 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 			return Response{}, err
 		}
 		return s.handlePreviewQuery(ctx, &c, strings.TrimSpace(rest))
+	}
+	// /loop slash command: daemon-driven audit fixpoint + task pipeline
+	// (M19). Fourth member of the auditSlashCommands /
+	// rulesAuditSlashCommands mirror — keep all four in sync.
+	if rest := strings.TrimPrefix(strings.TrimSpace(req.Text), "/loop"); rest != strings.TrimSpace(req.Text) && (strings.HasPrefix(rest, " ") || rest == "") {
+		c, err := s.checkConversation(ctx, req.ConversationID)
+		if err != nil {
+			return Response{}, err
+		}
+		return s.handleLoop(ctx, &c, strings.TrimSpace(rest))
 	}
 	// Held for the entire handler (M11 P0): the byConv check and
 	// the run-table insert must be one critical section, and adapter.Start is
@@ -713,23 +767,41 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if adName == "" {
 		adName = "omp"
 	}
-	ad, ok := s.adapters[adName]
+	ad, ok := s.adapterNamed(adName)
 	if !ok {
 		if req.Adapter != "" {
 			return Response{}, fmt.Errorf("send_message: unknown adapter %q", req.Adapter)
 		}
 		// Should not happen — "omp" is always registered — but fall back
 		// to the default adapter for safety.
-		adName, ad = "", s.adapters[""]
+		adName, ad = "", s.adapterFor("")
 	}
+	var loopRunID string
+	var loopRunMeta *runMeta
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
-			return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
+			// M19 (V8): a human send during a LOOP fix/implement run is
+			// never refused (P1 — the refusal here pre-empted the
+			// human-interleave suspension below and swallowed the send).
+			// Defer the cancel until this send clears the concurrency
+			// cap, then fall through: the user_message journals, then
+			// suspendLoopOnHumanSendLocked suspends the loop (the
+			// suspension postdates the send, per the design ordering),
+			// then the new run starts normally. The cancelled run's
+			// drain is inert — loopDrainActive's fold check.
+			if meta.loopID != 0 {
+				loopRunID, loopRunMeta = runID, meta
+			} else {
+				return Response{}, fmt.Errorf("send_message: agent already running for conversation %d", c.ID)
+			}
 		}
 	}
 	// M11 P3: parallelism cap — reject when too many concurrent runs.
 	if cap := resolveMaxConcurrent(); s.activeRunCount() >= cap {
 		return Response{}, fmt.Errorf("send_message: %d concurrent runs (cap %d)", s.activeRunCount(), cap)
+	}
+	if loopRunMeta != nil {
+		s.cancelLoopRunLocked(loopRunID, loopRunMeta)
 	}
 
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
@@ -758,6 +830,9 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
+	// M19 (V8): a human send without loop provenance suspends an active
+	// loop (deterministic — the conversation never refuses the send).
+	s.suspendLoopOnHumanSendLocked(ctx, c.ID)
 
 	// M18 W2 item 4: fail closed BEFORE any adapter start — the attempt
 	// (user_message above) and the breach (agent_error below) both stay on
@@ -1315,6 +1390,8 @@ func (s *Server) handleSteering(ctx context.Context, c store.Conversation, req R
 	if err != nil {
 		return Response{}, err
 	}
+	// M19 (V8): a steer is a human send — it suspends an active loop.
+	s.suspendLoopOnHumanSendLocked(ctx, c.ID)
 	runID, ok := s.byConv[c.ID]
 	meta := s.runs[runID]
 	if ok && meta != nil && !meta.finished {
@@ -1507,7 +1584,7 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 		return false, "worktree_create"
 	}
 
-	ad := s.adapters[""] // default adapter
+	ad := s.adapterFor("") // default adapter
 	runID, err := ad.Start(ctx, wtPath, fullPrompt)
 	if err != nil {
 		_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
@@ -1676,6 +1753,14 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		// action retired runs, and every no-diff run leaked its worktree
 		// forever (P1). Retire BEFORE firing a continuation.
 		s.retireRun(ctx, meta.conversationID, "")
+		if meta.loopID != 0 {
+			// M19: a loop fix/implement run produced no diff — failure
+			// matrix fix_no_diff / run_tainted (no continuations, no
+			// false-stop retry: the loop resumes explicitly).
+			s.loopNoDiffAfterRun(ctx, meta, verdict)
+			s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+			return nil
+		}
 		switch {
 		case verdict == verdictFalseStop && !meta.isRetry:
 			// One automatic retry, verbatim goal plus any queued steers —
@@ -1778,11 +1863,31 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// M16 (O-1 v2): the pending diff spawns the auto-land pipeline
 	// (pref-gated inside; goroutine, no locks held — the continuation
 	// trigger's shape). meta's fields are copied as arguments.
+	//
+	// M19 (C1): a loop-provenance run SKIPS maybeAutoLand — the loop's
+	// own pipeline drives its diff (Mode A: risk gate → verify → land;
+	// Mode B: s.autoLand verbatim). A ladder repair run (originDiffID,
+	// no loop marker) auto-lands as usual, then ticks any waiting loop.
 	reviewGoal := meta.goal
 	if meta.reviewGoal != "" {
 		reviewGoal = meta.reviewGoal
 	}
-	go s.maybeAutoLand(newDiff, meta.worktreePath, reviewGoal, meta.errored, verdict)
+	if meta.loopID != 0 {
+		s.loopWG.Add(1)
+		go func() {
+			defer s.loopWG.Done()
+			s.loopPipelineAfterRun(meta, newDiff, verdict)
+		}()
+	} else if meta.originDiffID != 0 {
+		// Ladder repair run: its product re-enters the full pipeline; the
+		// tick a tasks loop waits on fires AFTER settle's rows land.
+		go func() {
+			s.maybeAutoLand(newDiff, meta.worktreePath, reviewGoal, meta.errored, verdict)
+			s.fireLoopTick(meta.conversationID)
+		}()
+	} else {
+		go s.maybeAutoLand(newDiff, meta.worktreePath, reviewGoal, meta.errored, verdict)
+	}
 
 	// A2-lite: if steering messages were queued during this run, auto-start
 	// a continuation run with the queued texts as the prompt. This replaces
@@ -4193,7 +4298,7 @@ func (s *Server) runDistillAgent(ctx context.Context, prompt string) (string, *d
 	}
 	ad := s.distillAdapter
 	if ad == nil {
-		ad = s.adapters[""] // fallback to default if distill adapter not configured
+		ad = s.adapterFor("") // fallback to default if distill adapter not configured
 	}
 	note, err := runOneShot(ctx, ad, prompt, distillTimeout)
 	return note, nil, err
@@ -4518,6 +4623,19 @@ func distillRender(ev store.Event) string {
 			return ""
 		}
 		return fmt.Sprintf("### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
+	case store.EventLoopEvent:
+		// M19: the fold renders the loop's KIND — suspensions are the
+		// open loops the note must surface; payloads (findings rounds can
+		// carry tens of KB of audits) stay out, same doctrine as
+		// review_action one-liners.
+		if k := jsonStr(ev.Payload, "kind"); k != "" {
+			cause := jsonStr(ev.Payload, "cause")
+			if cause != "" {
+				return fmt.Sprintf("### loop_event (seq %d) {\"kind\":%q,\"cause\":%q}\n\n", ev.Seq, k, cause)
+			}
+			return fmt.Sprintf("### loop_event (seq %d) {\"kind\":%q}\n\n", ev.Seq, k)
+		}
+		return fmt.Sprintf("### loop_event (seq %d) [payload omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
 	case store.EventUserMessage:
 		// M18: a synthesized repair prompt is daemon bookkeeping wearing a
 		// user_message row — multi-KB by construction (32KB diff + 12KB
@@ -4525,6 +4643,11 @@ func distillRender(ev store.Event) string {
 		// tombstone, M17 F1 shape.
 		if m, ok := parseAutoReviseMarker(ev.Payload); ok {
 			return fmt.Sprintf("### user_message (seq %d) [auto_revise round %d prompt omitted — %d bytes]\n\n", ev.Seq, m.Round, len(ev.Payload))
+		}
+		// M19: loop fix/implement prompts are the same shape (BYOF
+		// findings verbatim + demotion directive).
+		if m, ok := parseLoopFixMarker(ev.Payload); ok {
+			return fmt.Sprintf("### user_message (seq %d) [loop_fix loop %d prompt omitted — %d bytes]\n\n", ev.Seq, m.LoopID, len(ev.Payload))
 		}
 		return fmt.Sprintf("### %s (seq %d)\n%s\n\n", ev.Type, ev.Seq, ev.Payload)
 	default:
@@ -4576,7 +4699,7 @@ func distillRenderSize(ev store.Event) int {
 	switch ev.Type {
 	case store.EventAgentThinking, store.EventAgentToolResult,
 		store.EventAgentToolCall, store.EventReviewAction,
-		store.EventMemoryUpdate:
+		store.EventMemoryUpdate, store.EventLoopEvent:
 		return len(distillRender(ev))
 	case store.EventAgentText:
 		if isAdvisoryAgentText(ev) {
@@ -4585,8 +4708,12 @@ func distillRenderSize(ev store.Event) int {
 		return len(ev.Type) + len(ev.Payload) + 64 // header + separators, over-estimated
 	case store.EventUserMessage:
 		// M18: tombstoned repair prompts measure exactly (render ==
-		// accounting, the M17 F1 byte-for-byte agreement).
+		// accounting, the M17 F1 byte-for-byte agreement). M19 loop
+		// prompts measure exactly too.
 		if _, ok := parseAutoReviseMarker(ev.Payload); ok {
+			return len(distillRender(ev))
+		}
+		if _, ok := parseLoopFixMarker(ev.Payload); ok {
 			return len(distillRender(ev))
 		}
 		return len(ev.Type) + len(ev.Payload) + 64

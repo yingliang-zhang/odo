@@ -115,8 +115,12 @@ func collectReplayTurns(events []store.Event, boundary int) []replayTurn {
 		// evidence, not a user turn — distillRender tombstones it and
 		// originGoal skips it; replaying it as "user" would confuse the
 		// NEXT repair run's prompt (and smuggle the demotion directive in
-		// as a lower-authority past turn, P0 review GLM).
+		// as a lower-authority past turn, P0 review GLM). M19: loop
+		// fix/implement prompts are the same shape (loop_fix marker).
 		if _, marked := parseAutoReviseMarker(ev.Payload); marked {
+			continue
+		}
+		if _, marked := parseLoopFixMarker(ev.Payload); marked {
 			continue
 		}
 		var p struct {

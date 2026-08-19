@@ -581,7 +581,7 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 	} else {
 		ad := s.distillAdapter
 		if ad == nil {
-			ad = s.adapters[""] // same fallback as runDistillAgent
+			ad = s.adapterFor("") // same fallback as runDistillAgent
 		}
 		raw, err = runOneShot(ctx, ad, prompt, curatorTimeout)
 	}

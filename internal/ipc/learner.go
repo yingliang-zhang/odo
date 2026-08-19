@@ -550,7 +550,7 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 	} else {
 		ad := s.distillAdapter
 		if ad == nil {
-			ad = s.adapters[""] // same fallback as runDistillAgent
+			ad = s.adapterFor("") // same fallback as runDistillAgent
 		}
 		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, sibs, userMem), learnerTimeout)
 	}

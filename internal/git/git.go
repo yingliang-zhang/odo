@@ -584,3 +584,10 @@ func CurrentSHA(repoPath string) (string, error) {
 	}
 	return strings.TrimSpace(out), nil
 }
+
+// DiffRange returns `git diff base..head` for repoPath (commit-to-commit —
+// the main checkout's working tree never pollutes the result). M19 /loop:
+// the Mode A audit subject is diff(frozen_base..HEAD).
+func DiffRange(repoPath, base, head string) (string, error) {
+	return run(repoPath, "diff", base+".."+head)
+}

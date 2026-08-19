@@ -96,6 +96,12 @@ const (
 	// GUI's open_path (canonicalize-then-prefix-check); binary files and
 	// escape attempts are rejected. Capped at readFileMaxBytes.
 	CmdReadFile = "read_file"
+	// M19 (/loop): loop_ctl is the GUI-only control surface — Mode B
+	// design gate (approve_design | amend_design with Request.Text |
+	// veto_design), chip buttons (stop | resume with Request.LoopBudget),
+	// and the notification receipt (notified with Request.LoopID +
+	// Request.Text = terminal kind).
+	CmdLoopCtl = "loop_ctl"
 )
 
 // Request is one command line on the socket.
@@ -138,6 +144,10 @@ type Request struct {
 	// repo-root-relative paths inlined into every leg's prompt (capped).
 	Goal         string   `json:"goal,omitempty"`
 	ContextFiles []string `json:"context_files,omitempty"`
+	// M19 (loop_ctl): LoopID selects the loop for the notified receipt;
+	// LoopBudget carries resume's optional budget raise.
+	LoopID     int64 `json:"loop_id,omitempty"`
+	LoopBudget int64 `json:"loop_budget,omitempty"`
 }
 
 // AutoDistillInfo is one scheduled auto-distill for the pending_counts

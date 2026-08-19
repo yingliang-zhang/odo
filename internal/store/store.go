@@ -27,6 +27,10 @@ const (
 	// /preview journals its headless capture facts (url, bytes, sha256 of
 	// the PNG, wait_ms) as one receipt event after the slash user_message.
 	EventPreviewCaptured = "preview_captured"
+	// M19 (/loop): ONE discriminated event type for every loop row —
+	// loop_started through loop_notified — split by the payload's kind
+	// key (docs/design/loop-design-lock.md V1).
+	EventLoopEvent = "loop_event"
 )
 
 // Diff statuses.

@@ -42,7 +42,10 @@ const (
 
 // handleDesignMoa runs the Design-MoA pipeline for req.Goal. Project-scoped
 // (the resolveProject guard) with the conversation naming the journal home
-// for the design_lock row (the handleCurate precedent).
+// for the design_lock row (the handleCurate precedent). M19: the pipeline
+// itself is extracted as runDesignMoa (the /loop tasks design gate calls
+// the same pass); this handler keeps the dark-launch gate, the one-pass
+// liveness flag, and the design_lock journaling.
 func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, error) {
 	// Fail-closed dark launch (the *_via convention): absent or any value
 	// short of explicit "moa" refuses before any work. resolveVia logs
@@ -60,17 +63,6 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
 		return Response{}, err
-	}
-	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
-	if len(models) == 0 {
-		return Response{}, errors.New("No review models configured for design_moa. Set the 'review:' line in prefs.md.")
-	}
-	// Context files are resolved against the bound repo root; an escape is
-	// a caller error (refused), an unreadable in-root file degrades to an
-	// inline note (the tools can still answer over the rest).
-	ctxBlock, err := designContextBlock(s.projectRoot, req.ContextFiles)
-	if err != nil {
-		return Response{}, fmt.Errorf("design_moa: %w", err)
 	}
 
 	// One design pass at a time (M11 P0 curating precedent): the pass runs
@@ -100,12 +92,76 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 		return Response{}, err
 	}
 
+	out, err := runDesignMoa(ctx, "design_moa", s.projectRoot, goal, req.ContextFiles, "")
+	if err != nil {
+		return fail(err, err.Error())
+	}
+
+	// Journal the lock plus every leg's metadata (verdict semantics: text,
+	// marks, receipts — the proposals ARE the design analog of review
+	// verdicts). Full proposal texts ride the row: the design_lock is
+	// falsifiable against exactly what the consolidator saw.
+	payload := map[string]interface{}{
+		"action":       "design_lock",
+		"goal":         goal,
+		"goal_sha16":   sha16([]byte(goal)),
+		"design_lock":  out.lock,
+		"design_sha16": sha16([]byte(out.lock)),
+		"proposals":    out.proposals,
+		"consolidator": out.consolidator,
+	}
+	if len(req.ContextFiles) > 0 {
+		payload["context_files"] = req.ContextFiles
+	}
+	if out.droppedLegs > 0 {
+		payload["dropped_legs"] = out.droppedLegs
+	}
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(payload)); err != nil {
+		return Response{}, err
+	}
+	return Response{DesignLock: out.lock, DesignProposals: out.proposals}, nil
+}
+
+// designMoaOutcome is one runDesignMoa pass's products: the DESIGN LOCK
+// text, every leg's receipt (failed legs included — their text is dropped,
+// never consolidator input), the consolidator's wire receipt block, and
+// the dropped-leg count.
+type designMoaOutcome struct {
+	lock         string
+	proposals    []DesignProposal
+	consolidator map[string]interface{}
+	droppedLegs  int
+}
+
+// runDesignMoa runs the Design-MoA pipeline verbatim (M19 extraction from
+// handleDesignMoa): blind-sealed proposal legs — one per prefs review:
+// model, each an independent QueryWithTools loop over read-only
+// repo-root-scoped tools — then ONE consolidator moa.Query synthesizing
+// the surviving proposals. opName prefixes error text ("design_moa" from
+// the IPC handler, "loop_design" from the /loop tasks gate);
+// consolidatorModel "" resolves to the prefs orchestrator: line. Strict
+// truncation: partial leg text never feeds the consolidator, and a
+// consolidator truncation fails the whole pass (the fail-closed
+// convention). Journaling stays with the caller.
+func runDesignMoa(ctx context.Context, opName, root, goal string, contextFiles []string, consolidatorModel string) (designMoaOutcome, error) {
+	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
+	if len(models) == 0 {
+		return designMoaOutcome{}, errors.New("No review models configured for " + opName + ". Set the 'review:' line in prefs.md.")
+	}
+	// Context files are resolved against the bound repo root; an escape is
+	// a caller error (refused), an unreadable in-root file degrades to an
+	// inline note (the tools can still answer over the rest).
+	ctxBlock, err := designContextBlock(root, contextFiles)
+	if err != nil {
+		return designMoaOutcome{}, fmt.Errorf("%s: %w", opName, err)
+	}
+
 	// Blind legs: independent QueryWithTools loops, repo-root scope. Same
 	// prompt, same tools, no cross-leg visibility — the seal holds because
 	// the executor exposes only reads and each leg builds its own message
 	// chain.
 	client := moa.NewClientFromEnv("", "")
-	exec := newFSToolExecutorRooted(s.projectRoot)
+	exec := newFSToolExecutorRooted(root)
 	tools := moaFSTools()
 	legSystem := "You are an expert design reviewer producing one independent, self-contained design proposal." +
 		"\n\nYou have read-only tools over the project repository: read_file, grep, glob. " +
@@ -126,7 +182,7 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 	wg.Wait()
 
 	// Strict truncation + degrade: failed legs (error or truncation) are
-	// excluded from the consolidator's plate. The command dies only when
+	// excluded from the consolidator's plate. The pass dies only when
 	// nothing survived.
 	var good []DesignProposal
 	for _, p := range proposals {
@@ -135,57 +191,38 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 		}
 	}
 	if len(good) == 0 {
-		err := fmt.Errorf("design_moa: every proposal leg failed (%d legs)", len(proposals))
-		return fail(err, err.Error())
+		return designMoaOutcome{}, fmt.Errorf("%s: every proposal leg failed (%d legs)", opName, len(proposals))
 	}
 
-	// Consolidator: ONE moa.Query on the prefs orchestrator model — a
-	// synthesis, not a vote. Deadline policy is the R-W2/R-W3 one: one
-	// worst-case moa attempt chain at the model's hard cap.
-	orchModel := adapter.ReadSettings().OrchestratorModel
-	cctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(orchModel))
-	consolidated, cerr := client.Query(cctx, orchModel, designConsolidatorSystem, designConsolidatorPrompt(goal, proposals))
+	// Consolidator: ONE moa.Query on the orchestrator model — a synthesis,
+	// not a vote. Deadline policy is the R-W2/R-W3 one: one worst-case moa
+	// attempt chain at the model's hard cap.
+	if consolidatorModel == "" {
+		consolidatorModel = adapter.ReadSettings().OrchestratorModel
+	}
+	cctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(consolidatorModel))
+	consolidated, cerr := client.Query(cctx, consolidatorModel, designConsolidatorSystem, designConsolidatorPrompt(goal, proposals))
 	cancel()
 	if cerr != nil {
-		err := fmt.Errorf("design_moa: consolidator: %w", cerr)
-		return fail(err, err.Error())
+		return designMoaOutcome{}, fmt.Errorf("%s: consolidator: %w", opName, cerr)
 	}
 	if consolidated.Truncated {
-		err := fmt.Errorf("design_moa: consolidator %s truncated at the %d-token hard cap after %d escalation(s); no design lock", orchModel, consolidated.Budget, len(consolidated.Escalations))
-		return fail(err, err.Error())
+		return designMoaOutcome{}, fmt.Errorf("%s: consolidator %s truncated at the %d-token hard cap after %d escalation(s); no design lock", opName, consolidatorModel, consolidated.Budget, len(consolidated.Escalations))
 	}
-	lock := consolidated.Text
 
-	// Journal the lock plus every leg's metadata (verdict semantics: text,
-	// marks, receipts — the proposals ARE the design analog of review
-	// verdicts). Full proposal texts ride the row: the design_lock is
-	// falsifiable against exactly what the consolidator saw.
-	payload := map[string]interface{}{
-		"action":       "design_lock",
-		"goal":         goal,
-		"goal_sha16":   sha16([]byte(goal)),
-		"design_lock":  lock,
-		"design_sha16": sha16([]byte(lock)),
-		"proposals":    proposals,
-		"consolidator": map[string]interface{}{
-			"model":         orchModel,
+	return designMoaOutcome{
+		lock:      consolidated.Text,
+		proposals: proposals,
+		consolidator: map[string]interface{}{
+			"model":         consolidatorModel,
 			"request_sha16": consolidated.RequestSHA16,
 			"request_bytes": consolidated.RequestBytes,
 			"budget":        consolidated.Budget,
 			"output_tokens": consolidated.OutputTokens,
 			"escalations":   consolidated.Escalations,
 		},
-	}
-	if len(req.ContextFiles) > 0 {
-		payload["context_files"] = req.ContextFiles
-	}
-	if dropped := len(proposals) - len(good); dropped > 0 {
-		payload["dropped_legs"] = dropped
-	}
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(payload)); err != nil {
-		return Response{}, err
-	}
-	return Response{DesignLock: lock, DesignProposals: proposals}, nil
+		droppedLegs: len(proposals) - len(good),
+	}, nil
 }
 
 // designLeg runs one blind proposal leg and folds the outcome into a

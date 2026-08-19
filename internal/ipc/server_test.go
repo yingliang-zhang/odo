@@ -2296,6 +2296,8 @@ func TestGetSettings(t *testing.T) {
 		AutoDistillIdleSeconds: "120",
 		MaxConcurrentRuns:      "4",
 		AutoApply:              "off",
+		// M19 (V11): loop_notify_on_complete defaults ON; the lock pins it.
+		LoopNotifyOnComplete: true,
 	}
 	if *got.Settings != want {
 		t.Errorf("defaults = %+v, want %+v", *got.Settings, want)
@@ -2316,6 +2318,8 @@ func TestGetSettings(t *testing.T) {
 		AutoDistillIdleSeconds: "120",
 		MaxConcurrentRuns:      "4",
 		AutoApply:              "off",
+		// No loop_notify_on_complete line in the prefs above: default ON.
+		LoopNotifyOnComplete: true,
 	}
 	if *got.Settings != want {
 		t.Errorf("from prefs = %+v, want %+v", *got.Settings, want)

@@ -77,11 +77,15 @@ autocomplete. This file is the implementing contract; the milestone spec is
 
 ```
 /loop audit [base=<sha>] [rounds=N] [budget=T]      Mode A; SEED lands pending diffs first
-/loop tasks <inline 1.… 2.… | file:<md> | queue> [rounds=N] [budget=T]
+/loop tasks [rounds=N] [budget=T] <inline 1.… 2.… | file:<md> | queue>
 /loop status                                        fold dump into chat
 /loop stop                                          terminal; cancels in-flight run
 /loop resume [budget=T]                             clear suspendable causes, re-tick
 ```
+
+Flags parse only from the LEADING run of key=value tokens, never from
+task text (post-lock P2 amendment: a `k=v` token inside a task is inert,
+and leading flags never pollute task 1's text).
 
 GUI-only IPC: `CmdLoopCtl` `{action: approve_design | amend_design(text) |
 veto_design | stop | resume(budget)}` (Mode B design gate + chip buttons).

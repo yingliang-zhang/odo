@@ -443,6 +443,10 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 						row.AutoBlocked++
 					case p.Action == "accept" && p.Actor == autoActor:
 						row.AutoAccepted++
+					case p.Action == "accept" && p.Actor == loopActor:
+						// M19: loop lands ride actor auto_loop — invisible to
+						// the autonomy audit (the ratchet must not drink its
+						// own bathwater, the M16 rule extended).
 					case p.Action == "accept":
 						row.Accepted++
 					case p.Action == "reject":
@@ -459,11 +463,16 @@ func ComputeAutonomy(ctx context.Context, st *store.Store, project store.Project
 				continue
 			}
 			// M16: pipeline-landed diffs are tallied, never streaked —
-			// the ratchet must not drink its own bathwater.
+			// the ratchet must not drink its own bathwater. M19: loop
+			// lands (auto_loop) are likewise excluded — they contribute
+			// no ratchet input either way (loop rows invisible to the audit).
 			if p.Actor == autoActor {
 				if p.Action == "accept" {
 					report.AutoAccepted++
 				}
+				continue
+			}
+			if p.Actor == loopActor {
 				continue
 			}
 			d, ok := byID[p.DiffID]

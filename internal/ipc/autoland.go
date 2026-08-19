@@ -307,32 +307,15 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 
 	// Path-scoped verify: pass diff paths so GUI-only diffs can use a
 	// lighter verify command (tsc + playwright instead of go test).
+	// M19: the gate itself is extracted as runVerifyGate (the /loop
+	// Mode A fix pipeline calls it verbatim).
 	verifyPaths, _ := git.PatchPaths(d.PathOnDisk)
-	verifyCmd, err := verifyCommand(worktreePath, verifyPaths)
-	if err != nil {
-		s.journalAutoLandBlocked(ctx, d, "verify_unconfigured",
-			"no usable "+verifyCmdFile+" at the repo root — the verify gate is mandatory for auto-land", nil, "")
+	gate := runVerifyGate(ctx, worktreePath, verifyPaths)
+	if !gate.ok {
+		s.journalAutoLandBlocked(ctx, d, gate.reason, gate.detail, nil, "")
 		return
 	}
-	verifyTail, err := runVerify(ctx, worktreePath, verifyCmd)
-	if err != nil {
-		s.journalAutoLandBlocked(ctx, d, "verify_failed",
-			capDetail(verifyCmd+" → "+err.Error()+"\n"+verifyTail), nil, "")
-		return
-	}
-	// Verify-evidence gate (M18 batch B): exit 0 that proves nothing. A
-	// verify whose output tail carries ZERO test evidence (no PASS token,
-	// no go "ok" line, no non-zero N-passed count — the conservative
-	// whitelist in review.go) never counts as "verified": a wrong-path
-	// verify used to give false release confidence. A build-only
-	// .odo-verify can never satisfy this, by design (m16 gate 7). The
-	// diff stays pending — fail closed, escalation to the human.
-	if !verifyHasPassEvidence(verifyTail) {
-		s.journalAutoLandBlocked(ctx, d, "verify_no_evidence",
-			capDetail("verify exit 0 (`"+verifyCmd+"`) but the output tail carries zero test evidence (no PASS token, no ok line, no N-passed count) — a verify that ran no tests proves nothing\n\n"+verifyTail),
-			nil, "")
-		return
-	}
+	verifyCmd, verifyTail := gate.cmd, gate.tail
 
 	prompt := buildReviewPrompt(reviewPromptInput{
 		mode:       reviewPromptGate,
@@ -490,6 +473,48 @@ func (s *Server) autoLandCheck(d store.Diff) (reason, detail string) {
 			fmt.Sprintf("*_test.go assertions: +%d added / -%d removed (net loss)", added, removed)
 	}
 	return "", ""
+}
+
+// verifyGateOutcome is runVerifyGate's result: on ok, the command that
+// ran and its capped output tail; on failure, the autoLand blocked reason
+// and detail (verbatim, so blocked-row text stays byte-identical to the
+// pre-extraction shape).
+type verifyGateOutcome struct {
+	ok     bool
+	cmd    string
+	tail   string
+	reason string
+	detail string
+}
+
+// runVerifyGate runs the verify gate verbatim (M19 extraction from
+// autoLand — the /loop Mode A fix pipeline calls the same gate):
+// command resolution → execution under the allowlisted environment →
+// the M18 pass-evidence rule. Unconfigured, failed, and evidence-less
+// outcomes are failures with exactly the reasons/details autoLand
+// journaled inline before the extraction.
+func runVerifyGate(ctx context.Context, worktreePath string, diffPaths []string) verifyGateOutcome {
+	verifyCmd, err := verifyCommand(worktreePath, diffPaths)
+	if err != nil {
+		return verifyGateOutcome{reason: "verify_unconfigured",
+			detail: "no usable " + verifyCmdFile + " at the repo root — the verify gate is mandatory for auto-land"}
+	}
+	verifyTail, err := runVerify(ctx, worktreePath, verifyCmd)
+	if err != nil {
+		return verifyGateOutcome{reason: "verify_failed",
+			detail: capDetail(verifyCmd + " → " + err.Error() + "\n" + verifyTail)}
+	}
+	// Verify-evidence gate (M18 batch B): exit 0 that proves nothing. A
+	// verify whose output tail carries ZERO test evidence (no PASS token,
+	// no go "ok" line, no non-zero N-passed count — the conservative
+	// whitelist in review.go) never counts as "verified": a wrong-path
+	// verify used to give false release confidence. A build-only
+	// .odo-verify can never satisfy this, by design (m16 gate 7).
+	if !verifyHasPassEvidence(verifyTail) {
+		return verifyGateOutcome{reason: "verify_no_evidence",
+			detail: capDetail("verify exit 0 (`" + verifyCmd + "`) but the output tail carries zero test evidence (no PASS token, no ok line, no N-passed count) — a verify that ran no tests proves nothing\n\n" + verifyTail)}
+	}
+	return verifyGateOutcome{ok: true, cmd: verifyCmd, tail: verifyTail}
 }
 
 // verifyCommand reads the worktree's .odo-verify: the first non-empty,

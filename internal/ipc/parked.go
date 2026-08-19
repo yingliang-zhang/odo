@@ -124,6 +124,8 @@ func (s *Server) handleParkGoal(ctx context.Context, c store.Conversation, req R
 	if err != nil {
 		return Response{}, err
 	}
+	// M19 (V8): a park is a human send — it suspends an active loop.
+	s.suspendLoopOnHumanSendLocked(ctx, c.ID)
 	s.parked[c.ID] = append(s.parked[c.ID], parkedGoal{seq: ev.Seq, text: req.Text})
 	if parkedGoalsAuto() {
 		s.maybeDequeueParkedGoal(ctx, c.ID)
@@ -141,6 +143,13 @@ func (s *Server) handleParkGoal(ctx context.Context, c store.Conversation, req R
 func (s *Server) maybeDequeueParkedGoal(ctx context.Context, conversationID int64) {
 	queue := s.parked[conversationID]
 	if len(queue) == 0 {
+		return
+	}
+	// M19 (V8): parked-goal auto-dequeue is suppressed (quietly) while a
+	// loop is active for the conversation. The queue survives; the loop's
+	// resume/stop re-frees the dequeue.
+	if st, _, err := s.loopActiveState(ctx, conversationID); err == nil && st != nil && st.active() {
+		log.Printf("parked: dequeue suppressed for conversation %d (loop active)", conversationID)
 		return
 	}
 	c, err := s.store.GetConversation(ctx, conversationID)
@@ -215,7 +224,7 @@ func (s *Server) startParkedGoalRunLocked(ctx context.Context, c store.Conversat
 		log.Printf("parked: skipping dequeue for conversation %d — distill in progress", c.ID)
 		return false
 	}
-	ad := s.adapters[""] // default adapter (continuation precedent)
+	ad := s.adapterFor("") // default adapter (continuation precedent)
 	if ad == nil || s.mgr == nil {
 		log.Printf("parked: no adapter/worktree manager — goal %d stays queued", goal.seq)
 		return false
