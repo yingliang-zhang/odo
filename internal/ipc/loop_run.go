@@ -233,6 +233,12 @@ func (s *Server) launchAuditRound(conversationID int64, st *loopState, events []
 	return tickHandedOff
 }
 
+// 256KB admits the real squashed-land shapes (M19 impl 233,533B; GUI wave
+// 80,889B). Convergence guards are UNCHANGED: the 16KB findings-feed
+// breaker, round cap, budget projection, and C5 stall. >256KB is a hard
+// wall (a 500KB death-loop stays physically inadmissible).
+const loopAuditSubjectCapBytes = 256 * 1024
+
 // runAuditRound executes one audit round end to end and journals
 // loop_audit_round + loop_verdict (evidence before action). Never
 // suspends directly except the subject-too-large breaker (C12) — every
@@ -250,12 +256,12 @@ func (s *Server) runAuditRound(loopID, conversationID int64, st *loopState, even
 		return
 	}
 	subjectSHA, subjectBytes := sha16([]byte(subject)), len(subject)
-	if subjectBytes > settleDiffCapBytes {
-		// C12 subject breaker (64KB): small-fix granularity is the loop's
-		// contract; recurring heavy findings belong to Mode B.
+	if subjectBytes > loopAuditSubjectCapBytes {
+		// C12 subject breaker: the loop-owned 256KB cap admits real
+		// squashed-land shapes; anything larger is a hard wall.
 		s.journalLoopBestEffort(ctx, conversationID, loopID, mode, loopKindSuspended, map[string]interface{}{
 			"cause":  "subject_too_large",
-			"detail": fmt.Sprintf("audit subject %dB exceeds the %dB cap — land pending diffs first", subjectBytes, settleDiffCapBytes),
+			"detail": fmt.Sprintf("audit subject %dB exceeds the %dB loop audit cap — land pending diffs first or narrow the base= range", subjectBytes, loopAuditSubjectCapBytes),
 		}, st.spentTokens)
 		return
 	}

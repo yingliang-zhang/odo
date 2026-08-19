@@ -491,6 +491,82 @@ func TestLoopSecondLoopRefused(t *testing.T) {
 	}
 }
 
+// subjectBlob renders a Go comment blob of at least size bytes — gate-clean
+// ASCII whose only effect is crossing git-diff byte thresholds (the audit
+// subject is base..HEAD's diff text, so each line costs one extra "+").
+func subjectBlob(size int) []byte {
+	line := "// " + strings.Repeat("x", 96) + "\n" // 100 B/line
+	var b strings.Builder
+	b.WriteString("package src\n\n")
+	for b.Len() < size {
+		b.WriteString(line)
+	}
+	return []byte(b.String())
+}
+
+// commitSubject commits a blob-sized work commit over the frozen base and
+// starts the audit loop on it.
+func commitSubject(t *testing.T, rig *testRig, convID int64, size int) {
+	t.Helper()
+	base := gitOut(t, rig.root, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(rig.root, "src", "blob.go"), subjectBlob(size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, rig.root, "add", ".")
+	gitIn(t, rig.root, "commit", "-m", "sized subject")
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/loop audit base=" + base})
+}
+
+// TestLoopAuditSubjectCapAdmits200KB pins the v1.2 loop-owned cap: a ~192KB
+// frozen subject (clear of the old 64KB settle cap, under the 256KB loop
+// cap) is AUDITED end to end, not suspended — the round row journals
+// subject_bytes inside the admission window.
+func TestLoopAuditSubjectCapAdmits200KB(t *testing.T) {
+	rig, _ := loopRig(t, func(kind string, n int, model string) (int, string, int) {
+		if kind == "audit" {
+			return 200, auditFindings(), 10 // clean leg: fenced block, zero rows
+		}
+		return 200, "", 0
+	}, "")
+	convID := loopBoot(t, rig)
+	commitSubject(t, rig, convID, 190*1024)
+	sc := waitLoop(t, rig.store, convID, "clean completion", func(sc loopScan) bool {
+		return len(sc.ofKind(loopKindCompleted)) == 1
+	})
+	for _, c := range sc.causes() {
+		if c == "subject_too_large" {
+			t.Fatalf("~192KB subject must audit under the 256KB cap: causes=%v", sc.causes())
+		}
+	}
+	rounds := sc.ofKind(loopKindAuditRound)
+	if len(rounds) != 1 {
+		t.Fatalf("round rows: %d, want 1", len(rounds))
+	}
+	sb, _ := rounds[0]["subject_bytes"].(float64)
+	if sb <= float64(settleDiffCapBytes) || sb > float64(loopAuditSubjectCapBytes) {
+		t.Errorf("subject_bytes = %v, want (%d, %d]", sb, settleDiffCapBytes, loopAuditSubjectCapBytes)
+	}
+}
+
+// TestLoopAuditSubjectCapSuspends500KB pins the hard wall: a ~532KB frozen
+// subject suspends subject_too_large before any leg fires, and the detail
+// names the loop cap (262144).
+func TestLoopAuditSubjectCapSuspends500KB(t *testing.T) {
+	rig, _ := loopRig(t, nil, "")
+	convID := loopBoot(t, rig)
+	commitSubject(t, rig, convID, 520*1024)
+	sc := waitLoop(t, rig.store, convID, "subject_too_large suspend", func(sc loopScan) bool {
+		return len(sc.causes()) == 1 && sc.causes()[0] == "subject_too_large"
+	})
+	if got := len(sc.ofKind(loopKindAuditRound)); got != 0 {
+		t.Errorf("breaker precedes fanout: round rows = %d, want 0", got)
+	}
+	susp := sc.ofKind(loopKindSuspended)
+	if d := fmt.Sprint(susp[0]["detail"]); !strings.Contains(d, "262144") {
+		t.Errorf("detail must name the loop cap: %q", d)
+	}
+}
+
 // TestLoopFixpointClean is the fixpoint's happy path: three rounds — two
 // blocking findings fixed and landed, round 3 clean, loop_completed with
 // two auto_loop accepts and per-round subject growth.

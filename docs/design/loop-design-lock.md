@@ -51,9 +51,10 @@ autocomplete. This file is the implementing contract; the milestone spec is
     Σ journaled `output_tokens` + prompt chars/4 estimate at spawn,
     `spent_tokens` cumulative on each row), pre-spend projection over cap ⇒
     `loop_budget_exceeded` + suspend; `/loop resume budget=N` raises.
-    Subject ≤ `settleDiffCapBytes` (64KB), findings feed ≤
-    `settleCommentsCapBytes` (16KB); over ⇒ `loop_suspended{subject_too_large}`
-    advising "land pending diffs first".
+    Subject ≤ `loopAuditSubjectCapBytes` (256KB) — a loop-owned constant;
+    findings feed stays ≤ `settleCommentsCapBytes` (16KB); over ⇒
+    `loop_suspended{subject_too_large}` naming the cap and advising
+    "land pending diffs first or narrow the base= range".
 
 ## Verdicts (V1–V13) — divergence points settled
 

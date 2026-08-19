@@ -53,4 +53,9 @@ memory writes, GUI design-lock editor redesign).
 
 Journal + accept-path adjacency ⇒ independent fresh-context review before
 landing. After landing, the repo dogfoods: run `/loop audit base=<m19_base>`
-on the M19 diff itself to shake out the loop against its own code.
+on the M19 diff itself to shake out the loop against its own code. The
+self-audit is now possible — the squashed M19 impl commit measures 233,533B
+of `git diff base..HEAD`, under the loop-owned 262,144B subject cap. The
+dogfood pass criterion is that the loop audits its own code AT ALL — a fix
+verdict driving convergence, or an honest subject/feed suspend with
+actionable detail — NOT necessarily a clean verdict.
