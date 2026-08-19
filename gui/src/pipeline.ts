@@ -1,5 +1,6 @@
 // Auto-land pipeline status (design lock: docs/design/pipeline-indicator-lock.md,
-// GUI-only Phase 1). Every pipeline fact the daemon produces is already
+// Phase 2: daemon auto_land_started breadcrumbs close the silent window).
+// Every pipeline fact the daemon produces is already
 // journaled as review_action{actor:"auto_panel"} / memory_update{layer:
 // "auto_land"} rows on the conversation and reaches the GUI through the
 // bootstrap replay + poll stream it already holds — so the chip derives
@@ -11,7 +12,7 @@ import type { OdoEvent } from "./types";
 export type PipelinePhase =
   | "hidden" // pref off or nothing to show — the chip is absent (empty state list)
   | "queued" // pending, pref on, no auto_panel row yet
-  | "in_flight" // non-terminal row newest (verify/panel are silent)
+  | "in_flight" // non-terminal row newest (started/refresh rows carry the stage)
   | "landing" // moa_review{accept} newest, no accept after
   | "landed" // accept{auto_panel} — transient green flash
   | "blocked" // auto_land_blocked{reason} — sticky while pending
@@ -30,6 +31,10 @@ export interface PipelineState {
   // only, never a second data path.
   landedUntil?: number;
   refreshed?: boolean; // in_flight refinement: refresh_attempted{clean}
+  // in_flight refinement (lock Phase 2): auto_land_started names the silent
+  // stage just entered — "verify" | "panel". Unknown/future stage values
+  // degrade to plain in_flight (forward-compat, lock rule 4).
+  stage?: "verify" | "panel";
 }
 
 // The daemon's pipeline journals its rows with this actor; human
@@ -162,6 +167,16 @@ export function derivePipelineStates(
         states.push({
           ...base,
           phase: p.consensus_verdict === "accept" ? "landing" : "in_flight",
+        });
+        break;
+      case "auto_land_started":
+        // Phase 2 liveness breadcrumb: the daemon journaled entry into a
+        // silent stage, so the multi-minute window labels as running, not
+        // queued. Unknown stage values stay plain in_flight.
+        states.push({
+          ...base,
+          phase: "in_flight",
+          ...(p.stage === "verify" || p.stage === "panel" ? { stage: p.stage } : {}),
         });
         break;
       default:

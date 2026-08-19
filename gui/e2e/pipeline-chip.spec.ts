@@ -1,7 +1,8 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// Auto-land pipeline chip (design lock pipeline-indicator-lock.md, GUI-only
-// Phase 1): StatusBar status derived journal-only from review_action
+// Auto-land pipeline chip (design lock pipeline-indicator-lock.md; Phase 2:
+// daemon auto_land_started stage breadcrumbs): StatusBar status derived
+// journal-only from review_action
 // {actor:"auto_panel"} rows + the pending-diff list. Fixtures boot with
 // auto_apply:"main" and conv 1's diff #1 pending-but-unevaluated; other
 // states are journaled mid-session through the __odoFixtures lever (the
@@ -116,6 +117,31 @@ test("queued spinner while a pending diff awaits evaluation", async ({ page }) =
   await expect(chip(page)).toHaveClass(/is-queued/);
   await expect(chip(page)).toContainText("queued");
   await expect(chip(page).locator(".spin")).toBeVisible();
+});
+
+test("phase-2 stage breadcrumbs label the running stage, then land", async ({ page }) => {
+  // Daemon Phase 2 journal order (autoland.go): started{verify} before the
+  // .odo-verify gate, started{panel} before the fan-out, accept on land.
+  // The chip must not hold "queued" through either silent stage.
+  await journal(page, [
+    { type: "review_action", payload: { action: "auto_land_started", diff_id: 1, actor: "auto_panel", stage: "verify", patch_sha16: "0123456789abcdef" } },
+  ]);
+  await expect(chip(page)).toContainText("verify running…", PIPE_POLL);
+  await expect(chip(page)).toHaveClass(/is-in_flight/);
+  await expect(chip(page).locator(".spin")).toBeVisible();
+
+  await journal(page, [
+    { type: "review_action", payload: { action: "auto_land_started", diff_id: 1, actor: "auto_panel", stage: "panel", patch_sha16: "0123456789abcdef" } },
+  ]);
+  await expect(chip(page)).toContainText("panel reviewing…", PIPE_POLL);
+
+  await journal(page, [
+    { type: "review_action", payload: { action: "accept", diff_id: 1, actor: "auto_panel" } },
+  ]);
+  await expect(chip(page)).toContainText("landed", PIPE_POLL);
+  // And the breadcrumbs must NOT appear as transcript badges: the chip is
+  // their only surface (LedgerPanel keeps the verbatim rows).
+  await expect(page.locator(".bubble-review", { hasText: "auto_land_started" })).toHaveCount(0);
 });
 
 test("blocked shows the journaled reason, sticky", async ({ page }) => {

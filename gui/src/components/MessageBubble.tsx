@@ -301,6 +301,12 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       if (p.action === "todo_merge") {
         return null;
       }
+      // Phase 2 stage breadcrumbs are PipelineChip liveness, not chat —
+      // two rows per landing attempt would spam the transcript (todo_merge
+      // posture). LedgerPanel keeps the verbatim history (lock rule 9).
+      if (p.action === "auto_land_started") {
+        return null;
+      }
       // The memory distiller journals its epoch bump as a review_action with
       // action "distill" and no diff (ADR-0002); render it as a memory event.
       if (p.action === "distill") {

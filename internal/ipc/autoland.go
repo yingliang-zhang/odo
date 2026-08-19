@@ -86,6 +86,14 @@ package ipc
 //
 // Every decision journals a review_action (append-only audit):
 //
+//	auto_land_started{stage:verify|panel} liveness breadcrumb journaled
+//	                                      immediately before each silent
+//	                                      stage (the verify gate and the
+//	                                      panel fan-out) — the GUI pipeline
+//	                                      chip derives "running" from these
+//	                                      instead of holding "queued" through
+//	                                      the multi-minute silent window
+//	                                      (pipeline-indicator-lock Phase 2)
 //	moa_review{actor:"auto_panel"}        unanimous panel verdict
 //	accept{actor:"auto_panel"}            auto-landed (streak-excluded:
 //	                                      ComputeAutonomy counts these
@@ -103,8 +111,11 @@ package ipc
 //	                                      patch sha16 on every row
 //	memory_update{layer:"auto_land"}      ladder_suspended/resumed (M18)
 //
-// fix-INT W5: every review_action row above (blocked, auto moa_review,
-// accept, revise round) additionally carries the Guardian risk receipt
+// fix-INT W5: every review_action row above EXCEPT auto_land_started
+// (blocked, auto moa_review, accept, revise round) additionally carries
+// the Guardian risk receipt — a started row is a liveness breadcrumb,
+// not an outcome: nothing resolved, so nothing is rated (ComputeAutonomy's
+// risk switch skips it, and it must never inflate Unrated). The receipt
 // — risk_class ([]string, severity-ranked, ["none"] when rated clean),
 // risk_classifier ("mechanical"), and risk_evidence (one trigger
 // artifact per class, omitted when clean) — classified from the patch
@@ -305,6 +316,12 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		s.journalRefreshAttempt(ctx, d, "pre_spend_probe", "clean", base, head, nil)
 	}
 
+	// Liveness breadcrumb (indicator lock Phase 2): every FREE gate has
+	// passed; the next state change is minutes of silent verify or a
+	// blocked row. Journal the stage entry so the pipeline chip can say
+	// "running" instead of "queued" through the silent window.
+	s.journalAutoLandStarted(ctx, d, "verify", data)
+
 	// Path-scoped verify: pass diff paths so GUI-only diffs can use a
 	// lighter verify command (tsc + playwright instead of go test).
 	// M19: the gate itself is extracted as runVerifyGate (the /loop
@@ -338,6 +355,9 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 			"prefs.md has no review: line — auto-land requires the panel", nil, "")
 		return
 	}
+	// Second breadcrumb: the verify is attested, the fan-out below is the
+	// last silent stage (minutes under model latency).
+	s.journalAutoLandStarted(ctx, d, "panel", data)
 	reviews := s.reviewFanout(ctx, models, prompt)
 	cv := consensusVerdict(reviews)
 	// M18 settlement: an infra leg is not a verdict — the round never
@@ -642,7 +662,28 @@ func verifyEnviron(environ []string) []string {
 	return out
 }
 
-// journalAutoLandBlocked records one blocked auto-land attempt. reviews
+// journalAutoLandStarted records the pipeline's entry into one of its two
+// silent stages (verify gate, panel fan-out) — a liveness breadcrumb for
+// the GUI pipeline chip (pipeline-indicator-lock Phase 2), NOT a decision.
+// No risk receipt: nothing resolved, so nothing is rated. patch_sha16
+// names the exact bytes about to be attested, same as the outcome rows.
+// Best-effort like journalRefreshAttempt: a lost breadcrumb degrades the
+// chip to "queued" for that stage — the evidence rows that follow are
+// journaled unconditionally regardless.
+func (s *Server) journalAutoLandStarted(ctx context.Context, d store.Diff, stage string, data []byte) {
+	payload := map[string]interface{}{
+		"action":      "auto_land_started",
+		"diff_id":     d.ID,
+		"actor":       autoActor,
+		"stage":       stage,
+		"patch_sha16": sha16(data),
+	}
+	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); err != nil {
+		log.Printf("auto-land: journal stage start (%s) for diff %d: %v", stage, d.ID, err)
+	}
+}
+
+// journalAutoLandBlocked records one blocked auto-land attempt. Reviews
 // (attached when the panel ran) keep the dissent on the record; the
 // diff's patch sha16 rides every row (M18: the ladder's no-progress
 // comparator and the audit's diff identity), best-effort — a row about an

@@ -463,6 +463,86 @@ func TestAutoLandVisualDiffUnanimousAcceptLands(t *testing.T) {
 	}
 }
 
+// TestAutoLandStartedRowsPinStageBoundaries (indicator-lock Phase 2): the
+// happy path journals one auto_land_started breadcrumb per silent stage —
+// "verify" before the gate, "panel" before the fan-out — ordered strictly
+// verify < panel < moa_review < accept, so the GUI chip never labels a
+// minutes-long running stage "queued". Breadcrumbs carry the judged bytes'
+// patch_sha16 (audit identity, same as every outcome row) and NEVER a risk
+// receipt (nothing resolved — a rated liveness row would corrupt the
+// autonomy audit's Unrated bucket).
+func TestAutoLandStartedRowsPinStageBoundaries(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\n")
+	startPanelStub(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nlooks correct"
+	})
+	f := newAutonomyFixture(t)
+	root, _ := visualAutolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "gui", "src", "app.ts"), []byte("export const x = 2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+
+	s.autoLand(context.Background(), d, root, "goal", false, "")
+
+	sc := scanSettle(t, f.st, f.c.ID)
+	var order []string
+	var stages []string
+	for _, p := range sc.reviewSeq {
+		action := fmt.Sprint(p["action"])
+		order = append(order, action)
+		if action != "auto_land_started" {
+			continue
+		}
+		stages = append(stages, fmt.Sprint(p["stage"]))
+		if p["actor"] != autoActor {
+			t.Errorf("started row actor = %v, want %q", p["actor"], autoActor)
+		}
+		if diffBytes, rerr := os.ReadFile(d.PathOnDisk); rerr != nil {
+			t.Fatal(rerr)
+		} else if p["patch_sha16"] != sha16(diffBytes) {
+			t.Errorf("started row patch_sha16 = %v, want sha16 of the judged diff bytes", p["patch_sha16"])
+		}
+		if _, rated := p["risk_class"]; rated {
+			t.Errorf("started row %v carries a risk receipt — liveness breadcrumbs never rate", p)
+		}
+	}
+	want := []string{"auto_land_started", "auto_land_started", "moa_review", "accept"}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("journal actions = %v, want %v (one breadcrumb per silent stage, then verdict, then land)", order, want)
+	}
+	if fmt.Sprint(stages) != fmt.Sprint([]string{"verify", "panel"}) {
+		t.Errorf("started stages = %v, want [verify panel]", stages)
+	}
+}
+
+// TestAutoLandStartedRowsAbsentBeforeSpend: entry/mechanical gates that
+// block before the first silent stage (here: the supply-chain gate) leave
+// ZERO started rows — the chip's honest transition is queued → blocked,
+// never queued → running → blocked for a pipeline that spent nothing.
+func TestAutoLandStartedRowsAbsentBeforeSpend(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, sha := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := f.addDiff(t, "p.diff", patchSrc("go.mod", 1, 1, false))
+	d.BaseSHA = &sha
+
+	s.autoLand(context.Background(), d, root, "goal", false, "")
+
+	if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "supply_chain_path" {
+		t.Fatalf("blocked reasons = %v, want [supply_chain_path]", got)
+	}
+	for _, p := range scanSettle(t, f.st, f.c.ID).reviewSeq {
+		if p["action"] == "auto_land_started" {
+			t.Errorf("started row %v journaled for a pipeline blocked before any spend", p)
+		}
+	}
+}
+
 // TestAutoLandVisualDiffNeedsFixesEntersLadder (visual-gate removal): a
 // GUI diff judged needs_fixes takes the same revise ladder a daemon diff
 // would — one round-1 marker + round row spawn, zero blocked rows.

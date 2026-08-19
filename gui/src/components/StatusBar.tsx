@@ -358,6 +358,10 @@ function pipelineLabel(s: PipelineState): string {
     case "queued":
       return "auto-land queued…";
     case "in_flight":
+      // Phase 2 stage breadcrumbs name the running stage verbatim; a
+      // pre-Phase-2 journal (or unknown stage) keeps the coarse label.
+      if (s.stage === "verify") return "verify running…";
+      if (s.stage === "panel") return "panel reviewing…";
       return s.refreshed ? "refreshed — verify → panel…" : "verify → panel…";
     case "landing":
       return "landing…";

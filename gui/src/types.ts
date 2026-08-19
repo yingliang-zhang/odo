@@ -174,6 +174,11 @@ export interface EventPayload {
   // topic pages were rewritten and how many epoch notes were read.
   topics?: number;
   notes_read?: number;
+  // review_action when action == "auto_land_started" (auto-land indicator
+  // lock Phase 2): which silent stage the pipeline just entered —
+  // "verify" (the .odo-verify gate) or "panel" (the review fan-out). The
+  // pipeline chip derives its "running" label from this.
+  stage?: string;
   // fix-INT W5 (Guardian risk taxonomy, internal/ipc/risk.go): receipt-
   // eligible review_action rows (accept/reject/auto_land_blocked/moa_review/
   // auto_revise_round) carry a PURE-MECHANICAL risk receipt —

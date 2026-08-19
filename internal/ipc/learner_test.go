@@ -637,6 +637,9 @@ func TestDistillRenderAutoPanelWhitelist(t *testing.T) {
 		{Seq: 1, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"moa_review","actor":"auto_panel","diff_id":7,"consensus_verdict":"accept","reviews":[{"model":"m1","verdict":"accept","body":"long panel verdict body"}]}`)},
 		{Seq: 2, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":7,"origin_diff_id":7,"patch_sha16":"0123456789abcdef","comments_sha16":"fedcba9876543210"}`)},
 		{Seq: 3, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"run_prompt","actor":"auto_panel","origin":"continuation","receipt":{"odo#user":"abc"},"total_prompt_bytes":42}`)},
+		// Indicator-lock Phase 2: stage breadcrumbs are GUI chip liveness,
+		// the same churn class as round mechanics.
+		{Seq: 4, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"auto_land_started","actor":"auto_panel","diff_id":7,"stage":"verify","patch_sha16":"0123456789abcdef"}`)},
 	}
 	for _, ev := range excluded {
 		if got := distillRender(ev); got != "" {

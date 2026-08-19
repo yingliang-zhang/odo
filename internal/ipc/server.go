@@ -4589,8 +4589,9 @@ func distillRender(ev store.Event) string {
 		}
 		if jsonUnmarshalOK(ev.Payload, &p) && p.Action != "" {
 			// M18 W2: auto-panel churn rows (moa_review / auto_revise_round /
-			// run_prompt journaled with actor:auto_panel) never fold — the
-			// prompt carries the pipeline's OUTCOMES, not its mechanics.
+			// run_prompt / auto_land_started journaled with actor:auto_panel)
+			// never fold — the prompt carries the pipeline's OUTCOMES, not
+			// its mechanics.
 			if foldExcludedReviewAction(p.Action, p.Actor) {
 				return ""
 			}
@@ -4677,13 +4678,15 @@ func isAdvisoryAgentText(ev store.Event) bool {
 // user_message folds like any user turn — a parked goal IS a user ask — and
 // manual resume/drop rows carry no actor, so they render their one-liner.) The note carries the pipeline's OUTCOMES
 // instead: accept rows (what landed) and auto_land_blocked rows, whose
-// reason IS the open loop the note must surface.
+// reason IS the open loop the note must surface. auto_land_started rows
+// (indicator-lock Phase 2 liveness breadcrumbs) are the same class: GUI
+// chip signals, never distill-prompt content.
 func foldExcludedReviewAction(action, actor string) bool {
 	if actor != autoActor {
 		return false
 	}
 	switch action {
-	case "moa_review", "auto_revise_round", "run_prompt":
+	case "moa_review", "auto_revise_round", "run_prompt", "auto_land_started":
 		return true
 	}
 	return false

@@ -78,4 +78,36 @@ describe('derivePipelineStates', () => {
     const states = derivePipelineStates(events, [8], true);
     expect(states).toEqual([{ diffId: 8, phase: 'in_flight', refreshed: true, lastSeq: 6 }]);
   });
+
+  it('names the silent stage from started breadcrumbs, newest wins', () => {
+    const verify = [autoRow(6, { action: 'auto_land_started', diff_id: 8, stage: 'verify' })];
+    expect(derivePipelineStates(verify, [8], true)).toEqual([
+      { diffId: 8, phase: 'in_flight', stage: 'verify', lastSeq: 6 },
+    ]);
+    // verify → panel: the panel breadcrumb supersedes (latest row wins).
+    const panel = [
+      ...verify,
+      autoRow(7, { action: 'auto_land_started', diff_id: 8, stage: 'panel' }),
+    ];
+    expect(derivePipelineStates(panel, [8], true)).toEqual([
+      { diffId: 8, phase: 'in_flight', stage: 'panel', lastSeq: 7 },
+    ]);
+  });
+
+  it('degrades unknown started stages to plain in_flight', () => {
+    // Forward-compat (lock rule 4): a daemon newer than this GUI journals
+    // a stage the chip has no label for — plain in flight, never a crash.
+    const events = [autoRow(6, { action: 'auto_land_started', diff_id: 8, stage: 'future_stage' })];
+    expect(derivePipelineStates(events, [8], true)).toEqual([
+      { diffId: 8, phase: 'in_flight', lastSeq: 6 },
+    ]);
+  });
+
+  it('the verdict supersedes the started breadcrumb', () => {
+    const events = [
+      autoRow(6, { action: 'auto_land_started', diff_id: 8, stage: 'panel' }),
+      autoRow(9, { action: 'moa_review', diff_id: 8, consensus_verdict: 'accept' }),
+    ];
+    expect(derivePipelineStates(events, [8], true)[0].phase).toBe('landing');
+  });
 });
