@@ -169,6 +169,58 @@ func TestRunVerify(t *testing.T) {
 	})
 }
 
+// TestRunVerifyGateProvisionsGuiDeps pins the diff-#8 incident (2026-08-19):
+// a GUI diff verified in a fresh worktree blocked verify_failed within
+// seconds — per-run worktrees carry tracked files only, so gui/node_modules
+// was absent and npx found no tsc. The gate now links the project
+// checkout's install before choosing/running the command.
+func TestRunVerifyGateProvisionsGuiDeps(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (root, wt string) {
+		t.Helper()
+		root, wt = t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(wt, verifyCmdFile), []byte("echo PASS\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, "gui", "node_modules"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return root, wt
+	}
+	t.Run("gui diff symlinks the project install", func(t *testing.T) {
+		root, wt := setup(t)
+		if gate := runVerifyGate(ctx, root, wt, []string{"gui/src/App.tsx"}); !gate.ok {
+			t.Fatalf("gate = %+v", gate)
+		}
+		fi, err := os.Lstat(filepath.Join(wt, "gui", "node_modules"))
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("want gui/node_modules symlink in the worktree, fi=%v err=%v", fi, err)
+		}
+	})
+	t.Run("go-only diff provisions nothing", func(t *testing.T) {
+		root, wt := setup(t)
+		if gate := runVerifyGate(ctx, root, wt, []string{"internal/ipc/server.go"}); !gate.ok {
+			t.Fatalf("gate = %+v", gate)
+		}
+		if _, err := os.Lstat(filepath.Join(wt, "gui", "node_modules")); !os.IsNotExist(err) {
+			t.Fatalf("want no gui/node_modules for a go-only diff, err=%v", err)
+		}
+	})
+	t.Run("existing node_modules is left alone", func(t *testing.T) {
+		root, wt := setup(t)
+		if err := os.MkdirAll(filepath.Join(wt, "gui", "node_modules", "sentinel"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if gate := runVerifyGate(ctx, root, wt, []string{"gui/src/App.tsx"}); !gate.ok {
+			t.Fatalf("gate = %+v", gate)
+		}
+		fi, err := os.Lstat(filepath.Join(wt, "gui", "node_modules"))
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("pre-existing real dir must not be replaced by a symlink, fi=%v err=%v", fi, err)
+		}
+	})
+}
+
 // TestVerifyEnviron pins the allowlist contract: the verify child sees
 // shell/toolchain vars and GO*/GIT_* passthrough, never the daemon's
 // credential-shaped vars (the panel's API keys are process env).

@@ -327,7 +327,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// M19: the gate itself is extracted as runVerifyGate (the /loop
 	// Mode A fix pipeline calls it verbatim).
 	verifyPaths, _ := git.PatchPaths(d.PathOnDisk)
-	gate := runVerifyGate(ctx, worktreePath, verifyPaths)
+	gate := runVerifyGate(ctx, s.projectRoot, worktreePath, verifyPaths)
 	if !gate.ok {
 		s.journalAutoLandBlocked(ctx, d, gate.reason, gate.detail, nil, "")
 		return
@@ -507,13 +507,49 @@ type verifyGateOutcome struct {
 	detail string
 }
 
+// provisionVerifyDeps gives a GUI diff's verify command its node toolchain.
+// Per-run worktrees carry tracked files only, so gui/node_modules is absent
+// unless the producing run happened to create it — a GUI-scoped .odo-verify
+// (`cd gui && npx tsc …`) then dies in seconds with npx's "not the tsc
+// command" tail and the diff blocks verify_failed on an environment lie
+// (diff #8, 2026-08-19). Runs already fix this by hand (symlink from the
+// project checkout's install); the gate codifies the same step. Absent
+// project install is NOT provisioned (npm ci is slow, networked, and its
+// own supply chain) — the verify then fails with the real tail instead.
+// Best-effort: a failed symlink surfaces as the honest verify error.
+func provisionVerifyDeps(projectRoot, worktreePath string, diffPaths []string) {
+	gui := false
+	for _, p := range diffPaths {
+		if strings.HasPrefix(p, "gui/") {
+			gui = true
+			break
+		}
+	}
+	if !gui {
+		return
+	}
+	dst := filepath.Join(worktreePath, "gui", "node_modules")
+	if _, err := os.Lstat(dst); err == nil {
+		return // present (real dir or an earlier link) — leave it alone
+	}
+	src := filepath.Join(projectRoot, "gui", "node_modules")
+	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return
+	}
+	_ = os.Symlink(src, dst)
+}
+
 // runVerifyGate runs the verify gate verbatim (M19 extraction from
 // autoLand — the /loop Mode A fix pipeline calls the same gate):
 // command resolution → execution under the allowlisted environment →
 // the M18 pass-evidence rule. Unconfigured, failed, and evidence-less
 // outcomes are failures with exactly the reasons/details autoLand
 // journaled inline before the extraction.
-func runVerifyGate(ctx context.Context, worktreePath string, diffPaths []string) verifyGateOutcome {
+func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPaths []string) verifyGateOutcome {
+	provisionVerifyDeps(projectRoot, worktreePath, diffPaths)
 	verifyCmd, err := verifyCommand(worktreePath, diffPaths)
 	if err != nil {
 		return verifyGateOutcome{reason: "verify_unconfigured",

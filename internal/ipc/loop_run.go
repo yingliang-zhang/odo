@@ -717,7 +717,7 @@ func (s *Server) loopFixPipeline(ctx context.Context, meta *runMeta, d store.Dif
 		s.journalFixBlocked(ctx, meta, d.ID, "loop_unparseable_diff", perr.Error())
 		return
 	}
-	gate := runVerifyGate(ctx, meta.worktreePath, paths)
+	gate := runVerifyGate(ctx, s.projectRoot, meta.worktreePath, paths)
 	if !gate.ok {
 		// Advisory, never land-blocking (V6): the blocked row is the
 		// round fact the next audit prompt reads.

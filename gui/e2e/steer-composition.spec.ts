@@ -107,6 +107,26 @@ test("composition without input events (WKWebView model) survives stream churn",
   await expect(ta).toHaveValue("");
 });
 
+test("a submit racing a stuck composition still empties the box (blue-marked-text regression)", async ({ page }) => {
+  // Regression contract for "the input box stays blue, like a permanent
+  // select-all" (2026-08-19): a WKWebView IME session can deliver the
+  // confirming Enter keydown WITHOUT isComposing/keyCode 229, so the
+  // submit fires mid-composition; compositionend then never arrives, the
+  // composingRef guard blocks every value-sync, and the webview's marked
+  // (blue) text is stranded in the DOM. The send path must force-clear
+  // the node — the visible contract is simply "box empty after send".
+  const ta = page.getByPlaceholder(STEER_PH);
+  await ta.click();
+  await ta.pressSequentially("aa");
+  await page.evaluate(() => {
+    const el = document.querySelector<HTMLTextAreaElement>("textarea");
+    if (!el) throw new Error("no textarea");
+    el.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+  });
+  await ta.press("Enter"); // synthetic: isComposing=false — the quirk's shape
+  await expect(ta).toHaveValue("");
+});
+
 test("composition with input events (React 19 compositionend model) survives stream churn", async ({ page }) => {
   const ta = page.getByPlaceholder(STEER_PH);
   await ta.click();

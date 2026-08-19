@@ -737,6 +737,17 @@ export default function ChatSurface({
       // steer+park) and queues the goal instead.
       const steer = agentRunning && !parkArmed;
       await onSend(text, attachments, steer, parkArmed);
+      // WKWebView IME: a submit that raced a live composition (Enter to
+      // confirm a candidate whose keydown arrived without isComposing /
+      // keyCode 229) can strand the webview's marked text — the blue
+      // "select-all" look — in the DOM: compositionend never fires, and
+      // the value-sync effect's composingRef guard then refuses to write
+      // the cleared draft. A successful submit ends the composition
+      // semantically, so force the DOM node empty here instead of relying
+      // on events the webview may never send.
+      const ta = textareaRef.current;
+      if (ta) ta.value = "";
+      composingRef.current = false;
       setDraft("");
       setAttachments([]);
       setSlashToken(null);
