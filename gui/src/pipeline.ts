@@ -217,3 +217,44 @@ export function derivePipelineStates(
   }
   return states;
 }
+
+// Phase label — ONE wording for every surface that renders a phase:
+// the StatusBar chip and its popover rows, and the human-action lock
+// indicator on the diff card / inbox row.
+export function pipelineLabel(s: PipelineState): string {
+  switch (s.phase) {
+    case "queued":
+      return "auto-land queued…";
+    case "in_flight":
+      // Phase 2 stage breadcrumbs name the running stage verbatim; a
+      // pre-Phase-2 journal (or unknown stage) keeps the coarse label.
+      if (s.stage === "verify") return "verify running…";
+      if (s.stage === "panel") return "panel reviewing…";
+      return s.refreshed ? "refreshed — verify → panel…" : "verify → panel…";
+    case "landing":
+      return "landing…";
+    case "landed":
+      return "landed";
+    case "blocked":
+      return `blocked: ${s.reason ?? "unknown"}`;
+    case "suspended":
+      return "auto-land suspended";
+    case "revise":
+      return `repair round ${s.round ?? "?"}`;
+    default:
+      return s.phase;
+  }
+}
+
+// Human-action lock (misfire guard): while the daemon pipeline is
+// actively working the diff's chain — verify, panel MoA review, or the
+// moa-accepted → land window — a human Accept/Reject races the panel
+// verdict, so the review surfaces disable their buttons and say why.
+// Phases that REQUIRE a human stay actionable: blocked (hard stop reasons
+// like protected_path exist precisely to hand the decision over) and the
+// suspended ladder (a human accept is its only resume). queued is the
+// pre-start gap — nothing is running yet. revise keeps the mid-ladder
+// escape hatch: accepting the original ends the ladder early.
+export function pipelineHumanLocked(s: PipelineState | undefined): boolean {
+  return s != null && (s.phase === "in_flight" || s.phase === "landing");
+}

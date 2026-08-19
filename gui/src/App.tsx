@@ -449,6 +449,16 @@ export default function App() {
     () => derivePipelineStates(events, diffs.map((d) => d.id), appSettings?.auto_apply === "main"),
     [events, diffs, appSettings],
   );
+  // Per-diff lookup for the review surfaces: the Changes card and the
+  // Review inbox lock their human-action buttons while the auto-land
+  // pipeline is actively working that diff (misfire guard — a click must
+  // not race the panel verdict). Active-conversation scope is inherited
+  // from the derivation; inbox rows owned by other conversations have no
+  // entry and stay actionable.
+  const pipelineStateByDiff = useMemo(
+    () => new Map(pipelineStates.map((s) => [s.diffId, s])),
+    [pipelineStates],
+  );
 
   // M19 (V11): ONE system notification per (loop, terminal kind), pref-
   // gated (loop_notify_on_complete, default ON), journaled back via
@@ -1748,10 +1758,11 @@ export default function App() {
                 onSendComments={(text) => handleSend(text, [], agentRunning)}
                 projectRoot={project?.root_path ?? null}
                 agentRunning={agentRunning}
+                pipelineState={pipelineStateByDiff.get(d.id)}
               />
             ))
           : diff
-            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={(text) => handleSend(text, [], agentRunning)} projectRoot={project?.root_path ?? null} agentRunning={agentRunning} />
+            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={(text) => handleSend(text, [], agentRunning)} projectRoot={project?.root_path ?? null} agentRunning={agentRunning} pipelineState={pipelineStateByDiff.get(diff.id)} />
             : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
         )}
         {panelTab === "review" && (
@@ -1765,6 +1776,7 @@ export default function App() {
             onReject={handleReject}
             projectRoot={project?.root_path ?? null}
             agentRunning={agentRunning}
+            pipelineStates={pipelineStateByDiff}
             onJump={(id) => void handleSwitchWorkstream(id)}
           />
         )}

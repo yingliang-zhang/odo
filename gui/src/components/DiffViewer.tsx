@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type UIEvent, type ReactNode } from "react";
 import { autonomyStatus, errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
+import { pipelineHumanLocked, pipelineLabel } from "../pipeline";
+import type { PipelineState } from "../pipeline";
+import { LoaderCircle } from "lucide-react";
 import FileRefContextMenu from "./FileRefContextMenu";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -16,6 +19,11 @@ interface Props {
   // D2: cosmetic guard — the daemon's retireRun already refuses to kill a
   // live run; disabling here just makes the safe state visible/click-proof.
   agentRunning?: boolean;
+  // Auto-land misfire guard: this diff's pipeline state (App's per-diff
+  // map). While the daemon is actively working the chain (verify / panel
+  // MoA / landing), the human review buttons lock so a stray click can't
+  // race the panel verdict; an inline chip names the running stage.
+  pipelineState?: PipelineState;
   // P1-3: fire-and-forget comment delivery — App routes through send_message
   // (steer when the agent is running). Rejects on IPC failure.
   onSendComments?: (text: string) => Promise<void>;
@@ -367,7 +375,7 @@ function autonomyHint(r: AutonomyReport): string {
 }
 
 // Only a `pending` diff is actionable; afterwards this becomes a record card.
-export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, agentRunning }: Props) {
+export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, agentRunning, pipelineState }: Props) {
   const [acting, setActing] = useState(false);
   const [reviews, setReviews] = useState<ReviewResult[] | null>(null);
   const [consensus, setConsensus] = useState<string | null>(null);
@@ -424,6 +432,11 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
   const pending = diff.status === "pending";
   // Any rejecting reviewer flags the whole card so it cannot be missed.
   const hasReject = reviews?.some((r) => r.verdict === "reject") ?? false;
+  // Misfire guard (pipelineHumanLocked documents the phase contract):
+  // Review joins the lock too — a manual review_diff holds the same MoA
+  // fan-out the panel is mid-flight on.
+  const panelLock = pipelineHumanLocked(pipelineState);
+  const panelLockTitle = "Auto-land is working this diff — wait for the panel to settle";
 
   // #10 + A2: compose and send inline diff comments with real file:line refs.
   const sendComments = async () => {
@@ -661,6 +674,15 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
         )}
         {pending ? (
           <span className="diff-actions ml-auto flex shrink-0 gap-2">
+            {panelLock && pipelineState != null && (
+              <span
+                className="panel-lock inline-flex items-center gap-1 text-micro text-text-dim"
+                title={panelLockTitle}
+              >
+                <LoaderCircle size={11} className="spin" aria-hidden="true" />
+                {pipelineLabel(pipelineState)}
+              </span>
+            )}
             {comments.size > 0 && (
               <Button
                 type="button"
@@ -679,8 +701,8 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
               variant="default"
               size="sm"
               className="btn-review"
-              disabled={acting || reviewing}
-              title="Ask the configured review models to grade this diff"
+              disabled={acting || reviewing || panelLock}
+              title={panelLock ? panelLockTitle : "Ask the configured review models to grade this diff"}
               onClick={() => void runReview()}
             >
               {reviewing ? "Reviewing…" : "Review"}
@@ -689,8 +711,14 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
               variant="default"
               size="sm"
               className="btn-accept"
-              disabled={acting || hasReject || agentRunning}
-              title={agentRunning ? "Agent is running — review after it finishes" : "Accept with editable commit message"}
+              disabled={acting || hasReject || agentRunning || panelLock}
+              title={
+                panelLock
+                  ? panelLockTitle
+                  : agentRunning
+                    ? "Agent is running — review after it finishes"
+                    : "Accept with editable commit message"
+              }
               onClick={() => {
                 setCommitMsg(`odo: accept diff #${diff.id}`);
                 setCommitEditing(true);
@@ -702,8 +730,14 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
               variant="danger"
               size="sm"
               className="btn-reject"
-              disabled={acting || agentRunning}
-              title={agentRunning ? "Agent is running — review after it finishes" : undefined}
+              disabled={acting || agentRunning || panelLock}
+              title={
+                panelLock
+                  ? panelLockTitle
+                  : agentRunning
+                    ? "Agent is running — review after it finishes"
+                    : undefined
+              }
               onClick={() => void act(onReject)}
             >
               Reject
@@ -748,7 +782,8 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
             variant="default"
             size="sm"
             className="btn-accept"
-            disabled={acting}
+            // Editor opened before the panel started: the confirm locks too.
+            disabled={acting || panelLock}
             onClick={() => {
               setCommitEditing(false);
               void act((id) => onAccept(id, commitMsg.trim() || undefined));

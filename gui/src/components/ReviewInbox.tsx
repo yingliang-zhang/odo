@@ -10,10 +10,12 @@
 // cross-workstream by diffID alone. Rows resolve optimistically in App.
 
 import { useMemo, useState } from "react";
-import { ArrowRight, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronRight, LoaderCircle } from "lucide-react";
 import DiffViewer from "./DiffViewer";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
+import { pipelineHumanLocked, pipelineLabel } from "../pipeline";
+import type { PipelineState } from "../pipeline";
 import type { DiffInfoEx } from "../types";
 
 interface Props {
@@ -23,6 +25,11 @@ interface Props {
   // M11 P1: review routes to this project's daemon; null = bridge default.
   projectRoot?: string | null;
   agentRunning?: boolean;
+  // Auto-land misfire guard, keyed by diff id. ACTIVE-conversation scope
+  // is inherited from App's derivation (pipeline.ts contract): rows owned
+  // by other conversations have no entry and stay actionable — a false
+  // "reviewing" lock on them would be the worse failure.
+  pipelineStates?: ReadonlyMap<number, PipelineState>;
   // Jump to the group owner's workstream (sidebar switch).
   onJump?: (workstreamId: number) => void;
 }
@@ -48,7 +55,7 @@ interface Group {
   rows: DiffInfoEx[];
 }
 
-export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, agentRunning, onJump }: Props) {
+export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, agentRunning, pipelineStates, onJump }: Props) {
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const groups = useMemo(() => {
@@ -118,6 +125,10 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
           </header>
           {g.rows.map((d) => {
             const expanded = expandedId === d.id;
+            const pipeState = pipelineStates?.get(d.id);
+            // Same lock as the expanded card (DiffViewer): Accept/Reject
+            // must not race a panel verdict already in flight.
+            const panelLock = pipelineHumanLocked(pipeState);
             return (
               <div
                 className={cn(
@@ -149,6 +160,7 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
                     onReject={onReject}
                     projectRoot={projectRoot}
                     agentRunning={agentRunning}
+                    pipelineState={pipeState}
                   />
                 ) : (
                   <>
@@ -168,12 +180,23 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
                         "px-2.5 py-1.5 border-t border-[var(--border)]",
                       )}
                     >
+                      {panelLock && pipeState != null && (
+                        <span
+                          className="panel-lock inline-flex items-center gap-1 mr-auto text-micro text-[var(--text-dim)]"
+                          title="Auto-land is working this diff — wait for the panel to settle"
+                        >
+                          <LoaderCircle size={11} className="spin" aria-hidden="true" />
+                          {pipelineLabel(pipeState)}
+                        </span>
+                      )}
                       <Button
                         type="button"
                         variant="danger"
                         size="sm"
                         className="inbox-reject"
                         aria-label={`Reject diff ${d.id}`}
+                        disabled={panelLock}
+                        title={panelLock ? "Auto-land is working this diff — wait for the panel to settle" : undefined}
                         onClick={() => void onReject(d.id)}
                       >
                         Reject
@@ -184,6 +207,8 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
                         size="sm"
                         className="inbox-accept"
                         aria-label={`Accept diff ${d.id}`}
+                        disabled={panelLock}
+                        title={panelLock ? "Auto-land is working this diff — wait for the panel to settle" : undefined}
                         onClick={() => void onAccept(d.id)}
                       >
                         Accept

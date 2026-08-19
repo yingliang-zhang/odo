@@ -210,6 +210,50 @@ test("ladder suspension overrides every tracked per-diff state", async ({ page }
   await expect(chip(page)).toContainText("blocked: revise_no_progress", PIPE_POLL);
 });
 
+test("panel reviewing locks the human-action buttons on card and inbox row", async ({ page }) => {
+  // Misfire-guard contract: while the daemon pipeline is actively working
+  // a diff (in_flight/landing — here stage:panel), the Changes card and
+  // the inbox row disable Review/Accept/Reject and name the running
+  // stage, so a stray click can't race the panel verdict. Hard stops hand
+  // the decision back: blocked re-enables everything.
+  await page.keyboard.press("Meta+j");
+  await expect(page.locator(".diff-card")).toBeVisible();
+  // Baseline (queued — nothing running yet): fully actionable.
+  await expect(page.locator(".diff-header .btn-accept")).toBeEnabled();
+  await expect(page.locator(".panel-lock")).toHaveCount(0);
+
+  await journal(page, [
+    { type: "review_action", payload: { action: "auto_land_started", diff_id: 1, actor: "auto_panel", stage: "panel", patch_sha16: "0123456789abcdef" } },
+  ]);
+  // Poll-derived (~1.5s cadence), same as the chip.
+  await expect(page.locator(".panel-lock")).toBeVisible(PIPE_POLL);
+  await expect(page.locator(".panel-lock")).toContainText("panel reviewing…");
+  await expect(page.locator(".panel-lock .spin")).toBeVisible();
+  await expect(page.locator(".diff-header .btn-accept")).toBeDisabled();
+  await expect(page.locator(".diff-header .btn-reject")).toBeDisabled();
+  await expect(page.locator(".diff-header .btn-review")).toBeDisabled();
+
+  // The inbox row for the same diff locks in lockstep (collapsed surface).
+  await page.getByRole("tab", { name: /Review/ }).click();
+  await expect(page.locator(".review-inbox")).toBeVisible();
+  const row = page.locator(".inbox-row", { hasText: "Diff #1" });
+  await expect(row.locator(".panel-lock")).toBeVisible(PIPE_POLL);
+  await expect(row.locator(".inbox-accept")).toBeDisabled();
+  await expect(row.locator(".inbox-reject")).toBeDisabled();
+
+  // Hard stop hands the diff back to the human: the lock lifts in both
+  // surfaces and the stage indicator clears.
+  await journal(page, [
+    { type: "review_action", payload: { action: "auto_land_blocked", diff_id: 1, actor: "auto_panel", reason: "panel_mixed" } },
+  ]);
+  await expect(row.locator(".inbox-accept")).toBeEnabled(PIPE_POLL);
+  await expect(row.locator(".inbox-reject")).toBeEnabled();
+  await expect(row.locator(".panel-lock")).toHaveCount(0);
+  await page.getByRole("tab", { name: /Changes/ }).click();
+  await expect(page.locator(".diff-header .btn-accept")).toBeEnabled();
+  await expect(page.locator(".panel-lock")).toHaveCount(0);
+});
+
 test("popover lists tracked diffs and the row opens the Review tab", async ({ page }) => {
   await journal(page, [
     { type: "review_action", payload: { action: "auto_land_blocked", diff_id: 1, actor: "auto_panel", reason: "panel_mixed" } },

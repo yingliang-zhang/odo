@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { derivePipelineStates, LANDED_FLASH_MS } from './pipeline';
+import { derivePipelineStates, LANDED_FLASH_MS, pipelineHumanLocked } from './pipeline';
+import type { PipelinePhase } from './pipeline';
 import type { EventPayload, OdoEvent } from './types';
 
 function ev(seq: number, type: OdoEvent['type'], payload: EventPayload = {}, created_at = '2026-08-17T00:00:00.000Z'): OdoEvent {
@@ -109,5 +110,33 @@ describe('derivePipelineStates', () => {
       autoRow(9, { action: 'moa_review', diff_id: 8, consensus_verdict: 'accept' }),
     ];
     expect(derivePipelineStates(events, [8], true)[0].phase).toBe('landing');
+  });
+});
+
+describe('pipelineHumanLocked', () => {
+  // The review surfaces (DiffViewer card, ReviewInbox row) read this ONE
+  // predicate to decide whether the human-action buttons lock while the
+  // daemon is mid-pipeline — pin the full phase truth table so the two
+  // surfaces can never drift, and so a phase re-map here is a deliberate,
+  // reviewed change (e.g. revising revise/blocked would strip the human's
+  // escape hatches).
+  it('locks only the actively-working phases', () => {
+    const cases: Array<[PipelinePhase, boolean]> = [
+      ['queued', false], // pre-start gap — nothing is racing yet
+      ['in_flight', true], // verify/panel/refresh — verdict in flight
+      ['landing', true], // moa accept → land window
+      ['landed', false], // transient flash; diff is leaving the pending list
+      ['blocked', false], // hard stop: hands the decision TO the human
+      ['suspended', false], // human accept is the ladder's only resume
+      ['revise', false], // mid-ladder escape hatch stays open
+      ['hidden', false],
+    ];
+    for (const [phase, want] of cases) {
+      expect(pipelineHumanLocked({ diffId: 1, phase, lastSeq: 0 })).toBe(want);
+    }
+  });
+
+  it('no derivation (foreign-conversation inbox row) means unlocked', () => {
+    expect(pipelineHumanLocked(undefined)).toBe(false);
   });
 });

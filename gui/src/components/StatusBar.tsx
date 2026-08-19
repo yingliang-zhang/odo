@@ -13,6 +13,7 @@ import {
   formatTokens,
 } from "../stats";
 import type { PanelModel, PromptSnapshot } from "../stats";
+import { pipelineLabel } from "../pipeline";
 import type { PipelinePhase, PipelineState } from "../pipeline";
 import type { PanelTab } from "./ContextPanel";
 import { ompUsage } from "../api";
@@ -352,31 +353,6 @@ const ACTIVE_PHASES: Record<PipelinePhase, boolean> = {
   landed: false,
   hidden: false,
 };
-
-function pipelineLabel(s: PipelineState): string {
-  switch (s.phase) {
-    case "queued":
-      return "auto-land queued…";
-    case "in_flight":
-      // Phase 2 stage breadcrumbs name the running stage verbatim; a
-      // pre-Phase-2 journal (or unknown stage) keeps the coarse label.
-      if (s.stage === "verify") return "verify running…";
-      if (s.stage === "panel") return "panel reviewing…";
-      return s.refreshed ? "refreshed — verify → panel…" : "verify → panel…";
-    case "landing":
-      return "landing…";
-    case "landed":
-      return "landed";
-    case "blocked":
-      return `blocked: ${s.reason ?? "unknown"}`;
-    case "suspended":
-      return "auto-land suspended";
-    case "revise":
-      return `repair round ${s.round ?? "?"}`;
-    default:
-      return s.phase;
-  }
-}
 
 // Icon vocabulary shared by the chip and its popover rows so a phase reads
 // the same in both surfaces: spinner for active phases, Check landed,
