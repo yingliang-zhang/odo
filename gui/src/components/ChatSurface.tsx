@@ -26,6 +26,7 @@ import { saveAttachment } from "../api";
 import { deriveTodoState } from "../todo";
 import { deriveParkedGoals } from "../parked";
 import { deriveActivePrompt, deriveSteerQueue, latestRunSteerSeqs } from "../steer_queue";
+import { isAdvisorySlash } from "../slash";
 import SteerQueue from "./SteerQueue";
 import type { LoopState } from "../loop";
 import { detectAtQuery, registerCompletionSource, resolveCompletions } from "../completions";
@@ -741,39 +742,87 @@ export default function ChatSurface({
 
   const canSend = draft.trim() !== "" || attachments.length > 0;
 
+  // Live mirror of the attachment list for async guards: the detached
+  // advisory failure path fires long after this closure's `attachments`
+  // went stale, and a late catch can land between a chip add and its
+  // render commit. (The draft needs no mirror — the uncontrolled
+  // textarea's DOM value reflects keystrokes synchronously.)
+  const attachmentsLiveRef = useRef(attachments);
+  useLayoutEffect(() => {
+    attachmentsLiveRef.current = attachments;
+  }, [attachments]);
+
+  // WKWebView IME: a submit that raced a live composition (Enter to
+  // confirm a candidate whose keydown arrived without isComposing /
+  // keyCode 229) can strand the webview's marked text — the blue
+  // "select-all" look — in the DOM: compositionend never fires, and the
+  // value-sync effect's composingRef guard then refuses to write the
+  // cleared draft. A successful submit ends the composition semantically,
+  // so force the DOM node empty here instead of relying on events the
+  // webview may never send.
+  //
+  // keepPark: advisory slash sends (/panel …) consult read-only and route
+  // BEFORE the daemon's park branch in handleSendMessage, so the armed
+  // toggle was never consumed by a queue — clearing it would silently
+  // drop the parked intent. Only a submitted goal disarms the one-shot.
+  const clearComposer = useCallback((opts?: { keepPark?: boolean }) => {
+    const ta = textareaRef.current;
+    if (ta) ta.value = "";
+    composingRef.current = false;
+    attachmentsLiveRef.current = [];
+    setDraft("");
+    setAttachments([]);
+    setSlashToken(null);
+    if (!opts?.keepPark) setParkArmed(false); // one-shot: park targets the submitted goal only
+  }, []);
+
   const submitDraft = useCallback(async () => {
     const text = draft.trim();
     if (!canSend || sending || sendDisabled) return;
+    // M1 steering: while the agent runs, submitting journals the message
+    // with steer=true instead of starting a new run. W6: an armed park
+    // toggle forces steer off (structural mutex — the daemon refuses
+    // steer+park) and queues the goal instead.
+    const steer = agentRunning && !parkArmed;
+    // Advisory slash sends (/panel, /vision, /preview): the daemon answers
+    // synchronously inside send_message and the MoA fan-out can hold the
+    // RPC for minutes. Holding `sending` that long disabled the textarea
+    // with the draft still in it — every workstream's composer looked
+    // frozen, while the journaled question already reaches the transcript
+    // via the poll loop. Detach: clear now, skip the `sending` lock, and
+    // keep the promise alive only for the guarded failure restore below.
+    if (isAdvisorySlash(text)) {
+      const token = slashToken;
+      const sent = onSend(text, attachments, steer, parkArmed);
+      clearComposer({ keepPark: true });
+      void sent.catch(() => {
+        // The consult can fail LATE — after the user composed a follow-up
+        // in the box meanwhile (slash receipt gate, daemon restart, IPC
+        // drop). Restoring unconditionally would silently erase that
+        // typing, so restore only an untouched composer; App's error
+        // banner names the failure either way.
+        const ta = textareaRef.current;
+        if ((ta != null && ta.value !== "") || attachmentsLiveRef.current.length > 0) return;
+        setDraft(text);
+        setAttachments(attachments);
+        // Match the normal path's failure posture (a fully intact
+        // composer): re-highlight the command token when the restored
+        // text still starts with it.
+        if (token != null && (text === token || text.startsWith(token + " "))) setSlashToken(token);
+      });
+      return;
+    }
     setSending(true);
     try {
-      // M1 steering: while the agent runs, submitting journals the message
-      // with steer=true instead of starting a new run. W6: an armed park
-      // toggle forces steer off (structural mutex — the daemon refuses
-      // steer+park) and queues the goal instead.
-      const steer = agentRunning && !parkArmed;
       await onSend(text, attachments, steer, parkArmed);
-      // WKWebView IME: a submit that raced a live composition (Enter to
-      // confirm a candidate whose keydown arrived without isComposing /
-      // keyCode 229) can strand the webview's marked text — the blue
-      // "select-all" look — in the DOM: compositionend never fires, and
-      // the value-sync effect's composingRef guard then refuses to write
-      // the cleared draft. A successful submit ends the composition
-      // semantically, so force the DOM node empty here instead of relying
-      // on events the webview may never send.
-      const ta = textareaRef.current;
-      if (ta) ta.value = "";
-      composingRef.current = false;
-      setDraft("");
-      setAttachments([]);
-      setSlashToken(null);
-      setParkArmed(false); // one-shot: park targets the submitted goal only
+      clearComposer();
     } catch {
       // onSend already surfaced the error; keep the draft (and the armed
       // toggle) for retry.
     } finally {
       setSending(false);
     }
-  }, [draft, attachments, canSend, sending, sendDisabled, onSend, agentRunning, parkArmed]);
+  }, [draft, attachments, canSend, sending, sendDisabled, onSend, agentRunning, parkArmed, slashToken, clearComposer]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();

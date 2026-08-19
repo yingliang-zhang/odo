@@ -48,6 +48,7 @@ import { basename } from "./files";
 import { notifyRunDone, notifyLoopTerminal } from "./notify";
 import { deriveLoopStates, loopMode } from "./loop";
 import { derivePipelineStates } from "./pipeline";
+import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
 import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
 import { strings } from "./strings";
@@ -138,8 +139,12 @@ export default function App() {
   // false once events arrive. Tri-model gap analysis: Hermes has
   // skeletons.tsx; Odo had only a spinner.
   const [chatLoading, setChatLoading] = useState(true);
-  // J: spinner for /panel and /vision while the daemon consults models.
-  const [panelThinking, setPanelThinking] = useState(false);
+  // J: spinner while /panel, /vision or /preview blocks on the daemon
+  // side — the consult can hold the RPC for minutes. A COUNT, not a
+  // boolean: concurrent advisory sends (the composer now detaches) would
+  // otherwise let the first to settle hide the spinner while a later
+  // consult is still holding.
+  const [panelThinking, setPanelThinking] = useState(0);
   // M7: transient streaming preview (never journaled), rebuilt every poll.
   const [preview, setPreview] = useState<PreviewEvent | null>(null);
   const [diff, setDiff] = useState<Diff | null>(null);
@@ -872,8 +877,8 @@ export default function App() {
       void refreshPendingCounts();
       // J: show a spinner for /panel, /vision and /preview while the
       // daemon blocks (a preview capture + K3 call can outlast a panel).
-      const isPanel = text.trim().startsWith("/panel") || text.trim().startsWith("/vision") || text.trim().startsWith("/preview");
-      if (isPanel) setPanelThinking(true);
+      const advisory = isAdvisorySlash(text);
+      if (advisory) setPanelThinking((n) => n + 1);
       try {
         const resp = unwrap(
           await sendMessage(cid, text, attachments, {
@@ -887,7 +892,10 @@ export default function App() {
         // Steering journals a message for the running agent; parking only
         // queues a goal — neither starts a new run here. (A park on a free
         // conversation may auto-dequeue daemon-side; the poll reconciles.)
-        if (!steer && !park) { setAgentRunning(true); setTurnStartedAt(Date.now()); }
+        // Advisory slash queries spawn no run either (read-only MoA
+        // consult) — marking one as running flipped the composer into
+        // steer mode with a Stop button until the next poll corrected it.
+        if (!steer && !park && !advisory) { setAgentRunning(true); setTurnStartedAt(Date.now()); }
         // W6: prompt reconcile — the sidebar's parked pill is sourced from
         // pending_counts, so re-read after the daemon's depth changed
         // rather than waiting for the poll loop's every-4th-tick cadence.
@@ -897,7 +905,7 @@ export default function App() {
         setError(`send failed: ${errorMessage(e)}`);
         throw e; // let the composer keep the draft
       } finally {
-        if (isPanel) setPanelThinking(false);
+        if (advisory) setPanelThinking((n) => Math.max(0, n - 1));
       }
     },
     [recordEvents, refreshPendingCounts],
@@ -1714,7 +1722,7 @@ export default function App() {
           events={events}
           agentRunning={agentRunning}
           preview={preview}
-          panelThinking={panelThinking}
+          panelThinking={panelThinking > 0}
           sendDisabled={!booted}
           onSend={handleSend}
           onCancel={handleCancel}

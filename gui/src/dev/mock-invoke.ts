@@ -5,6 +5,7 @@
 
 import * as fx from "./fixtures";
 import { deriveLoopStates } from "../loop";
+import { isAdvisorySlash } from "../slash";
 
 // Detect Tauri webview: __TAURI_INTERNALS__ is injected by Tauri v2.
 function isTauri(): boolean {
@@ -86,6 +87,34 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
     // ---------- Messaging ----------
     case "send_message": {
       const convId = args?.conversationId ?? 1;
+      // Advisory slash commands (/panel, /vision, /preview) route FIRST in
+      // the daemon's handleSendMessage — BEFORE the park/steer branches
+      // below (their request flags are ignored for a slash text; mock
+      // parity) — and the RPC holds for the whole consult. Timing mirrors
+      // handlePanelQuery: entry-gate refusals reject pre-journal
+      // (fx.advisorySend.fail); otherwise the question journals
+      // immediately (poll-visible while the consult runs), the RPC holds
+      // (fx.advisorySend.hold), then the combined answer + agent_done
+      // journal before ok returns — or a late refusal without answer rows
+      // when released with an error.
+      if (typeof args?.text === "string" && isAdvisorySlash(args.text)) {
+        if (fx.advisorySend.fail != null) {
+          return { ok: false, error: fx.advisorySend.fail };
+        }
+        const event = fx.ev("user_message", { text: args.text }, convId);
+        fx.events.push(event);
+        if (fx.advisorySend.hold && !fx.advisorySend.released) {
+          await new Promise<void>((resolve) => fx.advisorySend.waiters.push(resolve));
+        }
+        if (fx.advisorySend.releaseError != null) {
+          return { ok: false, error: fx.advisorySend.releaseError };
+        }
+        fx.events.push(
+          fx.ev("agent_text", { text: "Mock panel advisory answer.", panel: true, models: [] }, convId),
+          fx.ev("agent_done", { panel: true }, convId),
+        );
+        return { ok: true, event };
+      }
       // W6 (goal queue): park journals user_message{park:true} and bumps
       // the queue depth. Mirror the daemon cap (goalQueueCap=8): over-cap
       // parks fail loud pre-journal — never silently drop a human message.

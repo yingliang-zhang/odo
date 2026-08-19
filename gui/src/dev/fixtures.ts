@@ -524,6 +524,31 @@ export const runState = { foreground: false };
 // journaled, replaced wholesale per poll like the daemon's.
 export const previewState: { current: PreviewEvent | null } = { current: null };
 
+// Advisory-slash knob (/panel, /vision, /preview — same pattern as
+// runState): the daemon answers those synchronously inside send_message,
+// so the RPC outlasts the whole consult. hold parks the mock's reply
+// until a test releases it; fail rejects PRE-journal like the daemon's
+// entry gates (run in flight / no review models configured) do; releasing
+// WITH an error models a LATE failure — the question already journaled,
+// then the RPC rejects (slash receipt gate / daemon restart / IPC drop).
+// The release LATCHES (released + releaseError): a test that releases
+// before the held RPC reaches the mock's hold gate must still unblock
+// it — queueing remember-only waiters made that order a hang race.
+export const advisorySend = {
+  hold: false,
+  fail: null as string | null,
+  released: false,
+  releaseError: null as string | null,
+  waiters: [] as Array<() => void>,
+};
+
+export function releaseAdvisorySends(error?: string) {
+  advisorySend.released = true;
+  advisorySend.releaseError = error ?? null;
+  const waiters = advisorySend.waiters.splice(0);
+  for (const w of waiters) w();
+}
+
 // W6 (goal queue): per-workstream parked-goal depth, keyed like
 // pendingCounts. Kept in step with the journaled events by
 // syncParkedGoals (the same derivation the daemon applies — mock parity:
