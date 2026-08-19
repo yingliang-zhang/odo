@@ -3,6 +3,7 @@ import {
   ClipboardEvent,
   DragEvent,
   FormEvent,
+  Fragment,
   KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
@@ -278,6 +279,32 @@ function runRenderItems(events: OdoEvent[]): RunRenderItem[] {
   return items;
 }
 
+// Collapsed tool-group summary (ui/message-stream, Hermes ToolActivityGroup
+// parity): the collapsed row names what the burst ended with — last call's
+// tool + a single-line arg snippet — so "N tool calls" isn't an information
+// dead end. Same parse posture as MessageBubble: daemon journals args as a
+// JSON string, parse defensively.
+function toolCallSnippet(payload: OdoEvent["payload"] | undefined): string {
+  const tool = typeof payload?.tool === "string" && payload.tool !== "" ? payload.tool : "tool";
+  let args = payload?.args;
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch { /* keep raw string */ }
+  }
+  let snippet = "";
+  if (args != null && typeof args === "object" && !Array.isArray(args)) {
+    const first = Object.entries(args as Record<string, unknown>)[0];
+    if (first) {
+      const [k, v] = first;
+      const sv = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+      snippet = `${k}: ${sv}`;
+    }
+  } else if (typeof args === "string") {
+    snippet = args;
+  }
+  const flat = snippet === "" ? tool : `${tool}(${snippet})`.replace(/\s+/g, " ").trim();
+  return flat.length > 72 ? `${flat.slice(0, 71)}…` : flat;
+}
+
 // M7 streaming preview: the in-flight block below the journaled bubbles —
 // dimmed and italic so it reads as provisional. Text previews end in a
 // pulsing caret; tool previews lead with a spinning ⟳ plus the call's
@@ -301,7 +328,7 @@ function PreviewBubble({ preview, projectRoot }: { preview: PreviewEvent; projec
   const text = typeof p.text === "string" ? p.text : "";
   if (text === "") return null;
   return (
-    <div className="bubble bubble-agent bubble-preview w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-transparent text-[var(--agent-text)] border border-stroke-tertiary rounded-none px-3.5 py-2.5 whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)] opacity-60 italic" aria-live="polite" aria-busy="true">
+    <div className="bubble bubble-agent bubble-preview w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-bg-raised text-[var(--agent-text)] border border-stroke-secondary rounded-[12px_12px_12px_4px] px-3.5 py-2.5 whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)] opacity-85" aria-live="polite" aria-busy="true">
       <Markdown content={text} projectRoot={projectRoot} />
       <span className="preview-caret" aria-hidden="true" />
     </div>
@@ -1200,22 +1227,24 @@ export default function ChatSurface({
               Nothing was lost — the journal keeps every event. Send a message
               to continue in epoch {epoch}, or reopen the folded record.
             </p>
-            <button
-              type="button"
-              className="example-prompt mt-2 block w-full cursor-pointer rounded-md border border-border bg-bg-input px-3 py-[9px] text-left text-text [font:inherit] hover:border-accent-user hover:text-accent-user"
-              onClick={() => setExpandedKey(foldKey)}
-            >
-              Expand the folded record
-            </button>
-            {fold.notePath && (
+            <div className="example-prompts mt-4 flex flex-wrap justify-center gap-2">
               <button
                 type="button"
-                className="example-prompt mt-2 block w-full cursor-pointer rounded-md border border-border bg-bg-input px-3 py-[9px] text-left text-text [font:inherit] hover:border-accent-user hover:text-accent-user"
-                onClick={() => onOpenNote(fold.notePath!)}
+                className="example-prompt cursor-pointer rounded-[10px] border border-border bg-bg-input px-3 py-[7px] text-label text-text-dim [font:inherit] transition-colors hover:border-stroke-primary hover:text-text"
+                onClick={() => setExpandedKey(foldKey)}
               >
-                Open the note
+                Expand the folded record
               </button>
-            )}
+              {fold.notePath && (
+                <button
+                  type="button"
+                  className="example-prompt cursor-pointer rounded-[10px] border border-border bg-bg-input px-3 py-[7px] text-label text-text-dim [font:inherit] transition-colors hover:border-stroke-primary hover:text-text"
+                  onClick={() => onOpenNote(fold.notePath!)}
+                >
+                  Open the note
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           <div className="empty-state m-auto max-w-[480px] rounded-lg border border-border bg-bg-raised px-8 py-7 text-center">
@@ -1223,19 +1252,21 @@ export default function ChatSurface({
             <p className="dim mb-4 text-label">
               Every run is journaled, and its diff lands here for review.
             </p>
-            {EXAMPLE_PROMPTS.map((prompt) => (
-              <button
-                key={prompt}
-                type="button"
-                className="example-prompt mt-2 block w-full cursor-pointer rounded-md border border-border bg-bg-input px-3 py-[9px] text-left text-text [font:inherit] hover:border-accent-user hover:text-accent-user"
-                onClick={() => {
-                  setDraft(prompt);
-                  textareaRef.current?.focus();
-                }}
-              >
-                {prompt}
-              </button>
-            ))}
+            <div className="example-prompts mt-4 flex flex-wrap justify-center gap-2">
+              {EXAMPLE_PROMPTS.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  className="example-prompt cursor-pointer rounded-[10px] border border-border bg-bg-input px-3 py-[7px] text-label text-text-dim [font:inherit] transition-colors hover:border-stroke-primary hover:text-text"
+                  onClick={() => {
+                    setDraft(prompt);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
             <div className="shortcuts mt-[18px] flex justify-center gap-4 text-micro text-text-dim">
               <span>⌘K Commands</span>
               <span>⌘↵ Send</span>
@@ -1251,34 +1282,59 @@ export default function ChatSurface({
             <span>Panel consulting models…</span>
           </div>
         )}
-          {runGroups.map((group) => (
+          {runGroups.map((group, groupIdx) => (
             <RunGroupBoundary
               key={`${conversationId ?? "none"}:${group.start?.seq ?? "preamble"}`}
               resetKey={String(conversationId ?? "none") + ":" + String(group.start?.seq ?? "preamble") + ":" + String(group.events.length)}
             >
-            <div className="run-group flex flex-col gap-2.5">
+            <div className="run-group mx-auto flex w-full max-w-[var(--chat-column-width,100%)] flex-col gap-2.5">
               <RunHeader group={group} />
-              {runRenderItems(group.events).map((item) =>
-                item.kind === "bubble" ? (
-                  <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
-                ) : (
-                  // Tool calls default-collapsed; an active ⌘F search
+              {(() => {
+                const items = runRenderItems(group.events);
+                return items.map((item, itemIdx) => {
+                  if (item.kind === "bubble") {
+                    return <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />;
+                  }
+                  // ui/message-stream (Hermes parity): a lone call+result
+                  // renders inline — a "1 tool call" wrapper costs a click
+                  // and carries no summary. ≥2 calls fold into one group
+                  // whose summary names what the burst ended with.
+                  if (item.calls === 1) {
+                    return (
+                      <Fragment key={`tools-${item.events[0].seq}`}>
+                        {item.events.map((ev) => (
+                          <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
+                        ))}
+                      </Fragment>
+                    );
+                  }
+                  // Tool groups default-collapsed; an active ⌘F search
                   // forces them open so jump-to-match still reaches tool
                   // bubbles (the <details> `open` attribute, no JS state).
-                  <details
-                    className="tool-group group my-1"
-                    key={`tools-${item.events[0].seq}`}
-                    open={searchActive}
-                  >
-                    <summary className="cursor-pointer select-none rounded px-1 py-0.5 text-caption text-text-dim hover:bg-bg-input hover:text-text group-open:mb-1 group-open:text-text">
-                      {item.calls} tool call{item.calls === 1 ? "" : "s"}
-                    </summary>
-                    {item.events.map((ev) => (
-                      <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
-                    ))}
-                  </details>
-                ),
-              )}
+                  const trailing = agentRunning && groupIdx === runGroups.length - 1 && itemIdx === items.length - 1;
+                  const lastCall = [...item.events].reverse().find((e) => e.type === "agent_tool_call");
+                  return (
+                    <details
+                      className="tool-group group my-1"
+                      key={`tools-${item.events[0].seq}`}
+                      open={searchActive}
+                    >
+                      <summary className="flex cursor-pointer items-baseline gap-1.5 rounded px-1 py-0.5 text-caption text-text-dim select-none hover:bg-bg-input hover:text-text group-open:mb-1 group-open:text-text">
+                        {trailing && <LoaderCircle size={11} className="spin shrink-0 self-center" aria-hidden />}
+                        <span className="shrink-0">{item.calls} tool calls</span>
+                        {lastCall && (
+                          <span className="tool-group-last min-w-0 truncate text-text-dim/70">
+                            · {toolCallSnippet(lastCall.payload)}
+                          </span>
+                        )}
+                      </summary>
+                      {item.events.map((ev) => (
+                        <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
+                      ))}
+                    </details>
+                  );
+                });
+              })()}
             </div>
             </RunGroupBoundary>
           ))}

@@ -899,9 +899,15 @@ body {
    migrated to Tailwind utilities in MessageBubble.tsx and ChatSurface.tsx
    (the streaming preview); class names remain as inert DOM hooks.
    @keyframes bubble-in (in the keyframes block) stays; so does
-   [data-theme="light"] .bubble-agent a (markdown link colors).
-   --chat-column-width (default 100%, full-bleed) caps the agent column —
-   set to a fixed px/rem value for a reading-width constraint. */
+   [data-theme="light"] .bubble-agent a (markdown link colors). */
+
+/* ui/message-stream: centered reading column for the chat stream (Hermes
+   parity) — run groups, agent bubbles and the preview cap here; tool rows,
+   user bubbles (82%) and the run header size relative to it. Chrome rows
+   (ToolTicker, run-status strip, fold chip) stay full-width. */
+:root {
+  --chat-column-width: 1100px;
+}
 
 /* .badge base + .badge-accept/-reject/-other stay: LedgerPanel still
    consumes them (blocked/refresh/actor variants ui/badge.tsx doesn't

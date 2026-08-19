@@ -1,6 +1,6 @@
 import { memo, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, X } from "lucide-react";
+import { Check, Copy, X } from "lucide-react";
 import { basename } from "../files";
 import { loopEventLabel } from "../loop";
 import type { OdoEvent, RecallItem } from "../types";
@@ -98,6 +98,48 @@ function recallTooltip(recall: RecallItem[]): string {
     .join("\n");
 }
 
+// ui/message-stream (Hermes-parity): hover affordances on content bubbles —
+// copy the raw message text (top-right) and a small timestamp (in a bottom
+// strip the bubble reserves via pb-[26px], so no layout shift on reveal).
+// State lives per-rendered event: CopyBubbleButton is a component, not a
+// render closure, so the feedback flip survives the memo without prop drill.
+function CopyBubbleButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="bubble-copy absolute top-1.5 right-2 z-10 inline-flex cursor-pointer items-center rounded-md border border-border bg-panel-float p-1 text-text-dim opacity-0 transition-opacity hover:text-text group-hover/bubble:opacity-100 focus-visible:opacity-100"
+      aria-label={copied ? "Copied" : "Copy message"}
+      title={copied ? "Copied" : "Copy message"}
+      onClick={() => {
+        navigator.clipboard?.writeText(text)?.then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        })?.catch(() => {});
+      }}
+    >
+      {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+    </button>
+  );
+}
+
+// Hover timestamp: short clock label, absolute date-time on the tooltip.
+// Invalid/missing created_at (never expected from the journal) renders nothing.
+function BubbleTime({ when, side }: { when: string; side: "left" | "right" }) {
+  const ms = Date.parse(when);
+  if (Number.isNaN(ms)) return null;
+  const d = new Date(ms);
+  return (
+    <span
+      className={`bubble-time pointer-events-none absolute bottom-1.5 ${side === "right" ? "right-2.5" : "left-3.5"} text-micro leading-none text-text-dim opacity-0 transition-opacity select-none group-hover/bubble:opacity-100`}
+      title={d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+      aria-hidden
+    >
+      {d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+    </span>
+  );
+}
+
 // Renders one journaled event. Payloads come from the daemon verbatim; every
 // field is optional in the type, so render defensively.
 // Belt B: agent_text renders as markdown; `highlight` wraps occurrences of
@@ -112,7 +154,8 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
   switch (event.type) {
     case "user_message":
       body = (
-        <div className="bubble bubble-user group/bubble self-end bg-accent-user text-white flex flex-col rounded-[12px_12px_4px_12px] shadow-[0_1px_2px_rgba(0,0,0,0.25)] max-w-[82%] px-3.5 py-2.5 whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+        <div className="bubble bubble-user group/bubble relative self-end bg-accent-user text-white flex flex-col rounded-[12px_12px_4px_12px] shadow-[0_1px_2px_rgba(0,0,0,0.25)] max-w-[82%] px-3.5 pt-2.5 pb-[26px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <CopyBubbleButton text={p.text ?? ""} />
           <div className="bubble-text">{highlightText(p.text ?? "", highlight, "u")}</div>
           {p.attachments != null && p.attachments.length > 0 && (
             <div className="attachment-chips flex flex-wrap gap-1.5 pt-1.5">
@@ -143,16 +186,19 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
               Edit
             </button>
           )}
+          <BubbleTime when={event.created_at} side="right" />
         </div>
       );
       break;
 
     case "agent_text":
       body = (
-        <div className="bubble bubble-agent w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-transparent text-[var(--agent-text)] border border-stroke-tertiary rounded-none px-3.5 py-2.5 whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+        <div className="bubble bubble-agent group/bubble relative w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-bg-raised text-[var(--agent-text)] border border-stroke-secondary rounded-[12px_12px_12px_4px] shadow-[0_1px_2px_rgba(0,0,0,0.18)] px-3.5 pt-2.5 pb-[26px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+          <CopyBubbleButton text={p.text ?? ""} />
           <div className="bubble-text">
             <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />
           </div>
+          <BubbleTime when={event.created_at} side="left" />
         </div>
       );
       break;

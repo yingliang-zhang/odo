@@ -175,9 +175,18 @@ export const events: OdoEvent[] = [
   ev("agent_text", { text: "Adjusting the socket chmod to 0600." }, 3),
   ev("agent_done", { summary: "Socket permissions fixed" }, 3),
 
+  // ui/message-stream: one multi-call burst on CONVERSATION 1 — exercises
+  // the folded "N tool calls" group summary (lone calls render inline).
+  ev("user_message", { text: "Run the checks and report" }),
+  ev("agent_tool_call", { tool: "run_command", args: { cmd: "npm test" } }),
+  ev("agent_tool_result", { tool: "run_command", result: "0 failed" }),
+  ev("agent_tool_call", { tool: "read_file", args: { path: "gui/src/App.tsx" } }),
+  ev("agent_tool_result", { tool: "read_file", result: "1525 lines" }),
+  ev("agent_done", { summary: "Checks passed; App.tsx reviewed" }),
+
   // W6 (goal queue): one parked goal waiting in the default conversation,
   // so dev mode and e2e see the QueueDock (and the sidebar pill) on first
-  // paint. Conv 1's seq numbering stays gap-free (this is its seq 12).
+  // paint. Conv 1's seq numbering stays gap-free.
   ev("user_message", { text: "Parked: sweep the flaky sidebar selector", park: true }),
 
   // A-P0 #1 (Guardian risk taxonomy): one full story of review_action
