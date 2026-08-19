@@ -602,6 +602,17 @@ export default function ChatSurface({
     // joins the follow-the-tail trigger too.
   }, [events.length, preview, pinToBottom]);
 
+  // A conversation switch (sidebar click, workstream jump) is a fresh
+  // view: re-engage the follow and land on the newest events, even when
+  // the previous conversation was left scrolled up. ChatSurface is NOT
+  // remounted on a switch, so stick state would otherwise leak across
+  // workstreams and leave the new view wherever the old one scrolled.
+  useEffect(() => {
+    stickRef.current = true;
+    setNewOutput(false);
+    pinToBottom();
+  }, [conversationId, pinToBottom]);
+
   // A run flipping state (done banner appearing, ticker hiding) also nudges
   // the view, but never yanks a reader back down.
   useEffect(() => {

@@ -23,16 +23,16 @@ interface InjectedRow {
   payload: Record<string, unknown>;
 }
 
-async function journal(page: Page, rows: InjectedRow[]) {
-  await page.evaluate((r) => {
+async function journal(page: Page, rows: InjectedRow[], convId = 1) {
+  await page.evaluate(([r, c]) => {
     const fx = window.__odoFixtures;
     if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
     for (const row of r) {
-      const e = fx.ev(row.type, row.payload, 1);
+      const e = fx.ev(row.type, row.payload, c as number);
       e.created_at = new Date().toISOString();
       fx.events.push(e);
     }
-  }, rows);
+  }, [rows, convId] as const);
 }
 
 async function setRunning(page: Page, on: boolean) {
@@ -44,24 +44,24 @@ async function setRunning(page: Page, on: boolean) {
 }
 
 // Tall history so the message list overflows before the run starts.
-async function fillHistory(page: Page) {
+async function fillHistory(page: Page, convId = 1, pairs = 12) {
   const rows: InjectedRow[] = [];
-  for (let i = 0; i < 12; i++) {
-    rows.push({ type: "user_message", payload: { text: `history question ${i}` } });
+  for (let i = 0; i < pairs; i++) {
+    rows.push({ type: "user_message", payload: { text: `history question ${i} (conv ${convId})` } });
     rows.push({
       type: "agent_text",
-      payload: { text: `history answer ${i}\n\n${"long line of prior output that pads the bubble. ".repeat(6)}` },
+      payload: { text: `history answer ${i} (conv ${convId})\n\n${"long line of prior output that pads the bubble. ".repeat(6)}` },
     });
   }
-  await journal(page, rows);
-  // Let the idle poll deliver and the follow effect settle at the bottom.
-  await page.waitForTimeout(2200);
+  await journal(page, rows, convId);
 }
 
 test("auto-follow keeps the tail pinned while a run streams tool calls", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".sidebar .proj-tree")).toBeVisible();
   await fillHistory(page);
+  // Let the idle poll deliver and the follow effect settle at the bottom.
+  await page.waitForTimeout(2200);
 
   // Sanity: booted and pinned to the bottom.
   const dist0 = await page.evaluate(() => {
@@ -124,6 +124,7 @@ test("wheel-up disengages the follow; the pill re-engages it", async ({ page }) 
   await page.goto("/");
   await expect(page.locator(".sidebar .proj-tree")).toBeVisible();
   await fillHistory(page);
+  await page.waitForTimeout(2200);
 
   const list = page.locator(".message-list");
   const gap = () => list.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
@@ -148,4 +149,33 @@ test("wheel-up disengages the follow; the pill re-engages it", async ({ page }) 
   await journal(page, [{ type: "agent_text", payload: { text: "post-repin arrival" } }]);
   await page.waitForTimeout(2200);
   expect(await gap()).toBeLessThan(80);
+});
+
+test("switching workstreams re-pins to the newest output", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".sidebar .proj-tree")).toBeVisible();
+  // Both conversations overflow, ws 2 much taller: with equal heights the
+  // browser's scroll anchoring happens to land near the bottom and would
+  // mask the leak this test guards.
+  await fillHistory(page, 1);
+  await fillHistory(page, 2, 72);
+  await page.waitForTimeout(2200);
+
+  // Leave ws 1 scrolled up: the follow disengages.
+  const list = page.locator(".message-list");
+  const gap = () => list.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  expect(await gap()).toBeLessThan(80);
+  await list.hover();
+  await page.mouse.wheel(0, -600);
+  await page.waitForTimeout(300);
+  expect(await gap()).toBeGreaterThan(80);
+
+  // Switch to feat-sidebar-tree: the fresh view must open at its newest
+  // events, not at the spot the previous workstream was left.
+  await page.locator(".sidebar").locator(".ws-item", { hasText: "feat-sidebar-tree" }).click();
+  await expect(page.locator(".app-statusbar")).toContainText("feat-sidebar-tree");
+  await page.waitForTimeout(800);
+  expect(await gap()).toBeLessThan(80);
+  await expect(page.locator(".new-output-pill")).toHaveCount(0);
+  await expect(list.getByText(/history answer 7[01] \(conv 2\)/).last()).toBeVisible();
 });
