@@ -65,22 +65,26 @@ func TestAutoLandCheck(t *testing.T) {
 		nonexist   bool   // PathOnDisk points at a missing file
 		wantReason string
 		wantDetail string // substring; "" = don't check
+		wantNotes  string // substring across joined annotations; "" = none expected (when wantReason also "")
 	}{
-		{"modify in existing top dir", patchSrc("src/a.go", 1, 1, false), sha, false, "", ""},
-		{"top-level file", patchSrc("README.md", 1, 1, false), sha, false, "", ""},
-		{"new subdir under existing top", patchSrc("src/sub/f.go", 2, 0, true), sha, false, "", ""},
-		{"protected .odo path", patchSrc(".odo/memory.md", 1, 1, false), sha, false, "protected_path", ".odo/"},
-		{"protected wiki path", patchSrc("wiki/guide.md", 1, 0, true), sha, false, "protected_path", "wiki/"},
-		{"protected .odo path uppercase", patchSrc(".ODO/memory.md", 1, 1, false), sha, false, "protected_path", ".ODO/"},
-		{"protected wiki path mixed case", patchSrc("Wiki/guide.md", 1, 0, true), sha, false, "protected_path", "Wiki/"},
-		{"lockfile at top level", patchSrc("go.sum", 1, 1, false), sha, false, "supply_chain_path", "go.sum"},
-		{"nested manifest, case-insensitive", patchSrc("gui/Package-Lock.JSON", 1, 1, false), sha, false, "supply_chain_path", "Package-Lock.JSON"},
-		{"verify config is self-protected", patchSrc(".odo-verify", 1, 1, false), sha, false, "supply_chain_path", ".odo-verify"},
-		{"new top-level directory", patchSrc("newdir/f.go", 2, 0, true), sha, false, "new_top_dir", "newdir/"},
-		{"tests weakened", bigTestPatch(1, 2), sha, false, "test_assertions_decreased", "+1 added / -2 removed"},
-		{"tests strengthened pass", bigTestPatch(2, 1), sha, false, "", ""},
-		{"nil base sha", patchSrc("src/a.go", 1, 1, false), "", false, "base_unresolvable", ""},
-		{"missing patch file", "", sha, true, "unparseable_diff", ""},
+		{"modify in existing top dir", patchSrc("src/a.go", 1, 1, false), sha, false, "", "", ""},
+		{"top-level file", patchSrc("README.md", 1, 1, false), sha, false, "", "", ""},
+		{"new subdir under existing top", patchSrc("src/sub/f.go", 2, 0, true), sha, false, "", "", ""},
+		{"protected .odo path", patchSrc(".odo/memory.md", 1, 1, false), sha, false, "protected_path", ".odo/", ""},
+		{"protected wiki path", patchSrc("wiki/guide.md", 1, 0, true), sha, false, "protected_path", "wiki/", ""},
+		{"protected .odo path uppercase", patchSrc(".ODO/memory.md", 1, 1, false), sha, false, "protected_path", ".ODO/", ""},
+		{"protected wiki path mixed case", patchSrc("Wiki/guide.md", 1, 0, true), sha, false, "protected_path", "Wiki/", ""},
+		{"lockfile at top level", patchSrc("go.sum", 1, 1, false), sha, false, "supply_chain_path", "go.sum", ""},
+		{"nested manifest, case-insensitive", patchSrc("gui/Package-Lock.JSON", 1, 1, false), sha, false, "supply_chain_path", "Package-Lock.JSON", ""},
+		{"verify config is self-protected", patchSrc(".odo-verify", 1, 1, false), sha, false, "supply_chain_path", ".odo-verify", ""},
+		// 2026-08-20 doctrine: gate source / new top dir / net assertion
+		// loss are panel-weighed annotations, never hard blocks.
+		{"gate source annotated not blocked", patchSrc("internal/ipc/autoland.go", 1, 1, false), sha, false, "", "", "gate source touched: internal/ipc/autoland.go"},
+		{"new top-level directory annotated", patchSrc("newdir/f.go", 2, 0, true), sha, false, "", "", "new top-level directory: newdir/"},
+		{"tests weakened annotated", bigTestPatch(1, 2), sha, false, "", "", "test assertions decreased: +1 added / -2 removed"},
+		{"tests strengthened pass", bigTestPatch(2, 1), sha, false, "", "", ""},
+		{"nil base sha", patchSrc("src/a.go", 1, 1, false), "", false, "base_unresolvable", "", ""},
+		{"missing patch file", "", sha, true, "unparseable_diff", "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,12 +98,19 @@ func TestAutoLandCheck(t *testing.T) {
 			if tc.base != "" {
 				d.BaseSHA = &tc.base
 			}
-			reason, detail := s.autoLandCheck(d)
+			reason, detail, annotations := s.autoLandCheck(d)
 			if reason != tc.wantReason {
 				t.Errorf("reason = %q (detail %q), want %q", reason, detail, tc.wantReason)
 			}
 			if tc.wantDetail != "" && !strings.Contains(detail, tc.wantDetail) {
 				t.Errorf("detail = %q, want substring %q", detail, tc.wantDetail)
+			}
+			joined := strings.Join(annotations, "\n")
+			if tc.wantNotes != "" && !strings.Contains(joined, tc.wantNotes) {
+				t.Errorf("annotations = %q, want substring %q", joined, tc.wantNotes)
+			}
+			if tc.wantNotes == "" && tc.wantReason == "" && len(annotations) != 0 {
+				t.Errorf("annotations = %q, want none", joined)
 			}
 		})
 	}

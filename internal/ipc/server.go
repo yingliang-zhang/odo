@@ -2519,18 +2519,27 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		// Both patch sides are guarded: renaming a file out of wiki/ is a
 		// memory write too, not just writing into it.
 		//
-		// Two protection layers (2026-08-19 restore):
+		// Two protection layers (2026-08-20 user doctrine — "review
+		// everything automatically"; supersedes the 2026-08-19 restore):
 		//   (1) memory paths (.odo/, wiki/) — invariant 1, refused for
 		//       EVERY actor, human Accept included (the click still lands
 		//       an agent-produced patch into daemon-owned content).
-		//   (2) protectedGateFiles — refused ONLY for a non-human actor
-		//       (autoActor, loopActor, …); the human Accept click IS the
-		//       designed escape ("changes to these files go through the
-		//       accept path", 2026-08-15 tri-model consensus). Blocking it
-		//       here for the human left gate diffs un-landable at all.
+		//   (2) protectedGateFiles — a non-human actor (autoActor, loopActor,
+		//       …) may land them ONLY behind panel evidence:
+		//       panelVerdictAttestsDiff requires a journaled unanimous
+		//       verdict row (or the settle ladder's majority verdict) whose
+		//       patch_sha16 matches the exact bytes being landed — the
+		//       judged never modifies its own judge without its judges.
+		//       The human Accept click stays the unconditional escape.
 		patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
 		if gerr == nil {
-			if perr := rejectExecutorPaths(patchPaths, actor); perr != nil {
+			perr := rejectMemoryPaths(patchPaths)
+			if perr == nil && actor != "" {
+				if g, hit := gateSourceHit(patchPaths); hit && !s.panelVerdictAttestsDiff(ctx, d) {
+					perr = fmt.Errorf("gate source %q may auto-land only behind a journaled unanimous panel verdict on these exact patch bytes (moa_review consensus accept with matching patch_sha16); a human Accept is the alternative", g)
+				}
+			}
+			if perr != nil {
 				_, _ = s.store.AppendEvent(ctx, d.ConversationID, store.EventAgentError,
 					mustJSON(map[string]interface{}{"error": "accept_diff: " + perr.Error()}))
 				return Response{}, perr
@@ -4214,9 +4223,12 @@ func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response,
 // mechanism source files are also protected — autoland.go, autonomy.go,
 // learner.go, review.go, settle.go, ledger.go, risk.go, contradiction.go,
 // design_moa.go. These files implement the auto-land and self-improving
-// gates; a diff that weakens a gate must never auto-land (it would be
-// the judged modifying its own judge). Changes to these files require
-// explicit human review via the normal accept path.
+// gates. 2026-08-20 user doctrine supersedes "must never auto-land":
+// their diffs route through the full verify+panel pipeline like any
+// other, annotated as gate-source for the panel, and land only behind
+// panelVerdictAttestsDiff — a journaled verdict bound to the exact patch
+// bytes (the judged still never modifies its own judge without its
+// judges; the human Accept click stays the unconditional escape).
 //
 // Case-insensitive: macOS APFS/HFS+ resolve .ODO/ and Wiki/ identically.
 var protectedGateFiles = map[string]bool{
@@ -4240,42 +4252,74 @@ func isProtectedPath(p string) bool {
 	return protectedGateFiles[lp]
 }
 
-// rejectProtectedPaths errs when any patch path is protected. Callers pass
-// both patch sides (git.PatchPaths): deleting or renaming memory content
-// is a memory write too, so the pre-image side is guarded as well as the
-// post-image side.
-func rejectProtectedPaths(paths []string) error {
-	for _, f := range paths {
-		if isProtectedPath(f) {
-			return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
-		}
-	}
-	return nil
-}
-
-// rejectExecutorPaths is the accept-time guard inside handleDiffAction,
-// with two DIFFERENT refusal scopes that the now-replaced unconditional
-// call had collapsed into one:
-//
-//   - .odo/ and wiki/ — invariant 1: refused for EVERY actor. Even a human
-//     Accept click lands the agent-produced patch into daemon-owned
-//     content, so the daemon itself must stay the enforcement point.
-//   - protectedGateFiles — refused ONLY for a non-human actor (autoActor,
-//     loopActor, any named pipeline actor; the human Accept click carries
-//     actor ""). The human Accept click is the 2026-08-15 tri-model
-//     escape: gate diffs "require explicit human review via the normal
-//     accept path". The single-scope refusal made every gate-file
-//     change un-landable from the GUI.
-func rejectExecutorPaths(paths []string, actor string) error {
-	if actor != "" {
-		return rejectProtectedPaths(paths)
-	}
+// rejectMemoryPaths is layer (1) of the accept-time guard inside
+// handleDiffAction: daemon-owned memory content (.odo/, wiki/) refused for
+// EVERY actor — even a human Accept click lands the agent-produced patch
+// into daemon-owned content, so the daemon itself must stay the
+// enforcement point. Callers pass both patch sides (git.PatchPaths):
+// deleting or renaming memory content is a memory write too, so the
+// pre-image side is guarded as well as the post-image side.
+func rejectMemoryPaths(paths []string) error {
 	for _, f := range paths {
 		if lp := strings.ToLower(f); strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/") {
 			return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
 		}
 	}
 	return nil
+}
+
+// gateSourceHit returns the first patch path that is a protected gate
+// source file (protectedGateFiles only — NOT the memory prefix), or "".
+func gateSourceHit(paths []string) (string, bool) {
+	for _, f := range paths {
+		if protectedGateFiles[strings.ToLower(f)] {
+			return f, true
+		}
+	}
+	return "", false
+}
+
+// panelVerdictAttestsDiff is the gate-source evidence gate (2026-08-20
+// user doctrine, layer (2) of the accept-time guard): a non-human accept
+// of gate source files requires a journaled moa_review row — actor
+// auto_panel, consensus "accept" (the settle ladder's "majority_accept"
+// verdict rows count too, being the ladder's own panel settlement) — whose
+// recorded patch_sha16 matches the diff's CURRENT on-disk bytes. The sha
+// binding is the point: the panel must have judged exactly the bytes being
+// landed, never an earlier generation of the diff, and the judged never
+// modifies its own judge without its judges. Every failure (patch read,
+// journal read, no matching row) is fail-closed.
+func (s *Server) panelVerdictAttestsDiff(ctx context.Context, d store.Diff) bool {
+	data, err := os.ReadFile(d.PathOnDisk)
+	if err != nil {
+		return false
+	}
+	want := sha16(data)
+	events, err := s.store.ListEvents(ctx, d.ConversationID, 0)
+	if err != nil {
+		return false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action    string `json:"action"`
+			Actor     string `json:"actor"`
+			DiffID    int64  `json:"diff_id"`
+			Consensus string `json:"consensus_verdict"`
+			PatchSHA  string `json:"patch_sha16"`
+		}
+		if err := json.Unmarshal([]byte(ev.Payload), &p); err != nil {
+			continue
+		}
+		if p.Action == "moa_review" && p.Actor == autoActor && p.DiffID == d.ID &&
+			(p.Consensus == "accept" || p.Consensus == "majority_accept") && p.PatchSHA == want {
+			return true
+		}
+	}
+	return false
 }
 
 // supersedeChain marks older pending diffs in the same revise chain as

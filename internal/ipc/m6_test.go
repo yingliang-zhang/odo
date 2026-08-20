@@ -693,13 +693,14 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 	}
 }
 
-// TestHumanAcceptGateSourceAllowed (2026-08-15 consensus restore): a diff
-// touching a protected gate source (internal/ipc/autoland.go et al.) must
-// REFUSE the auto-land actor but still land via the human Accept click —
-// "gone through the accept path" was the designed escape; the executor
-// had collapsed both into one refusal, leaving gate diffs un-landable
-// (M19 diff 3 hit exactly this). Memory paths (.odo//wiki/) stay refused
-// for every actor.
+// TestHumanAcceptGateSourceAllowed (2026-08-15 consensus restore, extended
+// 2026-08-20): a diff touching a protected gate source (internal/ipc/
+// autoland.go et al.) lands via the human Accept click (the unconditional
+// escape), and via a non-human actor ONLY behind panel evidence — a
+// journaled unanimous verdict whose patch_sha16 matches the landed bytes
+// (panelVerdictAttestsDiff). No evidence → refused; a verdict bound to
+// different bytes → refused. Memory paths (.odo//wiki/) stay refused for
+// every actor.
 func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
@@ -738,8 +739,7 @@ func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 		t.Errorf("gate file after human accept = %q, want the applied content", got)
 	}
 
-	// Auto actor on another gate file: still refused (double-layer with
-	// autoLandCheck's pre-panel protected_path block).
+	// Auto actor on another gate file, NO panel evidence: refused.
 	gatePatch2 := "diff --git a/internal/ipc/settle.go b/internal/ipc/settle.go\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/internal/ipc/settle.go\n@@ -0,0 +1 @@\n+package generated\n"
 	dAuto := seed("gate-auto.diff", gatePatch2)
 	before := eventsTypes(t, rig, convID)
@@ -753,6 +753,42 @@ func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 	after := eventsTypes(t, rig, convID)
 	if len(after) <= len(before) || after[len(after)-1] != "agent_error" {
 		t.Errorf("auto refusal: events %v → %v, want an agent_error appended", before, after)
+	}
+
+	// Evidence bound to DIFFERENT bytes (a stale verdict for an earlier
+	// generation of the diff): still refused. Journal a verdict whose
+	// patch_sha16 does not match the on-disk patch.
+	journalMoaVerdict := func(d store.Diff, patchSHA string) {
+		t.Helper()
+		if _, err := rig.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
+			"action": "moa_review", "actor": autoActor, "diff_id": d.ID,
+			"consensus_verdict": "accept", "patch_sha16": patchSHA,
+		})); err != nil {
+			t.Fatalf("journal verdict: %v", err)
+		}
+	}
+	gatePatch3 := "diff --git a/internal/ipc/risk.go b/internal/ipc/risk.go\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/internal/ipc/risk.go\n@@ -0,0 +1 @@\n+package generated\n"
+	dStale := seed("gate-stale.diff", gatePatch3)
+	journalMoaVerdict(dStale, sha16([]byte("different bytes entirely")))
+	if _, err := rig.server.handleDiffAction(ctx, dStale.ID, "accept", autoActor, ""); err == nil ||
+		!strings.Contains(err.Error(), "internal/ipc/risk.go") {
+		t.Fatalf("auto accept behind a stale verdict err = %v, want a refusal naming internal/ipc/risk.go", err)
+	}
+	if got, err := rig.store.GetDiff(ctx, dStale.ID); err != nil || got.Status != store.DiffPending {
+		t.Errorf("stale-verdict gate diff status = %v (%v), want pending", got.Status, err)
+	}
+
+	// A journaled unanimous verdict bound to the EXACT patch bytes: the
+	// 2026-08-20 doctrine path — the gate-source diff auto-lands.
+	journalMoaVerdict(dAuto, sha16([]byte(gatePatch2)))
+	if _, err := rig.server.handleDiffAction(ctx, dAuto.ID, "accept", autoActor, ""); err != nil {
+		t.Fatalf("auto accept behind exact-byte panel evidence: %v", err)
+	}
+	if got := readFileStr(t, filepath.Join(root, "internal/ipc/settle.go")); got != "package generated\n" {
+		t.Errorf("gate file after auto accept = %q, want the applied content", got)
+	}
+	if got, err := rig.store.GetDiff(ctx, dAuto.ID); err != nil || got.Status != store.DiffAccepted {
+		t.Errorf("auto-landed gate diff status = %v (%v), want accepted", got.Status, err)
 	}
 }
 
@@ -840,8 +876,8 @@ func TestDiffGuardCQuotedPath(t *testing.T) {
 	if len(aPaths) != 1 || aPaths[0] != ".odo/mémory.md" {
 		t.Fatalf("DiffPaths a-side = %v, want [.odo/mémory.md]", aPaths)
 	}
-	if err := rejectProtectedPaths(bPaths); err == nil || !strings.Contains(err.Error(), ".odo/") {
-		t.Errorf("rejectProtectedPaths = %v, want a protected-path error naming .odo/", err)
+	if err := rejectMemoryPaths(bPaths); err == nil || !strings.Contains(err.Error(), ".odo/") {
+		t.Errorf("rejectMemoryPaths = %v, want a protected-path error naming .odo/", err)
 	}
 
 	// A quoted benign path is still extracted (not silently dropped by the
@@ -855,8 +891,8 @@ func TestDiffGuardCQuotedPath(t *testing.T) {
 		t.Fatal(err)
 	} else if len(paths) != 1 || paths[0] != "src/fé.go" {
 		t.Fatalf("PatchPaths(benign) = %v, want [src/fé.go]", paths)
-	} else if err := rejectProtectedPaths(paths); err != nil {
-		t.Errorf("rejectProtectedPaths(benign) = %v, want nil", err)
+	} else if err := rejectMemoryPaths(paths); err != nil {
+		t.Errorf("rejectMemoryPaths(benign) = %v, want nil", err)
 	}
 }
 
@@ -960,12 +996,12 @@ func eventsTypes(t *testing.T, rig *testRig, convID int64) []string {
 // .odo/ and wiki/.
 func TestRejectProtectedPathsCaseFold(t *testing.T) {
 	for _, p := range []string{".ODO/memory.md", "Wiki/guide.md", ".Odo/x", "WIKI/y"} {
-		if err := rejectProtectedPaths([]string{p}); err == nil {
-			t.Errorf("rejectProtectedPaths(%q) should error (case-fold bypass)", p)
+		if err := rejectMemoryPaths([]string{p}); err == nil {
+			t.Errorf("rejectMemoryPaths(%q) should error (case-fold bypass)", p)
 		}
 	}
-	if err := rejectProtectedPaths([]string{"src/main.go"}); err != nil {
-		t.Errorf("rejectProtectedPaths(src/main.go) = %v, want nil", err)
+	if err := rejectMemoryPaths([]string{"src/main.go"}); err != nil {
+		t.Errorf("rejectMemoryPaths(src/main.go) = %v, want nil", err)
 	}
 }
 

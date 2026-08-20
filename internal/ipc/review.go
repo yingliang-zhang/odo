@@ -56,6 +56,11 @@ type reviewPromptInput struct {
 	verifyTail string
 	verifyNote string // outcome clause, e.g. "exit 0 (pass evidence present…)" or "not run — …"
 	runFacts   string
+	// riskNotes carries autoLandCheck's mechanical risk annotations
+	// (2026-08-20 doctrine: content judgments belong to the panel).
+	// Each note is a daemon-derived fact the verdict must weigh —
+	// never agent-authored, and absent on the manual path.
+	riskNotes []string
 }
 
 // buildReviewPrompt assembles the grounded review input for both panel
@@ -92,12 +97,15 @@ func buildReviewPrompt(in reviewPromptInput) string {
 			}
 		}
 		if len(protected) > 0 {
-			b.WriteString("- protected paths touched: " + strings.Join(protected, ", ") + " (these never auto-land)\n")
+			b.WriteString("- protected paths touched: " + strings.Join(protected, ", ") + " (memory paths never land; gate source files land on your unanimous ACCEPT with no human click)\n")
 		} else {
 			b.WriteString("- protected paths touched: none\n")
 		}
 	} else {
 		b.WriteString("- files: (patch stats unavailable)\n")
+	}
+	for _, n := range in.riskNotes {
+		b.WriteString("- risk annotation: " + n + "\n")
 	}
 	if in.verifyCmd != "" {
 		fmt.Fprintf(&b, "- verify: `%s` %s (output tail below)\n", in.verifyCmd, in.verifyNote)

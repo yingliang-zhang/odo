@@ -12,11 +12,23 @@ package ipc
 //	                line means UNARMED = silent skip inside autoLand (zero
 //	                journal noise, both postures).
 //	run posture     the producing run must have finished cleanly
-//	mechanical      protected paths (.odo/, wiki/), supply-chain files
-//	gates            (manifests/lockfiles/.odo-verify), new top-level
-//	                 directory (vs the diff's base tree), weakened tests
-//	                 (net *_test.go assertion loss). Deterministic, zero
-//	                 panel spend. Size gates are GONE (panel verdict
+//	mechanical      2026-08-20 user doctrine ("review everything
+//	gates            automatically"): hard blocks remain ONLY where a
+//	                 panel verdict is impossible or structurally invalid —
+//	                 memory paths (.odo/, wiki/: the executor refuses those
+//	                 for EVERY actor, human click included, so a panel would
+//	                 attest bytes that can never land) and supply-chain
+//	                 files (manifests/lockfiles: single-line RCE vectors
+//	                 diff review structurally cannot audit — the panel's own
+//	                 catch; .odo-verify: a self-modified oracle attesting
+//	                 itself). Everything else the old gates stopped for —
+//	                 protected gate source files, new top-level directories,
+//	                 net *_test.go assertion loss — degrades to a mechanical
+//	                 risk annotation the panel must weigh, and a gate-source
+//	                 diff lands only behind a journaled unanimous verdict on
+//	                 the EXACT patch bytes (executor evidence gate,
+//	                 handleDiffAction). Deterministic, zero panel spend for
+//	                 the hard blocks. Size gates are GONE (panel verdict
 //	                 DROP_SIZE_KEEP_DIR: a 300-line cliff is fake
 //	                 precision with 350K-token contexts; the token cost
 //	                 breaker below is the ceiling).
@@ -93,8 +105,12 @@ package ipc
 //	                 enters the auto-revise ladder (≤3 fresh repair
 //	                 rounds, no-progress stop, journal-derived
 //	                 suspension resumed by ANY landing).
-//	land            handleDiffAction's original path — protected-path
-//	                 guard, unmerged-index refusal, the FINAL base-
+//	land            handleDiffAction's original path — memory-path
+//	                 refusal (every actor), the gate-source evidence
+//	                 gate (a non-human actor lands gate files only
+//	                 behind a moa_review verdict row whose patch_sha16
+//	                 matches the bytes being landed), unmerged-index
+//	                 refusal, the FINAL base-
 //	                 freshness adjudication (checkAndRefreshBase: a
 //	                 clean refresh re-applies onto current HEAD, a
 //	                 failed one wraps errBaseStale → base_stale_at_land
@@ -285,7 +301,8 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	}
 	diffText := string(data)
 
-	if reason, detail := s.autoLandCheck(d); reason != "" {
+	reason, detail, riskNotes := s.autoLandCheck(d)
+	if reason != "" {
 		s.journalAutoLandBlocked(ctx, d, reason, detail, nil, "")
 		return
 	}
@@ -398,6 +415,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		verifyCmd:  verifyCmd,
 		verifyTail: verifyTail,
 		verifyNote: "exit 0 (pass evidence present in the output tail)",
+		riskNotes:  riskNotes,
 	})
 	if est := len(prompt) / 4; est > autoLandMaxPromptTokens {
 		s.journalAutoLandBlocked(ctx, d, "prompt_too_large",
@@ -649,61 +667,87 @@ func pipelineTerminalDiffIDs(events []store.Event) map[int64]bool {
 	return terminal
 }
 
-// autoLandCheck applies the deterministic pre-panel gates, cheapest first.
-// A non-empty reason blocks. The gates are deliberately mechanical: each
-// names exactly the artifact that made the call (audit-grade details, zero
-// heuristics a prompt could talk its way around).
-func (s *Server) autoLandCheck(d store.Diff) (reason, detail string) {
+// autoLandCheck applies the deterministic pre-panel evaluation, cheapest
+// first, in two classes (2026-08-20 user doctrine: "review everything
+// automatically" — content judgments belong to the panel, not to
+// mechanical stops):
+//
+//   - HARD BLOCKS (non-empty reason): reserved for verdicts that are
+//     impossible or structurally invalid. Memory paths (.odo/, wiki/)
+//     can never land — the executor refuses them for EVERY actor, the
+//     human click included, so a panel would attest bytes landing is
+//     impossible for. Supply-chain files (manifests/lockfiles) are
+//     single-line RCE vectors diff review structurally cannot audit;
+//     .odo-verify self-modification would additionally be the verify
+//     oracle attesting itself.
+//   - RISK ANNOTATIONS (returned notes, never a block): everything a
+//     reviewer CAN audit — protected gate source files, new top-level
+//     directories, net *_test.go assertion loss. Each note is a
+//     mechanical, audit-grade fact (zero heuristics a prompt could talk
+//     its way around) injected into the panel's facts block; the panel
+//     owns the verdict, and a gate-source diff then lands only behind
+//     the executor's evidence gate (handleDiffAction: a journaled
+//     unanimous verdict whose patch_sha16 matches the landed bytes).
+func (s *Server) autoLandCheck(d store.Diff) (reason, detail string, annotations []string) {
 	paths, err := git.PatchPaths(d.PathOnDisk)
 	if err != nil {
-		return "unparseable_diff", err.Error()
+		return "unparseable_diff", err.Error(), nil
 	}
 	// Double-layer with the executor (handleDiffAction re-checks): the
-	// pre-panel check saves the panel spend and journals the clearer reason.
+	// pre-panel check saves the panel spend and journals the clearer
+	// reason. Gate sources split off here: isProtectedPath covers BOTH
+	// memory paths (hard block) and gate source files (annotation).
 	for _, p := range paths {
-		if isProtectedPath(p) {
-			return "protected_path", p
+		if lp := strings.ToLower(p); strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/") {
+			return "protected_path", p, nil
+		}
+	}
+	for _, p := range paths {
+		if protectedGateFiles[strings.ToLower(p)] {
+			annotations = append(annotations, "gate source touched: "+p+" — this diff modifies the reviewing pipeline itself and lands on a unanimous panel verdict with no human click; score ANY weakening of gates, unanimity, or the verify oracle as REJECT")
 		}
 	}
 	for _, p := range paths {
 		base := strings.ToLower(p[strings.LastIndex(p, "/")+1:])
 		if autoLandSupplyChainFiles[base] {
-			return "supply_chain_path", p
+			return "supply_chain_path", p, nil
 		}
 	}
 	stat, err := git.PatchStats(d.PathOnDisk)
 	if err != nil {
-		return "unparseable_diff", err.Error()
+		return "unparseable_diff", err.Error(), annotations
 	}
 	base := ""
 	if d.BaseSHA != nil {
 		base = *d.BaseSHA
 	}
 	if base == "" {
-		return "base_unresolvable", "diff has no base_sha — the new-top-dir gate cannot run"
+		return "base_unresolvable", "diff has no base_sha — the new-top-dir gate cannot run", annotations
 	}
 	tree, err := GitTopDirsResolver(s.projectRoot)(base)
 	if err != nil {
-		return "base_unresolvable", err.Error()
+		return "base_unresolvable", err.Error(), annotations
 	}
+	newDirs := map[string]bool{}
 	for _, f := range stat.Files {
 		if f.DeletedFile {
 			continue
 		}
 		p := strings.ReplaceAll(f.Path, "\\", "/")
-		if slash := strings.Index(p, "/"); slash > 0 && !tree[p[:slash]] {
-			return "new_top_dir", p[:slash] + "/ (new top-level directory)"
+		if slash := strings.Index(p, "/"); slash > 0 && !tree[p[:slash]] && !newDirs[p[:slash]] {
+			newDirs[p[:slash]] = true
+			annotations = append(annotations, "new top-level directory: "+p[:slash]+"/ — nothing in the diff's base tree places it; weigh whether the placement is intentional")
 		}
 	}
 	added, removed, err := git.TestAssertionDelta(d.PathOnDisk)
 	if err != nil {
-		return "unparseable_diff", err.Error()
+		return "unparseable_diff", err.Error(), annotations
 	}
 	if removed > added {
-		return "test_assertions_decreased",
-			fmt.Sprintf("*_test.go assertions: +%d added / -%d removed (net loss)", added, removed)
+		annotations = append(annotations,
+			fmt.Sprintf("test assertions decreased: +%d added / -%d removed (net loss) — if removed assertions covered surviving behavior the verify oracle itself just got weaker; weigh it", added, removed))
 	}
-	return "", ""
+	return "", "", annotations
 }
 
 // verifyGateOutcome is runVerifyGate's result: on ok, the command that

@@ -68,6 +68,29 @@ func TestBuildReviewPrompt(t *testing.T) {
 		}
 	})
 
+	t.Run("risk annotations render in the facts block", func(t *testing.T) {
+		p := buildReviewPrompt(reviewPromptInput{
+			mode:       reviewPromptGate,
+			diffPath:   diffPath,
+			diffText:   patch,
+			verifyNote: "not run — …",
+			riskNotes: []string{
+				"gate source touched: internal/ipc/autoland.go — score ANY weakening of gates as REJECT",
+				"test assertions decreased: +1 added / -2 removed (net loss)",
+			},
+		})
+		for _, want := range []string{
+			"- risk annotation: gate source touched: internal/ipc/autoland.go",
+			"score ANY weakening of gates as REJECT",
+			"- risk annotation: test assertions decreased: +1 added / -2 removed",
+			"gate source files land on your unanimous ACCEPT", // the accurate 2026-08-20 suffix
+		} {
+			if !strings.Contains(p, want) {
+				t.Errorf("prompt missing %q", want)
+			}
+		}
+	})
+
 	t.Run("advisory mode for manual review_diff", func(t *testing.T) {
 		p := buildReviewPrompt(reviewPromptInput{
 			mode:       reviewPromptAdvisory,

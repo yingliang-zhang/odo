@@ -96,3 +96,26 @@ go test ./internal/ipc/ -run 'Settle|Majority|Supercede|Verify|Risk' -count=1 -v
 go test ./internal/ipc/ -count=1 -timeout 600s
 cd gui && npx tsc --noEmit
 ```
+
+## Revision 2026-08-20: protected-path doctrine — review everything automatically
+
+User directive: manual diff review is redundant; every review must be automatic. Supersedes the 2026-08-15 tri-model rule "a diff that weakens a gate must never auto-land" and the corresponding `protected_path` mechanical block.
+
+**New split in `autoLandCheck`** (hard block ⇔ panel-weighed annotation):
+
+| Class | Routing | Why |
+|---|---|---|
+| memory paths (`.odo/`, `wiki/`) | hard block `protected_path` (unchanged) | executor refuses them for EVERY actor; a panel would attest bytes that can never land |
+| supply-chain files (manifests, lockfiles, `.odo-verify`) | hard block `supply_chain_path` (unchanged) | single-line RCE vectors diff review structurally cannot audit; a self-modified `.odo-verify` would be the verify oracle attesting itself |
+| gate source files (`protectedGateFiles` — autoland/review/settle/risk/…) | **risk annotation → verify+panel → auto-land** | Go source is exactly what a panel can audit; the diff carries the same facts block plus "score any gate weakening as REJECT" |
+| new top-level directory | risk annotation (was hard block) | placement intent is a content judgment |
+| net `*_test.go` assertion loss | risk annotation (was hard block) | may be legitimate removal; panel weighs oracle-weakening as REJECT evidence |
+| `unparseable_diff` / `base_unresolvable` / run-verdict taint | hard block (unchanged) | integrity preconditions — there is nothing valid to review |
+
+**Executor evidence gate** (`server.go: panelVerdictAttestsDiff`): a non-human accept of gate source files requires a journaled `moa_review{actor:auto_panel, consensus_verdict: accept|majority_accept}` row whose `patch_sha16` matches the **exact on-disk patch bytes** being landed. The sha binding prevents a verdict for an earlier generation of the diff from unlocking land. All failures are fail-closed. The human Accept click stays the unconditional escape; memory paths stay refused for every actor.
+
+**Residual risk (accepted by user)**: the panel is now the sole guard against the pipeline weakening its own judge (previously the mechanical gate short-circuited before any model saw the diff). Mitigations retained: unanimity across heterogeneous models, the diff body fenced as data, the gate-source annotation priming REJECT for gate weakening, byte-bound verdict evidence, and every outcome journaled (`auto_land_blocked` / `moa_review` / `accept`).
+
+**Loop pipeline unchanged**: `/loop` fix rounds land with `loopActor` and no panel, so their protected-path suspension stays — `panelVerdictAttestsDiff` structurally refuses a loopActor gate-source land (no auto_panel verdict rows exist for it).
+
+Tests: `TestAutoLandCheck` (annotation vs hard-block matrix), `TestHumanAcceptGateSourceAllowed` (three legs: human escape, no-evidence refusal, stale-sha refusal, evidence-bound auto-land), `TestBuildReviewPrompt` (risk annotations render in the facts block).
