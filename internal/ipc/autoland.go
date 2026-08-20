@@ -129,6 +129,12 @@ package ipc
 //	                                      patch sha16 on every row
 //	memory_update{layer:"auto_land"}      ladder_suspended/resumed (M18)
 //
+// Restart recovery taxonomy (recoverPendingDiffs): auto_land_blocked
+// (≠panel_infra), pipeline moa_review, and auto_revise_round are TERMINAL
+// for their diff — a restart never re-fires those. auto_land_started and
+// refresh_attempted are breadcrumbs and panel_infra is not a verdict —
+// those shapes re-fire; a diff with only them (or nothing) is stranded.
+//
 // fix-INT W5: every review_action row above EXCEPT auto_land_started
 // (blocked, auto moa_review, accept, revise round) additionally carries
 // the Guardian risk receipt — a started row is a liveness breadcrumb,
@@ -503,6 +509,144 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		// failure): the diff stays pending for triage either way.
 		log.Printf("auto-land: accept diff %d: %v", d.ID, err)
 	}
+}
+
+// recoverPendingDiffs re-fires the auto-land pipeline for pending diffs a
+// daemon restart STRANDED: maybeAutoLand normally fires from drainRun on
+// run completion, so a restart after the run drained but before the
+// pipeline journaled an outcome leaves the diff pending with zero
+// pipeline records; a restart mid-pipeline leaves only breadcrumbs
+// (auto_land_started, refresh_attempted) — the same stranded shape.
+//
+// Dedup (option A, restart double-panel fix): the pre-filter recovery
+// re-fired EVERY pending diff unconditionally, so each restart re-spent
+// verify+panel on diffs whose outcomes were already journaled — e.g. a
+// panel_mixed row awaiting the human's reject click got a second full
+// panel. Diffs with a terminal pipeline row (pipelineTerminalDiffIDs)
+// are skipped; only panel_infra stays retryable (infra is not a verdict
+// — this re-fire IS its designed retry channel, the panelInfraLeg block).
+//
+// Each surviving diff spawns a goroutine whose maybeAutoLand re-checks
+// the pref and re-adjudicates base freshness (P0a refresh) — the same
+// path as if the run had just finished. The worktree may have been
+// reclaimed by the sweeper; an empty path blocks verify_unconfigured
+// (the correct outcome — the user can re-run or reject). A journal read
+// failure aborts the whole recovery (fail closed): with a broken store
+// the pipeline can only spend, never land — its evidence rows would fail.
+func (s *Server) recoverPendingDiffs(ctx context.Context) {
+	p, err := s.store.GetProjectByRoot(ctx, s.projectRoot)
+	if err != nil {
+		log.Printf("recover-pending-diffs: get project: %v", err)
+		return
+	}
+	rows, err := s.store.ListAllPendingDiffs(ctx, p.ID)
+	if err != nil {
+		log.Printf("recover-pending-diffs: list pending: %v", err)
+		return
+	}
+	stranded, err := strandedPendingDiffs(ctx, s.store, rows)
+	if err != nil {
+		log.Printf("recover-pending-diffs: %v (NOT re-firing: a broken journal means spend without land)", err)
+		return
+	}
+	if skipped := len(rows) - len(stranded); skipped > 0 {
+		log.Printf("recover-pending-diffs: %d/%d pending diffs already adjudicated — skipping their re-fire", skipped, len(rows))
+	}
+	for _, r := range stranded {
+		wtPath := ""
+		if r.WorktreePath != nil {
+			wtPath = *r.WorktreePath
+		}
+		baseSHA := ""
+		if r.BaseSHA != nil {
+			baseSHA = *r.BaseSHA
+		}
+		log.Printf("recover-pending-diffs: re-triggering auto-land for diff #%d (conv %d, base %s)", r.ID, r.ConversationID, baseSHA)
+		// Fix B4: derive the goal from the conversation's last non-revise
+		// user_message so the panel has the user's original instruction.
+		go s.maybeAutoLand(r.Diff, wtPath, s.originGoal(ctx, r.ConversationID), false, "")
+	}
+}
+
+// strandedPendingDiffs filters pending diff rows down to those with NO
+// terminal pipeline row in their conversation's journal — the recovery's
+// re-fire set. One journal scan per conversation; input order preserved.
+func strandedPendingDiffs(ctx context.Context, st *store.Store, rows []store.PendingDiffRow) ([]store.PendingDiffRow, error) {
+	byConv := make(map[int64][]store.PendingDiffRow)
+	var convOrder []int64
+	for _, r := range rows {
+		if _, seen := byConv[r.ConversationID]; !seen {
+			convOrder = append(convOrder, r.ConversationID)
+		}
+		byConv[r.ConversationID] = append(byConv[r.ConversationID], r)
+	}
+	var out []store.PendingDiffRow
+	for _, convID := range convOrder {
+		events, err := st.ListEvents(ctx, convID, 0)
+		if err != nil {
+			return nil, fmt.Errorf("list events conv %d: %w", convID, err)
+		}
+		terminal := pipelineTerminalDiffIDs(events)
+		for _, r := range byConv[convID] {
+			if !terminal[r.ID] {
+				out = append(out, r)
+			}
+		}
+	}
+	return out, nil
+}
+
+// pipelineTerminalDiffIDs returns the diff IDs the auto-land pipeline has
+// already ADJUDICATED in one conversation's journal — the restart
+// recovery's dedup set. A diff is terminal when a review_action row names
+// it (diff_id) with:
+//
+//	auto_land_blocked{reason != panel_infra}  every settled/blocked outcome
+//	                                          (run/verify gates, base
+//	                                          staleness, panel_mixed /
+//	                                          panel_unanimous_reject, the
+//	                                          ladder's revise_* stops)
+//	moa_review{actor:auto_panel}              the pre-land evidence row — a
+//	                                          land-failure race leaves the
+//	                                          diff pending but judged
+//	auto_revise_round                         the ladder owns the diff now;
+//	                                          the spawned round's own
+//	                                          pipeline supersedes it when
+//	                                          that round lands
+//
+// NOT terminal, by design: auto_land_started / refresh_attempted are
+// breadcrumbs — a restart mid-pipeline leaves exactly those, and the diff
+// IS stranded. panel_infra is not a verdict: its designed resolution IS
+// the restart re-fire (autoLand, the panelInfraLeg block). Human-triggered
+// moa_review rows carry no actor and never dedup — the pipeline genuinely
+// has not run for that diff. Human accept/reject rows can't coexist with
+// a pending diff at all, and pipeline accept/reject rows only appear with
+// a status update, so neither is needed here.
+func pipelineTerminalDiffIDs(events []store.Event) map[int64]bool {
+	terminal := make(map[int64]bool)
+	for _, ev := range events {
+		if ev.Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action string `json:"action"`
+			Actor  string `json:"actor"`
+			Reason string `json:"reason"`
+			DiffID int64  `json:"diff_id"`
+		}
+		if !jsonUnmarshalOK(ev.Payload, &p) || p.DiffID == 0 {
+			continue
+		}
+		switch {
+		case p.Action == "auto_land_blocked" && p.Reason != "panel_infra":
+		case p.Action == "moa_review" && p.Actor == autoActor:
+		case p.Action == "auto_revise_round":
+		default:
+			continue
+		}
+		terminal[p.DiffID] = true
+	}
+	return terminal
 }
 
 // autoLandCheck applies the deterministic pre-panel gates, cheapest first.

@@ -1569,3 +1569,120 @@ func TestAutoLandLadderNoFork(t *testing.T) {
 		}
 	}
 }
+
+// -------------------------------------------------- restart recovery dedup
+
+// TestPipelineTerminalDiffIDs pins the recovery dedup classes: blocked
+// (≠panel_infra), pipeline moa_review, and revise-round rows retire a
+// diff; breadcrumbs, panel_infra, human rows, and foreign diff ids never
+// do.
+func TestPipelineTerminalDiffIDs(t *testing.T) {
+	ev := func(payload string) store.Event {
+		return store.Event{Type: store.EventReviewAction, Payload: json.RawMessage(payload)}
+	}
+	events := []store.Event{
+		// Terminal — the pipeline's own outcomes.
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_mixed","diff_id":1}`),
+		ev(`{"action":"auto_land_blocked","actor":"auto_loop","reason":"loop_verify_failed","diff_id":2}`), // loop pipeline: same terminal class
+		ev(`{"action":"moa_review","actor":"auto_panel","diff_id":3,"consensus_verdict":"accept"}`),
+		ev(`{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":4,"origin_diff_id":4}`),
+		ev(`{"action":"auto_revise_round","actor":"human","round":1,"diff_id":5}`), // human revise: the chain owns the diff
+		// NOT terminal.
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_infra","diff_id":11}`), // not a verdict — retry is the design
+		ev(`{"action":"auto_land_started","actor":"auto_panel","stage":"panel","diff_id":12}`),        // breadcrumb: restart mid-pipeline
+		ev(`{"action":"refresh_attempted","actor":"auto_panel","diff_id":13,"outcome":"conflict"}`),   // breadcrumb
+		ev(`{"action":"moa_review","diff_id":14,"consensus_verdict":"reject"}`),                       // human panel: no actor, pipeline never ran
+		ev(`{"action":"accept","actor":"auto_panel","diff_id":15}`),                                   // crash-mid-bookkeeping edge: not a judgment source
+		ev(`{"action":"reject","diff_id":16}`),                                                        // human verdict rows can't coexist with a pending diff
+		ev(`{"action":"auto_land_blocked","reason":"panel_mixed","diff_id":0}`),                       // no diff id: names nothing
+		ev(`garbage`),
+		{Type: store.EventUserMessage, Payload: json.RawMessage(`{"text":"unrelated"}`)},
+	}
+	terminal := pipelineTerminalDiffIDs(events)
+	for _, id := range []int64{1, 2, 3, 4, 5} {
+		if !terminal[id] {
+			t.Errorf("diff %d not terminal, want terminal", id)
+		}
+	}
+	for _, id := range []int64{11, 12, 13, 14, 15, 16} {
+		if terminal[id] {
+			t.Errorf("diff %d terminal, want stranded", id)
+		}
+	}
+}
+
+// TestStrandedPendingDiffs runs the recovery filter against a real store:
+// two workstreams, seven pending diffs — each diff with a journaled
+// pipeline outcome drops out; order and cross-conversation isolation
+// survive.
+func TestStrandedPendingDiffs(t *testing.T) {
+	f := newAutonomyFixture(t)
+	ctx := context.Background()
+	w2, err := f.st.CreateOrGetWorkstream(ctx, f.p.ID, "side")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := f.st.CreateConversation(ctx, w2.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(convID int64, name string) store.Diff {
+		t.Helper()
+		path := filepath.Join(f.dir, name)
+		if err := os.WriteFile(path, []byte(patchDoc("README.md", 1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := f.st.InsertDiff(ctx, convID, path, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	review := func(convID, diffID int64, payloadFmt string) {
+		t.Helper()
+		if _, err := f.st.AppendEvent(ctx, convID, store.EventReviewAction, fmt.Sprintf(payloadFmt, diffID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	review2 := func(convID int64, a, b int64, payloadFmt string) {
+		t.Helper()
+		if _, err := f.st.AppendEvent(ctx, convID, store.EventReviewAction, fmt.Sprintf(payloadFmt, a, b)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	d1 := add(f.c.ID, "d1.diff") // terminal: settled blocked row
+	d2 := add(f.c.ID, "d2.diff") // stranded: breadcrumbs only (restart mid-panel)
+	d3 := add(f.c.ID, "d3.diff") // stranded: zero pipeline rows
+	d4 := add(c2.ID, "d4.diff")  // terminal: pre-land evidence (land-failure race)
+	d5 := add(c2.ID, "d5.diff")  // stranded: panel_infra — retry IS the design
+	d6 := add(c2.ID, "d6.diff")  // terminal: ladder owns it (round spawned)
+	d7 := add(c2.ID, "d7.diff")  // stranded: human-review rows never dedup
+	review(f.c.ID, d1.ID, `{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_mixed","diff_id":%d}`)
+	review(f.c.ID, d2.ID, `{"action":"auto_land_started","actor":"auto_panel","stage":"panel","diff_id":%d}`)
+	review(f.c.ID, 999, `{"action":"auto_land_blocked","actor":"auto_panel","reason":"verify_failed","diff_id":%d}`) // foreign id bleeds nowhere
+	review(c2.ID, d4.ID, `{"action":"moa_review","actor":"auto_panel","diff_id":%d,"consensus_verdict":"accept"}`)
+	review(c2.ID, d5.ID, `{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_infra","diff_id":%d}`)
+	review2(c2.ID, d6.ID, d6.ID, `{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":%d,"origin_diff_id":%d}`)
+	review(c2.ID, d7.ID, `{"action":"moa_review","diff_id":%d,"consensus_verdict":"reject"}`)
+
+	rows, err := f.st.ListAllPendingDiffs(ctx, f.p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 7 {
+		t.Fatalf("pending rows = %d, want 7 (fixture sanity)", len(rows))
+	}
+	got, err := strandedPendingDiffs(ctx, f.st, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, r := range got {
+		ids = append(ids, r.ID)
+	}
+	want := []int64{d2.ID, d3.ID, d5.ID, d7.ID} // workstream-then-diff order preserved
+	if fmt.Sprint(ids) != fmt.Sprint(want) {
+		t.Errorf("stranded ids = %v, want %v", ids, want)
+	}
+}
