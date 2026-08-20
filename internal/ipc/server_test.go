@@ -4697,6 +4697,26 @@ func TestPanelProgressHeartbeat(t *testing.T) {
 	if prog == nil || prog.Total != 2 || prog.Done != 1 {
 		t.Fatalf("mid-flight panel_progress = %+v, want {done:1 total:2}", prog)
 	}
+	// Per-leg detail: both models registered at fan-out (prefs order),
+	// exactly one leg flipped done — and it must agree with the tally.
+	if len(prog.Legs) != 2 {
+		t.Fatalf("mid-flight legs = %+v, want 2 rows", prog.Legs)
+	}
+	if prog.Legs[0].Model != "pm1@test" || prog.Legs[1].Model != "pm2@test" {
+		t.Errorf("leg models = %q, %q, want pm1@test, pm2@test (prefs order)", prog.Legs[0].Model, prog.Legs[1].Model)
+	}
+	doneLegs := 0
+	for _, leg := range prog.Legs {
+		if leg.Done {
+			doneLegs++
+		}
+		if leg.Error {
+			t.Errorf("leg %s unexpectedly flagged error mid-flight", leg.Model)
+		}
+	}
+	if doneLegs != prog.Done {
+		t.Errorf("done legs = %d, want agreement with tally Done = %d", doneLegs, prog.Done)
+	}
 
 	close(release)
 	res := <-sendDone
@@ -4707,6 +4727,104 @@ func TestPanelProgressHeartbeat(t *testing.T) {
 	// the very next poll must report nothing — no stale progress rows.
 	if resp := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID}); resp.PanelProgress != nil {
 		t.Fatalf("panel_progress after completion = %+v, want absent", resp.PanelProgress)
+	}
+}
+
+// TestPendingCountsSlashConsult pins slash-consult visibility in the
+// sidebar badge feed: a /panel holds no run-table entry, yet its
+// workstream must read as running for the whole consult (sidebar dot,
+// "still running" line, StatusBar chip all derive from running_workstreams)
+// and drop out the moment the consult ends.
+func TestPendingCountsSlashConsult(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	seedSlashFixture(t, root, home)
+	writePrefs(t, home, "review: pm1@test\n")
+	// Single leg, parked until release: the whole consult sits inside one
+	// deterministic window.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": "panel-answer"}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	wsID := boot.Workstream.ID
+	if pc := rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root}); len(pc.RunningWorkstreams) != 0 {
+		t.Fatalf("fresh running_workstreams = %v, want empty", pc.RunningWorkstreams)
+	}
+
+	type sendResult struct {
+		ok  bool
+		err string
+	}
+	sendDone := make(chan sendResult, 1)
+	go func() {
+		conn, err := net.Dial("unix", rig.sock)
+		if err != nil {
+			sendDone <- sendResult{err: err.Error()}
+			return
+		}
+		defer conn.Close()
+		if err := json.NewEncoder(conn).Encode(Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel badge check"}); err != nil {
+			sendDone <- sendResult{err: err.Error()}
+			return
+		}
+		var resp Response
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			sendDone <- sendResult{err: err.Error()}
+			return
+		}
+		sendDone <- sendResult{ok: resp.OK, err: resp.Error}
+	}()
+
+	// Wait for the consult to register, then the badge must list the
+	// workstream even though no agent run exists.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rig.server.mu.Lock()
+		live := rig.server.slashing[convID] > 0
+		rig.server.mu.Unlock()
+		if live {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mid := rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
+	if got, want := fmt.Sprint(mid.RunningWorkstreams), fmt.Sprint([]int64{wsID}); got != want {
+		t.Fatalf("mid-consult running_workstreams = %s, want %s", got, want)
+	}
+
+	close(release)
+	res := <-sendDone
+	if !res.ok {
+		t.Fatalf("/panel RPC: %s", res.err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rig.server.mu.Lock()
+		done := rig.server.slashing[convID] == 0
+		rig.server.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	pc := rig.call(t, Request{Cmd: CmdPendingCounts, ProjectRoot: root})
+	if len(pc.RunningWorkstreams) != 0 {
+		t.Fatalf("post-consult running_workstreams = %v, want empty", pc.RunningWorkstreams)
 	}
 }
 

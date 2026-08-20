@@ -44,23 +44,61 @@ test("the spinner row shows the panel's live N/M progress from poll heartbeats",
   await expect(spinner).toBeVisible();
   await expect(spinner).toHaveText(/Panel consulting models…$/);
 
-  // The daemon's poll-side tally arrives on the next heartbeat tick.
+  // The daemon's poll-side tally arrives on the next heartbeat tick —
+  // with per-leg rows naming who is still out and who is back.
   await page.evaluate(() => {
     const fx = window.__odoFixtures;
     if (!fx) throw new Error("__odoFixtures hook missing");
-    fx.panelProgressState.current = { done: 1, total: 3 };
+    fx.panelProgressState.current = {
+      done: 1,
+      total: 3,
+      legs: [
+        { model: "kimi-k3@sudo", done: true },
+        { model: "glm-5.2@sudo", done: false },
+        { model: "deepseek-v4-flash@sudo", done: false },
+      ],
+    };
   });
   await expect(spinner).toContainText("1/3 back");
+  const legs = page.locator(".panel-leg");
+  await expect(legs).toHaveCount(3);
+  await expect(legs.nth(0)).toContainText("kimi-k3@sudo");
+  await expect(legs.nth(0)).toContainText("back");
+  await expect(legs.nth(1)).toContainText("consulting");
 
   // A daemon-side consult also lights the row on its own — the tally
   // arriving after this window's RPC cleared keeps the spinner alive.
   await page.evaluate(() => {
     const fx = window.__odoFixtures;
     if (!fx) throw new Error("__odoFixtures hook missing");
-    fx.panelProgressState.current = { done: 2, total: 3 };
+    fx.panelProgressState.current = {
+      done: 2,
+      total: 3,
+      legs: [
+        { model: "kimi-k3@sudo", done: true },
+        { model: "glm-5.2@sudo", done: true },
+        { model: "deepseek-v4-flash@sudo", done: false },
+      ],
+    };
     fx.releaseAdvisorySends();
   });
   await expect(spinner).toContainText("2/3 back");
+
+  // A failed leg answers too: error icon + label, done tally counts it.
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    fx.panelProgressState.current = {
+      done: 3,
+      total: 3,
+      legs: [
+        { model: "kimi-k3@sudo", done: true },
+        { model: "glm-5.2@sudo", done: true },
+        { model: "deepseek-v4-flash@sudo", done: true, error: true },
+      ],
+    };
+  });
+  await expect(legs.nth(2)).toContainText("error");
 
   // Consult over: tally gone, answer journaled, row cleared.
   await page.evaluate(() => {

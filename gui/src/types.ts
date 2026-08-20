@@ -284,6 +284,18 @@ export interface EventPayload {
 export interface PanelProgress {
   done: number;
   total: number;
+  // Per-leg rows registered at fan-out (prefs order): the status card
+  // shows who is still out, who is back, and who errored. Absent on rows
+  // from a daemon predating leg detail.
+  legs?: PanelLeg[];
+}
+
+// One model's slot in a /panel fan-out: done flips on any answer, error
+// distinguishes a failure leg from a successful one.
+export interface PanelLeg {
+  model: string;
+  done: boolean;
+  error?: boolean;
 }
 
 // M7 live streaming: the transient in-flight block preview returned by

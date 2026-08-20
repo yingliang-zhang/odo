@@ -1584,10 +1584,14 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 	}
 	// /panel heartbeat: hand the poller a COPY of the live tally — legs
 	// bump Done under s.mu and the response encodes after this handler
-	// drops the lock, so the shared pointer would race.
+	// drops the lock, so the shared pointer (and now the shared Legs
+	// slice) would race.
 	var panelProg *PanelProgress
 	if tally := s.panelProg[c.ID]; tally != nil {
 		cp := *tally
+		if tally.Legs != nil {
+			cp.Legs = append([]PanelLeg(nil), tally.Legs...)
+		}
 		panelProg = &cp
 	}
 	return Response{
@@ -3011,6 +3015,13 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		prog = &PanelProgress{}
 		s.panelProg[c.ID] = prog
 	}
+	// Leg rows are append-only for the entry's lifetime, so a goroutine's
+	// captured index stays valid until the whole entry is deleted (which
+	// happens only after every leg has answered).
+	legBase := len(prog.Legs)
+	for _, m := range models {
+		prog.Legs = append(prog.Legs, PanelLeg{Model: m.model + "@" + m.provider})
+	}
 	prog.Total += len(models)
 	s.mu.Unlock()
 	defer func() {
@@ -3027,15 +3038,15 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	var wg sync.WaitGroup
 	for i, m := range models {
 		wg.Add(1)
-		go func() {
+		go func(legIdx int) {
 			defer wg.Done()
-			defer func() {
-				s.mu.Lock()
-				prog.Done++
-				s.mu.Unlock()
-			}()
 			label := m.model + "@" + m.provider
 			resp, calls, err := client.QueryWithTools(ctx, m.model, system, text, tools, exec.Execute, 0)
+			s.mu.Lock()
+			prog.Done++
+			prog.Legs[legIdx].Done = true
+			prog.Legs[legIdx].Error = err != nil
+			s.mu.Unlock()
 			if err != nil {
 				results[i] = PanelResult{Model: label, Error: err.Error(), ToolCalls: calls}
 				return
@@ -3046,7 +3057,7 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 				OutputTokens: resp.OutputTokens, Escalations: resp.Escalations,
 				RequestSHA16: resp.RequestSHA16, RequestBytes: resp.RequestBytes,
 			}
-		}()
+		}(legBase + i)
 	}
 	wg.Wait()
 
@@ -3898,6 +3909,28 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 	for _, meta := range s.runs {
 		if !meta.finished {
 			running = append(running, meta.workstreamID)
+		}
+	}
+	// Advisory slash consults (/panel, /vision, /preview) hold no run-table
+	// entry but keep the workstream just as busy for minutes: count them as
+	// running so the sidebar dot, the "still running" activity line, and
+	// the StatusBar background chip light during the consult (display-only
+	// consumers). Conversation lookups are best-effort, mirroring the
+	// parked-goals loop below.
+	for convID := range s.slashing {
+		c, err := s.store.GetConversation(ctx, convID)
+		if err != nil {
+			continue
+		}
+		dup := false
+		for _, id := range running {
+			if id == c.WorkstreamID {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			running = append(running, c.WorkstreamID)
 		}
 	}
 	// M12 (D-auto): scheduled auto-distills (composer countdown chip) and

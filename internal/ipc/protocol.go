@@ -292,6 +292,21 @@ type WikiNoteInfo struct {
 type PanelProgress struct {
 	Done  int `json:"done"`
 	Total int `json:"total"`
+	// Per-leg detail registered at fan-out (one row per model, in prefs
+	// order): the GUI's status card shows who is still out, who is back,
+	// and who errored instead of a bare N/M tally. Append-only for the
+	// entry's lifetime; concurrent panels on one conversation append to
+	// the shared entry.
+	Legs []PanelLeg `json:"legs,omitempty"`
+}
+
+// PanelLeg is one model's slot in a /panel fan-out. Done flips when the
+// leg answers — answer or error (Error distinguishes those); Total/Done
+// on PanelProgress stay the summary of the same transitions.
+type PanelLeg struct {
+	Model string `json:"model"`
+	Done  bool   `json:"done"`
+	Error bool   `json:"error,omitempty"`
 }
 
 // Response is one result line on the socket. Fields are present only when
