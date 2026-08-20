@@ -296,6 +296,9 @@ func recallSiblingNote(ctx context.Context, st *store.Store, projectRoot, curren
 		if err != nil {
 			continue // note vanished between glob and read: skip it
 		}
+		if strings.HasPrefix(string(content), supersededBanner) {
+			continue // merged into topics: the topic-layer push already covers its facts
+		}
 		matched := noteMatches(string(content), base, terms)
 		if len(matched) == 0 {
 			continue

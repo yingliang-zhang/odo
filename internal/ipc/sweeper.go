@@ -21,10 +21,17 @@ package ipc
 // Every decision logs an audit line (sweeper: ...). The sweeper runs once at
 // daemon startup: single-daemon-per-project means "no in-memory runs yet" is
 // exact, and the grace covers the create→insert crash window against a
-// daemon booting right after its own crash. Legacy odo/* branches are
-// retired at the end (merged-only delete): they only ever accumulated
-// accepted content, so -d loses nothing and the "cannot force update" accept
-// noise (F2) dies with them.
+// daemon booting right after its own crash. The same boot pass then ages
+// out .odo/sessions/<runID> and .odo/prompts/<runID>.txt. Normal-path
+// cleanup drops a run's transcript dir with it (retireRun); prompt
+// captures deliberately survive until boot (they are the audit surface
+// for what the agent was shown), so everything the sweeper finds is
+// dead-run residue from a previous lifetime — kept one grace window (a
+// just-orphaned wrapper may still be draining), reclaimed after. Legacy
+// odo/*
+// branches are retired at the end (merged-only delete): they only ever
+// accumulated accepted content, so -d loses nothing and the "cannot force
+// update" accept noise (F2) dies with them.
 import (
 	"context"
 	"log"
@@ -109,6 +116,15 @@ func (s *Server) SweepOrphanWorktrees(ctx context.Context) {
 		log.Printf("sweeper: worktree prune: %v", err)
 	}
 
+	// Sessions/prompts: retireRun drops these at accept/reject, so what's
+	// left at boot is crash residue of dead runs (their journal story is
+	// complete). Session dir mtimes lie — writes touch files INSIDE the
+	// dir, so age is taken from the newest entry within. The grace window
+	// covers a wrapper still draining into a fresh dir as the daemon
+	// comes back up.
+	s.sweepRunArtifactDir("sessions")
+	s.sweepRunArtifactDir("prompts")
+
 	// Retire legacy M11c workstream refs (F2). Merged-only: a divergent ref
 	// would be the only copy of unaccepted work — refuse and leave it.
 	branches, err := git.ListOdoBranches(s.projectRoot)
@@ -123,4 +139,63 @@ func (s *Server) SweepOrphanWorktrees(ctx context.Context) {
 		}
 		log.Printf("sweeper: retired legacy branch %s", b)
 	}
+}
+
+// sweepRunArtifactDir ages out one per-run artifact dir (.odo/sessions or
+// .odo/prompts) at daemon boot. Sessions normally die with their run via
+// retireRun — boot-time leftovers are crash residue. Prompts ride a whole
+// daemon lifetime as the "what the agent was shown" audit surface; boot
+// is where their retention ends. Either way: everything found here is at
+// least one lifetime old, so the grace window (not liveness) is the keep
+// rule, and age = newest mtime found one level deep so an appended
+// output.txt keeps its session dir fresh.
+func (s *Server) sweepRunArtifactDir(name string) {
+	root := filepath.Join(s.mgr.StateDir(), name)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("sweeper: read %s: %v", root, err)
+		}
+		return
+	}
+	reclaimed, kept := 0, 0
+	for _, e := range entries {
+		age := time.Since(newestMtime(filepath.Join(root, e.Name()), e))
+		if age < sweepOrphanGrace {
+			log.Printf("sweeper: keep %s/%s (inside grace window)", name, e.Name())
+			kept++
+			continue
+		}
+		log.Printf("sweeper: reclaim %s/%s (crash residue, past grace)", name, e.Name())
+		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+			log.Printf("sweeper: reclaim %s/%s: %v", name, e.Name(), err)
+		}
+		reclaimed++
+	}
+	if reclaimed > 0 || kept > 0 {
+		log.Printf("sweeper: %s — %d reclaimed, %d kept", name, reclaimed, kept)
+	}
+}
+
+// newestMtime walks path one level deep and returns the newest mtime seen
+// (the entry itself plus, for dirs, its immediate children).
+func newestMtime(path string, e os.DirEntry) time.Time {
+	newest, err := e.Info()
+	if err != nil {
+		return time.Time{}
+	}
+	t := newest.ModTime()
+	if !e.IsDir() {
+		return t
+	}
+	children, err := os.ReadDir(path)
+	if err != nil {
+		return t
+	}
+	for _, c := range children {
+		if ci, err := c.Info(); err == nil && ci.ModTime().After(t) {
+			t = ci.ModTime()
+		}
+	}
+	return t
 }

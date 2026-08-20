@@ -405,6 +405,15 @@ func TestNoDiffRunRetiresWorktree(t *testing.T) {
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Errorf("worktree %s still on disk after no-diff run", wtPath)
 	}
+	// The run's transcript dir retired with it; the prompt capture stays
+	// behind as the "what the agent was shown" audit record until the
+	// startup sweeper ages it out.
+	if _, err := os.Stat(filepath.Join(root, ".odo", "sessions", runID)); !os.IsNotExist(err) {
+		t.Errorf("session dir for %s still on disk after no-diff run", runID)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".odo", "prompts", runID+".txt")); err != nil {
+		t.Errorf("prompt capture for %s removed at retire — it must survive until boot sweep: %v", runID, err)
+	}
 	if n := len(rig.server.runs); n != 0 {
 		t.Errorf("server still tracks %d runs after no-diff completion", n)
 	}

@@ -222,6 +222,9 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 		if err != nil {
 			continue // note vanished between glob and read: skip it
 		}
+		if strings.HasPrefix(string(content), supersededBanner) {
+			continue // fully merged into topics by a curate pass: facts now ride the topic layer, injection would double-count them
+		}
 		notes = append(notes, note{
 			path: m, name: name, epoch: epoch,
 			content: string(content),

@@ -2676,7 +2676,7 @@ func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
 // the review already happened and the startup sweeper converges orphans.
 // Caller holds s.mu (via retireRunForDiff, or drainRun's no-diff path).
 func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT string) {
-	var wtPath, liveWT string
+	var wtPath, liveWT, closedRunID string
 	if runID, ok := s.byConv[conversationID]; ok {
 		if meta := s.runs[runID]; meta != nil {
 			if !meta.finished {
@@ -2688,6 +2688,7 @@ func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT
 				wtPath = meta.worktreePath
 				_ = s.adapterFor(meta.adapter).Close(ctx, runID)
 				delete(s.runs, runID)
+				closedRunID = runID
 			}
 		}
 		if liveWT == "" {
@@ -2704,6 +2705,24 @@ func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT
 	if wtPath != "" && wtPath != liveWT {
 		if err := s.mgr.Remove(wtPath); err != nil {
 			log.Printf("ipc: retire run: remove worktree %s: %v", wtPath, err)
+		}
+	}
+
+	// The run's transcript dir retires WITH it: everything of record was
+	// journaled before this point (the event stream per turn), and orphaned
+	// session dirs otherwise accumulate without bound within one daemon
+	// lifetime. The prompt capture deliberately STAYS until the startup
+	// sweeper — it is the codebase's post-completion audit surface for
+	// "what the agent was actually shown" (tests read it as ground truth),
+	// so a daemon lifetime of prompts is kept for forensics and aged out
+	// at boot. Only a run THIS call closed is collectible: a live run is
+	// mid-write, and a fallbackWT diff's adapter run id is unrecoverable
+	// from its worktree name (the startup sweeper reaps those orphans by
+	// age instead).
+	if closedRunID != "" {
+		sessionDir := filepath.Join(s.mgr.StateDir(), "sessions", closedRunID)
+		if err := os.RemoveAll(sessionDir); err != nil {
+			log.Printf("ipc: retire run: remove session dir %s: %v", sessionDir, err)
 		}
 	}
 }

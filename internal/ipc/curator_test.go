@@ -191,6 +191,110 @@ func TestCurateRewritesTopicPages(t *testing.T) {
 	}
 }
 
+// TestCurateSupersedeMergedNotes: the curator's "superseded" list stamps
+// the banner onto notes whose content made it into the written topics —
+// those notes then drop out of recall injection (facts ride the topic
+// layer) while staying on disk for citation liveness. A claim naming a
+// note that was never cited in the written bullets is silently refused
+// (merge coverage is falsifiable, never rubber-stamped), and a claim
+// naming a note outside the input window is refused the same way.
+func TestCurateSupersedeMergedNotes(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	// epoch-1 and epoch-2 are both cited in the stub output below; the
+	// claims also include a phantom note (never read) to pin gate (1).
+	setOneShotEnv(t, "ODO_CURATOR_OUTPUT", `{"topics":[
+	  {"title":"Authentication","slug":"authentication","bullets":["- JWT with refresh (main-epoch-1)","- TTL fifteen (main-epoch-2)"]}
+	],"superseded":["main-epoch-1","phantom-epoch-9"]}`)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	writeNote(t, root, "main-epoch-1", "# Epoch 1 (main)\n\nAuthentication uses JWT with refresh tokens.\n")
+	writeNote(t, root, "main-epoch-2", "# Epoch 2 (main)\n\nToken TTL set to 15 minutes.\n")
+
+	rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+
+	// Cited claim: banner stamped atop the note, content retained.
+	note := readFileStr(t, filepath.Join(root, "wiki", "main-epoch-1.md"))
+	if !strings.HasPrefix(note, supersededBanner) {
+		t.Errorf("main-epoch-1 not stamped as superseded:\n%s", note)
+	}
+	if !strings.Contains(note, "JWT with refresh") {
+		t.Errorf("stamping rewrote note content:\n%s", note)
+	}
+	// Phantom claim (never read this pass): unstamped, untouched.
+	if _, err := os.Stat(filepath.Join(root, "wiki", "phantom-epoch-9.md")); !os.IsNotExist(err) {
+		t.Error("phantom supersede claim created a note file")
+	}
+
+	// The marker carries the stamped list.
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	found := false
+	for _, ev := range events {
+		if ev.Type == store.EventReviewAction && strings.Contains(string(ev.Payload), `"superseded":["main-epoch-1"]`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("curate marker missing superseded:[main-epoch-1]")
+	}
+
+	// Recall no longer injects the stamped note; the unstamped one stays.
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "how does auth work?"})
+	recall := recallPathsFromEvent(t, sent.Event)
+	for _, p := range recall {
+		if strings.HasSuffix(p, "main-epoch-1.md") {
+			t.Errorf("superseded note still injected: %v", recall)
+		}
+	}
+	hasEpoch2 := false
+	for _, p := range recall {
+		if strings.HasSuffix(p, "main-epoch-2.md") {
+			hasEpoch2 = true
+		}
+	}
+	if !hasEpoch2 {
+		t.Errorf("unstamped main-epoch-2 missing from recall: %v", recall)
+	}
+}
+
+// TestCurateSupersedeRequiresCitation: a supersede claim for a note that
+// IS in the input but never cited in the written bullets is refused —
+// without coverage evidence, stamping would drop its facts from recall
+// forever with nothing replacing them.
+func TestCurateSupersedeRequiresCitation(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, curatorFlowWrapper))
+	setOneShotEnv(t, "ODO_CURATOR_OUTPUT", `{"topics":[
+	  {"title":"Authentication","slug":"authentication","bullets":["- JWT with refresh (main-epoch-1)"]}
+	],"superseded":["main-epoch-2"]}`)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	writeNote(t, root, "main-epoch-1", "# Epoch 1 (main)\n\nJWT auth.\n")
+	writeNote(t, root, "main-epoch-2", "# Epoch 2 (main)\n\nToken TTL fifteen.\n")
+
+	rig.call(t, Request{Cmd: CmdCurate, ProjectRoot: root, ConversationID: convID})
+
+	note := readFileStr(t, filepath.Join(root, "wiki", "main-epoch-2.md"))
+	if strings.HasPrefix(note, supersededBanner) {
+		t.Errorf("uncited note stamped as superseded:\n%s", note)
+	}
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	for _, ev := range events {
+		if ev.Type == store.EventReviewAction && strings.Contains(string(ev.Payload), `"action":"curate"`) &&
+			strings.Contains(string(ev.Payload), "superseded") {
+			t.Errorf("marker carries a refused supersede claim: %s", ev.Payload)
+		}
+	}
+}
+
 // TestCurateGeneration2Rule: a pre-existing wiki/topics/old.md is removed on
 // the next pass, and the rewritten pages carry only what the source notes
 // said — the curator never reads the previous topic page (generation-2

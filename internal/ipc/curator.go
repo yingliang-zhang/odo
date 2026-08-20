@@ -161,7 +161,7 @@ func curatorPrompt(notes []epochNote) string {
 	b.WriteString(`You are running odo's memory curator pass. Synthesize the epoch notes below into topic pages — one per topic area (e.g., "authentication", "build-system", "testing").
 
 Output JSON ONLY (no prose, no markdown fence), exactly this shape:
-{"topics":[{"title":"<Topic Title>","slug":"<topic-slug>","bullets":["- <statement> (main-epoch-3)","- <statement> (ui-epoch-2)"]}]}
+{"topics":[{"title":"<Topic Title>","slug":"<topic-slug>","bullets":["- <statement> (main-epoch-3)","- <statement> (ui-epoch-2)"]}],"superseded":["<note-name>"]}
 
 Rules:
 - Each topic groups related decisions across workstreams and epochs.
@@ -170,6 +170,7 @@ Rules:
 - The slug is lowercase, hyphenated, no spaces (e.g., "authentication").
 - Do NOT copy previous topic pages — write from the source notes only (generation-1).
 - 3-10 topics is typical; fewer for small projects.
+- "superseded" (optional): note names whose durable content is now FULLY represented in the topic bullets you wrote. List a note ONLY when at least one bullet cites it — the daemon verifies this and stamps those notes out of active recall (they stay on disk for citation liveness and pull-based reads). Prefer consolidating many small old notes over leaving them half-merged. Omit the field entirely when nothing qualifies.
 
 === EPOCH NOTES (newest-first) ===
 `)
@@ -190,6 +191,11 @@ type topic struct {
 // curatorResult is the JSON object the curator one-shot must emit.
 type curatorResult struct {
 	Topics []topic `json:"topics"`
+	// Superseded names epoch notes the curator asserts are fully merged
+	// into this pass's topics. The daemon re-verifies every claim against
+	// the WRITTEN bullets before stamping (a note named but never cited
+	// drops out silently — asserted merge coverage is falsifiable).
+	Superseded []string `json:"superseded"`
 }
 
 // validTopics filters the curator's topic list to the pages that actually
@@ -670,6 +676,12 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 		return fail(fmt.Errorf("curate: %w", err), "write error: "+err.Error())
 	}
 
+	// Epoch→topic merge (P3): pages landed — now stamp the notes the
+	// curator declared fully merged. Stamping runs AFTER the writes so a
+	// failed pass never half-retires its sources, and BEFORE the marker so
+	// the journal records exactly which notes left active recall.
+	stamped := stampSupersededNotes(s.projectRoot, topics, res.Superseded, notesRead)
+
 	marker := map[string]interface{}{
 		"action":           "curate",
 		"topics":           len(topics),
@@ -677,6 +689,9 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 		"trigger":          trigger,
 		"notes_since_last": notesSince,
 		"gate":             "pass",
+	}
+	if len(stamped) > 0 {
+		marker["superseded"] = stamped
 	}
 	detail := fmt.Sprintf("rewrote %d topics + index", len(topics))
 	if len(stripped) > 0 {
@@ -740,6 +755,65 @@ func (s *Server) handleListTopics(ctx context.Context, req Request) (Response, e
 	}
 	sort.Slice(topics, func(i, j int) bool { return topics[i].Name < topics[j].Name })
 	return Response{WikiNotes: topics}, nil
+}
+
+// supersededBanner marks an epoch note as fully merged into topic pages.
+// The banner is a plain first-line blockquote so the note stays a legal
+// citation target (the M12 liveness gate resolves names on disk, never
+// content) while recall stops INJECTING it — its facts now live in the
+// topic layer. `odo wiki read <name>` still pulls the full text (drop
+// lines, not bytes).
+const supersededBanner = "> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.\n\n"
+
+// stampSupersededNotes writes the superseded banner onto epoch notes the
+// curator claimed as fully merged, returning the names ACTUALLY stamped.
+// A claim is honored only when both hold (falsifiable merge assert):
+//
+//  1. the named note was READ in this pass (a supersede claim for a note
+//     outside the input window is unverifiable), and
+//  2. the note is cited at least once in the WRITTEN (post-repair) topic
+//     bullets — if nothing made it into a page, the note is by definition
+//     not merged, and stamping it would silently drop its facts from
+//     every future prompt.
+//
+// Notes already carrying the banner are idempotently counted as stamped.
+// Write failures drop the name (the note just keeps being injected).
+func stampSupersededNotes(projectRoot string, topics []topic, claims []string, notesRead []map[string]string) []string {
+	cited := map[string]bool{}
+	for _, t := range topics {
+		for _, b := range t.Bullets {
+			for _, m := range wsEpochCiteRe.FindAllStringSubmatch(b, -1) {
+				cited[m[1]] = true
+			}
+		}
+	}
+	read := map[string]bool{}
+	for _, n := range notesRead {
+		read[n["name"]] = true
+	}
+	var stamped []string
+	seen := map[string]bool{}
+	for _, name := range claims {
+		if seen[name] || !read[name] || !cited[name] {
+			continue
+		}
+		seen[name] = true
+		path := filepath.Join(projectRoot, "wiki", name+".md")
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue // vanished between read and stamp: keeps being injected
+		}
+		if strings.HasPrefix(string(content), supersededBanner) {
+			stamped = append(stamped, name) // already stamped: reaffirm
+			continue
+		}
+		if err := writeFileAtomic(path, supersededBanner+string(content), 0o644); err != nil {
+			log.Printf("curate: stamp superseded %s: %v", name, err)
+			continue
+		}
+		stamped = append(stamped, name)
+	}
+	return stamped
 }
 
 // topicTitle reads the first "# "-prefixed line of a topic page, falling

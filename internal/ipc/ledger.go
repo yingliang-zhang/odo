@@ -243,12 +243,14 @@ func (s *Server) journalCurateLedger(ctx context.Context, conversationID int64, 
 //   - topics: how many topic pages were rewritten
 //   - notes read: how many epoch notes fed the curator
 //   - stripped citations: ghost-cited lines removed (M17 F4)
+//   - superseded: notes the curator declared fully merged (P3 merge)
 //   - trigger: manual / auto_notes / auto_age
 func curateLedgerMetrics(curateEv store.Event) []ledgerMetric {
 	var p struct {
 		Topics            int               `json:"topics"`
 		NotesRead         []json.RawMessage `json:"notes_read"`
 		StrippedCitations []string          `json:"stripped_citations"`
+		Superseded        []string          `json:"superseded"`
 		Trigger           string            `json:"trigger"`
 	}
 	_ = json.Unmarshal(curateEv.Payload, &p)
@@ -270,6 +272,14 @@ func curateLedgerMetrics(curateEv store.Event) []ledgerMetric {
 		metrics = append(metrics, ledgerMetric{
 			label: "ghost citations stripped",
 			value: strconv.Itoa(len(p.StrippedCitations)),
+			event: "review_action/curate",
+			seq:   curateEv.Seq,
+		})
+	}
+	if len(p.Superseded) > 0 {
+		metrics = append(metrics, ledgerMetric{
+			label: "notes superseded",
+			value: strconv.Itoa(len(p.Superseded)),
 			event: "review_action/curate",
 			seq:   curateEv.Seq,
 		})
