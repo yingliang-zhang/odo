@@ -21,6 +21,10 @@ import { Button } from "./ui/button";
 // Overflow: Curate, Pin, Wiki (opens panel), Ledger (opens panel).
 
 interface Props {
+  // Active project from the registry (falls back to the daemon's DB row).
+  // Rendered between the brand and the workstream so a multi-project
+  // window always names its context.
+  projectName: string | null;
   workstreamName: string | null;
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
@@ -109,6 +113,7 @@ function IconButton({
 }
 
 export default function TopBar({
+  projectName,
   workstreamName,
   sidebarCollapsed,
   onToggleSidebar,
@@ -183,6 +188,12 @@ export default function TopBar({
         {sidebarCollapsed ? <PanelLeft size={14} /> : <ChevronLeft size={14} />}
       </button>
       <span className="topbar-brand">Odo</span>
+      {projectName && (
+        <>
+          <span className="topbar-sep">·</span>
+          <span className="topbar-project">{projectName}</span>
+        </>
+      )}
       {workstreamName && (
         <>
           <span className="topbar-sep">·</span>

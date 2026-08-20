@@ -62,6 +62,47 @@ test("create new workstream via + button", async ({ page }) => {
   await expect(sidebar.locator(".ws-item", { hasText: "test-e2e-workstream" })).toBeVisible();
 });
 
+test("create input dismisses on click-away", async ({ page }) => {
+  const sidebar = page.locator(".sidebar");
+
+  await sidebar.getByText("+ New workstream").click();
+  const input = sidebar.locator(".ws-create input");
+  await expect(input).toBeVisible();
+
+  // Clicking anywhere outside the input must dismiss it — Esc alone is
+  // undiscoverable, and an accidental "+ New workstream" click must not
+  // leave a stuck row.
+  await page.locator(".app-topbar").click();
+  await expect(sidebar.locator(".ws-create input")).toHaveCount(0);
+});
+
+test("create input does not follow across project switch", async ({ page }) => {
+  const sidebar = page.locator(".sidebar");
+
+  // Open the create input under odo, then switch to supersplat-hdr.
+  await sidebar.getByText("+ New workstream").click();
+  await expect(sidebar.locator(".ws-create input")).toBeVisible();
+
+  // Name-anchored regex so the "Remove supersplat-hdr from list" action
+  // button doesn't match.
+  const hdrRow = sidebar.getByRole("button", { name: /^(Idle|Pending review) supersplat-hdr/ });
+  await hdrRow.click();
+  // The first click may only dismiss the input (popover-dismiss swallows
+  // the switch gesture) — a second click guarantees the root flip.
+  await hdrRow.click();
+  await expect(page.locator(".app-topbar")).toContainText("supersplat-hdr");
+
+  // The input died with the switch — it must not render under the new
+  // active project.
+  await expect(sidebar.locator(".ws-create input")).toHaveCount(0);
+
+  // And it stays gone when switching back.
+  const odoRow = sidebar.getByRole("button", { name: /review odo/ });
+  await odoRow.click();
+  await expect(page.locator(".app-topbar")).toContainText("odo");
+  await expect(sidebar.locator(".ws-create input")).toHaveCount(0);
+});
+
 test("rename workstream via hover action", async ({ page }) => {
   const sidebar = page.locator(".sidebar");
 

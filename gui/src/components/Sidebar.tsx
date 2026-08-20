@@ -250,6 +250,17 @@ export default function Sidebar({
     setCreateBusy(false);
   };
 
+  // The create row renders under whatever project is active
+  // (`isActive && creating`), so a half-open input would follow the user
+  // across projects on a root flip — kill it in the same commit as the
+  // switch instead.
+  useEffect(() => {
+    setCreating(false);
+    setNewName("");
+    setCreateError(null);
+    setCreateBusy(false);
+  }, [activeProjectRoot]);
+
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
     const name = newName.trim();
@@ -610,6 +621,10 @@ export default function Sidebar({
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); resetCreate(); } }}
+                    // Esc is undiscoverable — clicking away must also
+                    // dismiss the row, or an accidental click on
+                    // "+ New workstream" leaves a stuck input.
+                    onBlur={() => { if (!createBusy) resetCreate(); }}
                     placeholder={strings.sidebar.workstreamNamePlaceholder}
                     disabled={createBusy}
                     autoFocus

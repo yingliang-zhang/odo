@@ -321,6 +321,14 @@ body {
   color: var(--text-dim);
 }
 
+.topbar-project {
+  color: var(--text);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .topbar-workstream {
   color: var(--text-dim);
   max-width: 200px;

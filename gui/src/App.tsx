@@ -1643,6 +1643,11 @@ export default function App() {
         </div>
       )}
       <TopBar
+        projectName={
+          projects.find((p) => p.root === activeProjectRoot)?.name ??
+          project?.name ??
+          null
+        }
         workstreamName={workstream?.name ?? null}
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
         sidebarCollapsed={sidebarCollapsed}
