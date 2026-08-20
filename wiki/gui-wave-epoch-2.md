@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # GUI Wave B — Conversation Summary
 
 **Task:** Implement three GUI-only features (no daemon changes): context-pressure meter, per-turn stats strip, MoA panel picker. Sources: harness-gui-tri-model-audit §3 items #5/#8/#9 and audits-summary row #11.

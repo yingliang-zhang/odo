@@ -1,0 +1,7 @@
+# Memory Hygiene & Curator Supersede
+
+- P0 cleanup premise corrected by scout verification: the daemon never writes *-brief.md/*-output.md (in-memory moa.Query pipeline) — the 105 dead files were legacy manual-flow artifacts, so one-time deletion was the complete fix with no hook to add (main-epoch-6)
+- P1: sessions were never cleaned — OMP.Start creates .odo/sessions/<runID> + .odo/prompts/<runID>.txt and Close never deletes; retireRun now deletes the session dir and the boot sweeper ages out orphans; prompts must NOT be deleted at retire because TestFalseStopRetryConsumesSteers reads the original run's prompt as audit ground truth (main-epoch-6)
+- P2: memory/log.md folded 818→64 lines (Phase 1/2 summarized, Phase 3 kept verbatim), executed in the run worktree after an accidental main-repo fold was rolled back (main-epoch-6)
+- P3 supersede mechanism: the curator declares a superseded field; the daemon mechanically validates (name ∈ notesRead ∧ referenced by ≥1 written bullet) then atomically stamps a SUPERSEDED banner; the file stays on disk (citation liveness + `odo wiki read` intact), recall/recall_cross injection skips banner notes, and the curator input side deliberately still reads them because gen-2 topics rebuild from source notes each round (main-epoch-6)
+- Worktree reap already fired on accept via handleDiffAction → retireRunForDiff (pinned by TestVisibleLoopAcceptRejectRestore), with the boot sweeper converging crash-orphans (main-epoch-6)

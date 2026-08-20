@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # R-W1.5: Thread request receipts onto panel/review payloads
 
 ## Key decisions

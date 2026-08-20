@@ -1,47 +1,54 @@
-# Conversation Summary
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
 
-## Context
-Odo dev project (Tauri 2 + Go daemon + React GUI; repo `github.com/yingliang-zhang/odo`). Work happened across a run worktree (branch `odo/main` @ `ac8bed8`) and the main checkout `~/Projects/odo` (branch `main`). Session covered: status Q&A → repo rename + cleanup → full rollback → "missing output" diagnosis → /panel thinking-model failure fix → inventory of outstanding work.
+# Odo Maintenance & UI Session — Decisions and Changes
 
-## Key Decisions
+## Scope
 
-| # | Decision | Rationale / Evidence |
-|---|---|---|
-| 1 | **No merge needed** — `odo/main` fully contained in `main` (merge-base = `ac8bed8`; main strictly ahead) | Direction was reversed: worktree was the stale side |
-| 2 | **`odo/main` explained** — Odo-internal work branch with literal `/` in name (M11c): workstreams store bare `main`, git consumers prefix `odo/`; runs check out worktrees on it; accept lands on `main`, then `AdvanceBranch` fast-forwards `odo/main` | `internal/ipc/server.go:453`, `internal/git/git.go:41` |
-| 3 | **Op1+Op3 executed** from `docs/design/rename-install-cleanup-brief.md` ("先完成1，3"), Op2 (install .app) deferred | Brief had 3 numbered ops |
-| 4 | **Tauri bundle identifier kept** `com.yingliangzhang.odo` across rename | Bundle ID = macOS app identity; changing resets permissions/stores for zero value |
-| 5 | **Local dir `~/Projects/odo` NOT renamed** | 7 live worktrees + running daemon (PID 30215) reference the path |
-| 6 | **Historical docs/logs never rewritten** — corrections are appended | `memory/log.md` is append-only |
-| 7 | **Full rollback of the rename** after user said it was previously abandoned: `gh repo rename` back, `git revert --no-edit cb7bde4` → `753d553`, never history rewrite | Pushed `80bd148..a39825a`; gates re-run green (ipc 122.7s) |
-| 8 | **SUPERSEDED stamping** — `wiki/main-epoch-1.md` got a ROLLED BACK banner so future recall can't resurrect stale state |
-| 9 | **`journal.sqlite` reset deferred** — live daemon holds SQLite WAL; corruption risk. Manual: quit Odo, `rm .odo/journal.sqlite*` |
-| 10 | **"Missing output" = auto-distill epoch fold, not data loss** — prefs `auto_distill: on_idle / 60s / auto_curate_after_distill: true`; distill at 18:25:32 (seq 278) made `ChatSurface.tsx:456-466` filter `seq > lastDistillSeq`, hiding the rollback Q&A. Folded twice that day; first masked by a message 4s later |
-| 11 | **/panel root cause: `defaultMaxTok = 4096`** — thinking models (kimi-k3, deepseek-v4-flash) burn output budget on reasoning traces → `stop_reason=max_tokens`. Raised to **16384** |
-| 12 | **`TestVisibleLoopAcceptRejectRestore` FAIL = pre-existing bug, not the fix** — test lacks `t.Setenv("HOME", t.TempDir())`; `readUserMemory()` injected real `~/.odo/user.md` into the stubbed prompt, breaking `hello.txt == msg1`. Verified: passes with isolated HOME |
+Session covered three workstreams: (1) executing a hygiene/lifecycle optimization plan (P0–P3) on the odo daemon and its memory/wiki stores, (2) diagnosing phantom-project and running-badge cross-talk bugs in the GUI, (3) UI polish on the composer area (alignment, spacing, floating style).
 
-## Code Changes
+## Key decisions
 
-| Change | Files | Commit / State |
-|---|---|---|
-| Module path `odo`→`odo-agent` (go.mod + 15 Go files, 26 lines) | `go.mod`, `internal/**`, `main.go` | `cb7bde4` pushed → **reverted** by `753d553` |
-| Log rename + cleanup; log rollback | `memory/log.md` | `80bd148`, `a39825a` pushed |
-| **`defaultMaxTok` 4096→16384** (+ comment on thinking-model budget) | `internal/moa/client.go` | Accepted via GUI → `1de583c odo: accept diff #1` on `main`, **unpushed** |
-| Cleanup: 6 stale session+prompt pairs deleted (live session kept), `gui/dist`, `gui/test-results` removed, `daemon.log` truncated | filesystem | done (wiki/ + ledger.md already absent) |
-| SUPERSEDED/ROLLED BACK annotations | `wiki/main-epoch-1.md` | done |
-| HOME-isolation fixes for 15 run-loop tests lacking `t.Setenv("HOME", …)` (`TestSteering`/`TestCancelRun` need per-subtest) | `internal/ipc/*_test.go` | identified at cutoff; edits reported landed in `7559f7d`/`ac8bed8` vicinity |
+**Plan premise corrections (scout-verified before coding).** Two premises of the original optimization plan were disproved against code:
 
-**Self-caused incident (repaired):** bulk sed traversed `.odo/worktrees/*`, rewriting all 7 worktree checkouts; reverse-substitution also corrupted line 47 of the brief `.md` in each. All restored; every worktree verified `git status` clean. Lesson distilled into memory/skill proposals (scoped replacement via `git ls-files`).
+| Claimed gap | Verified reality |
+|---|---|
+| Orchestrator leaves `*-brief.md` / `*-output.md` after consuming; needs deletion hook | Daemon never writes these files (in-memory `moa.Query` pipeline). The 105 dead files were legacy manual-flow artifacts — one-time deletion is the complete fix; no hook exists to add |
+| Worktree reap only fires on no-diff | Already implemented: `handleDiffAction:2646` → `retireRunForDiff`, pinned by `TestVisibleLoopAcceptRejectRestore`. Boot sweeper converges crash-orphans |
+| Sessions never cleaned | **Real gap**: `OMP.Start` creates `.odo/sessions/<runID>` + `.odo/prompts/<runID>.txt`, `Close` never deletes (source of 331 session dirs) |
 
-**Fix verification (live gateway):** grounded 3-model fan-out at 16384 — all `end_turn`; output tokens 7325/8076/8550 (all > 4096, proving the old cap fundamentally insufficient). Earlier 4096 repro showed non-deterministic truncation (2890 tokens that run).
+**P1 design constraint discovered via regression**: prompt files must NOT be deleted at retire — `TestFalseStopRetryConsumesSteers` reads the original run's prompt as audit ground truth. Session dirs delete at retire; prompts converge via boot sweep only.
 
-## Open Questions / Pending
+**P3 supersede mechanism**: curator declares a `superseded` field; daemon mechanically validates (name ∈ `notesRead` ∧ referenced by ≥1 written bullet) then atomically stamps a SUPERSEDED banner on the note. File stays on disk (citation liveness gate + `odo wiki read` intact); recall/recall_cross injection skips banner notes; curator input side deliberately still reads them (gen-2 topics rebuild from source notes each round — excluding would erase facts).
 
-1. **Epoch-fold UX** — options unselected: A) `auto_distill: never`; B) empty-state distinguishes "new" vs "folded to wiki" + click-through; C) distill toast noting the fold.
-2. **`journal.sqlite` reset** — still manual, needs Odo fully quit.
-3. **`1de583c` push** — `main` is 1 ahead of origin; user to decide.
-4. **Uncommitted wiki restructure** in main checkout (10 files: index rewritten to new slugs, old topics merged/renamed — curator-shaped) — commit or discard?
-5. **/panel grounded consolidation** — the Hermes-comparison question (GUI / auto distill / auto curate / schema, `~/.hermes/hermes-agent/`) was re-run at 16384 with grounded context; answers captured in `/tmp/odo-panel/resp_*_16384.json` but **not yet presented/consolidated**. glm-5.2 needs file-pasted grounding (no tool access) for non-generic answers.
-6. **`odo/main` drift** — 6+ commits behind `main`; deliberately left for Odo's accept flow to fast-forward.
-7. **Earlier anomalies (uninvestigated)**: `agent_error` exit 127 (`omp: command not found`), one `agent_text` containing raw session JSON, 401 auth error.
-8. **Distilled skills pending acceptance**: `scoped-bulk-replacement`, `rollback-pushed-change`, `diagnose-folded-epoch`, `reset-odo-journal-safely`, `rename-github-repo-and-go-module` (reviews mostly ACCEPT; two needed wording fixes — verification step contradicting commit-later ordering).
+**Deployment conventions applied**: replace binaries before kill (`0ebc5dcb…` from HEAD `7b625c3`); use external `/bin/kill` (shell builtin refuses); `ensure_daemon_running` auto-respawns daemons from fresh binaries; GUI restart only needed when `gui/src` or `src-tauri` changed.
+
+## Code changes (all landed or pending as diffs under review)
+
+**Diff #16 (accepted)** — 10 files, 1332 lines:
+- P0: runtime cleanup of 105 dead `*-brief.md` files + orphan worktree `6a85ca6b`.
+- P1: `retireRun` deletes session dir; boot sweeper ages out orphan sessions/prompts; new sweeper aging test.
+- P2: `memory/log.md` folded 818 → 64 lines (Phase 1/2 summarized, Phase 3 kept verbatim); done in run worktree after an accidental main-repo fold was rolled back.
+- P3: curator `superseded` declaration + daemon double-validation + banner stamping + recall injection skip; tests for phantom/unreferenced declarations. Auto-land was blocked `protected_path` (touched `internal/ipc/ledger.go`, fail-closed); manually accepted.
+
+**Registry/cross-talk fix (PENDING diff `6a86673a-84b998603453.diff`)** — 6 files:
+- `gui/src/App.tsx`: `resetProjectAggregates` clears 6 project-level aggregate states on root switch + immediate re-fetch; mid-flight root check in `refreshPendingCounts`.
+- `gui/src/dev/fixtures.ts` + `mock-invoke.ts`: per-root `countsByRoot` overrides.
+- `gui/e2e/sidebar.spec.ts`: id-collision regression test (mutation-tested: fails without the App.tsx fix).
+- `internal/ipc/registry.go`: `isLinkedGitWorktree` guard — `.git` file pointing at `/.git/worktrees/` → refuse auto-registration (submodule `.git/modules/` still allowed); unit tests including submodule pass.
+
+**Diff #18 (accepted)** — composer UI, 5 files: container `flex flex-col gap-1.5`; removed SteerQueue `mx-4` (32px misalignment); added existing `shadow-soft` token to input form + both queue cards; stripped self-margins from AutoDistillChip/QueueDock/LoopChip/attachment chips/composer-hint. Browser-verified: all boxes `x=256/w=1008`, uniform 6px gaps, shadows rendered.
+
+## Verified facts about incidents
+
+- **Phantom tmp project**: `tmp.eUnKPPwpbm` (mktemp git repo) was auto-registered by `ensureProjectRegistered`; 5s `pending_counts` polling on dead socket respawned its daemon. Broken via sidebar remove-project (M11 F8 escape hatch) at 10:22:20; final stray daemon killed, no respawn.
+- **`ui-message-stream`**: not a phantom — a real sibling git worktree that got registered; old guard only recognized `<project>/.odo/worktrees/*` shapes.
+- **Running-badge cross-talk**: pure frontend bug; state keyed by workstream id (ids restart at 1 per journal) was not cleared on project switch → false "running" for up to ~6s (4 poll ticks). Daemon data verified correct.
+- **Learner pipeline self-healed**: `.odo/memory.md` now landing on disk.
+- Verification totals: e2e 113/113, vitest 97/97, `tsc --noEmit` clean, Go build/vet/tests green; `internal/ipc` full suite passed 3 consecutive rounds (~400s each) plus clean baseline.
+
+## Open loops
+
+- Accept pending diff `6a86673a-84b998603453.diff` (cross-talk fix + registry guard) — not yet in main; verify gate will re-run suites on accept.
+- Rebuild and restart after that accept: GUI (`npm run build` + tauri build → `/Applications/Odo.app`, currently 8-19 23:45 build missing both UI diffs) and both Go binaries (`~/Projects/odo/odo`, `~/.odo/bin/odo`, currently 10:12 builds missing the registry guard), then restart app.
+- Decide disposition of the `ui-message-stream` project: remove-project in sidebar if unwanted (stops the 5s polling keeping daemon 85177 alive); the registry guard prevents re-registration but does not clean existing rows, so the row must be removed manually once. Worktree directory and branch disposition is the user's call.
+- Unexplained flake: first `go test ./internal/ipc/` round during #16 verification FAILED with truncated output (test name unrecoverable); three later rounds + baseline passed and the accept gate re-ran clean, but root cause was never identified.

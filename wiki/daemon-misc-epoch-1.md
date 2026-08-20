@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Conversation Summary
 
 ## Task 1: Audit — visible⟺logged residual (A-P0 #2)

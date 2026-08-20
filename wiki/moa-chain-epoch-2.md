@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Session Summary — R-W4: Design-MoA Consolidator + Blind Proposal Legs
 
 ## Task

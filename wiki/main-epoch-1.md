@@ -1,45 +1,50 @@
-# Odo Session Summary — 2026-08-09
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
 
-> **SUPERSEDED 2026-08-09 (later session)**: Op1 repo rename `odo` → `odo-agent` was **fully rolled back** — user had previously abandoned the rename. GitHub repo back to `yingliang-zhang/odo`, origin URL restored, `cb7bde4` reverted (`753d553`), pushed (`a39825a`). Module path is `github.com/yingliang-zhang/odo` everywhere. Treat all "renamed to odo-agent" statements below as reverted history, not current state.
+# M19 `/loop` implementation — session snapshot
 
-## Context
+Implementing M19 `/loop` in the odo repo per `docs/milestones/m19-loop.md` and `docs/design/loop-design-lock.md`. The lock is the contract: C1–C12 base + V1–V13 verdicts, TDD against ~26 listed Go tests, mechanical extractions first with existing tests as regression witnesses, slash autocomplete (V13) and Tauri notification (V11) in scope.
 
-Working from Odo worktree `.odo/worktrees/6a7852d9-a17635c225c6` on branch `odo/main` (`ac8bed8`). Two earlier Q&A turns established:
+## Key decisions
 
-1. **Branch topology**: 2 local branches (`main`, `odo/main`) + 1 remote (`origin/main`). `odo/main` is Odo's internal work branch (M11c design) — workstreams store bare name `main`, git consumers prefix `odo/`; every run worktree checks out `odo/main` (`CreateWorktreeOnBranch`, `git worktree add -B odo/main`); accept lands on `main` then `AdvanceBranch` fast-forwards `odo/main`.
-2. **Merge direction**: `odo/main` was fully contained in `main` (0 ahead, 5 behind). No merge needed; main was strictly ahead with IME/PATH/SUDO_CODING_KEY fixes.
+- **Mode A precedent**: `settle.go` auto-revise ladder is the architectural template for the loop drivers.
+- **V12 model override lever**: `NewOMPForKey(stateDir, "loop_implementer")` plus a coding-model fallback in the adapter package; loop accepts run under a distinct adapter key.
+- **Autonomy exclusion**: explicit `loopActor` filter so loop-generated accepts never count as human accepts in autonomy metrics.
+- **Loop id sourcing**: derived from the started journal row's seq, not from the payload.
+- **Tick/liveness protocol**: single owner map with explicit handoff to driver goroutines — replaced a first draft where the audit goroutine released ownership after ticking (would stall).
+- **Tick sequencing in drainRun**: tick must fire *after* the ladder's `maybeAutoLand` completes, not beside it, on both diff-bearing and no-diff paths.
+- **Visibility contract**: replay skip for loop kinds, distill tombstone render, `originGoal` skip in fold/render — multi-KB loop payloads must not leak into fold/render paths.
+- **`launchAuditRound`**: takes a proper `conversationID` param; garbage guards removed.
+- **Settings**: `loop_notify_on_complete` pref exposed read-only for the GUI (V11 base).
 
-## Key Decisions (executed: Op1 + Op3 of `rename-install-cleanup-brief.md`, Op2 deferred)
+## Code changes
 
-| Decision | Rationale |
-|---|---|
-| ~~GitHub rename `odo` → `odo-agent` via `gh repo rename` (API)~~ **ROLLED BACK** (`753d553` + `gh repo rename odo`) | User decision: rename had been abandoned; rolled back in full |
-| Keep tauri identifier `com.yingliangzhang.odo` | Bundle identifier is macOS app identity, not repo name; changing it resets permissions + Tauri stores for zero value |
-| Do NOT rename local dir `~/Projects/odo` | 7 live worktrees + running daemon reference the path; cosmetic change not worth the risk |
-| Leave historical docs/logs untouched (`memory/log.md`, session prompts, brief text) | Don't rewrite history; only functional references updated |
-| Defer `journal.sqlite` reset | Live daemon (PID 30215) holds SQLite WAL; this session writes it in real time — deleting now would corrupt running state |
+1. **Mechanical extractions (witness-guarded)**
+   - `runVerifyGate` extracted from autoland.go verify/land path — byte-identical behavior.
+   - `runDesignMoa` extracted from `handleDesignMoa`.
+   - Full suite green after both (26.7s).
+2. **store package**: `DiffRange` helper added; `CurrentSHA` completed (an edit truncated it mid-function; repaired and verified).
+3. **adapter package**: OMP model override for key `loop_implementer` with coding fallback.
+4. **`loop_journal.go` (new)**: kinds, marker, prefs, spill, fold; `fixOutcome` lifecycle added after engine referenced it.
+5. **`loop.go` (new)**: `/loop` route, tick state machine, Mode A and Mode B drivers, recovery.
+6. **`loop_ctl.go` (new)**: status/stop/resume + `CmdLoopCtl`; tick/liveness rewrite (see decisions).
+7. **`server.go`**: `/loop` route, interleave hook, drainRun diff/no-diff branches with post-ladder tick.
+8. **`protocol.go`**: `CmdLoopCtl`, new `Request` fields, dispatch wiring.
+9. **Visibility edits**: replay skip, distill render, `originGoal` skip, autonomy `loopActor` exclusion.
+10. **Settings/GUI body**: `loop_notify_on_complete` pref.
+11. **`loop_test.go` (started, ~29.5KB)**: rig cloned from settle test patterns (stub mechanics, wait/poll helpers, prefs bootstrap) + pure-fold/parse table pins. Incomplete.
 
-## Code Changes
+Build is green (`go build` clean after fixing a `kind` shadow and an unused `events` var; two leftover garbage blocks self-reviewed and removed).
 
-**Op1 — rename (`cb7bde4`, pushed) — REVERTED by `753d553` (2026-08-09 later session):**
-- `git remote set-url origin git@github.com:yingliang-zhang/odo-agent.git`
-- `go.mod` module path + 15 Go files rewritten (`github.com/yingliang-zhang/odo` → `…/odo-agent`) — 16 files, 26 lines, import paths only
-- Gates: `go build` ✅, `go vet` ✅, `go test ./...` ✅ (ipc suite 123s)
+## Verification status
 
-**Op3 — cleanup (`80bd148`, pushed):**
-- Deleted 6 stale session+prompt pairs (preserved live session `6a7852d9-bd583ceb9585`), `gui/dist/`, `gui/test-results/`; truncated `daemon.log`
-- `wiki/` and `.odo/ledger.md` already absent
-- Logged both ops in `memory/log.md`
+- Baseline suite green before changes.
+- Suite green after extractions.
+- Compile green after full wiring.
+- M19 test suite **not yet run**; test file partially written at snapshot.
 
-**Incident (self-caused, repaired):** first bulk `sed` traversed `.odo/worktrees/*` and rewrote all 7 worktree checkouts; reverse-substitution also corrupted line 47 of the brief `.md` in each. All restored; every worktree verified `git status` clean.
+## Open loops
 
-## Open Questions / Pending
-
-1. **`journal.sqlite` reset — manual, needs Odo quit** (the one incomplete item):
-   ```bash
-   cd ~/Projects/odo && rm .odo/journal.sqlite*
-   ```
-   Bootstrap recreates an empty journal on next launch.
-2. **Op2 — release build + install to `/Applications`** — deferred by user.
-3. ~~Local dir rename `~/Projects/odo` → `odo-agent`~~ — moot; rename rolled back, everything stays `odo`.
-4. (Carried over) M7 GUI webview E2E (cua-driver) remains outstanding per log; `steering.txt` write path is dead code (Adapter interface not cleaned, per A2 brief RC8).
+- Finish `loop_test.go` (~28 pins planned; only rig + fold/parse tables written) and run the M19 suite plus full regression.
+- V13 slash autocomplete upgrade: GUI surface mapped by scout, implementation not yet done in this snapshot.
+- V11 Tauri notification: pref exposed read-only; GUI-side notification code not yet confirmed implemented.
+- `auto_land` blocked by auto_panel (`protected_path`) — needs human review/land decision.

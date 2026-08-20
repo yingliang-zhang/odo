@@ -1,13 +1,13 @@
 # Project Wiki Index
 
 ## Topics
-- Repo Rename and Rollback → topics/repo-rename-rollback.md
-- Epoch Folding and Auto-Distill UX → topics/epoch-folding.md
-- Panel Thinking-Model Token Cap → topics/panel-token-cap.md
-- Test HOME Isolation → topics/test-home-isolation.md
-- Branch Topology and Accept Flow → topics/branch-topology.md
-- Auto-Distill and Auto-Curate Pipeline Review → topics/memory-pipeline-review.md
-- Journal Database Reset → topics/journal-reset.md
-- Bulk Sed Worktree Incident and Distilled Skills → topics/bulk-sed-incident.md
-- Outstanding Work and Anomalies → topics/outstanding-work.md
-- Auto-Land Pipeline (M16) → topics/auto-land-pipeline.md
+- Auto-Land Pipeline & M20 Autonomy → topics/auto-land-pipeline.md
+- MoA Client Resilience & Wire Receipts → topics/moa-client-receipts.md
+- Design-MoA Pipeline (R-W4) → topics/design-moa.md
+- /loop Subsystem (M19) → topics/loop-subsystem.md
+- Panel & Advisory Slash Commands → topics/panel-advisory-slash.md
+- Daemon Robustness & Crash Recovery → topics/daemon-robustness.md
+- GUI Workstreams, Isolation & Surfacing → topics/gui-workstreams.md
+- Deployment Chain & Binary Lifecycle → topics/deployment-binary.md
+- Testing & Gate Conventions → topics/testing-conventions.md
+- Memory Hygiene & Curator Supersede → topics/memory-hygiene.md

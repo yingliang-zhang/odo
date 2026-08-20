@@ -1,0 +1,9 @@
+# Testing & Gate Conventions
+
+- Two pre-existing e2e failures blocked the auto-land verify gate: sidebar.spec copy drift on confirmRemoveTitle (fixed by importing strings from ../src/strings and deriving the label) and diff.spec clicking accept once when accept is intentionally a two-step flow (first click opens an inline commit-message editor prefilled 'odo: accept diff #N', second confirm sends accept_diff; badge-on-resolve is the documented intent) (main-epoch-5)
+- vitest must be run with the explicit gui/ directory — the repo root has no vitest config and mis-collects e2e specs (declared pre-existing; unit-test entry point still open) (main-epoch-8) (gui-wave-epoch-1)
+- playwright.config reuseExistingServer:true silently reused another worktree's vite dev server on port 1420, producing a false pass during verification; flipping to false (hard-fail on port conflict) recommended but left as a user decision (bug-fix-epoch-2)
+- bash tool cwd parameter is silently ignored (reported via report_issue) — commands must use explicit cd/git -C prefixes; the trap reproduced when git add landed in the session worktree instead of the pending one (main-epoch-8) (main-epoch-5)
+- E2E fixture placement: receipt/chat rows must not go into conv 1 — MessageBubble renders them as bubbles and badge text collides with diff.spec/review-inbox.spec assertions; conv 3 is the fixture conversation (gui-wave-epoch-1) (gui-wave-epoch-2)
+- Mock fidelity bug pattern: mock-invoke passed the fixture array by reference as running_workstreams, so in-place e2e mutation made it Object.is-equal to React state → bailout and permanently stale UI; mocks now copy arrays at the response edge (gui-wave-epoch-1)
+- Pre-existing gofmt debt in loop_audit.go/loop_journal.go is deliberately untouched across epochs; a stray untracked package-lock.json at the main checkout root (no root package.json) is left alone pending a cleanup decision (main-epoch-8) (UI-epoch-10)

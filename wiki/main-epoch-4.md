@@ -1,56 +1,54 @@
-# 会话总结 — Odo 状态盘点 → 改名回退 → Epoch 折叠诊断
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
 
-## 关键决策
+# M19 GUI Wave — /loop DESIGN-LOCK Items (V1, V13, V11)
 
-| # | 决策 | 依据/结果 |
-|---|---|---|
-| 1 | **无需 merge**:`odo/main` 完全包含于 `main`(0 领先/当时 5 落后） | merge-base = `odo/main` tip;main 多出的为 IME/PATH/`SUDO_CODING_KEY` 修复 |
-| 2 | **执行 GitHub rename `odo` → `odo-agent`**（后被回退） | 对照 `rename-install-cleanup-brief.md` Op1；用户事后声明早已放弃此改名 |
-| 3 | **Tauri identifier 保持 `com.yingliangzhang.odo`** | bundle ID 是 macOS 应用身份，改动会重置权限与存储，零收益 |
-| 4 | **本地目录 `~/Projects/odo` 不改名** | 7 个活跃 worktree + 运行中 daemon 引用该路径 |
-| 5 | **历史文档/日志一律不改**(append-only) | 只更新功能性引用 |
-| 6 | **journal.sqlite 重置推迟到 Odo 完全退出后** | 活跃 daemon(PID 30215）持有 SQLite WAL，强删即损坏 |
-| 7 | **回退用 `git revert --no-edit`，不改写历史** | `cb7bde4` → revert `753d553`;`80bd148` 作为历史保留 |
-| 8 | **回退后在 wiki 笔记顶部标 SUPERSEDED / ROLLED BACK** | 防止未来召回复活过期结论（`wiki/main-epoch-1.md`) |
-| 9 | **"没看到输出" = epoch 折叠，非数据丢失** | auto-distill 完成后 `ChatSurface` 只显示 `seq > lastDistillSeq`；输出完整在 journal |
+## Context & key decisions
 
-## 代码/仓库变更
+Goal: implement the three remaining DESIGN-LOCK GUI items for `/loop` as a GUI-only diff. Daemon contract (commit `042ab4b`, "odo: accept diff #3") treated as authoritative — no Go files touched; the daemon fold was mirrored, not modified.
 
-**主线提交（均已推送）:**
+Daemon fold semantics recovered from `internal/ipc/loop_journal.go` and mirrored exactly:
 
-| Commit | 内容 | 状态 |
-|---|---|---|
-| `cb7bde4` | Go module path `odo` → `odo-agent`(go.mod + 15 Go 文件，共 26 行） | ❌ 已被 revert |
-| `80bd148` | memory/log.md 记录 rename + Op3 清理 | ✅ 保留（append-only) |
-| `753d553` | `git revert cb7bde4`，模块路径恢复 `github.com/yingliang-zhang/odo` | ✅ |
-| `a39825a` | log.md 追加回退条目 | ✅ |
+- `loop_started` carries `loop_id: 0` — the loop's ID is its journal **seq**.
+- `loop_budget_exceeded` folds to `status=suspended, cause=budget_exceeded`.
+- `review_action{accept|auto_land_blocked, actor:"auto_loop"}` closes fix phases (same-session attribution).
+- `notifiedKinds` dedups notification receipts; first journaled `notified` row for a terminal kind prevents re-fires.
+- Terminal kinds: `loop_completed | loop_stopped | loop_suspended | loop_budget_exceeded`.
+- `loop_completed` carries `rounds` (not `round`); findings count key is `findings_count`.
 
-**GitHub 侧：** repo `odo` → `odo-agent` → 回滚回 `odo`（两次 `gh repo rename`，旧 URL 均自动重定向）;origin URL 同步两次。
+Design choices:
 
-**Op3 清理（非提交）:** 删 6 个过期 session+prompt 对（保留活跃会话）、`gui/dist`、`gui/test-results`；截断 `daemon.log`;wiki/ 与 ledger.md 本已不存在。
+- **V1**: `deriveLoopStates` as a pure TS mirror of the Go fold; `LoopChip` styled after `AutoDistillChip`, re-deriving purely from the event stream (loops continue daemon-side while GUI is closed). `loop_event` rows render as one compact bookkeeping bubble, never agent text, and survive the distill fold filter.
+- **V13**: slash registry entries gain a `description` field; five `/loop` subcommand entries (audit|tasks|status|stop|resume); "/" at composer start opens the full list immediately; Up/Down + Tab/Enter + Esc keyboard model; accepted command renders as a background-pill token overlay (overlay `z-0`, textarea `z-10`, caret survives). Menu-open condition widened from `!val.includes(" ")` to a regex allowing `cmd` + one subcommand word; render gated on non-empty items.
+- **V11**: `@tauri-apps/plugin-notification` was already installed and registered (M3) — no new dependency; only wiring: `notifyLoopTerminal` helper + App-level derive watcher firing once per terminal kind, then journaling the receipt via `loop_ctl {action:"notified"}`. Honest limit kept: daemon never talks to the OS; firing requires the GUI open.
+- **Esc safety** (16 prior regressions): `.slash-menu` class registered in App.tsx's window-level Esc gate chain (same pattern as `.bg-runs-menu`) **and** `e.stopPropagation()` in the React `onKeyDown` Escape handler — both layers.
 
-**门禁：** rename 与 revert 后各跑一轮 `go build` + `go vet` + `go test ./...`，全绿（ipc 套件 ~123s)。
+## Code changes (13 files, staged in worktree)
 
-## 事故与修复
+| File | Change |
+|---|---|
+| `gui/src/loop.ts` | **New.** TS mirror of Go `deriveLoopStates`/`foldLoopRow`; terminalKinds first-sight tracking; `phase`/`loopMode` helpers |
+| `gui/src/loop.test.ts` | **New.** Table-driven vitest suite (20 tests): started→rounds→verdicts→suspended/completed/stopped, notifiedKinds dedup |
+| `gui/src/types.ts` | `loop_event` event union member + payload keys; compact system-bubble render case + fold filters |
+| `gui/src/components/LoopChip.tsx` | **New.** Mode, phase (seeding/auditing round N/fixing/suspended: cause/stopped/completed), round N/maxRounds (pref `loop_max_rounds`, default 10, display only), spent tokens; stop/resume → `loop_ctl` |
+| `gui/src/components/ChatSurface.tsx` | LoopChip integration; V13 registry + descriptions + Tab accept + token overlay |
+| `gui/src/components/MessageBubble.tsx` | Compact bookkeeping bubble case for `loop_event` rows |
+| `gui/src/App.tsx` | `.slash-menu` in Esc gate chain; `loopStates` derivation; notify watcher journaled via `loop_ctl notified`; ChatSurface prop pass |
+| `gui/src/notify.ts` | `notifyLoopTerminal` + `__odoLoopNotify` e2e seam; platform-gated lazy import (§3b posture, exception named) |
+| `gui/src/api.ts` | `loopCtl` client for cmd `loop_ctl` |
+| `gui/src-tauri/src/lib.rs` | Rust bridge command for `loop_ctl` |
+| `gui/src/dev/fixtures.ts`, `gui/src/dev/mock-invoke.ts` | Fixture/mock wiring for the loop e2e seams |
+| `gui/e2e/loop.spec.ts` | **New.** 7 playwright tests: autocomplete immediate full list + descriptions + keyboard nav + Esc-without-cancel; chip phase/round/spent + stop; notify mocked-fire + no re-fire with receipt |
 
-1. **bulk sed 越界**（自造成，已修复）：首轮替换 travers 了 `.odo/worktrees/*`，改写全部 7 个 worktree 副本；逆向替换又损坏每个 worktree 中 brief `.md` 第 47 行。全部恢复，逐目录验证 `git status` 干净 → 已蒸馏为 skill(scoped replacement / 用 `git ls-files` 圈定范围）。
-2. **早前异常**（日午间，未追查）:`agent_error` exit 127(`omp: command not found`)；一次 `agent_text` 输出为原始 session JSON;401 认证失败。
+## Verification state
 
-## 诊断结论（Epoch 折叠）
+- `npx tsc --noEmit` — clean. `cargo check --manifest-path gui/src-tauri/Cargo.toml` — clean. Full vitest suite — green.
+- `e2e/loop.spec.ts` first run: 4 passed / 3 failed. Root causes found and fixed: (1) menu open condition killed two-word commands; (2) `pickSlash` parked caret before the placeholder — `/loop tasks` registry args set to `""`, test types the space; (3) V11 fixture needed audit-round rows journaled (`rounds.length` is fold-truth). Fixed spec re-run passed; final full-suite e2e run was started but its result was cut off by session end.
+- **The diff did not land.** Auto-land was blocked: `auto_land_blocked, reason: verify_failed` (seq 1439). Verified against the repo: `main` HEAD is still `042ab4b`; the work survives **staged but uncommitted** in worktree `/Users/yingliangzhang/Projects/odo/.odo/worktrees/6a8514d2-d2401f305d79`.
 
-- 触发链：run 结束（18:23:46)→ +60s auto-distill(18:24:46)→ 完成（18:25:32)→ `review_action(distill)` seq 278 → GUI 隐藏 ≤278 全部事件（含回退问答 seq 179–275)。
-- 配置证实：`~/.odo/prefs.md` = `auto_distill: on_idle` / `60s` / `auto_curate_after_distill: true`，与两次折叠时间戳（18:19:49、18:25:32）精确吻合。
-- 机制代码：`ChatSurface.tsx:456-466`;auto-distill arm:`App.tsx:906-947`。
-- 当天折叠两次：第一次用户 4 秒后发新消息未察觉；第二次离场发生 → 本次疑问。
+Prior fail-open signal in the same stretch: repeated `auto_land_blocked, reason: protected_path` on `internal/ipc/autoland.go` (invariant 1: agents never write memory) before diff #3 was accepted — unrelated to this wave but the second recent auto-land friction point.
 
-## 开放问题
+## Open loops
 
-| 项 | 状态 | 备注 |
-|---|---|---|
-| Epoch 折叠 UX | ⏳ 等用户拍板 | 已给选项：A. `auto_distill: never`;B. 空态文案区分"全新 vs 已折叠到 wiki（可点击）";C. distill toast 注明已折叠 |
-| `journal.sqlite` 重置 | ⏳ 需手动 | 退出 Odo 后 `rm .odo/journal.sqlite*`,bootstrap 自动重建 |
-| Op2 /Applications 安装 | 先前推迟 | 但 18:01 出现新构建的 `/Applications/Odo.app` 并在运行 `[INFERENCE: 用户自行完成]` |
-| `odo/main` 落后 `main` 7 个提交 | 未处理 | 下次 accept 时 `AdvanceBranch` 自动快进 |
-| M7 GUI webview E2E(cua-driver) | 仍 outstanding | log 遗留项 |
-| `steering.txt` 死代码 | 未清理 | A2 brief RC8 注明，Adapter 接口未动 |
-| Hermes 对照评审（GUI / auto distill / auto curate / schema) | ⚠️ 不完整 | `/panel`:2/3 模型（kimi-k3、deepseek-v4-flash）在 4096 max_tokens 截断；glm-5.2 未访问到 Hermes 本地文件，只给了通用框架 —— 需要贴文件/截图后做 grounded 复审 |
+- Auto-land verify gate failure (`verify_failed`) is undiagnosed — the failed gate's logs were not surfaced in the transcript; determine which check failed (tsc/playwright gate or the truncated full e2e run) before re-landing.
+- M19 GUI diff needs review + manual land from worktree `.odo/worktrees/6a8514d2-d2401f305d79` (staged changes only, base `042ab4b`); confirm the full e2e suite (not just `loop.spec.ts`) is green at land time.
+- `/loop audit base=a97bd3d` was attempted, suspended (`subject_too_large`), and stopped by the user — the intended audit of the daemon contract diff never ran; if still wanted, restart with a narrowed subject.

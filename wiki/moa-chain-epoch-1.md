@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Conversation Summary
 
 Two landed work items from the odo harness resilience plan (2026-08-14 audit docs): **R-W1** (moa client resilience) and **R-W3** (learner/curator OMP→moa migration).

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Conversation Summary
 
 Two sequential GUI tasks delivered in the odo worktree, both guided by `docs/compare/harness-gui-tri-model-audit-2026-08-13.md` and `docs/design/odo-harness-audits-summary-and-plan-2026-08-14.md`. Neither committed.
