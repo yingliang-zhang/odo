@@ -46,6 +46,12 @@ import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { notifyRunDone, notifyLoopTerminal } from "./notify";
+import {
+  captureSwitchSnapshot,
+  mergeEvents,
+  rollbackView,
+  SwitchCache,
+} from "./switch_cache";
 import { deriveLoopStates, loopMode } from "./loop";
 import { derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
@@ -75,13 +81,6 @@ const POLL_BACKOFF_CAP_MS = 15_000;
 // grows a Restart daemon button.
 const POLL_FAIL_RESTART_THRESHOLD = 20;
 
-function mergeEvents(prev: OdoEvent[], next: OdoEvent[]): OdoEvent[] {
-  if (next.length === 0) return prev;
-  const seen = new Set(prev.map((e) => e.seq));
-  const fresh = next.filter((e) => !seen.has(e.seq));
-  if (fresh.length === 0) return prev;
-  return [...prev, ...fresh].sort((a, b) => a.seq - b.seq);
-}
 
 // M6: a note retraction rides memory_update{layer:"note", cause:"retract"}
 // with detail "<oldNote> contradicted by <newNote>: <snippet>".
@@ -271,6 +270,12 @@ export default function App() {
   // Project/workstream switch sequence: a newer switch bumps this so a
   // slower in-flight bootstrap can't resolve last and clobber newer state.
   const switchSeqRef = useRef(0);
+  // Repeat switches (stale-while-revalidate): per-conversation journal
+  // cache + workstream→conversation resolution. A cached target renders
+  // synchronously on click; the authoritative bootstrap merges on landing
+  // (the journal is append-only, so the seq-keyed union is lossless), and
+  // a bootstrap failure restores the pre-flip snapshot wholesale.
+  const switchCacheRef = useRef(new SwitchCache());
   // Read inside callbacks that must stay referentially stable (recordEvents
   // is a poll-effect dependency; a state dep would rebuild the interval).
   const workstreamNameRef = useRef<string | null>(null);
@@ -584,18 +589,47 @@ export default function App() {
     }
   }, []);
 
-  // Whole-context replacement: bootstrap (initial or workstream switch)
-  // returns the target conversation's full journal, which supersedes any
-  // events accumulated under the previous workstream.
+  // Whole-context replacement (cold path) or tail merge (repeat switch):
+  // bootstrap returns the target conversation's journal — full replay, or
+  // only the tail when the request carried a switch-cache hint — and the
+  // landing reconciles it with whatever is currently rendered.
   const applyBootstrap = useCallback(
-    (resp: BootstrapResponse) => {
+    (resp: BootstrapResponse, opts?: { defaultTarget?: boolean }) => {
       setWorkstream(resp.workstream ?? null);
       workstreamNameRef.current = resp.workstream?.name ?? null;
+      const cid = resp.conversation?.id ?? null;
+      // Record the resolution BEFORE refs flip below: the next switch here
+      // can then render from cache synchronously. `defaultTarget` (the
+      // request carried no workstream id, so the daemon resolved its own
+      // default) additionally records the project-default alias — keying
+      // it off the workstream NAME "main" would go stale on rename.
+      const rootNow = projectRootRef.current;
+      if (rootNow != null && resp.workstream != null && cid != null) {
+        switchCacheRef.current.record(rootNow, resp.workstream.id, cid, {
+          defaultTarget: opts?.defaultTarget,
+        });
+      }
+      // An optimistic (cached) switch set conversationRef to the target
+      // already, so a same-conversation landing MERGES instead of
+      // replacing: a poll that landed in the flip window may hold rows
+      // newer than this response's tail, and a replace would drop them
+      // while lastSeqRef had advanced past them — permanently lost rows.
+      const sameConv = cid != null && cid === conversationRef.current;
       setConversation(resp.conversation ?? null);
-      conversationRef.current = resp.conversation?.id ?? null;
+      conversationRef.current = cid;
       const evs = resp.events ?? [];
-      lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
-      setEvents(evs);
+      if (sameConv) {
+        // Pure updater (StrictMode double-invokes it) — no ref writes
+        // inside; lastSeqRef advances here from the same inputs.
+        lastSeqRef.current = Math.max(
+          lastSeqRef.current,
+          evs.reduce((max, e) => Math.max(max, e.seq), 0),
+        );
+        setEvents((prev) => mergeEvents(prev, evs));
+      } else {
+        lastSeqRef.current = evs.reduce((max, e) => Math.max(max, e.seq), 0);
+        setEvents(evs);
+      }
       setChatLoading(false); // history loaded (empty or not) — show welcome or content
       setAgentRunning(resp.agent_running ?? false);
       if (resp.agent_running) setTurnStartedAt(Date.now());
@@ -609,11 +643,10 @@ export default function App() {
       bootstrappedRef.current = false;
       prevDiffsCountRef.current = 0;
       setWikiFocus(null);
-      // chatLoading was set to false at line 519 — the skeleton is gone
+      // chatLoading was set to false above — the skeleton is gone
       // once bootstrap delivers the event history (empty or not).
       // DO NOT re-arm it here; that would overwrite the false and latch
       // the skeleton permanently (DSF final review finding).
-      const cid = resp.conversation?.id;
       if (cid != null) {
         void refreshWikiCount(cid);
         void refreshMemoryProposals(cid);
@@ -624,6 +657,17 @@ export default function App() {
     },
     [refreshWikiCount, refreshMemoryProposals],
   );
+
+  // Keep the repeat-switch cache warm with whatever is currently rendered
+  // (bootstrap replace/merge and poll appends all flow through here), so
+  // the next repeat switch can flip synchronously. Eviction drops
+  // references only — the daemon's journal stays the source of truth.
+  useEffect(() => {
+    const root = projectRootRef.current;
+    const cid = conversationRef.current;
+    if (root == null || cid == null) return;
+    switchCacheRef.current.warm(root, cid, events);
+  }, [events]);
 
   // M11 P1 (2026-08-20 cross-project running-state leak): sidebar badges,
   // running dots, parked/distill chips and the review inbox are keyed by
@@ -674,7 +718,7 @@ export default function App() {
         if (cancelled) return;
         setProject(resp.project ?? null);
         projectRootRef.current = resp.project?.root_path ?? null;
-        applyBootstrap(resp);
+        applyBootstrap(resp, { defaultTarget: true }); // workstreamless request
         if (resp.project) {
           const list = unwrap(await listWorkstreams(resp.project.root_path));
           if (!cancelled) setWorkstreams(list.workstreams ?? []);
@@ -911,6 +955,7 @@ export default function App() {
     async (text: string, attachments: string[], steer: boolean, park?: boolean) => {
       const cid = conversationRef.current;
       if (cid == null) throw new Error("no active conversation yet");
+      const root = projectRootRef.current;
       // M12: the daemon disarms/cancels auto-distill on send itself; the
       // chip just re-reads promptly.
       void refreshPendingCounts();
@@ -923,9 +968,16 @@ export default function App() {
           await sendMessage(cid, text, attachments, {
             steer,
             park,
-            projectRoot: projectRootRef.current ?? undefined,
+            projectRoot: root ?? undefined,
           }),
         );
+        // A switch flipped the view while the daemon journaled this send:
+        // the row belongs to the OLD conversation — merging it into the
+        // new view (and via the warming effect, its switch-cache entry)
+        // would be durable cross-journal contamination; each journal's
+        // seqs restart at 1. The poll loop reconciles the old view if the
+        // user switches back.
+        if (conversationRef.current !== cid || projectRootRef.current !== root) return;
         if (resp.event) recordEvents([resp.event]);
         // The daemon starts the agent synchronously inside send_message.
         // Steering journals a message for the running agent; parking only
@@ -1105,8 +1157,60 @@ export default function App() {
       const root = projectRoot ?? project?.root_path;
       if (workstreamId === workstream?.id && projectRoot === undefined) return;
       const seq = ++switchSeqRef.current;
+      // Stale-while-revalidate: a previously visited workstream renders its
+      // cached journal synchronously, then the authoritative bootstrap
+      // merges on landing. Refs flip in this same sync block so the next
+      // poll tick targets the new conversation/daemon immediately; the
+      // poll loop compares its captured (cid, root) against the live refs
+      // and discards anything fired under the old target.
+      // The snapshot + rollback below keep a FAILED bootstrap fully
+      // reversible — refs, journal, workstream attribution, and the root
+      // partition all return to the pre-flip view.
+      const snap = captureSwitchSnapshot(
+        switchCacheRef.current,
+        projectRootRef.current,
+        conversationRef.current,
+        lastSeqRef.current,
+      );
+      const prevWS = workstream;
+      const flip = root != null ? switchCacheRef.current.forWorkstream(root, workstreamId) : null;
+      // Computed at flip time, not in the catch: closure state
+      // (activeProjectRoot) there still reads the pre-flip value.
+      const rootFlipped = flip != null && root !== snap.root;
+      if (flip != null && root != null) {
+        projectRootRef.current = root;
+        conversationRef.current = flip.conversationId;
+        lastSeqRef.current = flip.journal.lastSeq;
+        setEvents(flip.journal.events);
+        setChatLoading(false);
+        // Transient stream chrome — the next poll refills it. Everything
+        // landing-scoped (diff/diffs/wikiFocus/bootstrapped/prevDiffsCount)
+        // stays UNTOUCHED here so a failed switch has nothing to restore;
+        // applyBootstrap resets it on landing as before.
+        setPreview(null);
+        setPanelProgress(null);
+        if (rootFlipped) {
+          setActiveProjectRoot(root);
+          resetProjectAggregates();
+          void refreshPendingCounts();
+        }
+        if (projectRoot === undefined) {
+          const wsRow = workstreams.find((w) => w.id === workstreamId);
+          if (wsRow) {
+            setWorkstream(wsRow);
+            workstreamNameRef.current = wsRow.name;
+          }
+        }
+      }
       try {
-        const resp = unwrap(await bootstrap(root, workstreamId));
+        // A warmed, untruncated cache lets the daemon replay only the tail
+        // (repeat switches no longer resend a months-long journal); a
+        // truncated cache or cold path replays fully and merges on landing.
+        const cached =
+          flip != null && !flip.journal.truncated
+            ? { conversationId: flip.conversationId, afterSeq: flip.journal.lastSeq }
+            : undefined;
+        const resp = unwrap(await bootstrap(root, workstreamId, cached));
         // A newer switch started while this bootstrap was in flight — its
         // state is newer, so drop this response entirely.
         if (seq !== switchSeqRef.current) return;
@@ -1134,10 +1238,29 @@ export default function App() {
         setError(null);
       } catch (e) {
         if (seq !== switchSeqRef.current) return;
+        if (flip != null) {
+          // The optimistic flip pre-empted the live view on a target whose
+          // daemon never answered — restore the old view wholesale:
+          // refs, rendered journal, workstream attribution, root partition.
+          // lastSeq clamps to the restored snapshot so the poll refetches
+          // anything the cache cannot show (rollbackView's contract).
+          const view = rollbackView(snap);
+          projectRootRef.current = snap.root;
+          conversationRef.current = snap.conversationId;
+          lastSeqRef.current = view.lastSeq;
+          setEvents(view.events);
+          setWorkstream(prevWS);
+          workstreamNameRef.current = prevWS?.name ?? null;
+          if (rootFlipped) {
+            setActiveProjectRoot(snap.root);
+            resetProjectAggregates();
+            void refreshPendingCounts();
+          }
+        }
         setError(`switch failed: ${errorMessage(e)}`);
       }
     },
-    [workstream?.id, project?.root_path, activeProjectRoot, applyBootstrap, resetProjectAggregates, refreshPendingCounts],
+    [workstream, workstreams, project?.root_path, activeProjectRoot, applyBootstrap, resetProjectAggregates, refreshPendingCounts],
   );
 
   // M11 P1: full re-bootstrap against another registry project — every
@@ -1149,8 +1272,38 @@ export default function App() {
     async (root: string) => {
       if (root === activeProjectRoot) return;
       const seq = ++switchSeqRef.current;
+      // Stale-while-revalidate, mirroring handleSwitchWorkstream: the
+      // target's default conversation (the alias recorded by a
+      // workstreamless bootstrap landing) renders from cache
+      // synchronously; bootstrap merges on landing, and a failure restores
+      // the pre-flip view from the snapshot. The workstream row itself is
+      // unknown until the landing, so neither workstream state nor
+      // workstreamNameRef is flipped or restored here.
+      const snap = captureSwitchSnapshot(
+        switchCacheRef.current,
+        projectRootRef.current,
+        conversationRef.current,
+        lastSeqRef.current,
+      );
+      const flip = switchCacheRef.current.forDefault(root);
+      if (flip != null) {
+        projectRootRef.current = root;
+        conversationRef.current = flip.conversationId;
+        lastSeqRef.current = flip.journal.lastSeq;
+        setEvents(flip.journal.events);
+        setChatLoading(false);
+        setPreview(null);
+        setPanelProgress(null);
+        setActiveProjectRoot(root);
+        resetProjectAggregates();
+        void refreshPendingCounts();
+      }
       try {
-        const resp = unwrap(await bootstrap(root));
+        const cached =
+          flip != null && !flip.journal.truncated
+            ? { conversationId: flip.conversationId, afterSeq: flip.journal.lastSeq }
+            : undefined;
+        const resp = unwrap(await bootstrap(root, undefined, cached));
         // A newer switch started while this bootstrap was in flight — its
         // state is newer, so drop this response entirely.
         if (seq !== switchSeqRef.current) return;
@@ -1161,7 +1314,7 @@ export default function App() {
         // flip (ids collide across projects), then repopulate from the new
         // daemon immediately instead of waiting out the 4-tick cadence.
         resetProjectAggregates();
-        applyBootstrap(resp);
+        applyBootstrap(resp, { defaultTarget: true }); // workstreamless request
         void refreshPendingCounts();
         if (resp.project) {
           const list = unwrap(await listWorkstreams(resp.project.root_path));
@@ -1171,6 +1324,16 @@ export default function App() {
         setError(null);
       } catch (e) {
         if (seq !== switchSeqRef.current) return;
+        if (flip != null) {
+          const view = rollbackView(snap);
+          projectRootRef.current = snap.root;
+          conversationRef.current = snap.conversationId;
+          lastSeqRef.current = view.lastSeq;
+          setEvents(view.events);
+          setActiveProjectRoot(snap.root);
+          resetProjectAggregates();
+          void refreshPendingCounts();
+        }
         setError(`project switch failed: ${errorMessage(e)}`);
       }
     },

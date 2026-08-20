@@ -290,7 +290,10 @@ func TestPhantomDiffVerdictBlocksAutoLand(t *testing.T) {
 	root := initRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "auto_apply: main\n")
+	// M20 arming gate: prefs without a review: line leave the pipeline
+	// unarmed (silent exit, zero journal) — arm it so the verdict gate is
+	// exercised. Same form as the landed autoland_test.go isolation fix.
+	writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
 	counter := filepath.Join(t.TempDir(), "invocations")
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, phantomDiffStub(counter)))
 	rig := startRig(t, root)

@@ -529,6 +529,13 @@ export const countsByRoot: Record<
 // runningWorkstreams; this covers the FOREGROUND case (steer/park mutex).
 export const runState = { foreground: false };
 
+// Switch-phase knobs (same pattern as runState): the switch cache's
+// stale-while-revalidate flip and failure rollback are only observable
+// while a bootstrap response is still in flight. delayMs holds the mock's
+// reply so a test can sample the pre-landing DOM deterministically; fail
+// rejects like an unreachable daemon ("bootstrap: connection refused").
+export const bootstrapCtl = { delayMs: 0, fail: false };
+
 // M7 preview knob (same pattern as runState): the mock's poll response
 // mirrors this so e2e can simulate a streaming in-flight block — never
 // journaled, replaced wholesale per poll like the daemon's.

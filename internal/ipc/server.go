@@ -579,7 +579,18 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 	if err != nil {
 		return Response{}, err
 	}
-	events, err := s.store.ListEvents(ctx, c.ID, 0)
+	// Repeat-switch hint: the GUI holds a cached full journal through
+	// req.AfterSeq for req.ConversationID. When the hint still resolves to
+	// the ACTIVE conversation, replay only the tail — switching back and
+	// forth no longer resends a months-long journal on every click. A stale
+	// hint (epoch fold replaced the conversation since, or plain garbage)
+	// falls back to the full replay; the GUI's merge is seq-keyed so an
+	// over-broad replay is deduped, never doubled.
+	after := 0
+	if req.AfterSeq > 0 && req.ConversationID != 0 && req.ConversationID == c.ID {
+		after = req.AfterSeq
+	}
+	events, err := s.store.ListEvents(ctx, c.ID, after)
 	if err != nil {
 		return Response{}, err
 	}
@@ -601,7 +612,8 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 // Odo's project rules as its system prompt. The content is derived from
 // .odo/memory.md (project behavior rules) and .odo/pins.md (user-authored
 // verbatim statements). If neither file exists, a minimal default is written.
-// AGENTS.md is overwritten on every bootstrap so it never drifts.
+// AGENTS.md is regenerated on every bootstrap so it never drifts, but the
+// file is only rewritten when the derived content actually changed.
 func (s *Server) generateAgentsMD() {
 	var b strings.Builder
 	b.WriteString("# AGENTS.md\n\n")
@@ -646,7 +658,14 @@ func (s *Server) generateAgentsMD() {
 		b.WriteString("\n\n")
 	}
 	agentsPath := filepath.Join(s.projectRoot, ".odo", "AGENTS.md")
-	if err := os.WriteFile(agentsPath, []byte(b.String()), 0o644); err != nil {
+	// Bootstrap runs on every project/workstream switch; skip the rewrite
+	// (and the mtime churn it triggers in file watchers — OMP included)
+	// when the derived content is identical.
+	out := b.String()
+	if existing, err := os.ReadFile(agentsPath); err == nil && string(existing) == out {
+		return
+	}
+	if err := os.WriteFile(agentsPath, []byte(out), 0o644); err != nil {
 		log.Printf("ipc: generate AGENTS.md: %v", err)
 	}
 }
@@ -1547,28 +1566,45 @@ func (s *Server) handleCancel(ctx context.Context, req Request) (Response, error
 
 // handlePollEvents drains finished-run adapter events into the journal,
 // extracts each run's diff once, then returns journal events after afterSeq.
+// The two-phase shape keeps s.mu off the trailing diff reads: latestDiffInfo
+// and pendingDiffInfos hit only the store and diff FILES (handleBootstrap
+// already calls both without s.mu), and at the 350ms running cadence every
+// poll re-read every pending diff from disk under the global lock, stalling
+// drains, admissions, and switches daemon-wide.
 func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, error) {
-	// Held for the entire handler (M11 P0): drainRun advances the consumed
-	// cursor and sets finished, so concurrent pollers of the same run must
-	// serialize — without this two polls journal the same adapter events.
+	base, convID, err := s.pollLocked(ctx, req)
+	if err != nil {
+		return Response{}, err
+	}
+	base.Diff = s.latestDiffInfo(ctx, convID)
+	base.Diffs = s.pendingDiffInfos(ctx, convID)
+	return base, nil
+}
+
+// pollLocked is the s.mu-critical core of handlePollEvents (M11 P0):
+// drainRun advances the consumed cursor and sets finished, so concurrent
+// pollers of the same run must serialize — without this two polls journal
+// the same adapter events. It returns the Response minus the diff reads,
+// plus the validated conversation id for the caller's unlocked tail.
+func (s *Server) pollLocked(ctx context.Context, req Request) (Response, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
-		return Response{}, err
+		return Response{}, 0, err
 	}
 
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			if err := s.drainRun(ctx, meta); err != nil {
-				return Response{}, err
+				return Response{}, 0, err
 			}
 		}
 	}
 
 	events, err := s.store.ListEvents(ctx, c.ID, req.AfterSeq)
 	if err != nil {
-		return Response{}, err
+		return Response{}, 0, err
 	}
 	agentRunning := false
 	if runID, ok := s.byConv[c.ID]; ok {
@@ -1600,9 +1636,7 @@ func (s *Server) handlePollEvents(ctx context.Context, req Request) (Response, e
 		Preview:       preview,
 		Streaming:     preview != nil,
 		PanelProgress: panelProg,
-		Diff:          s.latestDiffInfo(ctx, c.ID),
-		Diffs:         s.pendingDiffInfos(ctx, c.ID),
-	}, nil
+	}, c.ID, nil
 }
 
 // startContinuationRun (A2-lite) starts a fresh run for a conversation
@@ -4006,7 +4040,11 @@ func (s *Server) journalDistillLedger(ctx context.Context, conversationID int64,
 
 // handlePendingCounts reports, per workstream, the number of pending diffs
 // plus which workstreams have a live agent run (M3 §3c sidebar badges).
-// Read-only: SQL over diffs + a scan of the in-memory run table.
+// Read-only: SQL over diffs + a snapshot of the in-memory tables. The two
+// phases are split so per-conversation SQL (slash consult / parked-goal
+// resolution) runs AFTER s.mu is released — under multi-project badge
+// polling those lookups inside the global lock stalled drains and
+// admissions daemon-wide.
 func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response, error) {
 	p, err := s.resolveProject(ctx, req.ProjectRoot)
 	if err != nil {
@@ -4016,20 +4054,15 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 	if err != nil {
 		return Response{}, err
 	}
-	var running []int64
-	s.mu.Lock() // M11 P0: the in-memory run table is shared
-	for _, meta := range s.runs {
-		if !meta.finished {
-			running = append(running, meta.workstreamID)
-		}
-	}
+	snap := s.snapshotBadgeState()
+	running := snap.running
 	// Advisory slash consults (/panel, /vision, /preview) hold no run-table
 	// entry but keep the workstream just as busy for minutes: count them as
 	// running so the sidebar dot, the "still running" activity line, and
 	// the StatusBar background chip light during the consult (display-only
 	// consumers). Conversation lookups are best-effort, mirroring the
 	// parked-goals loop below.
-	for convID := range s.slashing {
+	for _, convID := range snap.slashConvs {
 		c, err := s.store.GetConversation(ctx, convID)
 		if err != nil {
 			continue
@@ -4045,26 +4078,12 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 			running = append(running, c.WorkstreamID)
 		}
 	}
-	// M12 (D-auto): scheduled auto-distills (composer countdown chip) and
-	// in-flight distills ride the same badge poll — the GUI never owns a
-	// trigger, it only discloses daemon state.
-	var auto []AutoDistillInfo
-	for convID, entry := range s.autoPending {
-		auto = append(auto, AutoDistillInfo{ConversationID: convID, EtaUnix: entry.fireAt.Unix(), Trigger: entry.trigger})
-	}
-	var distillingConvs []int64
-	for convID := range s.distilling {
-		distillingConvs = append(distillingConvs, convID)
-	}
 	// W6: parked-goal queue depth per workstream (the badge's queue
 	// counterpart; keyed like PendingCounts). Conversation lookups are
 	// best-effort — a conversation that vanished between park and poll
 	// drops out of the badge, never out of the journal.
 	var parkedByWS map[int64]int
-	for convID, goals := range s.parked {
-		if len(goals) == 0 {
-			continue
-		}
+	for convID, depth := range snap.parkedDepth {
 		c, err := s.store.GetConversation(ctx, convID)
 		if err != nil {
 			continue
@@ -4072,17 +4091,61 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 		if parkedByWS == nil {
 			parkedByWS = make(map[int64]int)
 		}
-		parkedByWS[c.WorkstreamID] += len(goals)
+		parkedByWS[c.WorkstreamID] += depth
 	}
-	s.mu.Unlock()
 	return Response{
 		PendingCounts:      counts,
 		RunningWorkstreams: running,
 		ParkedGoals:        parkedByWS,
-		AutoDistill:        auto,
-		Distilling:         len(distillingConvs) > 0,
-		DistillingConvs:    distillingConvs,
+		AutoDistill:        snap.auto,
+		Distilling:         len(snap.distillingConvs) > 0,
+		DistillingConvs:    snap.distillingConvs,
 	}, nil
+}
+
+// badgeSnapshot is the s.mu-owned slice of a pending_counts answer, copied
+// under the lock so the handler can resolve conversation→workstream ids
+// with plain store SQL after releasing it.
+type badgeSnapshot struct {
+	running         []int64
+	slashConvs      []int64
+	auto            []AutoDistillInfo
+	distillingConvs []int64
+	parkedDepth     map[int64]int
+}
+
+// snapshotBadgeState copies the shared in-memory tables (M11 P0) and
+// releases the lock before returning.
+func (s *Server) snapshotBadgeState() badgeSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var snap badgeSnapshot
+	for _, meta := range s.runs {
+		if !meta.finished {
+			snap.running = append(snap.running, meta.workstreamID)
+		}
+	}
+	for convID := range s.slashing {
+		snap.slashConvs = append(snap.slashConvs, convID)
+	}
+	// M12 (D-auto): scheduled auto-distills (composer countdown chip) and
+	// in-flight distills ride the same badge poll — the GUI never owns a
+	// trigger, it only discloses daemon state.
+	for convID, entry := range s.autoPending {
+		snap.auto = append(snap.auto, AutoDistillInfo{ConversationID: convID, EtaUnix: entry.fireAt.Unix(), Trigger: entry.trigger})
+	}
+	for convID := range s.distilling {
+		snap.distillingConvs = append(snap.distillingConvs, convID)
+	}
+	for convID, goals := range s.parked {
+		if len(goals) > 0 {
+			if snap.parkedDepth == nil {
+				snap.parkedDepth = make(map[int64]int)
+			}
+			snap.parkedDepth[convID] = len(goals)
+		}
+	}
+	return snap
 }
 
 // handleListAllPendingDiffs returns every pending diff across all active

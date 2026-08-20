@@ -360,6 +360,8 @@ async fn run_command(
 async fn bootstrap(
     project_root: Option<String>,
     workstream_id: Option<i64>,
+    conversation_id: Option<i64>,
+    after_seq: Option<i64>,
 ) -> Result<Value, String> {
     let root = resolve_root(project_root)?;
     let mut req = json!({"cmd": "bootstrap", "project_root": root});
@@ -367,6 +369,15 @@ async fn bootstrap(
     // (workstream switch in the sidebar).
     if let Some(id) = workstream_id {
         req["workstream_id"] = json!(id);
+    }
+    // Switch-cache hint (repeat switches): the GUI holds the full journal
+    // through after_seq; when the id still resolves to the active
+    // conversation the daemon replays only the tail.
+    if let Some(id) = conversation_id {
+        req["conversation_id"] = json!(id);
+    }
+    if let Some(seq) = after_seq {
+        req["after_seq"] = json!(seq);
     }
     run_command(root, req, READ_TIMEOUT).await
 }

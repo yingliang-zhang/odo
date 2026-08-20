@@ -71,10 +71,19 @@ import type {
 
 // Tauri v2 maps JS camelCase args onto the Rust snake_case parameters.
 
-export function bootstrap(projectRoot?: string, workstreamId?: number): Promise<BootstrapResponse> {
+// `cached` is the switch-cache hint (conversation id + full-journal seq
+// high-water); when it still resolves to the active conversation the
+// daemon replays only the tail instead of the whole journal.
+export function bootstrap(
+  projectRoot?: string,
+  workstreamId?: number,
+  cached?: { conversationId: number; afterSeq: number },
+): Promise<BootstrapResponse> {
   return invoke<BootstrapResponse>("bootstrap", {
     projectRoot: projectRoot ?? null,
     workstreamId: workstreamId ?? null,
+    conversationId: cached?.conversationId ?? null,
+    afterSeq: cached?.afterSeq ?? null,
   });
 }
 

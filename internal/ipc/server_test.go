@@ -1193,6 +1193,62 @@ func TestBootstrapByWorkstream(t *testing.T) {
 	}
 }
 
+// TestBootstrapAfterSeqHint covers the repeat-switch tail replay: a
+// bootstrap carrying the GUI's switch-cache hint (conversation_id +
+// after_seq) replays only events beyond the sequence high-water; a stale
+// hint naming another conversation falls back to the full replay so a
+// client can never silently lose the middle of a journal.
+func TestBootstrapAfterSeqHint(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	ctx := context.Background()
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	for i := range 5 {
+		if _, err := rig.store.AppendEvent(ctx, convID, store.EventUserMessage,
+			mustJSON(map[string]interface{}{"text": fmt.Sprintf("m%d", i)})); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	full := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	if len(full.Events) != 5 {
+		t.Fatalf("baseline replay: %d events, want 5", len(full.Events))
+	}
+
+	// The warm-cache contract: replay only the tail beyond after_seq.
+	cut := full.Events[2].Seq
+	tail := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, ConversationID: convID, AfterSeq: cut})
+	if len(tail.Events) != 2 {
+		t.Fatalf("hinted bootstrap: %d events, want the 2-row tail", len(tail.Events))
+	}
+	for _, ev := range tail.Events {
+		if ev.Seq <= cut {
+			t.Errorf("hinted bootstrap replayed seq %d ≤ after_seq %d", ev.Seq, cut)
+		}
+	}
+	if tail.Conversation == nil || tail.Conversation.ID != convID {
+		t.Errorf("hinted bootstrap: conversation = %+v, want id %d", tail.Conversation, convID)
+	}
+
+	// A hint naming another conversation (stale cache after an epoch fold
+	// replaced the active one) must NOT tail-trim: the merged journal
+	// would silently elide every row ≤ after_seq.
+	stale := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, ConversationID: convID + 999, AfterSeq: cut})
+	if len(stale.Events) != 5 {
+		t.Errorf("stale-conversation hint: %d events, want full replay of 5", len(stale.Events))
+	}
+
+	// after_seq 0 is the cold-cache contract: also a full replay.
+	cold := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, ConversationID: convID, AfterSeq: 0})
+	if len(cold.Events) != 5 {
+		t.Errorf("after_seq 0: %d events, want full replay of 5", len(cold.Events))
+	}
+}
+
 // TestSteering covers steer=true messages: journaled as user_message rows
 // only while a run is ACTIVE, queued there for the continuation run
 // (A2-lite). A conversation with no live run refuses fail-closed —
@@ -2349,7 +2405,7 @@ func TestGetSettings(t *testing.T) {
 		AutoDistill:            "on_idle",
 		AutoDistillIdleSeconds: "120",
 		MaxConcurrentRuns:      "4",
-		AutoApply:              "off",
+		AutoApply:              "main",
 		// M19 (V11): loop_notify_on_complete defaults ON; the lock pins it.
 		LoopNotifyOnComplete: true,
 	}
@@ -2371,7 +2427,7 @@ func TestGetSettings(t *testing.T) {
 		AutoDistill:            "never",
 		AutoDistillIdleSeconds: "120",
 		MaxConcurrentRuns:      "4",
-		AutoApply:              "off",
+		AutoApply:              "main",
 		// No loop_notify_on_complete line in the prefs above: default ON.
 		LoopNotifyOnComplete: true,
 	}

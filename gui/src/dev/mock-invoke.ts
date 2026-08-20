@@ -24,6 +24,14 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
   switch (cmd) {
     // ---------- Lifecycle ----------
     case "bootstrap": {
+      if (fx.bootstrapCtl.fail) {
+        throw new Error("bootstrap: connection refused (knob)");
+      }
+      if (fx.bootstrapCtl.delayMs > 0) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, fx.bootstrapCtl.delayMs);
+        await promise;
+      }
       return fx.makeBootstrap(args?.projectRoot ?? undefined, args?.workstreamId ?? undefined);
     }
     case "list_projects": {
