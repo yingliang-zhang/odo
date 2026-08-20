@@ -19,7 +19,9 @@ function isTauri(): boolean {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function mockInvoke(cmd: string, args?: Record<string, any>): Promise<unknown> {
   // Small delay to simulate network/IPC latency
-  await new Promise(r => setTimeout(r, 50));
+  const { promise: latency, resolve: latencyDone } = Promise.withResolvers<void>();
+  setTimeout(latencyDone, 50);
+  await latency;
 
   switch (cmd) {
     // ---------- Lifecycle ----------
