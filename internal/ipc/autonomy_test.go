@@ -246,7 +246,7 @@ func classRow(t *testing.T, r AutonomyReport, class string) AutonomyClassReport 
 // has an accepted history in the workstream.
 func TestAutonomyStreaks(t *testing.T) {
 	f := newAutonomyFixture(t)
-	t.Setenv("HOME", t.TempDir()) // auto_apply reads defaults ("off")
+	t.Setenv("HOME", t.TempDir()) // auto_apply reads the M20 default ("main")
 
 	d1 := f.addDiff(t, "d1.diff", patchDoc("README.md", 3))
 	f.resolve(t, d1, "accept", "2026-08-01 10:00:01")
@@ -280,8 +280,8 @@ func TestAutonomyStreaks(t *testing.T) {
 	if un.Accepted != 1 || un.Streak != 1 || un.NextThreshold != 0 {
 		t.Errorf("unclassified = %+v, want 1 accepted (first-time src), no rung threshold", un)
 	}
-	if r.AutoApply != "off" || r.CurrentRung != 0 {
-		t.Errorf("pref/rung = %q/%d, want off/0 (rung-0 instrumentation)", r.AutoApply, r.CurrentRung)
+	if r.AutoApply != "main" || r.CurrentRung != 0 {
+		t.Errorf("pref/rung = %q/%d, want main/0 (M20 default-on; rungs stay 0 — pref value is not a rung elevation)", r.AutoApply, r.CurrentRung)
 	}
 }
 

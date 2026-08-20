@@ -1,10 +1,16 @@
 package ipc
 
-// M16 (O-1 v2): daemon-side auto-land — a pending diff lands without a
-// human click only after surviving every layer below, in order:
+// M16 (O-1 v2) → M20: daemon-side auto-land — a pending diff lands after
+// surviving every layer below, in order. M20 made the pipeline the
+// DEFAULT landing canon (panel-owns-resolution): no human review step
+// anywhere in the ordinary path.
 //
-//	pref gate       auto_apply == "main" (off = silent; the pref's
-//	                fail-closed parse in settings.go unchanged)
+//	arming          M20: every completed run's diff enters the pipeline;
+//	                the survivors below resolve WITHOUT a human. The
+//	                auto_apply pref survives only as an explicit kill
+//	                switch ("off" = silent), and a prefs.md with no review:
+//	                line means UNARMED = silent skip inside autoLand (zero
+//	                journal noise, both postures).
 //	run posture     the producing run must have finished cleanly
 //	mechanical      protected paths (.odo/, wiki/), supply-chain files
 //	gates            (manifests/lockfiles/.odo-verify), new top-level
@@ -14,23 +20,31 @@ package ipc
 //	                 DROP_SIZE_KEEP_DIR: a 300-line cliff is fake
 //	                 precision with 350K-token contexts; the token cost
 //	                 breaker below is the ceiling).
-//	base freshness  P0a refresh: entry drift triggers a --3way rebase
-//	                 probe in a throwaway worktree (ProbeApplyClean —
-//	                 the main checkout is never touched, acceptMu never
-//	                 taken). Clean = the diff's base pointer moves to
-//	                 current HEAD (UpdateDiffBaseSHA +
-//	                 refresh_attempted{clean, pre_spend_probe}) and the
-//	                 pipeline proceeds to verify+panel attesting the
-//	                 tree the land now targets; conflict/error =
-//	                 refresh_attempted{...} then blocked base_stale,
-//	                 diff pending. The AUTHORITATIVE check is still
-//	                 final, inside handleDiffAction's accept branch
-//	                 under acceptMu (checkAndRefreshBase — zero
-//	                 check-to-apply window): drift past it attempts the
-//	                 same rebase against the real checkout, and a failed
-//	                 one journals base_stale_at_land via the caller's
-//	                 errors.Is(errBaseStale) branch with the completed
-//	                 panel riding the blocked row.
+//	base freshness  M20 reconcile chain, in order — the zombie killer:
+//	                 (1) ALREADY-LANDED roundtrip (ProbeAlreadyLanded:
+//	                 a reverse --check applies ⇔ the post-image is fully
+//	                 in main — manual merge/cherry-pick/identical edit;
+//	                 the pipeline's apply-path blindness to side-channel
+//	                 landings was the diff-20 class). Read-only, zero
+//	                 spend: refresh_attempted{already_landed} journals
+//	                 and the FINAL gate's own roundtrip ledgers the
+//	                 no-op land under acceptMu (accept row carries
+//	                 already_landed:true). (2) P0a REFRESH: entry drift
+//	                 triggers a --3way rebase probe in a throwaway
+//	                 worktree (ProbeApplyClean — the main checkout is
+//	                 never touched, acceptMu never taken); clean = base
+//	                 pointer moves to HEAD and the pipeline proceeds.
+//	                 (3) REBASE ROUND: conflict/error at the probe (or
+//	                 at the FINAL gate mid-pipeline) regenerates the
+//	                 task on current HEAD via the settle ladder
+//	                 (trigger:"base_stale" on the round row; supersede
+//	                 retires the stale diff when the round lands). The
+//	                 AUTHORITATIVE adjudication is still final, inside
+//	                 handleDiffAction's accept branch under acceptMu
+//	                 (checkAndRefreshBase — zero check-to-apply window,
+//	                 same roundtrip→refresh chain against the real
+//	                 checkout). Partial landings reverse-check dirty
+//	                 every time — conservative, never a false accept.
 //	verify gate     the repo-root `.odo-verify` command re-runs at the
 //	                 run's worktree root with an allowlisted child
 //	                 environment (verifyEnviron) — the gate executes the
@@ -66,15 +80,19 @@ package ipc
 //	unanimity       consensusVerdict == "accept" requires EVERY reviewer
 //	                 (the fail-open fix: a lone needs_fixes now blocks).
 //	visual class    REMOVED — GUI diffs land through the same unanimous-panel pipeline as daemon diffs; the panel verdict is sufficient.
-//	settlement      M18 (settle.go): the four panel outcomes split —
-//	                 accept lands; unanimous reject blocks
-//	                 {panel_unanimous_reject} + transcript advisory (the
-//	                 diff stays pending — never auto-rejected); any
-//	                 reject at all blocks {panel_mixed}; an errored leg
-//	                 blocks {panel_infra} (infra is not a verdict); and
-//	                 zero rejects + ≥1 needs_fixes enters the auto-revise
-//	                 ladder (≤2 fresh repair rounds, no-progress stop,
-//	                 journal-derived suspension).
+//	settlement      M18 (settle.go) → M20 verdict ownership: the four
+//	                 panel outcomes split — accept lands; unanimous
+//	                 reject AUTO-REJECTS {panel_unanimous_reject} and a
+//	                 split reject AUTO-REJECTS {panel_mixed} (evidence
+//	                 row carries the full dissent, transcript advisory
+//	                 fires, chain ancestors supersede; M18 parked them
+//	                 for a human the pipeline no longer assumes); an
+//	                 errored leg stays blocked-pending {panel_infra}
+//	                 (infra is not a verdict — recover-pending-diffs
+//	                 re-fires on restart); zero rejects + ≥1 needs_fixes
+//	                 enters the auto-revise ladder (≤3 fresh repair
+//	                 rounds, no-progress stop, journal-derived
+//	                 suspension resumed by ANY landing).
 //	land            handleDiffAction's original path — protected-path
 //	                 guard, unmerged-index refusal, the FINAL base-
 //	                 freshness adjudication (checkAndRefreshBase: a
@@ -122,11 +140,10 @@ package ipc
 // bytes by risk.go; all three keys omitted when the patch is
 // unreadable (patch_sha16 precedent).
 //
-// auto_apply values "branch"/"all" stay unconsumed (rung-0 contract:
-// only "main" has pipeline semantics). M16 amends the M15 O-1
-// no-auto-apply deferral for DIFF LANDING ONLY (m16-auto-land.md +
-// README row/A1): skill proposals keep auto_accept deferred, and every
-// land remains reversible (git).
+// auto_apply values "main"/"branch"/"all" all read as ON under M20 (the
+// pref was kept back-compatible: only "off" disables). Skill proposals
+// keep auto_accept deferred — the O-1 no-auto-apply posture lifts for
+// DIFF LANDING ONLY — and every land remains reversible (git).
 import (
 	"context"
 	"errors"
@@ -201,11 +218,13 @@ var autoLandSupplyChainFiles = map[string]bool{
 
 // maybeAutoLand is drainRun's spawn point (goroutine, no locks held —
 // the continuation trigger's shape). Everything the pipeline needs is
-// copied off the run's runMeta by the caller. Pref-off returns SILENTLY:
-// a disabled feature deserves no journal noise (unlike a blocked attempt,
-// which is evidence).
+// copied off the run's runMeta by the caller. M20: the pipeline is the
+// DEFAULT landing canon (no arming click, no human review step) — the
+// auto_apply pref survives only as an explicit kill switch: "off"
+// returns SILENTLY (a disabled feature deserves no journal noise, unlike
+// a blocked attempt, which is evidence).
 func (s *Server) maybeAutoLand(d store.Diff, worktreePath, goal string, runErrored bool, runVerdict string) {
-	if adapter.ReadSettings().AutoApply != "main" {
+	if adapter.ReadSettings().AutoApply == "off" {
 		return
 	}
 	// Pipelines run concurrently; the final handleDiffAction accept is
@@ -226,6 +245,18 @@ func (s *Server) maybeAutoLand(d store.Diff, worktreePath, goal string, runError
 // autoLand runs the full pipeline for one pending diff. Blocks journal and
 // return; only a unanimous panel after all gates calls handleDiffAction.
 func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal string, runErrored bool, runVerdict string) {
+	// M20 arming gate — FIRST, before any journal write, git probe, or
+	// verify spend: a prefs.md without a review: line means no panel can
+	// exist, so the pipeline is UNARMED and exits SILENT (same posture as
+	// the off kill switch — zero journal noise for a feature that cannot
+	// run). This subsumes the M16 no_review_models blocked row: under
+	// default-on, "no panel configured" is the ordinary unconfigured
+	// state, not a per-diff failure worth an evidence row; it also keeps
+	// verify_unconfigured rows off projects that never armed the panel.
+	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
+	if len(models) == 0 {
+		return
+	}
 	if runErrored {
 		s.journalAutoLandBlocked(ctx, d, "run_errored", "the producing run ended with agent_error", nil, "")
 		return
@@ -278,6 +309,19 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		return
 	}
 	if head != base {
+		// M20 reconcile BEFORE the merge probe (read-only): content that
+		// already reached main through a side path (manual merge,
+		// cherry-pick) is a bookkeeping resolution — skip the rebase
+		// probe, skip verify+panel spend (nothing is being judged), and
+		// let the FINAL gate's own already-landed path ledger the no-op
+		// land under acceptMu.
+		if landed, _, lerr := git.ProbeAlreadyLanded(s.projectRoot, d.PathOnDisk); lerr == nil && landed {
+			s.journalRefreshAttempt(ctx, d, "pre_spend_probe", "already_landed", base, head, nil)
+			if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor, ""); err != nil {
+				log.Printf("auto-land: already-landed accept for diff %d: %v", d.ID, err)
+			}
+			return
+		}
 		clean, probeDetail, perr := git.ProbeApplyClean(s.projectRoot, d.PathOnDisk)
 		if perr != nil || !clean {
 			outcome := "error"
@@ -287,13 +331,19 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 				refreshErr = errors.New(probeDetail)
 			}
 			s.journalRefreshAttempt(ctx, d, "pre_spend_probe", outcome, base, head, refreshErr)
-			reasonDetail := fmt.Sprintf("main HEAD %s drifted from diff base %s — refresh probe: %s", head, base, outcome)
+			feedback := fmt.Sprintf("main HEAD %s drifted from diff base %s — refresh probe: %s", head, base, outcome)
 			if probeDetail != "" {
-				reasonDetail += ": " + capDetail(probeDetail)
+				feedback += "\n" + probeDetail
 			} else if perr != nil {
-				reasonDetail += ": " + perr.Error()
+				feedback += "\n" + perr.Error()
 			}
-			s.journalAutoLandBlocked(ctx, d, "base_stale", reasonDetail, nil, "")
+			// M20: the drifted diff regenerates on current HEAD (rebase
+			// revise round, trigger base_stale) — the M16 "re-run the
+			// task" advice mechanized; nothing parks for a human. When
+			// the round's diff lands, supersedeChain retires this one.
+			s.ladderMu.Lock()
+			s.settleBaseStale(ctx, d, diffText, feedback)
+			s.ladderMu.Unlock()
 			return
 		}
 		// Clean rebase available: move the diff's base pointer to the tree
@@ -349,12 +399,6 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		return
 	}
 
-	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
-	if len(models) == 0 {
-		s.journalAutoLandBlocked(ctx, d, "no_review_models",
-			"prefs.md has no review: line — auto-land requires the panel", nil, "")
-		return
-	}
 	// Second breadcrumb: the verify is attested, the fan-out below is the
 	// last silent stage (minutes under model latency).
 	s.journalAutoLandStarted(ctx, d, "panel", data)
@@ -362,32 +406,50 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	cv := consensusVerdict(reviews)
 	// M18 settlement: an infra leg is not a verdict — the round never
 	// validly completed (fail closed, and it never ticks the ladder).
+	// Infra stays blocked-pending under M20: a transport/auth/timeout
+	// failure resolves on the next pipeline trigger (recover-pending-diffs
+	// re-fires pending diffs at daemon start), never by discarding the diff.
 	if panelInfraLeg(reviews) {
 		s.journalAutoLandBlocked(ctx, d, "panel_infra",
 			"a review leg failed on transport/auth/timeout — infra failures are not verdicts", reviews, cv)
 		return
 	}
 	switch settlementClass(cv, reviews) {
-	case "reject_unanimous":
-		// Every reviewer rejected the DIRECTION: the diff stays pending
-		// (a diff is the user's work product — never auto-rejected), and
-		// the fall-through to the human is transcript-visible, not
-		// ledger-only.
-		s.journalAutoLandBlocked(ctx, d, "panel_unanimous_reject",
-			"every reviewer rejected the direction; the diff stays pending for the human", reviews, cv)
-		s.journalRunAdvisory(ctx, d.ConversationID, fmt.Sprintf(
-			"the auto-land panel unanimously rejected diff #%d — it stays pending for your review (the reasons are in the journal).", d.ID))
-		return
-	case "reject_mixed":
-		s.journalAutoLandBlocked(ctx, d, "panel_mixed",
-			"at least one reviewer rejected the direction; the diff stays pending for the human", reviews, cv)
+	case "reject_unanimous", "reject_mixed":
+		// M20 auto-reject (panel owns resolution): a direction-level
+		// reject no longer parks the diff for a human — M18's "never
+		// auto-reject" posture assumed one. Evidence before action: the
+		// blocked row carries the full dissent (blocked-row-as-evidence
+		// precedent), the transcript advisory makes the resolution
+		// visible where the user reads, and the reject row itself names
+		// the pipeline as actor (streak-excluded in ComputeAutonomy,
+		// risk-attested like every resolution). The patch file stays on
+		// disk; the chain's older pending siblings retire as superseded
+		// (the chain is dead); the revised instruction is the re-entry.
+		reason := "panel_unanimous_reject"
+		detail := "every reviewer rejected the direction; auto-rejected (the dissent is on this row; the patch stays on disk)"
+		advisory := "the auto-land panel unanimously rejected diff #%d — auto-rejected (the reasons are in the journal). Revise the instruction and resend if the direction should change."
+		if settlementClass(cv, reviews) == "reject_mixed" {
+			reason = "panel_mixed"
+			detail = "at least one reviewer rejected the direction; auto-rejected (the dissent is on this row; the patch stays on disk)"
+			advisory = "the auto-land panel rejected diff #%d (split verdict — the reasons are in the journal); it was auto-rejected. Revise the instruction and resend if the direction should change."
+		}
+		s.journalAutoLandBlocked(ctx, d, reason, detail, reviews, cv)
+		s.journalRunAdvisory(ctx, d.ConversationID, fmt.Sprintf(advisory, d.ID))
+		if _, err := s.handleDiffAction(ctx, d.ID, "reject", autoActor, ""); err != nil {
+			// A racer already resolved it (human override, a chain
+			// supersede) — the evidence rows above stand either way.
+			log.Printf("auto-land: auto-reject diff %d: %v", d.ID, err)
+		} else {
+			s.supersedeChain(ctx, d)
+		}
 		return
 	case "needs_fixes":
 		// Zero rejects + ≥1 needs_fixes: nobody said the direction is
 		// wrong, it's just not done — the auto-revise ladder decides
-		// (spawn a repair round, block to the human, or demote). ladderMu
-		// serializes the whole read-decide-spawn: two racing pipelines from
-		// the same conversation must not fork the rounds chain.
+		// (spawn a repair round, or demote). ladderMu serializes the
+		// whole read-decide-spawn: two racing pipelines from the same
+		// conversation must not fork the rounds chain.
 		s.ladderMu.Lock()
 		s.settleRevise(ctx, d, diffText, reviews)
 		s.ladderMu.Unlock()
@@ -422,18 +484,23 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	}
 	if _, err := s.handleDiffAction(ctx, d.ID, "accept", autoActor, ""); err != nil {
 		// Drift mid-pipeline (HEAD moved after the entry probe): the
-		// FINAL gate's automatic refresh failed (conflict/error — its
-		// refresh_attempted row already precedes this one). The completed
-		// panel rides the blocked row as advisory evidence
-		// (the blocked-row-as-evidence precedent) — the human re-runs or
-		// rejects with the verdict on record.
+		// FINAL gate exhausted its resolutions (already-landed roundtrip
+		// and --3way refresh conflicted — its refresh_attempted row
+		// already precedes this one). The completed panel rides the
+		// blocked row as evidence (blocked-row-as-evidence precedent);
+		// M20 then regenerates the task on current HEAD via a base_stale
+		// revise round — the fresh diff re-enters the full pipeline, so
+		// the pre-drift verdict never attests the post-drift tree.
 		if errors.Is(err, errBaseStale) {
 			s.journalAutoLandBlocked(ctx, d, "base_stale_at_land",
-				err.Error()+" — the verify and panel attested the pre-drift tree; the diff stays pending for the human", reviews, cv)
+				err.Error()+" — the verify and panel attested the pre-drift tree; regenerating on current HEAD", reviews, cv)
+			s.ladderMu.Lock()
+			s.settleBaseStale(ctx, d, diffText, err.Error())
+			s.ladderMu.Unlock()
 		}
 		// A human raced the panel (already accepted/rejected), or the
 		// executor refused (protected path, conflicted index, apply
-		// failure): the diff stays pending for the human either way.
+		// failure): the diff stays pending for triage either way.
 		log.Printf("auto-land: accept diff %d: %v", d.ID, err)
 	}
 }

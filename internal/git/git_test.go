@@ -463,6 +463,138 @@ func TestProbeApplyClean_ConflictOnOverlap(t *testing.T) {
 	}
 }
 
+// ------------------------------------------- M20: ProbeAlreadyLanded + PathsDifferFromHEAD
+
+// twoFilePatch returns a patch that rewrites base.txt AND adds new.txt,
+// cut from the repo's current HEAD (the tree is restored afterwards).
+func twoFilePatch(t *testing.T, repo string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("patched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, repo, "add", "-A")
+	// mustRun trims whitespace — restore the hunk-terminating newline,
+	// without which git apply reads a corrupt patch.
+	patch := mustRun(t, repo, "diff", "--cached", "HEAD") + "\n"
+	// reset --hard restores index+tree to HEAD, index-only new.txt included.
+	mustRun(t, repo, "reset", "-q", "--hard", "HEAD")
+	path := filepath.Join(t.TempDir(), "two.diff")
+	if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestProbeAlreadyLanded (M20): the reverse-apply roundtrip — full
+// post-image present (committed OR uncommitted) → landed; base state,
+// partial landings, and drift content all report not-landed, and the
+// check never writes to the tree.
+func TestProbeAlreadyLanded(t *testing.T) {
+	t.Run("committed post-image is landed", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		writeAndCommit(t, repo, "base.txt", "patched\n") // identical content, side path
+		landed, detail, err := ProbeAlreadyLanded(repo, patch)
+		if err != nil || !landed || detail != "" {
+			t.Fatalf("ProbeAlreadyLanded = (%v, %q, %v), want (true, \"\", nil)", landed, detail, err)
+		}
+		if status := mustRun(t, repo, "status", "--porcelain"); status != "" {
+			t.Errorf("main status = %q, want clean (the probe is read-only)", status)
+		}
+	})
+
+	t.Run("uncommitted post-image is landed", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("patched\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		landed, _, err := ProbeAlreadyLanded(repo, patch)
+		if err != nil || !landed {
+			t.Fatalf("ProbeAlreadyLanded = (%v, %v), want (true, nil) for an identical uncommitted edit", landed, err)
+		}
+	})
+
+	t.Run("base state is not landed", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		landed, detail, err := ProbeAlreadyLanded(repo, patch)
+		if err != nil || landed || detail == "" {
+			t.Fatalf("ProbeAlreadyLanded = (%v, %q, %v), want (false, detail, nil)", landed, detail, err)
+		}
+	})
+
+	t.Run("partial landing is not landed", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := twoFilePatch(t, repo)
+		writeAndCommit(t, repo, "base.txt", "patched\n") // ONLY the first half lands
+		landed, _, err := ProbeAlreadyLanded(repo, patch)
+		if err != nil || landed {
+			t.Fatalf("ProbeAlreadyLanded = (%v, %v), want (false, nil) — partial must never reconcile", landed, err)
+		}
+	})
+
+	t.Run("drifted content is not landed", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		writeAndCommit(t, repo, "base.txt", "other drift\n")
+		landed, _, err := ProbeAlreadyLanded(repo, patch)
+		if err != nil || landed {
+			t.Fatalf("ProbeAlreadyLanded = (%v, %v), want (false, nil)", landed, err)
+		}
+	})
+
+	t.Run("multi-file full landing is landed", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := twoFilePatch(t, repo)
+		writeAndCommit(t, repo, "base.txt", "patched\n")
+		writeAndCommit(t, repo, "new.txt", "new\n")
+		landed, _, err := ProbeAlreadyLanded(repo, patch)
+		if err != nil || !landed {
+			t.Fatalf("ProbeAlreadyLanded = (%v, %v), want (true, nil)", landed, err)
+		}
+	})
+
+	t.Run("not a repo is an error", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		landed, _, err := ProbeAlreadyLanded(filepath.Join(t.TempDir(), "no-repo"), patch)
+		if err == nil || landed {
+			t.Fatalf("ProbeAlreadyLanded = (%v, %v), want (false, err)", landed, err)
+		}
+	})
+}
+
+// TestPathsDifferFromHEAD (M20): exit-1 quarantine — differences report
+// true (staged OR unstaged), a clean path set reports false, and real
+// errors surface as errors, never as a diff verdict.
+func TestPathsDifferFromHEAD(t *testing.T) {
+	repo := newPatchRepo(t)
+	if differs, err := PathsDifferFromHEAD(repo, []string{"base.txt"}); err != nil || differs {
+		t.Fatalf("clean tree = (%v, %v), want (false, nil)", differs, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if differs, err := PathsDifferFromHEAD(repo, []string{"base.txt"}); err != nil || !differs {
+		t.Fatalf("unstaged edit = (%v, %v), want (true, nil)", differs, err)
+	}
+	mustRun(t, repo, "add", "base.txt")
+	if differs, err := PathsDifferFromHEAD(repo, []string{"base.txt"}); err != nil || !differs {
+		t.Fatalf("staged edit = (%v, %v), want (true, nil)", differs, err)
+	}
+	mustRun(t, repo, "reset", "-q", "--hard", "HEAD")
+	if differs, err := PathsDifferFromHEAD(repo, nil); err != nil || differs {
+		t.Fatalf("empty paths = (%v, %v), want (false, nil)", differs, err)
+	}
+	if _, err := PathsDifferFromHEAD(filepath.Join(t.TempDir(), "no-repo"), []string{"x"}); err == nil {
+		t.Fatal("not-a-repo = nil error, want error")
+	}
+}
+
 // TestProbeApplyClean_CleansUp (P0a): the throwaway worktree is removed
 // unconditionally — neither a clean nor a conflicting probe leaves a
 // registered worktree entry or an odo-probe-* dir behind.

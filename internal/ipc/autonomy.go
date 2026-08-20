@@ -104,7 +104,7 @@ type AutonomyReport struct {
 	Resolutions          int                   `json:"resolutions"`      // human accept/reject events (auto-land excluded)
 	AutoAccepted         int                   `json:"auto_accepted"`    // M16: diffs landed by the auto-land pipeline (never streak-feeding)
 	UnreadableDiffs      int                   `json:"unreadable_diffs"` // patch file missing/parse error: unclassified + no revert evidence
-	AutoApply            string                `json:"auto_apply"`       // prefs value ("main" = M16 auto-land consumed)
+	AutoApply            string                `json:"auto_apply"`       // prefs value ("off" = the M20 kill switch; everything else on)
 	CurrentRung          int                   `json:"current_rung"`     // always 0 today
 	RungThresholds       map[string]int        `json:"rung_thresholds"`
 	RevertCheck          string                `json:"revert_check"` // how streaks treat reverts

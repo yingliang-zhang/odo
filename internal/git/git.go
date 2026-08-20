@@ -131,14 +131,23 @@ func ApplyDiff(repoPath, diffPath string) error {
 	if _, err := run(repoPath, "apply", "--3way", diffPath); err != nil {
 		return err
 	}
-	paths := unionPaths(aPaths, bPaths)
-	if len(paths) == 0 {
-		return nil
-	}
-	if _, err := run(repoPath, append([]string{"add", "--"}, paths...)...); err != nil {
+	if err := StagePaths(repoPath, unionPaths(aPaths, bPaths)); err != nil {
 		return fmt.Errorf("stage patch paths: %w", err)
 	}
 	return nil
+}
+
+// StagePaths stages exactly paths — both pre- and post-image, so deletions
+// and renames record correctly. ApplyDiff runs it post-apply; the M20
+// already-landed accept runs it without an apply (nothing was applied to
+// stage, and `git commit -- <untracked>` would refuse an untracked
+// post-image file the user produced out-of-band).
+func StagePaths(repoPath string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	_, err := run(repoPath, append([]string{"add", "--"}, paths...)...)
+	return err
 }
 
 // ProbeApplyClean tests whether diffPath would apply cleanly via --3way onto
@@ -179,6 +188,72 @@ func ProbeApplyClean(repoPath, diffPath string) (clean bool, detail string, err 
 		return false, "", applyErr
 	}
 	return true, "", nil
+}
+
+// ProbeAlreadyLanded is the content-roundtrip check: if diffPath applies
+// cleanly in REVERSE (git apply --reverse --check) against repoPath's
+// working tree, every line the patch would add is already there — the
+// diff's content reached main through a path the daemon never applied (a
+// manual merge, a cherry-pick, the user's own identical edit). Pure
+// tree-state: no commit ancestry is consulted, and a PARTIAL landing
+// reverse-checks dirty, correctly reporting false (the ordinary rebase
+// path then adjudicates). Read-only — --check writes nothing. Returns
+// (true, "", nil) when the post-image is fully present; (false, detail,
+// nil) when not (detail is git's diagnostics); (false, "", err) when the
+// check itself could not run (no git binary, not a repo).
+func ProbeAlreadyLanded(repoPath, diffPath string) (landed bool, detail string, err error) {
+	abs, err := filepath.Abs(diffPath)
+	if err != nil {
+		return false, "", fmt.Errorf("already-landed probe patch path: %w", err)
+	}
+	cmd := exec.Command("git", "-C", repoPath, "apply", "--reverse", "--check", abs)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if runErr == nil {
+		return true, "", nil
+	}
+	// exit 1 is the mismatch verdict ("error: patch failed"); anything
+	// else — not a repo, unreadable patch, no git binary — is an error,
+	// not evidence about the tree.
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
+		tail := strings.TrimSpace(stderr.String())
+		if tail == "" {
+			tail = runErr.Error()
+		}
+		return false, tail, nil
+	}
+	return false, "", fmt.Errorf("git apply --reverse --check: %w (%s)", runErr, strings.TrimSpace(stderr.String()))
+}
+
+// PathsDifferFromHEAD reports whether any of paths differ between HEAD and
+// the checkout (working tree or index) — i.e. whether a path-scoped commit
+// would record anything. Used by the already-landed accept: content that
+// arrived uncommitted still needs the accept commit; content already
+// committed must skip it (an empty commit is a git error). exit 1 from
+// `git diff --quiet` means differences; anything else is a real error.
+func PathsDifferFromHEAD(repoPath string, paths []string) (bool, error) {
+	if len(paths) == 0 {
+		return false, nil
+	}
+	args := append([]string{"-C", repoPath, "diff", "--quiet", "HEAD", "--"}, paths...)
+	cmd := exec.Command("git", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	tail := strings.TrimSpace(stderr.String())
+	if tail == "" {
+		tail = err.Error()
+	}
+	return false, fmt.Errorf("git diff --quiet HEAD: %s", tail)
 }
 
 // CapturePatchBaseline records, for each patch path, whether it is tracked

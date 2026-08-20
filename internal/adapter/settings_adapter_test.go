@@ -49,16 +49,19 @@ func writePrefsForTest(t *testing.T, home, content string) {
 	}
 }
 
-// TestAutoApplyPref pins the M15 rung-0 contract: the pref parses with
-// default "off", unknown values read back fail-closed as "off", and
-// UpdateSettings rejects invalid values (writing nothing).
+// TestAutoApplyPref pins the pref contract (M15 rung-0 → M20): the pref
+// parses with default "main" (auto-land is the default landing canon),
+// unknown non-empty values read back fail-closed as "off" (a typo narrows
+// scope, never widens), and UpdateSettings rejects invalid values (writing
+// nothing).
 func TestAutoApplyPref(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	// Absent pref -> default off.
-	if s := ReadSettings(); s.AutoApply != "off" {
-		t.Errorf("AutoApply = %q, want off (no prefs.md)", s.AutoApply)
+	// Absent pref -> default on ("main"); the pipeline arms unarmed-silently
+	// (a prefs.md without a review: line still never spends).
+	if s := ReadSettings(); s.AutoApply != "main" {
+		t.Errorf("AutoApply = %q, want main (no prefs.md → M20 default-on)", s.AutoApply)
 	}
 
 	// Every valid value round-trips.
@@ -80,8 +83,8 @@ func TestAutoApplyPref(t *testing.T) {
 	if err := UpdateSettings(Settings{AutoApply: "everything"}); err == nil {
 		t.Fatal("UpdateSettings(invalid auto_apply) = nil error, want validation error")
 	}
-	if s := ReadSettings(); s.AutoApply != "off" {
-		t.Errorf("after rejected update AutoApply = %q, want off (file untouched)", s.AutoApply)
+	if s := ReadSettings(); s.AutoApply != "main" {
+		t.Errorf("after rejected update AutoApply = %q, want main (file untouched → M20 default-on)", s.AutoApply)
 	}
 	if err := UpdateSettings(Settings{AutoApply: "branch"}); err != nil {
 		t.Fatal(err)

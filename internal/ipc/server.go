@@ -2283,38 +2283,76 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 }
 
 // errBaseStale is the base-freshness refusal's sentinel: checkAndRefreshBase
-// wraps it when a stale base fails its automatic refresh (conflict OR
-// error) so the auto-land caller (the land step in autoland.go) can
-// errors.Is-distinguish "main HEAD drifted mid-pipeline" from an apply
-// failure — drift journals base_stale_at_land with the completed panel
-// riding the blocked row as advisory evidence, while a non-sentinel
-// refusal (protected path, conflicted index, apply error) stays log-only.
+// wraps it when a stale base fails every automatic resolution — the M20
+// already-landed roundtrip AND the P0a refresh (conflict OR error) — so the
+// auto-land caller (the land step in autoland.go) can errors.Is-distinguish
+// "main HEAD drifted mid-pipeline" from an apply failure — drift journals
+// base_stale_at_land with the completed panel riding the blocked row as
+// evidence, then hands the diff to a base_stale revise round on current
+// HEAD, while a non-sentinel refusal (protected path, conflicted index,
+// apply error) stays log-only.
 var errBaseStale = errors.New("base stale")
+
+// baseAdjudication is checkAndRefreshBase's tri-state verdict (M20: the
+// already-landed resolution joined fresh/refreshed).
+type baseAdjudication int
+
+const (
+	// baseFresh: HEAD == base (or nil/empty base) — the caller applies
+	// the diff and commits normally.
+	baseFresh baseAdjudication = iota
+	// baseRefreshed: a clean --3way rebase already applied the diff to
+	// main and moved its base pointer to HEAD — the caller skips its own
+	// baseline/apply and only commits.
+	baseRefreshed
+	// baseAlreadyLanded: the diff's post-image is already in main's tree
+	// (it landed through a path the daemon never applied — manual merge,
+	// cherry-pick). Nothing was applied by this call; the caller skips
+	// apply, commits only if uncommitted post-image content remains on
+	// the patch paths, and marks the accept row already_landed.
+	baseAlreadyLanded
+)
 
 // checkAndRefreshBase is the FINAL, authoritative base-freshness
 // adjudication (P0a; supersedes fix-INT's checkBaseFresh, same D1/D3/D4
 // invariants): it runs where the refusal used to — under acceptMu, after
 // the unmerged-index refusal and before the caller's apply — so the
 // check-to-apply window stays zero for daemon writers (a concurrent
-// accept's CommitPaths holds this same mutex). HEAD drift now triggers a
-// REBASE instead of a hard refusal: the diff embeds its base blobs, so
-// git apply --3way merges it onto current HEAD as a real 3-way merge,
-// using the same baseline/apply/rollback trio the caller's fresh path
-// runs. Returns:
+// accept's CommitPaths holds this same mutex). HEAD drift triggers (in
+// order):
 //
-//	(false, nil) — base fresh, or nil/empty (fix-INT D4 grandfathering:
-//	the auto path already refuses a missing base upstream as
-//	base_unresolvable, so the skip re-opens no hole); the caller applies
-//	normally.
-//	(true, nil) — refresh CLEAN: the diff already applied to main and its
-//	base pointer moved to HEAD (UpdateDiffBaseSHA); the caller skips its
-//	baseline/apply and proceeds to CommitPaths.
-//	(false, err) — refresh failed: main rolled back to pre-attempt state,
-//	the diff stays pending (NOT conflict — DiffConflict is reserved for
-//	fresh-base apply failures), and err wraps errBaseStale for BOTH the
-//	conflict and the error outcome (the lock's contract treats them the
-//	same: fail closed), so the auto-land caller's errors.Is branch
-//	journals base_stale_at_land with its panel evidence.
+//  1. the ALREADY-LANDED roundtrip (M20): ProbeAlreadyLanded reverse-
+//     checks the patch against main's tree — read-only, before any
+//     apply attempt. A diff whose content is fully present (landed via
+//     manual merge/cherry-pick) is a bookkeeping resolution, not a
+//     conflict: base pointer moves to HEAD, refresh_attempted
+//     {outcome:"already_landed"} journals, and the caller's accept
+//     proceeds as a no-op land. This is the reconcile that closes the
+//     "content in main, diff pending forever" zombie class at its root.
+//  2. the P0a REBASE: the diff embeds its base blobs, so git apply
+//     --3way merges it onto current HEAD as a real 3-way merge, using
+//     the same baseline/apply/rollback trio the caller's fresh path
+//     runs.
+//
+// Returns:
+//
+//	(baseFresh, nil) — base fresh, or nil/empty (fix-INT D4
+//	grandfathering: the auto path already refuses a missing base
+//	upstream as base_unresolvable, so the skip re-opens no hole); the
+//	caller applies normally.
+//	(baseRefreshed, nil) — refresh CLEAN: the diff already applied to
+//	main and its base pointer moved to HEAD (UpdateDiffBaseSHA); the
+//	caller skips its baseline/apply and proceeds to CommitPaths.
+//	(baseAlreadyLanded, nil) — content roundtrip: fully present, pointer
+//	moved; the caller skips apply and commits only if patch paths still
+//	differ from HEAD.
+//	(baseFresh, err) — refresh failed: main rolled back to pre-attempt
+//	state, the diff stays pending (NOT conflict — DiffConflict is
+//	reserved for fresh-base apply failures), and err wraps errBaseStale
+//	for BOTH the conflict and the error outcome (the lock's contract
+//	treats them the same: fail closed), so the auto-land caller's
+//	errors.Is branch journals base_stale_at_land and hands the diff to
+//	the rebase revise round.
 //
 // Every attempt journals refresh_attempted{phase:"accept_apply"} BEFORE
 // returning — journal-first, so the rebase's evidence precedes whichever
@@ -2324,25 +2362,39 @@ var errBaseStale = errors.New("base stale")
 // back is not on the table. One attempt per gate encounter (hard rule 8):
 // if HEAD moves again after a clean refresh, the next gate's check starts
 // the adjudication over, it never loops inside one call.
-func (s *Server) checkAndRefreshBase(ctx context.Context, d *store.Diff) (refreshed bool, err error) {
+func (s *Server) checkAndRefreshBase(ctx context.Context, d *store.Diff) (baseAdjudication, error) {
 	if d.BaseSHA == nil || *d.BaseSHA == "" {
-		return false, nil
+		return baseFresh, nil
 	}
 	head, err := git.CurrentSHA(s.projectRoot)
 	if err != nil {
-		return false, fmt.Errorf("accept_diff: read main HEAD for base freshness: %w", err)
+		return baseFresh, fmt.Errorf("accept_diff: read main HEAD for base freshness: %w", err)
 	}
 	if head == *d.BaseSHA {
-		return false, nil
+		return baseFresh, nil
 	}
 	base := *d.BaseSHA
+	// M20 reconcile, BEFORE any apply attempt (read-only): a stale base
+	// whose content is already in main is the diff-20 zombie class — the
+	// pipeline's only ingest path is git apply, so manual merges and
+	// cherry-picks are invisible to it without this check. A partial
+	// landing or a tree with drifted content reverse-checks dirty and
+	// falls through to the rebase — conservative, never a false accept.
+	if landed, _, lerr := git.ProbeAlreadyLanded(s.projectRoot, d.PathOnDisk); lerr == nil && landed {
+		if uerr := s.store.UpdateDiffBaseSHA(ctx, d.ID, head); uerr != nil {
+			return baseFresh, fmt.Errorf("accept_diff: record already-landed base: %w", uerr)
+		}
+		*d.BaseSHA = head
+		s.journalRefreshAttempt(ctx, *d, "accept_apply", "already_landed", base, head, nil)
+		return baseAlreadyLanded, nil
+	}
 	patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
 	if gerr != nil {
-		return false, fmt.Errorf("accept_diff: parse patch paths for refresh: %w", gerr)
+		return baseFresh, fmt.Errorf("accept_diff: parse patch paths for refresh: %w", gerr)
 	}
 	baseHEAD, baseDisk, berr := git.CapturePatchBaseline(s.projectRoot, patchPaths)
 	if berr != nil {
-		return false, fmt.Errorf("accept_diff: capture rollback baseline: %w", berr)
+		return baseFresh, fmt.Errorf("accept_diff: capture rollback baseline: %w", berr)
 	}
 	if applyErr := git.ApplyDiff(s.projectRoot, d.PathOnDisk); applyErr == nil {
 		// Clean rebase onto current HEAD — move the base pointer before
@@ -2354,11 +2406,11 @@ func (s *Server) checkAndRefreshBase(ctx context.Context, d *store.Diff) (refres
 			if rbErr := git.RollbackPatchApply(s.projectRoot, patchPaths, baseHEAD, baseDisk); rbErr != nil {
 				log.Printf("accept_diff: refresh rollback after UpdateDiffBaseSHA failure for diff %d: %v (inspect the main checkout)", d.ID, rbErr)
 			}
-			return false, fmt.Errorf("accept_diff: record refreshed base: %w", uerr)
+			return baseFresh, fmt.Errorf("accept_diff: record refreshed base: %w", uerr)
 		}
 		*d.BaseSHA = head
 		s.journalRefreshAttempt(ctx, *d, "accept_apply", "clean", base, head, nil)
-		return true, nil
+		return baseRefreshed, nil
 	} else {
 		// Classify BEFORE the rollback erases the evidence: a failed --3way
 		// that left unmerged index entries is a merge conflict; anything
@@ -2371,7 +2423,7 @@ func (s *Server) checkAndRefreshBase(ctx context.Context, d *store.Diff) (refres
 			log.Printf("accept_diff: refresh rollback for diff %d: %v (inspect the main checkout)", d.ID, rbErr)
 		}
 		s.journalRefreshAttempt(ctx, *d, "accept_apply", outcome, base, head, applyErr)
-		return false, fmt.Errorf("accept_diff: base stale (%s→%s) and automatic refresh %s: %v — re-run the task on current HEAD or reject the diff, which stays pending: %w", base, head, outcome, applyErr, errBaseStale)
+		return baseFresh, fmt.Errorf("accept_diff: base stale (%s→%s) and automatic refresh %s: %v — the content conflicts with current main; the pipeline regenerates the task on current HEAD (auto-revise): %w", base, head, outcome, applyErr, errBaseStale)
 	}
 }
 
@@ -2453,6 +2505,10 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	// attests current_HEAD+diff, so the row must carry both — base_sha is
 	// the post-refresh base (== head_sha), refreshed_from_sha the original.
 	var refreshedFromSHA string
+	// alreadyLanded (M20) marks the content-roundtrip resolution: the
+	// diff's post-image was already in main, so the accept applied nothing
+	// (bookkeeping no-op land, accept row carries already_landed:true).
+	var alreadyLanded bool
 	if action == "accept" {
 		// M6 (§8b): explicit guarded-path check — gitignore is not the
 		// enforcement point (wiki/ is NOT gitignored, so this daemon-side
@@ -2489,23 +2545,29 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		} else if conflicts {
 			return Response{}, errors.New("accept_diff: main checkout has unresolved merge conflicts; resolve or reset them, then retry the accept")
 		}
-		// Final base-freshness adjudication (P0a; see checkAndRefreshBase):
-		// a stale base attempts a --3way REBASE right here instead of the
-		// old hard refusal. A clean refresh ALREADY applied the diff to
+		// Final base-freshness adjudication (P0a + M20; see
+		// checkAndRefreshBase): a stale base is adjudicated right here
+		// instead of the old hard refusal — already-landed roundtrip first,
+		// then a --3way rebase. A clean refresh ALREADY applied the diff to
 		// main, so the fresh-path baseline+apply below is skipped and only
-		// CommitPaths remains; a conflict/error keeps the diff pending,
-		// journals refresh_attempted, and returns errBaseStale-wrapped —
-		// the auto caller's errors.Is branch owns base_stale_at_land on
-		// top of that row.
+		// CommitPaths remains; already-landed applies nothing and commits
+		// only leftover uncommitted post-image content; a conflict/error
+		// keeps the diff pending, journals refresh_attempted, and returns
+		// errBaseStale-wrapped — the auto caller's errors.Is branch owns
+		// base_stale_at_land (blocked row + rebase revise round) on top.
 		originalBase := ""
 		if d.BaseSHA != nil {
 			originalBase = *d.BaseSHA
 		}
-		refreshed, err := s.checkAndRefreshBase(ctx, &d)
+		adj, err := s.checkAndRefreshBase(ctx, &d)
 		if err != nil {
 			return Response{}, err
 		}
-		if refreshed {
+		if adj == baseRefreshed {
+			refreshedFromSHA = originalBase
+		}
+		if adj == baseAlreadyLanded {
+			alreadyLanded = true
 			refreshedFromSHA = originalBase
 		}
 		// The freshness head for the journaled row: a set BaseSHA that
@@ -2523,9 +2585,24 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		// paths (no self-produced unmerged entries, no half-applied files,
 		// no damage outside the patch). When our parser can't enumerate the
 		// paths, falls back to no-baseline — git apply stays the authority.
-		// Skipped entirely when a stale-base refresh already applied the
-		// diff (its own baseline/rollback pair ran inside the attempt).
-		if !refreshed {
+		// Skipped entirely when the adjudication resolved the base (a
+		// clean refresh ran its own baseline/apply; already-landed applies
+		// nothing).
+		if adj == baseFresh {
+			// M20 fresh-base roundtrip, BEFORE any apply (read-only): the
+			// post-image is already in the tree when an identical
+			// UNCOMMITTED edit sits on the patch paths, or the base
+			// commit itself carries the content. A forward apply there
+			// fails, and the I7 rollback restores HEAD bytes — it would
+			// destroy the identical edit before any check could see it.
+			// Rescued diffs land as bookkeeping; when the content is
+			// uncommitted, CommitPaths below records it as the accept
+			// commit (the landing must be recorded either way).
+			if landed, _, lerr := git.ProbeAlreadyLanded(s.projectRoot, d.PathOnDisk); lerr == nil && landed {
+				alreadyLanded = true
+			}
+		}
+		if adj == baseFresh && !alreadyLanded {
 			var baseHEAD, baseDisk map[string]bool
 			if gerr == nil {
 				var berr error
@@ -2544,9 +2621,9 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 				if baseHEAD != nil {
 					rbErr = git.RollbackPatchApply(s.projectRoot, patchPaths, baseHEAD, baseDisk)
 				}
-				// Terminal conflict state: the diff leaves the review queue,
-				// the journal records the outcome, and the message tells the
-				// human exactly where main stands.
+				// Terminal conflict state: the diff leaves the review
+				// queue, the journal records the outcome, and the
+				// message tells the human exactly where main stands.
 				if uerr := s.store.UpdateDiffStatus(ctx, diffID, store.DiffConflict); uerr != nil {
 					log.Printf("accept_diff: mark diff %d conflict: %v", diffID, uerr)
 				}
@@ -2577,14 +2654,41 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		// committed don't appear in new worktrees, and the agent can't
 		// modify them in isolation. Unrelated changes the user staged or
 		// left dirty in the main checkout are never swept in.
-		commitMsg := fmt.Sprintf("odo: accept diff #%d", diffID)
-		if commitMessage != "" {
-			commitMsg = commitMessage
+		//
+		// M20: the already-landed resolution applies nothing, so the paths
+		// usually match HEAD exactly (content arrived committed) — an
+		// empty path-scoped commit is a git error, skip it. Uncommitted
+		// identical content (the fresh-base rescue) still gets the accept
+		// commit — the landing must be recorded.
+		skipCommit := false
+		if alreadyLanded {
+			// The rescue applied nothing, so no apply staged the paths —
+			// stage FIRST: an untracked post-image file must form an index
+			// entry before anything downstream, because git-diff-vs-HEAD
+			// is blind to untracked files (it would report "no
+			// difference" and skip the very commit that must record the
+			// file) and git commit -- paths refuses untracked pathspecs.
+			if err := git.StagePaths(s.projectRoot, patchPaths); err != nil {
+				log.Printf("accept_diff: already-landed stage for diff %d (non-fatal): %v", diffID, err)
+			}
+			differs, derr := git.PathsDifferFromHEAD(s.projectRoot, patchPaths)
+			switch {
+			case derr != nil:
+				log.Printf("accept_diff: already-landed commit-necessity check for diff %d: %v (attempting commit)", diffID, derr)
+			case !differs:
+				skipCommit = true
+			}
 		}
-		if err := git.CommitPaths(s.projectRoot, commitMsg, patchPaths); err != nil {
-			// Non-fatal: the file is already applied to the working tree.
-			// The commit just ensures worktree freshness for future runs.
-			log.Printf("accept_diff: auto-commit failed (non-fatal): %v", err)
+		if !skipCommit {
+			commitMsg := fmt.Sprintf("odo: accept diff #%d", diffID)
+			if commitMessage != "" {
+				commitMsg = commitMessage
+			}
+			if err := git.CommitPaths(s.projectRoot, commitMsg, patchPaths); err != nil {
+				// Non-fatal: the file is already applied to the working tree.
+				// The commit just ensures worktree freshness for future runs.
+				log.Printf("accept_diff: auto-commit failed (non-fatal): %v", err)
+			}
 		}
 		applied = true
 	}
@@ -2631,6 +2735,12 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	if refreshedFromSHA != "" {
 		payload["refreshed_from_sha"] = refreshedFromSHA
 	}
+	// M20 (additive): the diff's post-image was found already present in
+	// main (it landed outside the pipeline's apply path); the accept is a
+	// bookkeeping no-op land, not a fresh application.
+	if alreadyLanded {
+		payload["already_landed"] = true
+	}
 	if actor != "" {
 		payload["actor"] = actor
 	}
@@ -2651,11 +2761,13 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	s.retireRunForDiff(ctx, d)
 	s.mu.Unlock()
 
-	// M18: a human accept is the ladder's only un-suspension reset
-	// (journaled only at the transition, derived — never an in-memory
-	// flag).
-	if applied && actor == "" {
-		s.maybeLadderResume(ctx, d.ConversationID, diffID)
+	// M18 → M20: ANY landing is the ladder's un-suspension reset —
+	// "the panel converged again" is the same evidence class a human
+	// accept was, and a pipeline that can demote itself but never recover
+	// permanently wedges every conversation that hits one bad chain.
+	// Journaled only at the transition, derived — never an in-memory flag.
+	if applied {
+		s.maybeLadderResume(ctx, d.ConversationID, diffID, actor)
 	}
 
 	return Response{DiffID: diffID, Applied: applied}, nil

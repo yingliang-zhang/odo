@@ -65,7 +65,7 @@ func seedAutonomyJournal(t *testing.T, root string, withData bool) {
 func TestAutonomyAuditNoData(t *testing.T) {
 	root := t.TempDir()
 	seedAutonomyJournal(t, root, false)
-	t.Setenv("HOME", t.TempDir()) // auto_apply reads defaults ("off"); never a real ~/.odo/prefs.md
+	t.Setenv("HOME", t.TempDir()) // auto_apply reads the M20 default ("main"); never a real ~/.odo/prefs.md
 	t.Chdir(root)
 
 	stdout, stderr, code := captureCLI(t, func() int {
@@ -77,8 +77,8 @@ func TestAutonomyAuditNoData(t *testing.T) {
 	if !strings.Contains(stdout, "no data") {
 		t.Errorf("stdout %q, want the no-data line", stdout)
 	}
-	if !strings.Contains(stdout, "auto-apply: off") {
-		t.Errorf("stdout %q, want the auto-apply pref line", stdout)
+	if !strings.Contains(stdout, "auto-apply: main") {
+		t.Errorf("stdout %q, want the auto-apply pref line (M20 default-on)", stdout)
 	}
 }
 

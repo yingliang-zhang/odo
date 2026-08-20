@@ -335,9 +335,14 @@ func blockedDetails(t *testing.T, st *store.Store, convID int64) []string {
 
 func TestAutoLandBlockedPaths(t *testing.T) {
 	// Each case drives s.autoLand to one blocked exit and asserts the
-	// journal row. Cases needing the panel without network isolate HOME so
-	// prefs.md has no review: line (empty models = blocked, never landed).
+	// journal row. M20: the models arming gate runs FIRST — every gate
+	// case must isolate HOME and arm the panel (a review: line parses
+	// without network; these cases never reach the fan-out). The one
+	// no-prefs case pins the OPPOSITE contract: unarmed = silent.
 	newServer := func(t *testing.T) (autonomyFixture, *Server, string, string) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
 		f := newAutonomyFixture(t)
 		root, sha := autolandRepo(t)
 		return f, &Server{store: f.st, projectRoot: root}, root, sha
@@ -385,42 +390,82 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("no review models is fail-closed", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir()) // no prefs.md → no review: models
-		f, s, root, sha := newServer(t)
-		// Pass evidence required (B4): an evidence-less verify blocks
-		// before the panel-model check.
+	t.Run("no review models is silent (M20 unarmed)", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir()) // no prefs.md → default-on but UNARMED (no review: line)
+		f := newAutonomyFixture(t)
+		root, sha := autolandRepo(t)
+		// Even a verify config and a perfectly-landable diff must not
+		// make a sound: the arming gate precedes every gate and row.
 		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		s := &Server{store: f.st, projectRoot: root}
 		d := f.addDiff(t, "p.diff", patchSrc("README.md", 1, 1, false))
 		d.BaseSHA = &sha
 		s.autoLand(context.Background(), d, root, "goal", false, "")
-		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "no_review_models" {
-			t.Errorf("reasons = %v, want [no_review_models]", got)
+		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 0 {
+			t.Errorf("reasons = %v, want NONE (unarmed pipelines journal nothing)", got)
+		}
+		got, err := f.st.GetDiff(context.Background(), d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffPending {
+			t.Errorf("diff status = %q, want pending (unarmed never resolves)", got.Status)
 		}
 	})
 }
 
-// TestMaybeAutoLandPrefOffSilent: a disabled auto_apply leaves NO journal
-// trace — a turned-off feature deserves no noise (blocked attempts are the
-// evidence, silence is the off state).
+// TestMaybeAutoLandPrefOffSilent (M20): the off kill switch leaves NO
+// journal trace even when the panel is fully armed — a disabled feature
+// deserves no noise (blocked attempts are the evidence, silence is the
+// off state). Companion contract: an armed pref with the pipeline
+// default-on (no auto_apply line at all) DOES run.
 func TestMaybeAutoLandPrefOffSilent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // default auto_apply = off
-	f := newAutonomyFixture(t)
-	s := &Server{store: f.st, projectRoot: f.dir}
-	d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
-	s.maybeAutoLand(d, f.dir, "goal", false, "")
-	if got := blockedReasons(t, f.st, f.c.ID); len(got) != 0 {
-		t.Errorf("reasons = %v, want none (pref off must be silent)", got)
-	}
+	t.Run("explicit off silences an armed pipeline", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		writePrefs(t, home, "review: rm1@test\nauto_apply: off\n")
+		f := newAutonomyFixture(t)
+		s := &Server{store: f.st, projectRoot: f.dir}
+		d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
+		s.maybeAutoLand(d, f.dir, "goal", false, "")
+		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 0 {
+			t.Errorf("reasons = %v, want none (kill switch must be silent)", got)
+		}
+	})
+
+	t.Run("absent auto_apply arms (M20 default-on)", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		// review: line but NO auto_apply line — the M20 default must arm
+		// the pipeline; reaching the verify gate proves it (blocked row).
+		writePrefs(t, home, "review: rm1@test\n")
+		f := newAutonomyFixture(t)
+		root, sha := autolandRepo(t)
+		s := &Server{store: f.st, projectRoot: root}
+		d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
+		d.BaseSHA = &sha
+		s.maybeAutoLand(d, root, "goal", false, "")
+		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "verify_unconfigured" {
+			t.Errorf("reasons = %v, want [verify_unconfigured] (absent pref must arm)", got)
+		}
+	})
 }
 
 // TestAutoLandVerifyNoEvidence (B4): an exit-0 verify whose output tail
 // shows zero test evidence blocks before ANY panel spend — and, flipped
-// on, pass evidence lets the same config proceed to the panel-model gate.
+// on, pass evidence lets the same config proceed THROUGH the panel to a
+// verdict (M20: the panel is armed by stub; the M16 no_review_models
+// progress-proof is gone with the arming gate).
 func TestAutoLandVerifyNoEvidence(t *testing.T) {
+	arm := func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		writePrefs(t, home, "review: rm1@test\n")
+	}
 	t.Run("zero evidence blocks", func(t *testing.T) {
+		arm(t)
 		f := newAutonomyFixture(t)
 		root, sha := autolandRepo(t)
 		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo build-only-done\n"), 0o644); err != nil {
@@ -449,18 +494,40 @@ func TestAutoLandVerifyNoEvidence(t *testing.T) {
 	})
 
 	t.Run("go-test-shaped tail passes the gate", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir()) // no prefs → the next gate (no_review_models) proves we got PAST verify
+		arm(t)
+		startPanelStub(t, func(call int64, model string) (int, string) {
+			return 200, "ACCEPT\nlooks correct"
+		})
 		f := newAutonomyFixture(t)
-		root, sha := autolandRepo(t)
+		root, _ := autolandRepo(t)
 		if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("printf 'ok  \\tpkg/mod\\t0.1s\\n'\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		s := &Server{store: f.st, projectRoot: root}
-		d := f.addDiff(t, "p.diff", patchSrc("src/a.go", 1, 1, false))
-		d.BaseSHA = &sha
+		d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // landed\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}))
 		s.autoLand(context.Background(), d, root, "goal", false, "")
-		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "no_review_models" {
-			t.Errorf("reasons = %v, want [no_review_models] (an ok line satisfies the evidence gate)", got)
+		// An ok line satisfies the evidence gate → panel consulted →
+		// unanimous accept lands (the live proof the gate passed).
+		got, err := f.st.GetDiff(context.Background(), d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffAccepted {
+			t.Errorf("diff status = %q, want accepted (verify evidence gate passed to a landed panel)", got.Status)
+		}
+		if got := blockedReasons(t, f.st, f.c.ID); len(got) != 0 {
+			t.Errorf("reasons = %v, want none on a landed pipeline", got)
+		}
+		content, err := os.ReadFile(filepath.Join(root, "src", "a.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(content), "// landed") {
+			t.Errorf("landed tree content = %q, want the patch's post-image", content)
 		}
 	})
 }
@@ -987,13 +1054,18 @@ func TestAutoLandPreSpendRefreshClean(t *testing.T) {
 	}
 }
 
-// TestAutoLandPreSpendRefreshConflict (P0a): entry drift that OVERLAPS the
-// diff — the pre-spend probe's 3-way merge conflicts in its throwaway
-// worktree. The pipeline blocks exactly where the old hard refusal did
-// (base_stale, before ANY verify/panel spend), one refresh_attempted
-// {conflict, pre_spend_probe} row precedes the blocked row, the diff stays
-// pending, and main was never touched by the probe.
+// TestAutoLandPreSpendRefreshConflict (P0a → M20): entry drift that
+// OVERLAPS the diff — the pre-spend probe's 3-way merge conflicts in its
+// throwaway worktree. M20 rewires the old base_stale block into the settle
+// ladder: refresh_attempted{conflict, pre_spend_probe} journals first,
+// then the ladder's read-decide — failing closed at revise_ambiguous
+// because this fixture conversation has no origin goal — spawns nothing,
+// consults no panel, runs no verify, and leaves the diff pending with its
+// base unmoved. Main was never touched by the probe.
 func TestAutoLandPreSpendRefreshConflict(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\n") // M20: the arming gate precedes every gate
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	s := &Server{store: f.st, projectRoot: root}
@@ -1015,18 +1087,16 @@ func TestAutoLandPreSpendRefreshConflict(t *testing.T) {
 	head := gitOut(t, root, "rev-parse", "HEAD")
 
 	s.autoLand(context.Background(), d, root, "goal", false, "")
-	if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "base_stale" {
-		t.Fatalf("reasons = %v, want [base_stale]", got)
-	}
 	sc := scanSettle(t, f.st, f.c.ID)
-	if detail, _ := sc.blocked[0]["detail"].(string); !strings.Contains(detail, "refresh probe: conflict") {
-		t.Errorf("blocked detail = %q, want the refresh-probe conflict named", detail)
+	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "revise_ambiguous" {
+		t.Fatalf("reasons = %v, want [revise_ambiguous] (entry conflict now enters the ladder, not a base_stale block)", got)
 	}
 	if n := atomic.LoadInt64(calls); n != 0 {
 		t.Errorf("panel calls = %d, want 0 (the entry probe precedes all spend)", n)
 	}
 	// refresh_attempted{conflict, pre_spend_probe} immediately precedes the
-	// blocked row (journal-first, hard rule 6).
+	// blocked row (journal-first, hard rule 6), and the verify/panel
+	// breadcrumbs never fired.
 	if len(sc.reviewSeq) != 2 || sc.reviewSeq[0]["action"] != "refresh_attempted" || sc.reviewSeq[1]["action"] != "auto_land_blocked" {
 		t.Fatalf("reviewSeq = %v, want [refresh_attempted, auto_land_blocked]", sc.reviewSeq)
 	}
@@ -1060,12 +1130,14 @@ func TestAutoLandPreSpendRefreshConflict(t *testing.T) {
 	}
 }
 
-// TestAutoLandFinalRefreshConflict (P0a): the entry probe passed (fresh
-// base), verify + the panel ran — and THEN a racing commit drifted main
-// ONTO the diff's own path. The final gate's rebase conflicts: main rolls
-// back, one refresh_attempted{conflict, accept_apply} row rides between
-// the moa_review and the base_stale_at_land blocked row (which carries
-// the completed panel as advisory evidence), and the diff stays pending.
+// TestAutoLandFinalRefreshConflict (P0a → M20): the entry probe passed
+// (fresh base), verify + the panel ran — and THEN a racing commit drifted
+// main ONTO the diff's own path. The final gate's rebase conflicts: main
+// rolls back, one refresh_attempted{conflict, accept_apply} row rides
+// between the moa_review and the base_stale_at_land blocked row (which
+// carries the completed panel as advisory evidence), and M20 hands the
+// diff to the settle ladder — here failing closed at revise_ambiguous
+// (no origin goal in the fixture conversation), the diff still pending.
 func TestAutoLandFinalRefreshConflict(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1104,8 +1176,12 @@ func TestAutoLandFinalRefreshConflict(t *testing.T) {
 		t.Fatalf("panel calls = %d, want 1 (the panel RAN — the block rides its evidence)", n)
 	}
 	sc := scanSettle(t, f.st, f.c.ID)
-	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "base_stale_at_land" {
-		t.Fatalf("blocked reasons = %v, want [base_stale_at_land]", got)
+	// M20: the blocked evidence row now rides INTO the settle ladder —
+	// this fixture conversation has no human user_message (no origin
+	// goal), so the ladder fails closed at revise_ambiguous instead of
+	// spawning. The old contract's run ends at base_stale_at_land.
+	if got := sc.blockedReasons(); len(got) != 2 || got[0] != "base_stale_at_land" || got[1] != "revise_ambiguous" {
+		t.Fatalf("blocked reasons = %v, want [base_stale_at_land revise_ambiguous]", got)
 	}
 	row := sc.blocked[0]
 	if row["consensus_verdict"] != "accept" {
@@ -1117,6 +1193,9 @@ func TestAutoLandFinalRefreshConflict(t *testing.T) {
 	}
 	if detail, _ := row["detail"].(string); !strings.Contains(detail, "the verify and panel attested the pre-drift tree") {
 		t.Errorf("detail = %q, want the pre-drift attestation advisory", detail)
+	}
+	if detail, _ := row["detail"].(string); !strings.Contains(detail, "regenerating on current HEAD") {
+		t.Errorf("detail = %q, want the M20 regeneration note", detail)
 	}
 	// Journal order: moa_review → refresh_attempted{conflict} →
 	// base_stale_at_land, and NO accept row.
@@ -1157,6 +1236,139 @@ func TestAutoLandFinalRefreshConflict(t *testing.T) {
 	}
 	if unmerged := gitOut(t, root, "ls-files", "-u"); unmerged != "" {
 		t.Errorf("unmerged index entries after rollback:\n%s", unmerged)
+	}
+}
+
+// TestAutoLandAlreadyLandedFastPath (M20 reconcile): the diff's content
+// reached main through a side path (a manual commit of identical content)
+// while the diff sat pending. Entry detection short-circuits everything —
+// NO verify run, NO panel spend, NO base probe — and the final gate's own
+// roundtrip ledgers the no-op land: diff accepted, accept row carries
+// already_landed:true with actor auto_panel, base pointer rides to HEAD,
+// refresh_attempted{already_landed} rows mark both gates, and NO new
+// commit is created (the content was already committed — an empty
+// path-scoped commit would be a git error and ledger noise).
+func TestAutoLandAlreadyLandedFastPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\n")
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	calls := startPanelStub(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nshould never be consulted"
+	})
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // landed out-of-band\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	// The side-channel landing: identical content, committed by hand.
+	if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // landed out-of-band\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", "src/a.go")
+	gitIn(t, root, "commit", "-m", "manual merge of the same change")
+	landedHEAD := gitOut(t, root, "rev-parse", "HEAD")
+
+	s.autoLand(context.Background(), d, root, "goal", false, "")
+	if n := atomic.LoadInt64(calls); n != 0 {
+		t.Errorf("panel calls = %d, want 0 (bookkeeping spends nothing)", n)
+	}
+	sc := scanSettle(t, f.st, f.c.ID)
+	if got := sc.blockedReasons(); len(got) != 0 {
+		t.Fatalf("blocked reasons = %v, want none on a roundtripted land", got)
+	}
+	if len(sc.accepts) != 1 || sc.accepts[0]["diff_id"] != float64(d.ID) || sc.accepts[0]["actor"] != autoActor {
+		t.Fatalf("accepts = %v, want one auto_panel accept of diff %d", sc.accepts, d.ID)
+	}
+	if sc.accepts[0]["already_landed"] != true {
+		t.Errorf("accept row already_landed = %v, want true", sc.accepts[0]["already_landed"])
+	}
+	// Gate breadcrumbs: entry roundtrip then the final gate's own roundtrip,
+	// newest order, and NO started/moa rows (nothing attested by verify or panel).
+	var outcomes []string
+	for _, p := range sc.reviewSeq {
+		switch p["action"] {
+		case "auto_land_started", "moa_review":
+			t.Errorf("spend row %v on a reconcile land — verify/panel must never run", p)
+		case "refresh_attempted":
+			outcomes = append(outcomes, fmt.Sprintf("%v/%v", p["outcome"], p["phase"]))
+		}
+	}
+	if len(outcomes) != 2 || outcomes[0] != "already_landed/pre_spend_probe" || outcomes[1] != "already_landed/accept_apply" {
+		t.Errorf("refresh rows = %v, want [already_landed/pre_spend_probe, already_landed/accept_apply]", outcomes)
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+	if got.BaseSHA == nil || *got.BaseSHA != landedHEAD {
+		t.Errorf("store base_sha = %v, want %s (the pointer rode to HEAD)", got.BaseSHA, landedHEAD)
+	}
+	// No bookkeeping commit: HEAD is exactly the manual landing commit.
+	if head := gitOut(t, root, "rev-parse", "HEAD"); head != landedHEAD {
+		t.Errorf("HEAD = %s, want %s (an already-committed landing earns no empty commit)", head, landedHEAD)
+	}
+	if status := gitOut(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("main status = %q, want clean", status)
+	}
+}
+
+// TestAcceptAlreadyLandedFreshBase (M20 rescue): head == base, but the
+// post-image sits in main UNCOMMITTED (an identical out-of-band edit) —
+// the forward apply fails yet this is no conflict. The fresh-base
+// roundtrip fires BEFORE the apply attempt (the I7 rollback would
+// otherwise restore HEAD bytes and destroy the edit), the accept commits
+// the content as the accept commit, and the tree ends clean.
+func TestAcceptAlreadyLandedFreshBase(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	patch := realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // identical out-of-band edit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	d := baseBoundDiff(t, f, root, "p.diff", patch)
+	headBefore := gitOut(t, root, "rev-parse", "HEAD")
+	// The out-of-band identical edit, left uncommitted.
+	if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // identical out-of-band edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", autoActor, ""); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+	row := resolutionRow(t, f, d, "accept")
+	if row["already_landed"] != true {
+		t.Errorf("accept row already_landed = %v, want true", row["already_landed"])
+	}
+	if row["refreshed_from_sha"] != nil {
+		t.Errorf("accept row refreshed_from_sha = %v, want absent (no base refresh happened)", row["refreshed_from_sha"])
+	}
+	// The uncommitted post-image content was recorded as the accept commit.
+	if head := gitOut(t, root, "rev-parse", "HEAD"); head == headBefore {
+		t.Error("HEAD did not advance — the uncommitted post-image must be committed")
+	}
+	if msg := gitOut(t, root, "log", "-1", "--format=%s"); !strings.Contains(msg, "odo: accept diff #") {
+		t.Errorf("HEAD subject = %q, want the accept commit", msg)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(root, "src", "a.go")); rerr != nil || string(data) != "package src // identical out-of-band edit\n" {
+		t.Errorf("src/a.go = %q, %v — the identical edit survives, never rolled back", data, rerr)
+	}
+	if status := gitOut(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("main status = %q, want clean (the accept commit swept the patch paths)", status)
 	}
 }
 

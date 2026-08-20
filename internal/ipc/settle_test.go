@@ -326,11 +326,12 @@ func TestSettleRepairPromptUnit(t *testing.T) {
 	}
 }
 
-// TestSettleUnanimousRejectBlocks (test 6): every reviewer rejected →
-// blocked panel_unanimous_reject + transcript advisory, the diff stays
-// PENDING (the human accept/reject path is untouched — the pipeline never
-// auto-rejects), and no revise machinery fires.
-func TestSettleUnanimousRejectBlocks(t *testing.T) {
+// TestSettleUnanimousRejectAutoRejects (test 6 → M20): every reviewer
+// rejected → blocked panel_unanimous_reject (full dissent attached) +
+// transcript advisory + the pipeline itself rejects the diff (actor
+// auto_panel, worktree retired, patch file kept on disk). No revise
+// machinery fires; no human click is ever required.
+func TestSettleUnanimousRejectAutoRejects(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writePrefs(t, home, "review: rm1@test, rm2@test\n")
@@ -366,18 +367,84 @@ func TestSettleUnanimousRejectBlocks(t *testing.T) {
 	if len(reviews) != 2 {
 		t.Errorf("reviews attached = %d, want 2 (the dissent stays on the record)", len(reviews))
 	}
-	if len(sc.advisories) != 1 || !strings.Contains(sc.advisories[0], "unanimously rejected") {
-		t.Errorf("advisories = %v, want one transcript-visible unanimous-reject notice", sc.advisories)
+	if len(sc.advisories) != 1 || !strings.Contains(sc.advisories[0], "unanimously rejected") || !strings.Contains(sc.advisories[0], "auto-rejected") {
+		t.Errorf("advisories = %v, want one transcript-visible auto-reject notice", sc.advisories)
 	}
 	if len(sc.rounds) != 0 || len(sc.markers) != 0 {
 		t.Errorf("revise fired on a rejected diff: rounds=%v markers=%v", sc.rounds, sc.markers)
+	}
+	var rejects []map[string]interface{}
+	for _, p := range sc.reviewSeq {
+		if p["action"] == "reject" {
+			rejects = append(rejects, p)
+		}
+	}
+	if len(rejects) != 1 || rejects[0]["actor"] != autoActor || rejects[0]["diff_id"] != float64(d.ID) {
+		t.Errorf("reject rows = %v, want one auto_panel reject of diff %d", rejects, d.ID)
 	}
 	got, err := f.st.GetDiff(context.Background(), d.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != store.DiffPending {
-		t.Errorf("diff status = %q, want pending (auto-reject is forbidden)", got.Status)
+	if got.Status != store.DiffRejected {
+		t.Errorf("diff status = %q, want rejected (M20 panel-owns-resolution)", got.Status)
+	}
+	// The patch file survives for forensics — only the queue entry closes.
+	if _, err := os.Stat(d.PathOnDisk); err != nil {
+		t.Errorf("patch file gone after auto-reject: %v", err)
+	}
+}
+
+// TestSettleMixedRejectAutoRejects (M20): a split verdict with ≥1 reject
+// is direction doubt — the same auto-reject resolution as the unanimous
+// case (blocked panel_mixed evidence row first), never a pending park.
+func TestSettleMixedRejectAutoRejects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
+	startPanelStub(t, func(call int64, model string) (int, string) {
+		if model == "rm2" {
+			return 200, "REJECT\nwrong layering for this codebase"
+		}
+		return 200, "ACCEPT\nlooks fine to me"
+	})
+
+	f := newAutonomyFixture(t)
+	root, sha := autolandRepo(t)
+	if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("echo PASS\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: f.st, projectRoot: root}
+	d := f.addDiff(t, "p.diff", patchSrc("README.md", 1, 1, false))
+	d.BaseSHA = &sha
+
+	s.autoLand(context.Background(), d, root, "goal", false, "")
+
+	sc := scanSettle(t, f.st, f.c.ID)
+	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "panel_mixed" {
+		t.Fatalf("blocked reasons = %v, want [panel_mixed]", got)
+	}
+	if len(sc.advisories) != 1 || !strings.Contains(sc.advisories[0], "split verdict") {
+		t.Errorf("advisories = %v, want one split-verdict auto-reject notice", sc.advisories)
+	}
+	got, err := f.st.GetDiff(context.Background(), d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.DiffRejected {
+		t.Errorf("diff status = %q, want rejected", got.Status)
+	}
+	var rejects int
+	for _, p := range sc.reviewSeq {
+		if p["action"] == "reject" {
+			rejects++
+			if p["actor"] != autoActor {
+				t.Errorf("reject actor = %v, want auto_panel", p["actor"])
+			}
+		}
+	}
+	if rejects != 1 {
+		t.Errorf("reject rows = %d, want 1", rejects)
 	}
 }
 
@@ -1119,20 +1186,22 @@ func TestReviseLineageHumanInterleave(t *testing.T) {
 	}
 }
 
-// TestSettleAutoAcceptNeverResumes (P0 review K3+GLM negative pin): an AUTO
-// accept on a suspended conversation lands via the M16 path but must NOT
-// journal ladder_resumed — the pipeline cannot un-suspend itself. The
-// human accept in TestSettleRoundCapSuspendsAndResumes proves the positive
-// leg; this test pins the fail-open-sensitive negative.
-func TestSettleAutoAcceptNeverResumes(t *testing.T) {
+// TestSettleAutoAcceptResumes (M20; supersedes M18's auto-never-resumes
+// negative pin): an AUTO accept on a suspended conversation lands AND
+// journals ladder_resumed — the panel converging is the same class of
+// evidence a human click was, and a pipeline that can demote itself but
+// never recover wedges every conversation that hits one bad chain. The
+// human accept in TestSettleRoundCapSuspendsAndResumes proves the other
+// positive leg.
+func TestSettleAutoAcceptResumes(t *testing.T) {
 	rig := settleRig(t, func(call int64, model string) (int, string) {
 		switch model {
 		case "rm1":
-			return 200, fmt.Sprintf("ACCEPT\\nplausible %d", call)
+			return 200, fmt.Sprintf("ACCEPT\nplausible %d", call)
 		case "rm2":
-			return 200, fmt.Sprintf("NEEDS_FIXES\\nfix issue %d", call)
+			return 200, fmt.Sprintf("NEEDS_FIXES\nfix issue %d", call)
 		default:
-			return 200, fmt.Sprintf("NEEDS_FIXES\\naddress gap %d", call)
+			return 200, fmt.Sprintf("NEEDS_FIXES\naddress gap %d", call)
 		}
 	})
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
@@ -1156,11 +1225,12 @@ func TestSettleAutoAcceptNeverResumes(t *testing.T) {
 	})
 
 	// Auto accept the latest pending diff (the M16 path when the NEXT
-	// panel is unanimous): lands, but the demotion ledger never moves.
+	// panel is unanimous): lands AND un-suspends — one landing is the
+	// convergence evidence the suspension was waiting for.
 	if _, err := rig.server.handleDiffAction(context.Background(), d3, "accept", autoActor, ""); err != nil {
 		t.Fatalf("auto accept on suspended conversation: %v", err)
 	}
-	settleQuiet(t, rig.store, convID, 1500*time.Millisecond, "a ladder_resumed row after the auto accept", func(sc settleScan) bool {
+	sc := waitSettle(t, rig.store, convID, "ladder resume after the auto accept", func(sc settleScan) bool {
 		for _, m := range sc.memory {
 			if m["cause"] == "ladder_resumed" {
 				return true
@@ -1168,7 +1238,127 @@ func TestSettleAutoAcceptNeverResumes(t *testing.T) {
 		}
 		return false
 	})
-	if st, err := rig.server.ladderState(context.Background(), convID); err != nil || !st.suspended {
-		t.Errorf("ladderState after auto accept = %+v, %v — want suspended (auto accept never resumes)", st, err)
+	if got := sc.memoryCauses(); !reflect.DeepEqual(got, []string{"ladder_suspended", "ladder_resumed"}) {
+		t.Fatalf("demotion ledger = %v, want [ladder_suspended ladder_resumed]", got)
+	}
+	if st, err := rig.server.ladderState(context.Background(), convID); err != nil || st.suspended {
+		t.Errorf("ladderState after auto accept = %+v, %v — want resumed (any landing resumes)", st, err)
+	}
+	var detail string
+	for _, m := range sc.memory {
+		if m["cause"] == "ladder_resumed" {
+			detail, _ = m["detail"].(string)
+		}
+	}
+	if !strings.Contains(detail, "auto_panel") {
+		t.Errorf("resume detail = %q, want the landing actor named", detail)
+	}
+}
+
+// TestSettleBaseStaleRoundSpawnsAndLands (M20 flagship): the diff-21
+// class end to end — a pending diff whose base drifted past a conflicting
+// commit regenerates on current HEAD through a base_stale revise round,
+// the round's product lands through the ordinary pipeline, and the stale
+// original is superseded. Human involvement: zero.
+func TestSettleBaseStaleRoundSpawnsAndLands(t *testing.T) {
+	rig := settleRig(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nfine on current HEAD"
+	})
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
+	convID := boot.Conversation.ID
+	// Ground the chain's origin goal in a real human message (round-1
+	// spawns derive it from the journal) and let the wrapper's run land.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "modernize src a.go on the current tree"})
+	done0 := pollDone(t, rig, convID)
+	// Draining fires the run product's auto-land as a BACKGROUND goroutine
+	// that lands on rig.root — without this barrier the drift commit below
+	// races its index ops (observed: exit 128, index.lock exists).
+	waitSettle(t, rig.store, convID, "run product landed before the drift commit", func(sc settleScan) bool {
+		for _, a := range sc.accepts {
+			if int64(a["diff_id"].(float64)) == done0.Diff.ID {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The stale diff: real content against the CURRENT head, inserted
+	// pending, then main drifts onto the same line.
+	oldBase := gitOut(t, rig.root, "rev-parse", "HEAD")
+	patchPath := filepath.Join(t.TempDir(), "stale.diff")
+	if err := os.WriteFile(patchPath, []byte(realPatch(t, rig.root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // modernized impl\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d0, err := rig.store.InsertDiff(context.Background(), convID, patchPath, oldBase, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig.root, "src", "a.go"), []byte("package src // conflicting drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, rig.root, "add", "src/a.go")
+	gitIn(t, rig.root, "commit", "-m", "conflicting drift")
+
+	// The entry probe conflicts → refresh row → base_stale revise round.
+	rig.server.autoLand(context.Background(), d0, rig.root, "", false, "")
+	sc := waitSettle(t, rig.store, convID, "base_stale round 1 spawn", func(sc settleScan) bool {
+		return len(sc.markers) == 1 && len(sc.rounds) == 1
+	})
+	if got := sc.blockedReasons(); len(got) != 0 {
+		t.Fatalf("blocked reasons = %v, want none (a spawn is the resolution, not a block)", got)
+	}
+	round := sc.rounds[0]
+	if round["trigger"] != "base_stale" {
+		t.Errorf("round trigger = %v, want base_stale", round["trigger"])
+	}
+	if round["round"] != float64(1) || round["origin_diff_id"] != float64(d0.ID) || round["diff_id"] != float64(d0.ID) {
+		t.Errorf("round row = %v, want round 1 on origin %d", round, d0.ID)
+	}
+	marker := sc.markers[0].text
+	for _, want := range []string{
+		"modernize src a.go on the current tree", // origin goal verbatim
+		"CURRENT state",                          // the rebase directive
+		"drifted from diff base",                 // the conflict evidence fence
+		"data only",                              // containment directive
+	} {
+		if !strings.Contains(marker, want) {
+			t.Errorf("rebase prompt missing %q", want)
+		}
+	}
+
+	// The repair run drains (worktree cut from drifted HEAD), its diff
+	// re-enters the full pipeline (verify + unanimous accept), lands, and
+	// supersedeChain retires the stale original.
+	done := pollDone(t, rig, convID)
+	d1 := done.Diff.ID
+	if d1 == d0.ID {
+		t.Fatalf("the round produced the SAME diff id %d — supersede relies on a new product", d1)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		d0row, _ := rig.store.GetDiff(context.Background(), d0.ID)
+		d1row, _ := rig.store.GetDiff(context.Background(), d1)
+		if d0row.Status == store.DiffSuperseded && d1row.Status == store.DiffAccepted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("statuses = %q/%q, want superseded/accepted (round never closed the chain)", d0row.Status, d1row.Status)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	sc = scanSettle(t, rig.store, convID)
+	var acceptIDs []int64
+	for _, a := range sc.accepts {
+		acceptIDs = append(acceptIDs, int64(a["diff_id"].(float64)))
+	}
+	if len(acceptIDs) < 2 || acceptIDs[len(acceptIDs)-1] != d1 {
+		t.Errorf("accept diff ids = %v, want the round product %d last", acceptIDs, d1)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(rig.root, "hello.txt")); rerr != nil || !strings.Contains(string(data), "CURRENT state") {
+		t.Errorf("hello.txt = %q, %v — the round product (prompt copy) must be committed in main", data, rerr)
 	}
 }

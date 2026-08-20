@@ -159,11 +159,15 @@ func ReadSettings() Settings {
 	if s.MaxConcurrentRuns == "" {
 		s.MaxConcurrentRuns = "4"
 	}
-	// M15 (O-1 rung-0): fail-closed — an unknown or absent value reads as
-	// "off". When a future rung consumes this pref, a typo must never
-	// silently widen apply scope.
+	// M15 (O-1 rung-0) → M20: auto-land is the DEFAULT landing canon, so
+	// an ABSENT value reads "main" (on). An unknown non-empty value still
+	// reads "off" — the fail-closed direction survived the flip: a typo
+	// narrows scope to manual review, never widens it. "main"/"branch"/
+	// "all" are back-compatible on-values; only "off" disables.
 	s.AutoApply = LoadPrefsRaw("auto_apply")
-	if !ValidAutoApply(s.AutoApply) {
+	if s.AutoApply == "" {
+		s.AutoApply = "main"
+	} else if !ValidAutoApply(s.AutoApply) {
 		s.AutoApply = "off"
 	}
 	s.PrewalkModel = LoadPrefsRaw("prewalk_model")
