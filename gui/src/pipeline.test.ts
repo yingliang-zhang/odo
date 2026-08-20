@@ -39,6 +39,27 @@ describe('derivePipelineStates', () => {
     expect(states).toEqual([{ diffId: 1, phase: 'revise', round: 2, lastSeq: 9 }]);
   });
 
+  it('ignores auto_revise_product: the superseded origin stays human-decidable', () => {
+    // Real journal shape (diff 21 revised into product 22): the product
+    // row is newest on the origin's chain but is drainRun bookkeeping
+    // (supersedeChain linkage), not activity — the origin must derive from
+    // its governing round row (revise = escape hatch), never in_flight.
+    const events = [
+      autoRow(10, { action: 'auto_land_started', diff_id: 21, stage: 'verify' }),
+      autoRow(11, { action: 'auto_land_started', diff_id: 21, stage: 'panel' }),
+      autoRow(12, { action: 'auto_revise_round', diff_id: 21, origin_diff_id: 21, round: 1 }),
+      autoRow(13, { action: 'auto_revise_product', origin_diff_id: 21, product_diff_id: 22 }),
+      autoRow(14, { action: 'auto_land_started', diff_id: 22, stage: 'verify' }),
+      autoRow(15, { action: 'auto_land_blocked', diff_id: 22, reason: 'verify_failed' }),
+    ];
+    const states = derivePipelineStates(events, [21, 22], true);
+    expect(states).toEqual([
+      { diffId: 21, phase: 'revise', round: 1, lastSeq: 12 },
+      { diffId: 22, phase: 'blocked', reason: 'verify_failed', lastSeq: 15 },
+    ]);
+    expect(states.every((s) => !pipelineHumanLocked(s))).toBe(true);
+  });
+
   it('reads moa_review consensus accept as landing, otherwise in_flight', () => {
     const accept = [autoRow(5, { action: 'moa_review', diff_id: 1, consensus_verdict: 'accept' })];
     const split = [autoRow(5, { action: 'moa_review', diff_id: 1, consensus_verdict: 'revise' })];

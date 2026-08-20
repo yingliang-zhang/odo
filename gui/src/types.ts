@@ -245,6 +245,11 @@ export interface EventPayload {
   // start), later rounds carry the just-evaluated product's id with the
   // SAME origin — the GUI resolves chain membership from this pair.
   origin_diff_id?: number;
+  // auto_revise_product (drainRun Fix B1): chain bookkeeping linking the
+  // repair product back to its origin — {product_diff_id, origin_diff_id},
+  // no diff_id. Derivation skips it (pipeline.ts); supersedeChain consumes
+  // it daemon-side on land.
+  product_diff_id?: number;
   // Timed-out review marker (codex ReviewDecision.TimedOut parity):
   // defensive — rendered when the payload carries it, nothing writes it yet.
   timed_out?: boolean;

@@ -24,6 +24,8 @@ All terminal pipeline events are already journaled as `review_action{actor:"auto
 
 Human accept/reject = silent (not pipeline news).
 
+**Exclusion — `auto_revise_product` is not pipeline state.** drainRun journals it purely as chain bookkeeping (Fix B1: lets `supersedeChain` find a landed repair product; the daemon's own loop tracker reads it as "revise over — the product's pipeline decides"). It carries no terminal state and nothing ever supersedes it on the origin, so letting it win "latest row" would park the origin in *in flight* forever and strip the human's decide-the-superseded-original escape hatch. Derivation skips these rows; the origin falls through to its governing round/blocked row.
+
 ## Placement
 
 StatusBar `PipelineChip`, between `PanelChip` and diff-count badge. Reuse `PanelChip` pattern: `useCloseOnClickAway`, `status-badge` classes, `bg-runs-menu`-shaped popover. Popover: one row per tracked diff (state icon · diff # · label · reason/round). Row click → Review tab.

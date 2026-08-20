@@ -114,6 +114,16 @@ export function derivePipelineStates(
       if (e.type !== "review_action") continue;
       const p = e.payload;
       if (p?.actor !== AUTO_ACTOR) continue;
+      // auto_revise_product is chain bookkeeping, not pipeline activity:
+      // drainRun journals it (Fix B1, server.go) purely so supersedeChain
+      // can find a landed repair product, and the daemon's own loop
+      // tracker (loop_run.go) reads it as "revise over — the product's
+      // own pipeline decides". Letting it win the scan would park the
+      // origin in in_flight forever (it carries no terminal state and
+      // nothing ever supersedes it ON the origin), stripping the human's
+      // decide-the-superseded-original escape hatch. Skip it; the scan
+      // falls through to the governing round/blocked row.
+      if (p.action === "auto_revise_product") continue;
       if (p.origin_diff_id != null && p.origin_diff_id === want) return e;
       if (p.diff_id != null && root(p.diff_id) === want) return e;
     }
