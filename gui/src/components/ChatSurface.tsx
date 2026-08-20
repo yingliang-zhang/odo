@@ -126,7 +126,7 @@ interface Props {
 // chip, hairline border, dim mono text). QueueDock.tsx keeps an inlined copy
 // for its Popover trigger — do not import across the boundary.
 const AUTO_DISTILL_CHIP_BASE =
-  "inline-flex items-center self-start gap-1 mt-2.5 mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-0.5 font-mono text-[length:var(--text-caption)] text-text-dim";
+  "inline-flex items-center self-start gap-1 mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-0.5 font-mono text-[length:var(--text-caption)] text-text-dim";
 
 // AutoDistillChip discloses the daemon's auto-distill state above the
 // composer: scheduled countdown with a Cancel (auto_distill_ctl disarm),
@@ -1582,7 +1582,7 @@ export default function ChatSurface({
       )}
       <div
         className={cn(
-          "chat-composer shrink-0 border-t border-stroke-tertiary bg-bg-raised px-4 pt-2.5 pb-2",
+          "chat-composer flex shrink-0 flex-col gap-1.5 border-t border-stroke-tertiary bg-bg-raised px-4 pt-2.5 pb-2",
           dragOver && "drag-over shadow-[inset_0_0_0_2px_var(--accent-user)]",
         )}
         ref={composerRef}
@@ -1637,7 +1637,7 @@ export default function ChatSurface({
           />
         )}
         {attachments.length > 0 && (
-          <div className="attachment-chips flex flex-wrap gap-1.5 px-4 pt-2.5">
+          <div className="attachment-chips flex flex-wrap gap-1.5 px-4">
             {attachments.map((path) => (
               <span
                 className="attachment-chip inline-flex items-center gap-1.5 rounded-[12px] border border-border bg-bg-input px-2 py-0.5 font-mono text-caption"
@@ -1658,7 +1658,7 @@ export default function ChatSurface({
           </div>
         )}
         <form
-          className="chat-input relative flex items-end gap-2 rounded-lg border border-stroke-secondary bg-bg-input py-1.5 pr-1.5 pl-3.5 transition-[border-color] duration-[180ms] ease-[var(--ease-standard)] focus-within:border-[var(--stroke-primary)]"
+          className="chat-input relative flex items-end gap-2 rounded-lg border border-stroke-secondary bg-bg-input py-1.5 pr-1.5 pl-3.5 shadow-soft transition-[border-color] duration-[180ms] ease-[var(--ease-standard)] focus-within:border-[var(--stroke-primary)]"
           onSubmit={handleSubmit}
         >
           {atMenu && (
@@ -1819,7 +1819,7 @@ export default function ChatSurface({
             onModelChanged={onModelChanged}
           />
         </form>
-        <div className="composer-hint px-1 pt-1.5 text-right text-micro text-text-dim">
+        <div className="composer-hint px-1 text-right text-micro text-text-dim">
           ⌘↵ send · Shift+↵ newline{agentRunning ? " · Esc stop" : ""}{distillLocked ? " · distilling…" : ""}
         </div>
       </div>

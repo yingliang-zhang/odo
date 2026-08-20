@@ -79,11 +79,11 @@ export default function SteerQueue({
   };
 
   return (
-    <div data-testid="steer-queue-panel" className="steer-queue mt-2.5 flex flex-col gap-1.5">
+    <div data-testid="steer-queue-panel" className="steer-queue flex flex-col gap-1.5">
       {showActive && (
         <div
           data-testid="steer-queue-active"
-          className="steer-active mx-4 flex items-start gap-1.5 rounded-lg border border-border bg-bg-input px-2.5 py-1.5 font-mono text-caption text-text-dim"
+          className="steer-active flex items-start gap-1.5 rounded-lg border border-border bg-bg-input px-2.5 py-1.5 font-mono text-caption text-text-dim shadow-soft"
         >
           <LoaderCircle size={11} className="spin mt-[3px] shrink-0" aria-hidden />
           <span className="shrink-0 font-semibold">
@@ -95,7 +95,7 @@ export default function SteerQueue({
         </div>
       )}
       {pending.length > 0 && (
-        <div className="steer-queue-list mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-1.5">
+        <div className="steer-queue-list rounded-lg border border-border bg-bg-input px-2.5 py-1.5 shadow-soft">
           <div className="queue-note">{strings.steerQueue.title(pending.length)}</div>
           <ul className="plan-list">
             {pending.map((s, i) => (

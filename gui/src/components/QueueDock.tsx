@@ -82,7 +82,7 @@ export default function QueueDock({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex items-center self-start gap-1 mt-2.5 mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-0.5 font-mono text-caption text-text-dim queue-chip self-start data-[state=open]:border-[var(--accent)] data-[state=open]:text-[var(--text)]"
+          className="inline-flex items-center self-start gap-1 mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-0.5 font-mono text-caption text-text-dim queue-chip self-start data-[state=open]:border-[var(--accent)] data-[state=open]:text-[var(--text)]"
           title={`${goals.length} parked goal${goals.length === 1 ? "" : "s"} — queued goals start when the current run finishes`}
         >
           Queue · {goals.length}

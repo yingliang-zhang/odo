@@ -31,7 +31,7 @@ interface Props {
 // AUTO_DISTILL_CHIP_BASE shape. ChatSurface owns its own copy; component
 // files never import one-liner class strings across the boundary.
 const LOOP_CHIP_BASE =
-  "inline-flex items-center self-start gap-1 mt-2.5 mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-0.5 font-mono text-[length:var(--text-caption)] text-text-dim";
+  "inline-flex items-center self-start gap-1 mx-4 rounded-lg border border-border bg-bg-input px-2.5 py-0.5 font-mono text-[length:var(--text-caption)] text-text-dim";
 
 export default function LoopChip({ conversationId, projectRoot, loops, onChanged, onError }: Props) {
   const [busy, setBusy] = useState<"stop" | "resume" | null>(null);
