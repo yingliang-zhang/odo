@@ -1,5 +1,12 @@
 import { test, expect } from "@playwright/test";
+import type * as fixtures from "../src/dev/fixtures";
 import { strings } from "../src/strings";
+
+declare global {
+  interface Window {
+    __odoFixtures?: typeof fixtures;
+  }
+}
 
 // Sidebar: project tree expand/collapse, workstream switch, create, rename, delete,
 // project switch (without collapsing tree state).
@@ -135,4 +142,71 @@ test("switch to non-active project does not collapse tree", async ({ page }) => 
 
   // odo project should still be expanded
   await expect(sidebar.getByText("feat-sidebar-tree")).toBeVisible();
+});
+
+const ODO_ROOT = "/Users/yingliangzhang/Projects/odo";
+const HDR_ROOT = "/Users/yingliangzhang/Projects/Sudo/supersplat-hdr";
+// Aggregate cadence: pending_counts refreshes on every 4th poll tick
+// (~6 s idle); the cross-project badge loop runs every 5 s.
+const AGG_REFRESH = { timeout: 12_000 };
+
+// 2026-08-20 regression: the active project's aggregates (running dots,
+// pending/parked pills) are keyed by workstream id — and ids collide
+// across projects (every journal starts at 1). Without a reset on project
+// switch, the previous project's rows rendered against the new project's
+// workstreams until the 4th poll tick corrected them: odo's running Main
+// (real) made supersplat-hdr's Main read "running" (its daemon reported
+// []). The mock answers pending_counts per root (fx.countsByRoot) so the
+// two fixture daemons disagree exactly like the real ones did.
+test("project switch drops the previous project's running/pending aggregates", async ({ page }) => {
+  const staleWindowProbe = async (root: () => Promise<number>) => expect(await root()).toBe(0);
+  await page.evaluate(([odo, hdr]) => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
+    // odo daemon: Main (ws 1) running, plus pending/parked aimed at ws 10 —
+    // an id only the OTHER project's Main has, so the pills are invisible
+    // before the switch and can only appear as cross-project leakage.
+    fx.countsByRoot[odo] = { pending: { 10: 3 }, parked: { 10: 2 }, running: [1] };
+    // supersplat-hdr daemon: idle.
+    fx.countsByRoot[hdr] = { pending: {}, parked: {}, running: [] };
+    // supersplat-hdr gains a workstream whose id collides with odo's
+    // running Main — the exact 2026-08-20 shape.
+    fx.workstreams[hdr].push({
+      id: 1, project_id: 2, name: "legacy-main", branch: "legacy-main",
+      status: "active", created_at: "2026-08-01T14:02:00Z",
+    });
+  }, [ODO_ROOT, HDR_ROOT]);
+
+  const sidebar = page.locator(".sidebar");
+  const odoGroup = sidebar.locator(".proj-group", { has: page.locator(".proj-row", { hasText: "odo" }) });
+  // Baseline truth: odo's Main reads Running (pre-condition, from its own daemon).
+  await expect(odoGroup.locator(".ws-row", { hasText: "main" }).getByText("Running", { exact: true }))
+    .toBeVisible(AGG_REFRESH);
+
+  await sidebar.locator(".proj-row", { hasText: "supersplat-hdr" }).click();
+  // Commit 2 marker: the new project's workstream list has landed.
+  const hdrGroup = sidebar.locator(".proj-group", { has: page.locator(".proj-row", { hasText: "supersplat-hdr" }) });
+  await expect(hdrGroup.getByText("legacy-main")).toBeVisible();
+
+  // Synchronous sample — no web-first retry. Without the switch-time
+  // reset the stale aggregates persist ≥1.5 s past this point, so a
+  // single count() settles the contract deterministically.
+  await staleWindowProbe(() => hdrGroup.getByText("Running", { exact: true }).count());
+  await staleWindowProbe(() => hdrGroup.getByText("Running in background", { exact: true }).count());
+  await staleWindowProbe(() => hdrGroup.getByText("still running", { exact: true }).count());
+  await staleWindowProbe(() => hdrGroup.locator(".ws-pending-pill").count());
+  await staleWindowProbe(() => hdrGroup.locator(".ws-parked-pill").count());
+
+  // Stays clean after the aggregate cadence catches up — supersplat-hdr's
+  // own pending_counts is genuinely idle, so any relapse means the clear
+  // regressed rather than the daemon lying.
+  await page.waitForTimeout(7_000);
+  await staleWindowProbe(() => hdrGroup.getByText("Running in background", { exact: true }).count());
+  await staleWindowProbe(() => hdrGroup.locator(".ws-pending-pill").count());
+  await staleWindowProbe(() => hdrGroup.locator(".ws-parked-pill").count());
+
+  // Positive control: the now-non-active odo still truthfully reports its
+  // running Main via the 5 s cross-project badge loop — the reset must
+  // not overwrite real state from a sibling daemon.
+  await expect(odoGroup.getByText("Running in background", { exact: true })).toBeVisible(AGG_REFRESH);
 });

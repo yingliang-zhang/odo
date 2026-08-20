@@ -369,11 +369,15 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       // otherwise read Object.is-equal to the previous state and bail the
       // render. Real IPC payloads are always fresh objects; the mock must
       // match that identity discipline.
+      // Cross-project tests key the counts per root (fx.countsByRoot) so
+      // the two fixture projects can disagree; roots without an entry
+      // fall back to the shared globals (legacy single-project specs).
+      const ovr = fx.countsByRoot[(args?.projectRoot as string) ?? ""];
       return {
         ok: true,
-        pending_counts: fx.pendingCounts,
-        parked_goals: fx.parkedGoals,
-        running_workstreams: [...fx.runningWorkstreams],
+        pending_counts: ovr?.pending ?? fx.pendingCounts,
+        parked_goals: ovr?.parked ?? fx.parkedGoals,
+        running_workstreams: [...(ovr?.running ?? fx.runningWorkstreams)],
         auto_distill: [...(fx.autoDistill ?? [])],
         distilling: false,
         distilling_convs: [],

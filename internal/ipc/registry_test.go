@@ -65,6 +65,48 @@ func TestRegistryRefusesWorktreePaths(t *testing.T) {
 	}
 }
 
+// 2026-08-20 sibling-worktree row: a daemon booted from a `git worktree
+// add` checkout OUTSIDE the parent (odo-worktrees/ui-message-stream)
+// slipped past the shape guard and registered. The linked-worktree guard
+// reads the .git file's gitdir target, so it holds order-independently.
+func TestRegistryRefusesLinkedGitWorktrees(t *testing.T) {
+	useTempRegistry(t)
+	project := t.TempDir()
+	linked := t.TempDir()
+	gitdir := filepath.Join(project, ".git", "worktrees", "ui-message-stream")
+	if err := os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: "+gitdir+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git: %v", err)
+	}
+
+	// Refused even against an empty registry (order-independent).
+	ensureProjectRegistered(linked)
+	if got := registryRoots(t); len(got) != 0 {
+		t.Fatalf("linked worktree registered against empty registry: %v", got)
+	}
+
+	// Still refused once the parent checkout is registered.
+	ensureProjectRegistered(project)
+	ensureProjectRegistered(linked)
+	if got := registryRoots(t); len(got) != 1 || got[0] != resolved(t, project) {
+		t.Fatalf("linked worktree registered alongside parent: %v", got)
+	}
+}
+
+// Submodule .git files point at <super>/.git/modules/<name> — a real
+// project root, not scratch space; registration must stay allowed.
+func TestRegistryAllowsSubmoduleRoots(t *testing.T) {
+	useTempRegistry(t)
+	sub := t.TempDir()
+	gitdir := filepath.Join(t.TempDir(), ".git", "modules", "sub")
+	if err := os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: "+gitdir+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git: %v", err)
+	}
+	ensureProjectRegistered(sub)
+	if got := registryRoots(t); len(got) != 1 || got[0] != resolved(t, sub) {
+		t.Fatalf("submodule root refused: %v", got)
+	}
+}
+
 func TestRegistryAllowsOrdinaryProjects(t *testing.T) {
 	useTempRegistry(t)
 	a := t.TempDir()

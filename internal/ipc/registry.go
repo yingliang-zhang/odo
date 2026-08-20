@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -75,6 +76,28 @@ func isOdoWorktreePath(resolved string) bool {
 	}
 }
 
+// isLinkedGitWorktree reports whether resolved is a LINKED git worktree
+// (`git worktree add`): its .git is a file ("gitdir: <abs>") pointing into
+// another checkout's .git/worktrees/ dir. The shape-based guard above only
+// sees <project>/.odo/worktrees/<run> — the 2026-08-20 ui-message-stream
+// row came through the gap: a sibling `odo-worktrees/<name>` checkout
+// doesn't match that shape, yet a daemon booted from it auto-registered
+// and the GUI then kept a daemon alive there by polling. The check is
+// structural (the gitdir target path), so it holds order-independently.
+// Submodule .git files point at .git/modules/ instead and stay
+// registrable — a submodule is a real project root, not scratch space.
+func isLinkedGitWorktree(resolved string) bool {
+	b, err := os.ReadFile(filepath.Join(resolved, ".git"))
+	if err != nil {
+		return false // no .git (non-repo dir) or a main checkout's .git dir
+	}
+	target, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir:")
+	if !ok {
+		return false
+	}
+	return strings.Contains(filepath.ToSlash(strings.TrimSpace(target)), "/.git/worktrees/")
+}
+
 // ensureProjectRegistered appends root (EvalSymlinks-resolved) to the
 // registry when absent. Best-effort: errors are logged, never returned.
 func ensureProjectRegistered(root string) {
@@ -85,6 +108,10 @@ func ensureProjectRegistered(root string) {
 	}
 	if isOdoWorktreePath(resolved) {
 		log.Printf("registry: refusing to register worktree path %s", resolved)
+		return
+	}
+	if isLinkedGitWorktree(resolved) {
+		log.Printf("registry: refusing to register linked git worktree %s", resolved)
 		return
 	}
 	path := registryPath()

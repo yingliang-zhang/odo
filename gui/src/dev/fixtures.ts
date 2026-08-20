@@ -515,6 +515,15 @@ export const userContent = `# USER.md
 // of the same baseline (the Review tab's rows must equal these pills).
 export const pendingCounts: Record<string, number> = { 1: 1, 2: 1, 3: 0, 10: 0 };
 export const runningWorkstreams: number[] = [];
+// Per-root pending_counts override: cross-project regression tests need
+// the two fixture daemons to DISAGREE (project A running / B idle) — the
+// shared globals above can't express that. The mock consults an entry
+// first and falls back to the globals, so single-project specs are
+// unaffected. Keys are ProjectEntry.root values.
+export const countsByRoot: Record<
+  string,
+  { pending?: Record<string, number>; running?: number[]; parked?: Record<string, number> }
+> = {};
 // E2E lever: pretend the daemon reports a live run on the polled
 // conversation (agent_running). Background runs go through
 // runningWorkstreams; this covers the FOREGROUND case (steer/park mutex).

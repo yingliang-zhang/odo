@@ -365,6 +365,7 @@ export default function App() {
     if (root == null) return;
     try {
       const counts = await fetchPendingCounts(root);
+      if (projectRootRef.current !== root) return; // switched mid-flight — dropping stale totals
       if (!counts.ok) return;
       const pending: Record<number, number> = {};
       for (const [k, v] of Object.entries(counts.pending_counts ?? {})) {
@@ -623,6 +624,25 @@ export default function App() {
     },
     [refreshWikiCount, refreshMemoryProposals],
   );
+
+  // M11 P1 (2026-08-20 cross-project running-state leak): sidebar badges,
+  // running dots, parked/distill chips and the review inbox are keyed by
+  // workstream id — and ids collide across projects (every journal starts
+  // at 1). Without a reset on project switch, the previous project's
+  // aggregates render against the new project's rows for up to four poll
+  // ticks (~6 s idle) — e.g. a running Main in the old project made the
+  // new project's Main read "running" while its daemon truthfully
+  // reported []. Called by both switch handlers the moment the root
+  // flips; refreshPendingCounts then repopulates from the new daemon.
+  const resetProjectAggregates = useCallback(() => {
+    setPendingCounts({});
+    pendingTotalRef.current = 0;
+    setRunningWorkstreams([]);
+    setParkedGoals({});
+    setAutoDistill([]);
+    setDistillingConvs([]);
+    setInboxDiffs([]);
+  }, []);
 
   // Session restore: the project registry is read first (M11 P1) — the
   // persisted selection wins when it still resolves to a registry entry,
@@ -1099,6 +1119,11 @@ export default function App() {
           setActiveProjectRoot(projectRoot);
           setProject(resp.project ?? null);
           projectRootRef.current = resp.project?.root_path ?? null;
+          // Root flipped: drop the old project's aggregates in the same
+          // commit, then repopulate from the new daemon immediately
+          // instead of waiting out the 4-tick poll cadence.
+          resetProjectAggregates();
+          void refreshPendingCounts();
         }
         applyBootstrap(resp);
         if (projectRoot && projectRoot !== activeProjectRoot && resp.project) {
@@ -1112,7 +1137,7 @@ export default function App() {
         setError(`switch failed: ${errorMessage(e)}`);
       }
     },
-    [workstream?.id, project?.root_path, activeProjectRoot, applyBootstrap],
+    [workstream?.id, project?.root_path, activeProjectRoot, applyBootstrap, resetProjectAggregates, refreshPendingCounts],
   );
 
   // M11 P1: full re-bootstrap against another registry project — every
@@ -1132,7 +1157,12 @@ export default function App() {
         setActiveProjectRoot(root);
         setProject(resp.project ?? null);
         projectRootRef.current = resp.project?.root_path ?? null;
+        // Drop the old project's aggregates in the same commit as the root
+        // flip (ids collide across projects), then repopulate from the new
+        // daemon immediately instead of waiting out the 4-tick cadence.
+        resetProjectAggregates();
         applyBootstrap(resp);
+        void refreshPendingCounts();
         if (resp.project) {
           const list = unwrap(await listWorkstreams(resp.project.root_path));
           if (seq !== switchSeqRef.current) return;
@@ -1144,7 +1174,7 @@ export default function App() {
         setError(`project switch failed: ${errorMessage(e)}`);
       }
     },
-    [activeProjectRoot, applyBootstrap],
+    [activeProjectRoot, applyBootstrap, resetProjectAggregates, refreshPendingCounts],
   );
 
   // Phase 3.7: stable callback for lazy-fetching workstreams from non-active
