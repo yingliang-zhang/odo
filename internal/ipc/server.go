@@ -194,6 +194,19 @@ type Server struct {
 	ladderMu     sync.Mutex
 	autoLandDone chan struct{}
 
+	// verifyAdvised keys project roots that already got the one-time
+	// .odo-verify setup advisory (verify_advisory.go) — one transcript row
+	// per project per daemon boot, never per diff; a failed journal
+	// append releases the key so the next blocked diff retries.
+	// verifyAdviseMu serializes claim+journal+release: autoLand
+	// pipelines run concurrently, and an unguarded claim would let a
+	// racing second diff observe a key its owner's failed append is
+	// about to release — both diffs passing without a row (panel
+	// finding). The lock is held across the journal append; the path is
+	// once-per-project-per-boot, so the bounded hold is noise.
+	verifyAdviseMu sync.Mutex
+	verifyAdvised  map[string]struct{}
+
 	// M12 (D-auto): daemon-side auto-distill state. All guarded by mu.
 	// distillKind replaces the bare distilling bit where the kind matters:
 	// "manual" keeps let-finish + send refusal; auto triggers ("idle",

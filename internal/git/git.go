@@ -256,6 +256,16 @@ func PathsDifferFromHEAD(repoPath string, paths []string) (bool, error) {
 	return false, fmt.Errorf("git diff --quiet HEAD: %s", tail)
 }
 
+// ShowHEADFile returns path's content as committed in HEAD, read via the
+// git binary (`git show HEAD:path`) — never the working copy: run
+// worktrees materialize HEAD's tracked content, so decisions about what a
+// future run will see must consult the commit, not the checkout (the
+// .odo-verify advisory's configured check). Any failure — file absent
+// from HEAD, not a repo, no git binary — is returned as error.
+func ShowHEADFile(repoPath, path string) (string, error) {
+	return run(repoPath, "show", "HEAD:"+path)
+}
+
 // CapturePatchBaseline records, for each patch path, whether it is tracked
 // in HEAD and whether it exists on disk BEFORE an apply attempt. Rollback
 // needs both axes separately: a path tracked in HEAD restores via

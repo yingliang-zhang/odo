@@ -403,6 +403,12 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	gate := runVerifyGate(ctx, s.projectRoot, worktreePath, verifyPaths)
 	if !gate.ok {
 		s.journalAutoLandBlocked(ctx, d, gate.reason, gate.detail, nil, "")
+		if gate.reason == "verify_unconfigured" {
+			// Discoverability (verify_advisory.go): an unconfigured or
+			// scope-missing project blocks EVERY such diff here; surface
+			// the one-time manual fix in the transcript the user reads.
+			s.adviseVerifyUnconfigured(ctx, d.ConversationID, worktreePath, verifyPaths)
+		}
 		return
 	}
 	verifyCmd, verifyTail := gate.cmd, gate.tail
@@ -849,28 +855,18 @@ func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPa
 // contentless means the gate cannot run (blocked, fail-closed).
 //
 // Path-scoped verify (Fix 3, zero-manual-accept), scope-union selection
-// (panel diff #9 finding 3): a "glob: command" line runs whenever the
-// diff TOUCHES that scope (≥1 path matches); the bare fallback line
-// ADDITIONALLY runs when any diff path sits outside every glob's scope.
-// The previous all-paths-match rule silently disqualified the gui line on
-// mixed-scope diffs: diff #9's ~700 frontend lines landed on go vet alone.
-// Example:
-//
-//	gui/**: cd gui && npx tsc --noEmit && npx playwright test --reporter=line
-//	go build ./... && go vet ./... && go test ./...
-//
-// A pure-gui diff runs the gui line only; a pure-go diff the fallback
-// only; a mixed diff both, file order then fallback. Supply-chain gate
-// blocks .odo-verify self-modification.
-func verifyCommands(worktreePath string, diffPaths []string) ([]string, error) {
-	data, err := os.ReadFile(worktreePath + string(os.PathSeparator) + verifyCmdFile)
-	if err != nil {
-		return nil, err
-	}
-	type scopedLine struct{ glob, cmd string }
-	var scoped []scopedLine
-	var fallback string
-	for _, line := range strings.Split(string(data), "\n") {
+// scopedLine is one "glob: command" verify line.
+type scopedLine struct{ glob, cmd string }
+
+// parseVerifyFile splits .odo-verify content into its scoped (glob:
+// command) lines and the bare fallback command, skipping blanks and
+// comments. A line containing ": " whose left side carries * or / is
+// scoped; the first other non-comment line is the fallback. THE parser
+// for the file format — verifyCommands (gate, reads the run worktree's
+// copy) and verifyCommitConfig (advisory, reads HEAD's copy) must never
+// drift apart on what a line means.
+func parseVerifyFile(content string) (scoped []scopedLine, fallback string) {
+	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -891,6 +887,28 @@ func verifyCommands(worktreePath string, diffPaths []string) ([]string, error) {
 			fallback = line
 		}
 	}
+	return scoped, fallback
+}
+
+// (panel diff #9 finding 3): a "glob: command" line runs whenever the
+// diff TOUCHES that scope (≥1 path matches); the bare fallback line
+// ADDITIONALLY runs when any diff path sits outside every glob's scope.
+// The previous all-paths-match rule silently disqualified the gui line on
+// mixed-scope diffs: diff #9's ~700 frontend lines landed on go vet alone.
+// Example:
+//
+//	gui/**: cd gui && npx tsc --noEmit && npx playwright test --reporter=line
+//	go build ./... && go vet ./... && go test ./...
+//
+// A pure-gui diff runs the gui line only; a pure-go diff the fallback
+// only; a mixed diff both, file order then fallback. Supply-chain gate
+// blocks .odo-verify self-modification.
+func verifyCommands(worktreePath string, diffPaths []string) ([]string, error) {
+	data, err := os.ReadFile(worktreePath + string(os.PathSeparator) + verifyCmdFile)
+	if err != nil {
+		return nil, err
+	}
+	scoped, fallback := parseVerifyFile(string(data))
 	uncovered := len(diffPaths) == 0
 	for _, p := range diffPaths {
 		inside := false

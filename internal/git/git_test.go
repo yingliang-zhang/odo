@@ -656,3 +656,24 @@ func readFile(repo, name string) string {
 	}
 	return string(data)
 }
+
+// ShowHEADFile judges the COMMIT, never the checkout (the .odo-verify
+// advisory's configured check): uncommitted edits are invisible to it,
+// and an absent-from-HEAD file is an error.
+func TestShowHEADFile(t *testing.T) {
+	repo := newPatchRepo(t)
+	if got, err := ShowHEADFile(repo, "base.txt"); err != nil || got != "base\n" {
+		t.Fatalf("ShowHEADFile(base.txt) = %q, %v", got, err)
+	}
+	// Uncommitted edits never reach run worktrees; the HEAD read must
+	// not see them either.
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ShowHEADFile(repo, "base.txt"); err != nil || got != "base\n" {
+		t.Errorf("ShowHEADFile with uncommitted edit = %q, %v, want committed content", got, err)
+	}
+	if _, err := ShowHEADFile(repo, "no-such-file"); err == nil {
+		t.Error("absent-from-HEAD file: want error (fail-open to the advisory)")
+	}
+}

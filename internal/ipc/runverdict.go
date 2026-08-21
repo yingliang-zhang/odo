@@ -46,12 +46,17 @@ const (
 // transcript-visible human-wait surface (round-2 panel parity rule: no
 // code path may leave a false stop ledger-only). The odo:true flag marks
 // provenance; precedent: the cancel-by-user error row. Best-effort: a
-// journal failure is logged, never fatal.
-func (s *Server) journalRunAdvisory(ctx context.Context, conversationID int64, msg string) {
+// journal failure is logged and returned, never fatal — most callers stay
+// fire-and-forget, but the verify-setup advisory releases its debounce on
+// failure so the next blocked diff retries instead of losing the boot's
+// one reminder (verify_advisory.go).
+func (s *Server) journalRunAdvisory(ctx context.Context, conversationID int64, msg string) error {
 	if _, err := s.store.AppendEvent(ctx, conversationID, store.EventAgentError,
 		mustJSON(map[string]interface{}{"error": "odo: " + msg, "odo": true})); err != nil {
 		log.Printf("run-verdict: journal advisory for conversation %d: %v", conversationID, err)
+		return err
 	}
+	return nil
 }
 
 // journalRunVerdict writes the memory_update{layer:"run_verdict"} row for
