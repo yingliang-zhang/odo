@@ -18,8 +18,11 @@ import (
 
 // M4 (Learning): the learner pass runs at the distill epoch boundary,
 // proposing behavior rules for .odo/memory.md (project) and ~/.odo/user.md
-// (global, recurrence-gated). Proposals land in the journal only; a human
-// review (apply_memory) is the single write path (ADR-0003 inv 1, 7).
+// (global, recurrence-gated). Proposals land in the journal first; the
+// daemon remains the only writer (ADR-0003 inv 1, 7). The default decision
+// is the review panel's (panel-gated memory apply — distillCore auto-applies
+// after the fold commits); a human apply_memory remains as the fallback
+// (no review models configured, refused auto-apply, manual salvage).
 
 const (
 	// learnerTimeout bounds the one-shot orchestrator learner run that
@@ -846,6 +849,9 @@ type proposePayload struct {
 }
 
 // pendingBatch is a recovered memory_propose event plus its consumption state.
+// A consumed batch carries the apply row's actor and accepted/rejected refs
+// (the outcome view — the MemoryPanel renders what the panel or human
+// decided, not just what is still actionable).
 type pendingBatch struct {
 	epoch     int
 	seq       int
@@ -853,6 +859,10 @@ type pendingBatch struct {
 	reaffirm  []string
 	consumed  bool // a memory_apply for this epoch exists
 	exists    bool
+	// Consumption details (from the memory_apply row; empty while pending).
+	applyActor string
+	accepted  []MemoryAccept
+	rejected  []MemoryAccept
 }
 
 // findPendingBatch recovers the pending proposal batch from the journal: the
@@ -881,8 +891,16 @@ func findPendingBatch(events []store.Event) pendingBatch {
 		return pendingBatch{}
 	}
 	// Pass 2 (newest-first): an apply for the pending epoch consumes the
-	// batch; the propose for it is the pending review.
-	for i := len(events) - 1; i >= 0; i-- {
+	// batch; the propose for it is the review surface. Both rows are
+	// captured so a consumed batch still renders its outcome.
+	var apply *struct {
+		Actor    string         `json:"actor"`
+		Accepted []MemoryAccept `json:"accepted"`
+		Rejected []MemoryAccept `json:"rejected"`
+	}
+	var propose *proposePayload
+	var proposeSeq int
+	for i := len(events) - 1; i >= 0 && (apply == nil || propose == nil); i-- {
 		if events[i].Type != store.EventReviewAction {
 			continue
 		}
@@ -895,20 +913,41 @@ func findPendingBatch(events []store.Event) pendingBatch {
 		}
 		switch p.Action {
 		case "memory_apply":
-			return pendingBatch{epoch: pendingEpoch, consumed: true, exists: true}
+			if apply != nil {
+				continue // newest apply wins; keep walking for the propose
+			}
+			var ap struct {
+				Actor    string         `json:"actor"`
+				Accepted []MemoryAccept `json:"accepted"`
+				Rejected []MemoryAccept `json:"rejected"`
+			}
+			if json.Unmarshal(events[i].Payload, &ap) == nil {
+				apply = &ap
+			}
 		case "memory_propose":
 			var pp proposePayload
 			if json.Unmarshal(events[i].Payload, &pp) != nil {
 				return pendingBatch{}
 			}
-			return pendingBatch{
-				epoch:     pendingEpoch,
-				seq:       events[i].Seq,
-				proposals: pp.Proposals,
-				reaffirm:  pp.Reaffirm,
-				exists:    true,
-			}
+			propose = &pp
+			proposeSeq = events[i].Seq
 		}
 	}
-	return pendingBatch{}
+	if propose == nil {
+		return pendingBatch{}
+	}
+	batch := pendingBatch{
+		epoch:     pendingEpoch,
+		seq:       proposeSeq,
+		proposals: propose.Proposals,
+		reaffirm:  propose.Reaffirm,
+		exists:    true,
+	}
+	if apply != nil {
+		batch.consumed = true
+		batch.applyActor = apply.Actor
+		batch.accepted = apply.Accepted
+		batch.rejected = apply.Rejected
+	}
+	return batch
 }

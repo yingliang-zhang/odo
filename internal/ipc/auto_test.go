@@ -327,6 +327,15 @@ func TestAutoUrgentFiresImmediately(t *testing.T) {
 		}
 		return false
 	})
+	// The fold keeps working past the marker (post-fold apply, wiki
+	// commit): drain it before assertions/teardown or rig.stop races a
+	// live store write / git commit into TempDir removal.
+	waitForCond(t, 15*time.Second, "distill pipeline drained", func() bool {
+		rig.server.mu.Lock()
+		defer rig.server.mu.Unlock()
+		_, distilling := rig.server.distilling[convID]
+		return !distilling
+	})
 	if rows := autoRows(t, rig, convID, "fired"); len(rows) != 1 {
 		t.Fatalf("fired rows = %v, want exactly 1", rows)
 	}

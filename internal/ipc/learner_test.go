@@ -228,10 +228,17 @@ func TestLearnerProposesJournaled(t *testing.T) {
 	}
 
 	// The propose event is journaled before the distill marker, and a
-	// successful learner means no learner-failure memory_update.
+	// successful learner means no learner-failure memory_update. The
+	// post-marker wiki auto-commit row is the one legitimate memory_update
+	// in this stream (the pipeline commits its own note now).
 	proposeIdx, distillIdx := -1, -1
 	for i, ev := range events {
 		if ev.Type == store.EventMemoryUpdate {
+			var mu map[string]interface{}
+			_ = json.Unmarshal(ev.Payload, &mu)
+			if mu["layer"] == "wiki" && mu["cause"] == "commit" {
+				continue
+			}
 			t.Errorf("unexpected memory_update event at seq %d: %s", ev.Seq, ev.Payload)
 		}
 		if ev.Type != store.EventReviewAction {
@@ -866,9 +873,14 @@ func TestApplyMemoryWritesMemoryMD(t *testing.T) {
 		t.Errorf("memory_apply metrics = %v, want 1 accepted / 1 rejected", metrics)
 	}
 
-	// The batch is consumed: nothing pending for review anymore.
-	if pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID}); pend.Epoch != 0 {
-		t.Errorf("memory_proposals after apply = epoch %d, want 0 (consumed)", pend.Epoch)
+	// The batch is consumed: the outcome view reports it (epoch + consumed
+	// flag + decision refs) — nothing actionable remains.
+	pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID})
+	if pend.Epoch != 1 || !pend.Consumed {
+		t.Errorf("memory_proposals after apply = epoch %d consumed %v, want epoch 1 consumed", pend.Epoch, pend.Consumed)
+	}
+	if len(pend.Accepted) != 1 || len(pend.Rejected) != 1 {
+		t.Errorf("consumed decision = %d accepted / %d rejected, want 1/1", len(pend.Accepted), len(pend.Rejected))
 	}
 }
 
@@ -1491,8 +1503,8 @@ func TestApplyMemoryIdempotent(t *testing.T) {
 	if !strings.HasPrefix(userContent, "- Short durable line.\n") {
 		t.Errorf("user.md lost its prior content on retry: %q", userContent)
 	}
-	if pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID}); pend.Epoch != 0 {
-		t.Errorf("memory_proposals after retry = epoch %d, want 0 (consumed)", pend.Epoch)
+	if pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID}); pend.Epoch != 2 || !pend.Consumed {
+		t.Errorf("memory_proposals after retry = epoch %d consumed %v, want epoch 2 consumed", pend.Epoch, pend.Consumed)
 	}
 }
 

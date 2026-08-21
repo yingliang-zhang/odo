@@ -581,8 +581,11 @@ export default function App() {
     try {
       const resp = await memoryProposals(conversationId, root ?? undefined);
       if (conversationRef.current !== conversationId || projectRootRef.current !== root) return; // switched mid-flight
+      // The badge counts ACTIONABLE proposals: a consumed batch (the
+      // panel-gated path decides it inside the distill, or a human did)
+      // is history, not work — the MemoryPanel shows its outcome instead.
       setPendingMemoryProposals(
-        (resp.epoch ?? 0) > 0 && resp.proposals ? resp.proposals.length : 0,
+        !resp.consumed && (resp.epoch ?? 0) > 0 && resp.proposals ? resp.proposals.length : 0,
       );
     } catch {
       if (conversationRef.current === conversationId && projectRootRef.current === root) setPendingMemoryProposals(0);

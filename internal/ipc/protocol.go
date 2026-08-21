@@ -183,9 +183,12 @@ type MemoryAccept struct {
 // self-tagged list.
 //
 // M9: when Target is "skills", Rule holds the full composed SKILL.md content
-// (frontmatter + body), Name is the vetted kebab-case skill name, and Reviews
-// carries the tri-model gate verdicts (nil for auto_discard proposals, which
-// are never included in the memory_propose batch).
+// (frontmatter + body) and Name is the vetted kebab-case skill name.
+//
+// Panel-gated apply: Reviews carries the panel verdicts for every gated
+// proposal (all targets when the prefs `review:` panel is configured; nil
+// when the gate is inert, and nil for auto_discard skills, which never
+// reach the memory_propose batch).
 type MemoryProposal struct {
 	Target      string         `json:"target"`         // "memory.md" | "user.md" | "skills"
 	Rule        string         `json:"rule"`           // imperative rule OR full SKILL.md content (skills target)
@@ -193,7 +196,7 @@ type MemoryProposal struct {
 	Evidence    string         `json:"evidence,omitempty"`
 	Contradicts string         `json:"contradicts,omitempty"` // memory: contradicts existing rule; skills: "overwrites existing skill: <name>"
 	Projects    []string       `json:"projects,omitempty"`
-	Reviews     []ReviewResult `json:"reviews,omitempty"` // M9: tri-model gate verdicts (skills target only)
+	Reviews     []ReviewResult `json:"reviews,omitempty"` // panel gate verdicts
 }
 
 // ReviewResult is one model's verdict on a diff (MoA review fan-out).
@@ -346,10 +349,17 @@ type Response struct {
 	MemoryContent  string `json:"memory_content,omitempty"`
 	ArchiveContent string `json:"archive_content,omitempty"`
 	UserContent    string `json:"user_content,omitempty"`
-	// memory_proposals: the pending batch (absent/epoch 0 = nothing pending).
-	Seq       int              `json:"seq,omitempty"`
-	Proposals []MemoryProposal `json:"proposals,omitempty"`
-	Reaffirm  []string         `json:"reaffirm,omitempty"`
+	// memory_proposals: the latest epoch's batch (absent/epoch 0 = no batch
+	// at all). Consumed false = pending and actionable; true = decided —
+	// ApplyActor names who decided ("auto_panel" or a human apply, absent
+	// on pre-panel rows), Accepted/Rejected carry the daemon-computed refs.
+	Seq        int              `json:"seq,omitempty"`
+	Proposals  []MemoryProposal `json:"proposals,omitempty"`
+	Reaffirm   []string         `json:"reaffirm,omitempty"`
+	Consumed   bool             `json:"consumed,omitempty"`
+	ApplyActor string           `json:"apply_actor,omitempty"`
+	Accepted   []MemoryAccept   `json:"accepted,omitempty"`
+	Rejected   []MemoryAccept   `json:"rejected,omitempty"`
 	// distill: count of pending memory+user proposals in the new batch.
 	MemoryProposals int `json:"memory_proposals,omitempty"`
 	// pending_counts: Go map keys serialize as JSON strings — that is the

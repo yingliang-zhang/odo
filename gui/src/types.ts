@@ -652,13 +652,15 @@ export interface AutoDistillCtlResponse {
 // The daemon tags every proposal with the file it targets.
 export type MemoryTarget = "memory.md" | "user.md" | "skills";
 
-// One learner-proposed rule from the pending memory_propose batch. evidence
+// One learner-proposed rule from the memory_propose batch. evidence
 // is optional — user-target proposals have no note evidence; projects is the
 // daemon-verified recurrence set (display-only, never the LLM's own tags).
 //
 // M9: when target is "skills", rule holds the full composed SKILL.md content,
-// name is the vetted kebab-case skill name, and reviews carries the tri-model
-// gate verdicts.
+// name is the vetted kebab-case skill name.
+//
+// Panel-gated apply: reviews carries the panel verdicts for every gated
+// proposal (all targets when the prefs `review:` panel is configured).
 export interface MemoryProposal {
   target: MemoryTarget;
   rule: string;
@@ -666,20 +668,33 @@ export interface MemoryProposal {
   evidence?: string;
   contradicts?: string;
   projects?: string[];
-  reviews?: ReviewResult[]; // M9: tri-model gate verdicts (skills target only)
+  reviews?: ReviewResult[]; // panel verdicts (gated proposals)
 }
 
-// One pending proposal batch (journal-only daemon storage: the
-// memory_propose review_action whose epoch matches the latest distill).
+// One proposal-batch reference (target + batch index) — the apply row's
+// accepted/rejected lists use it; the GUI derives per-row outcomes.
+export interface MemoryAcceptRef {
+  target: MemoryTarget;
+  index: number;
+}
+
+// One proposal batch (journal-only daemon storage: the memory_propose
+// review_action whose epoch matches the latest distill) plus, once
+// consumed, its decision (who applied and which refs landed).
 export interface PendingMemoryBatch {
   epoch: number;
   seq: number;
   proposals: MemoryProposal[];
   reaffirm?: string[]; // daemon-internal, echoed for transparency
+  consumed?: boolean;
+  applyActor?: string; // "auto_panel" | human (absent on pre-panel rows)
+  accepted?: MemoryAcceptRef[];
+  rejected?: MemoryAcceptRef[];
 }
 
-// memory_proposals: ok with no batch fields (epoch absent/0) = nothing
-// pending; a new distill supersedes an older unconsumed batch.
+// memory_proposals: the latest epoch's batch — epoch absent/0 = no batch
+// at all. consumed=false is actionable (the human fallback); consumed=true
+// is the outcome view (the panel-gated path consumed it, or a human did).
 export interface MemoryProposalsResponse {
   ok: boolean;
   error?: string;
@@ -687,6 +702,10 @@ export interface MemoryProposalsResponse {
   seq?: number;
   proposals?: MemoryProposal[];
   reaffirm?: string[];
+  consumed?: boolean;
+  apply_actor?: string;
+  accepted?: MemoryAcceptRef[];
+  rejected?: MemoryAcceptRef[];
 }
 
 // Type alias (not interface) so it is assignable to Tauri's InvokeArgs.

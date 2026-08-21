@@ -1532,24 +1532,33 @@ func TestDistill(t *testing.T) {
 	// to a journaled memory_update{layer:learner,cause:failed} — never a
 	// distill failure (spec §2).
 	if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
-		"[user_message agent_text agent_done memory_update review_action]"; got != want {
+		"[user_message agent_text agent_done memory_update review_action memory_update]"; got != want {
 		t.Errorf("events = %s, want %s", got, want)
 	}
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	// The fold marker and the wiki commit row ride above learner/failed.
 	var muPayload map[string]interface{}
-	if err := json.Unmarshal(events[len(events)-2].Payload, &muPayload); err != nil {
+	if err := json.Unmarshal(events[len(events)-3].Payload, &muPayload); err != nil {
 		t.Fatalf("memory_update payload: %v", err)
 	}
 	if muPayload["layer"] != "learner" || muPayload["cause"] != "failed" {
 		t.Errorf("memory_update payload = %v, want learner/failed", muPayload)
 	}
 	var payload map[string]interface{}
-	last := events[len(events)-1]
-	if err := json.Unmarshal(last.Payload, &payload); err != nil {
+	if err := json.Unmarshal(events[len(events)-2].Payload, &payload); err != nil {
 		t.Fatalf("review_action payload: %v", err)
 	}
 	if payload["action"] != "distill" || payload["epoch"] != float64(2) || payload["wiki_path"] != wantPath {
 		t.Errorf("review_action payload = %v", payload)
+	}
+	// The pipeline commits its own wiki output and journals the commit as
+	// additive telemetry above the marker (layer wiki / cause commit).
+	var wikiMu map[string]interface{}
+	if err := json.Unmarshal(events[len(events)-1].Payload, &wikiMu); err != nil {
+		t.Fatalf("wiki commit payload: %v", err)
+	}
+	if wikiMu["layer"] != "wiki" || wikiMu["cause"] != "commit" {
+		t.Errorf("trailing row = %v, want the wiki commit telemetry", wikiMu)
 	}
 
 	// The distill prompt carried the conversation events to the agent.
@@ -1769,10 +1778,15 @@ func TestDistillViaMoa(t *testing.T) {
 		}
 
 		// Receipts on the fold marker (additive over the OMP-route shape).
+		// The wiki commit memory_update rides above the marker as the tail
+		// row; the marker itself carries the receipts.
 		events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
-		last := events[len(events)-1]
+		if tail := events[len(events)-1]; tail.Type != store.EventMemoryUpdate {
+			t.Fatalf("last event = %s, want the wiki commit memory_update", tail.Type)
+		}
+		last := events[len(events)-2]
 		if last.Type != store.EventReviewAction {
-			t.Fatalf("last event = %s, want review_action", last.Type)
+			t.Fatalf("marker event = %s, want review_action", last.Type)
 		}
 		var payload map[string]interface{}
 		if err := json.Unmarshal(last.Payload, &payload); err != nil {

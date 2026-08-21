@@ -342,6 +342,18 @@ func HasUnmergedEntries(repoPath string) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
+// HasPathChanges reports whether the given paths carry staged, unstaged,
+// or untracked changes — the daemon's own-directory "anything to commit?"
+// probe (wiki auto-commit skips a no-op commit).
+func HasPathChanges(repoPath string, paths []string) (bool, error) {
+	args := append([]string{"status", "--porcelain", "--"}, paths...)
+	out, err := run(repoPath, args...)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // CommitPaths creates a commit limited to the given paths: the current
 // working-tree state of exactly those paths, regardless of what else is
 // staged or dirty. Used after applying a diff so the next worktree (created

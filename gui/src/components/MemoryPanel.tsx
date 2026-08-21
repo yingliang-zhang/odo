@@ -6,10 +6,15 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
-// M4 memory review (spec §7): the learner proposes rules at distill time
-// (journaled as one memory_propose batch per epoch); this panel is the human
-// gate — nothing is written until Apply. The batch is fetched here, not
-// threaded from App: App only tracks its size for the sidebar badge.
+// M4 memory review (spec §7) → panel-gated apply: the learner proposes
+// rules at distill time (journaled as one memory_propose batch per epoch)
+// and the review PANEL decides by default — the daemon auto-applies right
+// after the fold commits. This tab is the outcome surface first (what the
+// panel accepted/discarded, with per-model verdicts) and the human
+// fallback second: an undecided batch (no review models configured, or a
+// refused auto-apply left pending) still renders the Accept/Reject gate.
+// The batch is fetched here, not threaded from App: App only tracks its
+// actionable size for the sidebar badge.
 //
 // M9 P3: what was the memory review modal now renders inside the right
 // panel's Memory tab — Proposals and Current files. The ledger view moved
@@ -41,17 +46,91 @@ function byTarget(batch: PendingMemoryBatch, target: MemoryProposal["target"]) {
   return batch.proposals.map((p, index) => ({ p, index })).filter(({ p }) => p.target === target);
 }
 
-// One proposal row: rule + provenance + Accept/Reject (Accept is the
-// default, per spec §7; the daemon composes rejected indexes itself).
+// Per-model verdict badges for a gated proposal. Verdict badges are served
+// by ui/badge.tsx variants (the .verdict-* rules in app.css are deleted by
+// the DiffViewer migration); the className strings stay as e2e hooks.
+function VerdictBadges({ reviews }: { reviews: ReviewResult[] }) {
+  return (
+    <div className="mem-verdicts flex flex-wrap gap-1 mt-1">
+      {reviews.map((r: ReviewResult, i: number) => (
+        <Badge
+          key={i}
+          variant={r.verdict === "accept" || r.verdict === "reject" || r.verdict === "needs_fixes" ? (r.verdict as "accept" | "reject" | "needs_fixes") : "other"}
+          className={cn("verdict-badge", `verdict-${r.verdict}`, "capitalize")}
+        >
+          {r.model}: {r.verdict}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+// The decision side of a proposal row: Accept/Reject buttons while the
+// batch is actionable (human fallback), or the recorded outcome chip once
+// consumed (panel or human decided — read-only history).
+function DecisionArea({
+  index,
+  rejected,
+  outcome,
+  onDecision,
+}: {
+  index: number;
+  rejected: boolean;
+  outcome?: "accepted" | "discarded";
+  onDecision: (index: number, accept: boolean) => void;
+}) {
+  if (outcome != null) {
+    return (
+      <div className="mem-decisions flex gap-1 shrink-0">
+        <Badge
+          variant={outcome === "accepted" ? "accept" : "reject"}
+          className={cn("mem-outcome", `mem-outcome-${outcome}`, "capitalize")}
+        >
+          {outcome}
+        </Badge>
+      </div>
+    );
+  }
+  return (
+    <div className="mem-decisions flex gap-1 shrink-0">
+      <button
+        type="button"
+        className={cn(
+          "mem-decision accept bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
+          !rejected && "selected text-[var(--ok-text)] border-[var(--ok-text)] bg-[rgba(63,163,95,0.15)]",
+        )}
+        onClick={() => onDecision(index, true)}
+      >
+        Accept
+      </button>
+      <button
+        type="button"
+        className={cn(
+          "mem-decision reject bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
+          rejected && "selected text-[var(--err-text)] border-[var(--err-text)] bg-[rgba(195,74,74,0.12)]",
+        )}
+        onClick={() => onDecision(index, false)}
+      >
+        Reject
+      </button>
+    </div>
+  );
+}
+
+// One proposal row: rule + provenance + panel verdicts + decision area
+// (Accept is the default while actionable, per spec §7; the daemon
+// composes rejected indexes itself).
 function ProposalRow({
   p,
   index,
   rejected,
+  outcome,
   onDecision,
 }: {
   p: MemoryProposal;
   index: number;
   rejected: boolean;
+  outcome?: "accepted" | "discarded";
   onDecision: (index: number, accept: boolean) => void;
 }) {
   return (
@@ -63,29 +142,9 @@ function ProposalRow({
         {p.projects != null && p.projects.length > 0 && (
           <div className="mem-meta mt-[3px] text-[11px] text-[var(--text-dim)]">seen in: {p.projects.join(", ")}</div>
         )}
+        {p.reviews != null && p.reviews.length > 0 && <VerdictBadges reviews={p.reviews} />}
       </div>
-      <div className="mem-decisions flex gap-1 shrink-0">
-        <button
-          type="button"
-          className={cn(
-            "mem-decision accept bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
-            !rejected && "selected text-[var(--ok-text)] border-[var(--ok-text)] bg-[rgba(63,163,95,0.15)]",
-          )}
-          onClick={() => onDecision(index, true)}
-        >
-          Accept
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "mem-decision reject bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
-            rejected && "selected text-[var(--err-text)] border-[var(--err-text)] bg-[rgba(195,74,74,0.12)]",
-          )}
-          onClick={() => onDecision(index, false)}
-        >
-          Reject
-        </button>
-      </div>
+      <DecisionArea index={index} rejected={rejected} outcome={outcome} onDecision={onDecision} />
     </div>
   );
 }
@@ -98,18 +157,22 @@ function parseSkillFrontmatter(rule: string): { name: string; description: strin
   return { name: m[1].trim(), description: m[2].trim() };
 }
 
-// M9: SkillProposalRow — one proposed skill with tri-model review verdict
-// badges and a collapsible full-content view. Skills are reject-by-default
-// (stricter trust posture: skills inject into every prompt).
+// M9: SkillProposalRow — one proposed skill with panel review verdict
+// badges and a collapsible full-content view. While the batch is
+// actionable, skills are reject-by-default (stricter trust posture: skills
+// inject into every prompt); once consumed the row is read-only history
+// like every other target.
 function SkillProposalRow({
   p,
   index,
   rejected,
+  outcome,
   onDecision,
 }: {
   p: MemoryProposal;
   index: number;
   rejected: boolean;
+  outcome?: "accepted" | "discarded";
   onDecision: (index: number, accept: boolean) => void;
 }) {
   const { name, description } = parseSkillFrontmatter(p.rule);
@@ -120,49 +183,13 @@ function SkillProposalRow({
         {description && <div className="mem-meta mt-[3px] text-[11px] text-[var(--text-dim)]">{description}</div>}
         {p.evidence && <div className="mem-meta mt-[3px] text-[11px] text-[var(--text-dim)]">cites {p.evidence}</div>}
         {p.contradicts && <div className="mem-meta mem-meta-warn mt-[3px] text-[11px] text-[var(--warn)]">⚠ {p.contradicts}</div>}
-        {p.reviews && p.reviews.length > 0 && (
-          <div className="mem-verdicts flex flex-wrap gap-1 mt-1">
-            {/* Verdict badges served by ui/badge.tsx variants (the .verdict-*
-                rules in app.css are deleted by the DiffViewer migration);
-                the className strings stay as e2e hooks. */}
-            {p.reviews.map((r: ReviewResult, i: number) => (
-              <Badge
-                key={i}
-                variant={r.verdict === "accept" || r.verdict === "reject" || r.verdict === "needs_fixes" ? (r.verdict as "accept" | "reject" | "needs_fixes") : "other"}
-                className={cn("verdict-badge", `verdict-${r.verdict}`, "capitalize")}
-              >
-                {r.model}: {r.verdict}
-              </Badge>
-            ))}
-          </div>
-        )}
+        {p.reviews != null && p.reviews.length > 0 && <VerdictBadges reviews={p.reviews} />}
         <details className="mem-skill-details mt-1.5">
           <summary className="cursor-pointer text-[11px] text-[var(--text-dim)]">Full SKILL.md</summary>
           <pre className="wiki-content mem-file max-h-[200px] overflow-y-auto">{p.rule}</pre>
         </details>
       </div>
-      <div className="mem-decisions flex gap-1 shrink-0">
-        <button
-          type="button"
-          className={cn(
-            "mem-decision accept bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
-            !rejected && "selected text-[var(--ok-text)] border-[var(--ok-text)] bg-[rgba(63,163,95,0.15)]",
-          )}
-          onClick={() => onDecision(index, true)}
-        >
-          Accept
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "mem-decision reject bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer",
-            rejected && "selected text-[var(--err-text)] border-[var(--err-text)] bg-[rgba(195,74,74,0.12)]",
-          )}
-          onClick={() => onDecision(index, false)}
-        >
-          Reject
-        </button>
-      </div>
+      <DecisionArea index={index} rejected={rejected} outcome={outcome} onDecision={onDecision} />
     </div>
   );
 }
@@ -193,26 +220,35 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
     return () => { mountedRef.current = false; };
   }, []);
 
-  // (Re-)load the pending batch. Nothing pending (epoch absent/0 or no
-  // proposals after the daemon's evidence veto) reads as the empty state —
-  // a fresh distill supersedes an older unconsumed batch the same way.
+  // (Re-)load the latest batch: actionable when unconsumed (the human
+  // fallback), read-only outcome view once consumed (the panel-gated path
+  // decides inside the distill; a human apply counts too). No batch for
+  // the latest epoch reads as the empty state.
   const refreshBatch = useCallback(async () => {
     try {
       const resp = await memoryProposals(conversationId, projectRoot ?? undefined);
       if (!mountedRef.current) return;
       if ((resp.epoch ?? 0) > 0 && (resp.proposals?.length ?? 0) > 0) {
+        const consumed = resp.consumed ?? false;
         setBatch({
           epoch: resp.epoch ?? 0,
           seq: resp.seq ?? 0,
           proposals: resp.proposals ?? [],
           reaffirm: resp.reaffirm,
+          consumed,
+          applyActor: resp.apply_actor,
+          accepted: resp.accepted ?? [],
+          rejected: resp.rejected ?? [],
         });
         // M9: reject-by-default for skills — stricter trust posture because
-        // skills inject into every prompt. User must actively accept.
+        // skills inject into every prompt. User must actively accept. A
+        // consumed batch is read-only; the decision set is irrelevant.
         const skillRejects = new Set<number>();
-        (resp.proposals ?? []).forEach((p, i) => {
-          if (p.target === "skills") skillRejects.add(i);
-        });
+        if (!consumed) {
+          (resp.proposals ?? []).forEach((p, i) => {
+            if (p.target === "skills") skillRejects.add(i);
+          });
+        }
         setRejects(skillRejects);
       } else {
         setBatch(null);
@@ -318,6 +354,12 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
   const userRows = batch ? byTarget(batch, "user.md") : [];
   const skillRows = batch ? byTarget(batch, "skills") : [];
   const acceptedCount = batch ? batch.proposals.length - rejects.size : 0;
+  // Consumed batch → per-row outcome from the apply row's accepted refs
+  // (daemon-computed; everything else was rejected). Dynamic membership —
+  // Set by convention.
+  const acceptedIdx = new Set<number>((batch?.accepted ?? []).map((a) => a.index));
+  const outcomeFor = (index: number): "accepted" | "discarded" | undefined =>
+    batch?.consumed ? (acceptedIdx.has(index) ? "accepted" : "discarded") : undefined;
 
   return (
     <div className="mem-panel h-full flex flex-col">
@@ -362,6 +404,15 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
             )}
             {!batchLoading && batch && (
               <>
+                <div className="mem-batch-status px-3 py-2 text-[11px] text-[var(--text-dim)]">
+                  {batch.consumed
+                    ? `epoch ${batch.epoch} batch — ${
+                        batch.applyActor === "auto_panel"
+                          ? "decided by the review panel"
+                          : "applied by hand"
+                      } (${(batch.accepted ?? []).length} accepted, ${(batch.rejected ?? []).length} discarded)`
+                    : `epoch ${batch.epoch} batch — awaiting decision (no panel decision recorded)`}
+                </div>
                 <div className="mem-section-title">memory.md (project)</div>
                 {memRows.length === 0 && (
                   <div className="wiki-hint">No project rules in this batch.</div>
@@ -372,6 +423,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
                     p={p}
                     index={index}
                     rejected={rejects.has(index)}
+                    outcome={outcomeFor(index)}
                     onDecision={handleDecision}
                   />
                 ))}
@@ -384,6 +436,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
                         p={p}
                         index={index}
                         rejected={rejects.has(index)}
+                        outcome={outcomeFor(index)}
                         onDecision={handleDecision}
                       />
                     ))}
@@ -398,6 +451,7 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
                         p={p}
                         index={index}
                         rejected={rejects.has(index)}
+                        outcome={outcomeFor(index)}
                         onDecision={handleDecision}
                       />
                     ))}
@@ -405,15 +459,16 @@ export default function MemoryPanel({ conversationId, workstreamName, initialTab
                 )}
                 {(batch.reaffirm?.length ?? 0) > 0 && (
                   <div className="mem-reaffirm px-3 py-2 text-[var(--text-dim)] text-[11px] italic">
-                    The daemon will also reaffirm {batch.reaffirm?.length} existing rule(s) on
-                    apply.
+                    {batch.consumed
+                      ? `The daemon also reaffirmed ${batch.reaffirm?.length} existing rule(s) on apply.`
+                      : `The daemon will also reaffirm ${batch.reaffirm?.length} existing rule(s) on apply.`}
                   </div>
                 )}
               </>
             )}
           </div>
           <div className="mem-foot flex items-center gap-3 mt-3">
-            {batch && (
+            {batch && !batch.consumed && (
               <Button
                 type="button"
                 variant="default"

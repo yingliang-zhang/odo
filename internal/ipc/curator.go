@@ -725,6 +725,11 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 	})); err != nil {
 		return err
 	}
+	// The topic/index rewrite is daemon output on a tracked surface —
+	// commit it (the distill note pass does the same at distillCore's
+	// tail). Never blocks the pipeline: commit failures journal and the
+	// files stay for the next pass.
+	s.commitWiki(ctx, convID, fmt.Sprintf("curate (%s): rewrote %d topics + index", trigger, len(topics)))
 	return nil
 }
 

@@ -3603,7 +3603,15 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// started, 2026-08-09) and past the model's context as the journal
 	// grows.
 	window := windowEvents(events)
-	if len(window) == 0 {
+	firstSeq, lastSeq := FoldWindow(events)
+	// The nothing-new guard counts CONTENT, not any row above the
+	// boundary: post-fold bookkeeping (apply rows, wiki commits) lands
+	// above the marker but is authored by the fold itself — the same
+	// attribution unownedFoldGrowth pins for the supersession probe. A
+	// window holding only such rows folds pure self-telemetry, so it is
+	// empty for this guard (a successful distill must not invite a
+	// follow-up distill that summarizes the first one's receipts).
+	if len(window) == 0 || !unownedFoldGrowth(events, firstSeq-1) {
 		return Response{}, fmt.Errorf("distill: nothing journaled since the last distill")
 	}
 	winStats := measureWindow(window)
@@ -3614,7 +3622,6 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// bookkeeping, and any user message a committed-phase send journaled
 	// mid-fold), and those rows then sat below the replay boundary,
 	// invisible to future prompts.
-	firstSeq, lastSeq := FoldWindow(events)
 
 	// M12 (D-todo): surviving open plan items ride the distill prompt as
 	// labeled authoritative state → the note's Open loops are seeded from
@@ -3675,21 +3682,44 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	noteName := fmt.Sprintf("%s-epoch-%d", w.Name, c.Epoch)
 	contradictions := s.runContradictionPass(ctx, c.ID, noteName, note, c.Epoch)
 
+	// Panel review lineup (prefs `review:`). Empty = the gate is inert:
+	// proposals journal unreviewed, the batch stays pending, and the human
+	// apply path remains the decision.
+	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
+
+	// Legacy sweep, before the new learner output exists: an older
+	// unconsumed batch (pre-panel rows, or a leftover of a crash/refused
+	// auto-apply) still deserves its panel decision — no batch drops
+	// silently under supersession anymore. Its rows stay this fold's own
+	// bookkeeping for the supersession probe below.
+	if len(models) > 0 {
+		s.sweepPendingBatch(ctx, c, w, models)
+	}
+
 	// Learner pass (M4 §2 + M9): propose behavior rules and skill procedures
 	// from the note just written. runLearner no longer journals —
-	// handleDistill journals after gating the skill proposals. A learner
+	// distillCore journals after gating the proposals. A learner
 	// failure degrades to a journaled memory_update and never fails the
 	// distill.
 	proposals, reaffirm, stats, learnerRec, _ := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
 
-	// M9: gate skill proposals through tri-model review. Non-skill proposals
-	// (memory.md, user.md) go straight to the batch; skills are partitioned
-	// by the gate into auto_discard (dropped + journaled) and human_gate
-	// (kept with reviews, included in the batch).
+	// Panel gate (M9 origins, now all targets): every proposal × every
+	// review model fans out. memory/user rules are gated straight into the
+	// batch — their reviews ride MemoryProposal.Reviews for the post-fold
+	// decision and the outcome view. Skills keep the stricter pre-batch
+	// split: all-reject → auto_discard (dropped + journaled), anything else
+	// stays with reviews for the same post-fold decision.
 	nonSkills, skillProposals := splitSkillProposals(proposals)
+	if len(models) > 0 && len(nonSkills) > 0 {
+		allReviews := s.reviewProposals(ctx, nonSkills, models, func(p MemoryProposal) string {
+			return ruleReviewPrompt(p, note)
+		})
+		for i := range nonSkills {
+			nonSkills[i].Reviews = allReviews[i]
+		}
+	}
 	var humanGateSkills []MemoryProposal
 	if len(skillProposals) > 0 {
-		models := parseReviewModels(adapter.LoadPrefsRaw("review"))
 		gateResults := s.gateSkillProposals(ctx, skillProposals, models, note)
 		for _, gr := range gateResults {
 			if gr.Tier == "auto_discard" {
@@ -3843,10 +3873,25 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// not newEpoch (the counter after increment).
 	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
 
+	// Panel-gated memory apply: the fold committed and the marker made
+	// this distill's batch the pending one — decide it from the riding
+	// reviews and consume it now. Post-fold by design: an abandoned fold
+	// (supersession probe above) deletes its note, and rules must never
+	// apply with evidence that no longer exists; the apply rows land above
+	// the pinned window, unclaimed by any note and visible in replay.
+	if len(models) > 0 {
+		s.autoApplyProposals(ctx, c, batchProposals, len(models))
+	}
+
 	// M12: the fold retired the window. Evaluate the conditional
 	// auto-curate (never chained: it fires only when the notes/age
 	// thresholds say so).
 	s.maybeAutoCurate(w.ProjectID, c.ID)
+
+	// The note (+ any same-pass metadata) is daemon output on a tracked
+	// surface — durable beats rebuildable, and review has already happened
+	// upstream (the panel gates rules; wiki text itself is journaled).
+	s.commitWiki(ctx, c.ID, fmt.Sprintf("distill %s/epoch %d", w.Name, c.Epoch))
 	return Response{WikiPath: wikiPath, Epoch: newEpoch, MemoryProposals: len(batchProposals)}, nil
 }
 
@@ -3953,7 +3998,14 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 			var p struct {
 				Action string `json:"action"`
 			}
+			// Fold-authored memory-pipeline rows: the gate discards, the
+			// propose batch, and the legacy sweep's verdict receipt +
+			// apply marker. A memory_apply landing mid-fold from a HUMAN
+			// click gets the same attribution on the same grounds as the
+			// metadata layers below — it records a prompt-input change,
+			// never conversation coverage the note claims.
 			if jsonUnmarshalOK(ev.Payload, &p) && (p.Action == "skill_gate" || p.Action == "memory_propose" ||
+				p.Action == "memory_gate" || p.Action == "memory_apply" ||
 				p.Action == "curate") {
 				continue
 			}
@@ -3963,9 +4015,16 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 				Layer string `json:"layer"`
 				Cause string `json:"cause"`
 			}
+			// Fold-authored: contradiction retracts, learner/gate/apply
+			// failure fallbacks. Metadata layers read FRESH at prompt
+			// time (memory.md, user.md, skills, wiki on disk, ledger,
+			// curated wiki, index, pins): their rows describe input
+			// bookkeeping, not coverage — a same-conversation human apply
+			// or wiki commit landing mid-fold must not abort it.
 			if jsonUnmarshalOK(ev.Payload, &p) && ((p.Layer == "note" && p.Cause == "retract") ||
-				(p.Layer == "skills" && p.Cause == "gate_journal_failed") ||
 				(p.Layer == "learner" && p.Cause == "failed") ||
+				p.Layer == "skills" || p.Layer == "memory" || p.Layer == "user" ||
+				p.Layer == "apply" || p.Layer == "ledger" || p.Layer == "wiki" ||
 				p.Layer == "curator" || p.Layer == "index" || p.Layer == "pins") {
 				continue
 			}
@@ -4614,9 +4673,12 @@ func (s *Server) handleReadMemory(ctx context.Context, req Request) (Response, e
 	return resp, nil
 }
 
-// handleMemoryProposals returns the pending propose batch for review: the
-// memory_propose journaled at the latest distill, unless already consumed by
-// a memory_apply (spec §5). Nothing pending → empty response (epoch 0).
+// handleMemoryProposals returns the latest epoch's propose batch: pending
+// (actionable, pre-decision) or consumed with its outcome (the panel-gated
+// path consumes batches itself; the MemoryPanel renders what was decided —
+// per-proposal reviews ride the batch, accepted/rejected refs and the
+// actor ride the response). No batch for the latest epoch → empty
+// response (epoch 0).
 func (s *Server) handleMemoryProposals(ctx context.Context, req Request) (Response, error) {
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
@@ -4627,24 +4689,25 @@ func (s *Server) handleMemoryProposals(ctx context.Context, req Request) (Respon
 		return Response{}, err
 	}
 	batch := findPendingBatch(events)
-	if !batch.exists || batch.consumed {
+	if !batch.exists {
 		return Response{}, nil
 	}
 	return Response{
-		Epoch:     batch.epoch,
-		Seq:       batch.seq,
-		Proposals: batch.proposals,
-		Reaffirm:  batch.reaffirm,
+		Epoch:      batch.epoch,
+		Seq:        batch.seq,
+		Proposals:  batch.proposals,
+		Reaffirm:   batch.reaffirm,
+		Consumed:   batch.consumed,
+		ApplyActor: batch.applyActor,
+		Accepted:   batch.accepted,
+		Rejected:   batch.rejected,
 	}, nil
 }
 
 // handleApplyMemory consumes the pending batch all-or-nothing (spec §5):
-// every target is pre-computed in memory before anything hits disk or the
-// journal; a user.md overflow refusal writes nothing and leaves the batch
-// pending for retry. Per changed layer a memory_update event is journaled
-// (rotation and successful retraction are their own causes, spec §6), then
-// the review_action apply marker; a second apply errors "already
-// applied".
+// the human decision path. It resolves and validates the caller's accepted
+// refs, then hands the per-index decision to applyResolvedBatch. The
+// default (panel-gated) path reaches the same core from distillCore.
 func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, error) {
 	c, err := s.checkConversation(ctx, req.ConversationID)
 	if err != nil {
@@ -4667,9 +4730,6 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 
 	// Resolve + validate every accepted ref against the batch proposals.
 	accepted := make([]bool, len(batch.proposals))
-	var memAccepted []acceptedRule
-	var userAccepted []acceptedUserRule
-	var skillWrites []skillWrite // M9: pre-computed skill file writes
 	for _, a := range req.Accepted {
 		if a.Index < 0 || a.Index >= len(batch.proposals) {
 			return Response{}, fmt.Errorf("apply_memory: proposal index %d out of range (%d proposals)", a.Index, len(batch.proposals))
@@ -4682,6 +4742,31 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 			return Response{}, fmt.Errorf("apply_memory: proposal %d accepted twice", a.Index)
 		}
 		accepted[a.Index] = true
+	}
+	return s.applyResolvedBatch(ctx, c, batch, accepted, "")
+}
+
+// applyResolvedBatch consumes a pending batch all-or-nothing (spec §5):
+// every target is pre-computed in memory before anything hits disk or the
+// journal; a user.md overflow refusal writes nothing and leaves the batch
+// pending for retry. Per changed layer a memory_update event is journaled
+// (rotation and successful retraction are their own causes, spec §6), then
+// the review_action apply marker; a second apply errors "already
+// applied".
+//
+// actor names the decision-maker on the apply marker: "" for the human
+// path (additive — pre-panel rows carry no actor), autoActor for the
+// panel-gated auto-apply and legacy sweep.
+func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, batch pendingBatch, accepted []bool, actor string) (Response, error) {
+	var acceptedRefs []MemoryAccept
+	var memAccepted []acceptedRule
+	var userAccepted []acceptedUserRule
+	var skillWrites []skillWrite // M9: pre-computed skill file writes
+	for i, p := range batch.proposals {
+		if !accepted[i] {
+			continue
+		}
+		acceptedRefs = append(acceptedRefs, MemoryAccept{Target: p.Target, Index: i})
 		switch p.Target {
 		case "memory.md":
 			memAccepted = append(memAccepted, acceptedRule{
@@ -4697,7 +4782,7 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 			// M9: skill proposals write to .odo/skills/<name>.md. Use the
 			// vetted p.Name directly (NOT re-parsed frontmatter — TOCTOU risk).
 			if p.Name == "" {
-				return Response{}, fmt.Errorf("apply_memory: skill proposal %d has empty name", a.Index)
+				return Response{}, fmt.Errorf("apply_memory: skill proposal %d has empty name", i)
 			}
 			fname := filepath.Base(p.Name)
 			if !strings.HasSuffix(fname, ".md") {
@@ -4853,17 +4938,23 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 	}
 
 	// Batch-consumed marker (daemon-computed counts, ADR inv 4) — captured
-	// so the M6 ledger row can cite its seq.
-	applyEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+	// so the M6 ledger row can cite its seq. actor is additive: human
+	// applies (the pre-panel rows too) carry none, panel decisions name
+	// autoActor, so audit can split who decided.
+	applyPayload := map[string]interface{}{
 		"action":   "memory_apply",
 		"epoch":    batch.epoch,
-		"accepted": req.Accepted,
+		"accepted": acceptedRefs,
 		"rejected": rejected,
 		"metrics": map[string]int{
-			"accepted": len(req.Accepted),
+			"accepted": len(acceptedRefs),
 			"rejected": len(rejected),
 		},
-	}))
+	}
+	if actor != "" {
+		applyPayload["actor"] = actor
+	}
+	applyEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(applyPayload))
 	if err != nil {
 		return Response{}, err
 	}
