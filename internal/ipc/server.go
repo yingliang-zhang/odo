@@ -2385,7 +2385,19 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// The per-run worktree binding rides the diff row (schema v2): retire
 	// and the sweeper aim at exactly this run's worktree, never whatever the
 	// workstream's single-slot column happened to point at last (Q6 bug 1).
-	newDiff, derr := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA, meta.worktreePath)
+	// The review objective rides the row too (schema v3): every later
+	// review of this diff — gate, recoverPendingDiffs re-fire, manual
+	// review_diff, loop seed drive — anchors to the PRODUCING run's goal,
+	// never the conversation's newest human message (the #34 false
+	// objective-mismatch rejection, 2026-08-22).
+	// M16 (O-1 v2)/M18 ladder: meta.reviewGoal overrides meta.goal on
+	// revise-chain runs — the panel judges against the chain's origin
+	// goal, and a product diff stores that same anchor byte-exactly.
+	reviewGoal := meta.goal
+	if meta.reviewGoal != "" {
+		reviewGoal = meta.reviewGoal
+	}
+	newDiff, derr := s.store.InsertDiff(ctx, meta.conversationID, diffPath, baseSHA, meta.worktreePath, reviewGoal)
 	if derr != nil {
 		log.Printf("ipc: drainRun: InsertDiff failed: %v", derr)
 		s.store.AppendEvent(ctx, meta.conversationID, store.EventAgentError, mustJSON(map[string]interface{}{
@@ -2438,10 +2450,7 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// own pipeline drives its diff (Mode A: risk gate → verify → land;
 	// Mode B: s.autoLand verbatim). A ladder repair run (originDiffID,
 	// no loop marker) auto-lands as usual, then ticks any waiting loop.
-	reviewGoal := meta.goal
-	if meta.reviewGoal != "" {
-		reviewGoal = meta.reviewGoal
-	}
+	// reviewGoal is computed above, at InsertDiff.
 	if meta.loopID != 0 {
 		s.loopWG.Add(1)
 		go func() {
@@ -3099,7 +3108,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 
 	prompt := buildReviewPrompt(reviewPromptInput{
 		mode:       reviewPromptAdvisory,
-		goal:       s.originGoal(ctx, d.ConversationID),
+		goal:       s.diffGoal(ctx, d),
 		diffPath:   d.PathOnDisk,
 		diffText:   string(content),
 		verifyNote: "not run — manual review_diff has no verify gate; the auto-land pipeline is the verified path",

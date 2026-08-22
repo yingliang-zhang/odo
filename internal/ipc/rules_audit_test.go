@@ -91,7 +91,7 @@ func (f *raFixture) seedConv(t *testing.T, wsName string, steps []raStep) int64 
 	for _, step := range steps {
 		at := time.Date(2026, 8, 1, 12, 0, step.sec, 0, time.UTC).Format("2006-01-02 15:04:05")
 		if step.kind == "diff" {
-			d, err := f.st.InsertDiff(ctx, c.ID, filepath.Join(t.TempDir(), "run.diff"), "", "")
+			d, err := f.st.InsertDiff(ctx, c.ID, filepath.Join(t.TempDir(), "run.diff"), "", "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -721,7 +721,7 @@ func TestRulesAuditPriorFlagsDedupe(t *testing.T) {
 		case "done":
 			ev, aerr = f.st.AppendEvent(context.Background(), c.ID, store.EventAgentDone, `{}`)
 		case "diff":
-			d, derr := f.st.InsertDiff(context.Background(), c.ID, filepath.Join(t.TempDir(), "run.diff"), "", "")
+			d, derr := f.st.InsertDiff(context.Background(), c.ID, filepath.Join(t.TempDir(), "run.diff"), "", "", "")
 			if derr != nil {
 				t.Fatal(derr)
 			}

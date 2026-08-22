@@ -109,8 +109,15 @@ type Diff struct {
 	// reject/accept retires exactly this dir. NULL on pre-v2 rows — the
 	// sweeper treats NULL as long-retired and never reclaims for them.
 	WorktreePath *string `json:"worktree_path,omitempty"`
-	Status       string  `json:"status"`
-	CreatedAt    string  `json:"created_at"`
+	// Goal is the producing run's review objective, verbatim (schema v3):
+	// the panel judges the diff against THIS, never against whatever the
+	// newest human message in the conversation happens to be at review
+	// time (the 2026-08-22 #34 false objective-mismatch rejection). For a
+	// revise-chain product it is the chain's origin goal. NULL on pre-v3
+	// rows — readers fall back to conversation-derived originGoal.
+	Goal      *string `json:"goal,omitempty"`
+	Status    string  `json:"status"`
+	CreatedAt string  `json:"created_at"`
 }
 
 // Store owns the journal database. SQLite is opened with a single
@@ -165,6 +172,7 @@ CREATE TABLE IF NOT EXISTS diffs (
     path_on_disk    TEXT NOT NULL,
     base_sha        TEXT,
     worktree_path   TEXT,
+    goal            TEXT,
     status          TEXT NOT NULL DEFAULT 'pending',
     created_at      DATETIME NOT NULL DEFAULT (datetime('now'))
 );
@@ -220,14 +228,14 @@ func OpenReadOnly(path string) (*Store, error) {
 
 func migrate(db *sql.DB) error {
 	// schemaV1 (kept name; its DDL is the CURRENT shape) creates fresh
-	// databases at v2. Existing v1 journals upgrade via migrateV2.
+	// databases at v3. Existing v1/v2 journals upgrade via migrateV2/V3.
 	if _, err := db.Exec(schemaV1); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
 	var version int
 	err := db.QueryRow(`SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1`).Scan(&version)
 	if err == sql.ErrNoRows {
-		if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (2)`); err != nil {
+		if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (3)`); err != nil {
 			return fmt.Errorf("store: migrate: record version: %w", err)
 		}
 		return nil
@@ -239,6 +247,37 @@ func migrate(db *sql.DB) error {
 		if err := migrateV2(db); err != nil {
 			return err
 		}
+	}
+	if version < 3 {
+		if err := migrateV3(db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV3 (review objective-anchor fix, 2026-08-22): diffs gain the
+// producing run's verbatim goal so review anchors to the diff's own
+// provenance instead of the conversation's newest human message. Pre-v3
+// rows stay NULL; readers fall back to the conversation-derived goal.
+// Atomic: a crash between statements retries the whole upgrade next boot.
+func migrateV3(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: migrate v3: begin: %w", err)
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		`ALTER TABLE diffs ADD COLUMN goal TEXT`,
+		`UPDATE schema_version SET version = 3`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("store: migrate v3: %s: %w", q, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: migrate v3: commit: %w", err)
 	}
 	return nil
 }

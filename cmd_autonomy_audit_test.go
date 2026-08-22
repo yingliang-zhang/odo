@@ -47,7 +47,7 @@ func seedAutonomyJournal(t *testing.T, root string, withData bool) {
 			t.Fatal(err)
 		}
 		for range 2 {
-			d, err := st.InsertDiff(ctx, c.ID, diffPath, "", "")
+			d, err := st.InsertDiff(ctx, c.ID, diffPath, "", "", "")
 			if err != nil {
 				t.Fatal(err)
 			}

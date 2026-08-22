@@ -601,7 +601,11 @@ func (s *Server) settleDraft(ctx context.Context, d store.Diff, diffText string,
 	} else {
 		// Chain start: the latest human ask in the journal is the origin
 		// goal.
-		originGoal = s.originGoal(ctx, d.ConversationID)
+		// Schema v3: the diff row's own goal is the byte-exact anchor for
+		// a round-1 spawn (the conversation may have moved on since the
+		// producing run); originGoal's newest-message scan is the legacy
+		// fallback only (NULL-goal rows).
+		originGoal = s.diffGoal(ctx, d)
 		if originGoal == "" {
 			s.journalAutoLandBlocked(ctx, d, "revise_ambiguous",
 				"no human user_message in the journal to ground the repair prompt", reviews, cv)
@@ -648,6 +652,22 @@ func (s *Server) settleDraft(ctx context.Context, d store.Diff, diffText string,
 // steer-joined run gets its latest steer (the join itself is never
 // journaled as one row — documented M18 approximation). Round ≥ 2 spawns
 // never use this: the origin goal rides the chain's markers byte-exactly.
+// diffGoal resolves the objective anchor a REVIEW of d judges against:
+// the producing run's goal stored on the diff row (schema v3) — byte-exact
+// provenance immune to whatever the conversation's newest human message is
+// at review time. Legacy (NULL-goal) rows fall back to originGoal, whose
+// newest-message scan is precisely the false anchor that mis-rejected #34
+// on 2026-08-22 ("coding.sudoai.cc 应该可以访问了" — a connectivity note
+// sent long after the producing run — judged against an unrelated 2,500-
+// line batch). "" stays underivable: reviewPromptInput then OMITS the
+// objective block rather than guess one.
+func (s *Server) diffGoal(ctx context.Context, d store.Diff) string {
+	if d.Goal != nil && *d.Goal != "" {
+		return *d.Goal
+	}
+	return s.originGoal(ctx, d.ConversationID)
+}
+
 func (s *Server) originGoal(ctx context.Context, conversationID int64) string {
 	events, err := s.store.ListEvents(ctx, conversationID, 0)
 	if err != nil {

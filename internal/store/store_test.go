@@ -52,10 +52,10 @@ func TestOpenMigrates(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	// Fresh journals are created at v2 directly (schemaV1 DDL is the
-	// current shape; migrateV2 only upgrades pre-v2 journals).
-	if version != 2 {
-		t.Fatalf("schema_version = %d, want 2", version)
+	// Fresh journals are created at v3 directly (schemaV1 DDL is the
+	// current shape; migrateV2/V3 only upgrade older journals).
+	if version != 3 {
+		t.Fatalf("schema_version = %d, want 3", version)
 	}
 
 	for _, table := range []string{"projects", "workstreams", "conversations", "events", "diffs"} {
@@ -101,11 +101,13 @@ func TestOpenMigrates(t *testing.T) {
 	}
 }
 
-// TestMigrateV1ToV2 covers the upgrade every pre-v2 (live) journal takes on
-// first boot under this code: workstreams loses branch + worktree_path,
-// diffs gains worktree_path (NULL on existing rows — the sweeper treats
-// NULL as long-retired, I10), and the whole journal's rows survive.
-func TestMigrateV1ToV2(t *testing.T) {
+// TestMigrateV1ToV3 covers the upgrade chain every pre-v2 (live) journal
+// takes on first boot under this code: workstreams loses branch +
+// worktree_path, diffs gains worktree_path and goal (NULL on existing
+// rows — the sweeper treats a NULL worktree as long-retired, I10; review
+// readers fall back to a conversation-derived goal, schema v3), and the
+// whole journal's rows survive.
+func TestMigrateV1ToV3(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "journal.sqlite")
 
@@ -148,17 +150,20 @@ func TestMigrateV1ToV2(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("schema_version = %d, want 2 after upgrade", version)
+	if version != 3 {
+		t.Fatalf("schema_version = %d, want 3 after upgrade", version)
 	}
 
-	// Rows survive the upgrade with the new binding NULL on pre-v2 diffs.
+	// Rows survive the upgrade with the new columns NULL on legacy diffs.
 	d, err := s.GetDiff(ctx, 1)
 	if err != nil {
 		t.Fatalf("GetDiff: %v", err)
 	}
 	if d.WorktreePath != nil {
 		t.Errorf("pre-v2 diff worktree_path = %v, want NULL (long-retired)", *d.WorktreePath)
+	}
+	if d.Goal != nil {
+		t.Errorf("pre-v3 diff goal = %v, want NULL (no provenance recorded)", *d.Goal)
 	}
 	if d.BaseSHA == nil || *d.BaseSHA != "abc" {
 		t.Errorf("pre-v2 diff base_sha = %v, want abc", d.BaseSHA)
@@ -175,8 +180,13 @@ func TestMigrateV1ToV2(t *testing.T) {
 	if _, err := s.DB().ExecContext(ctx, `INSERT INTO workstreams (project_id, name, branch) VALUES (1, 'x', 'odo/x')`); err == nil {
 		t.Error("INSERT with dropped branch column: want unknown-column error, got nil")
 	}
-	if _, err := s.InsertDiff(ctx, 1, "/p/.odo/diffs/2.diff", "def", "/p/.odo/worktrees/run-2"); err != nil {
+	d2, err := s.InsertDiff(ctx, 1, "/p/.odo/diffs/2.diff", "def", "/p/.odo/worktrees/run-2", "the verbatim goal")
+	if err != nil {
 		t.Errorf("InsertDiff with worktree binding after upgrade: %v", err)
+	} else if d2.Goal == nil || *d2.Goal != "the verbatim goal" {
+		t.Errorf("InsertDiff goal = %v, want the verbatim goal", d2.Goal)
+	} else if got, gerr := s.GetDiff(ctx, d2.ID); gerr != nil || got.Goal == nil || *got.Goal != "the verbatim goal" {
+		t.Errorf("GetDiff goal = %v (err %v), want the verbatim goal persisted", got.Goal, gerr)
 	}
 
 	// The upgrade is idempotent: reopen is a no-op.
@@ -188,6 +198,69 @@ func TestMigrateV1ToV2(t *testing.T) {
 		t.Fatalf("reopen after upgrade: %v", err)
 	}
 	defer s2.Close()
+}
+
+// TestMigrateV2ToV3 covers the upgrade every CURRENT (v2) journal takes:
+// diffs gains goal (NULL on existing rows — review readers fall back to
+// the conversation-derived goal), and rows survive.
+func TestMigrateV2ToV3(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "journal.sqlite")
+
+	// Hand-build a v2-shape journal (the current-on-disk shape) with one
+	// pending diff.
+	raw, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	v2 := []string{
+		`CREATE TABLE schema_version (version INTEGER NOT NULL)`,
+		`INSERT INTO schema_version (version) VALUES (2)`,
+		`CREATE TABLE projects (id INTEGER PRIMARY KEY, root_path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO projects (id, root_path, name) VALUES (1, '/p', 'p')`,
+		`CREATE TABLE workstreams (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO workstreams (id, project_id, name) VALUES (1, 1, 'main')`,
+		`CREATE TABLE conversations (id INTEGER PRIMARY KEY, workstream_id INTEGER NOT NULL REFERENCES workstreams(id), epoch INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'active', base_commit_sha TEXT, created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO conversations (id, workstream_id) VALUES (1, 1)`,
+		`CREATE TABLE events (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversations(id), seq INTEGER NOT NULL, type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT (datetime('now')), UNIQUE(conversation_id, seq))`,
+		`CREATE TABLE diffs (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversations(id), path_on_disk TEXT NOT NULL, base_sha TEXT, worktree_path TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at DATETIME NOT NULL DEFAULT (datetime('now')))`,
+		`INSERT INTO diffs (id, conversation_id, path_on_disk, base_sha, worktree_path) VALUES (1, 1, '/p/.odo/diffs/1.diff', 'abc', '/p/.odo/worktrees/run-1')`,
+	}
+	for _, q := range v2 {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("v2 fixture: %s: %v", q, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open over v2 journal: %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatalf("schema_version: %v", err)
+	}
+	if version != 3 {
+		t.Fatalf("schema_version = %d, want 3 after upgrade", version)
+	}
+	d, err := s.GetDiff(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetDiff: %v", err)
+	}
+	if d.Goal != nil {
+		t.Errorf("pre-v3 diff goal = %v, want NULL (no provenance recorded)", *d.Goal)
+	}
+	if d.WorktreePath == nil || *d.WorktreePath != "/p/.odo/worktrees/run-1" {
+		t.Errorf("pre-v3 diff worktree_path = %v, want preserved", d.WorktreePath)
+	}
+	if _, err := s.InsertDiff(ctx, 1, "/p/.odo/diffs/2.diff", "", "", "g"); err != nil {
+		t.Errorf("InsertDiff with goal after upgrade: %v", err)
+	}
 }
 
 // TestReopenIdempotent covers restart restore at the store level: reopening
@@ -420,7 +493,7 @@ func TestDiffLifecycle(t *testing.T) {
 	w, _ := s.CreateOrGetWorkstream(ctx, p.ID, "main")
 	c, _ := s.CreateConversation(ctx, w.ID, "base0")
 
-	d, err := s.InsertDiff(ctx, c.ID, "/repo/d/.odo/diffs/1.diff", "base0", "/repo/d/.odo/worktrees/run-1")
+	d, err := s.InsertDiff(ctx, c.ID, "/repo/d/.odo/diffs/1.diff", "base0", "/repo/d/.odo/worktrees/run-1", "")
 	if err != nil {
 		t.Fatalf("InsertDiff: %v", err)
 	}
@@ -487,28 +560,28 @@ func TestListAllPendingDiffs(t *testing.T) {
 	c2, _ := s.CreateConversation(ctx, w2.ID, "")
 	cB, _ := s.CreateConversation(ctx, wB.ID, "")
 
-	d1a, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/1.diff", "", "")
+	d1a, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/1.diff", "", "", "")
 	if err != nil {
 		t.Fatalf("InsertDiff d1a: %v", err)
 	}
-	d1b, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/2.diff", "", "")
+	d1b, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/2.diff", "", "", "")
 	if err != nil {
 		t.Fatalf("InsertDiff d1b: %v", err)
 	}
-	d2, err := s.InsertDiff(ctx, c2.ID, "/repo/ri-a/.odo/diffs/3.diff", "", "")
+	d2, err := s.InsertDiff(ctx, c2.ID, "/repo/ri-a/.odo/diffs/3.diff", "", "", "")
 	if err != nil {
 		t.Fatalf("InsertDiff d2: %v", err)
 	}
 	// Noise: an accepted diff in w1 and a pending diff in the foreign project —
 	// both must be excluded from pA's inbox.
-	dAcc, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/4.diff", "", "")
+	dAcc, err := s.InsertDiff(ctx, c1.ID, "/repo/ri-a/.odo/diffs/4.diff", "", "", "")
 	if err != nil {
 		t.Fatalf("InsertDiff dAcc: %v", err)
 	}
 	if err := s.UpdateDiffStatus(ctx, dAcc.ID, DiffAccepted); err != nil {
 		t.Fatalf("UpdateDiffStatus: %v", err)
 	}
-	dB, err := s.InsertDiff(ctx, cB.ID, "/repo/ri-b/.odo/diffs/1.diff", "", "")
+	dB, err := s.InsertDiff(ctx, cB.ID, "/repo/ri-b/.odo/diffs/1.diff", "", "", "")
 	if err != nil {
 		t.Fatalf("InsertDiff dB: %v", err)
 	}
@@ -712,7 +785,7 @@ func TestUpdateDiffBaseSHA(t *testing.T) {
 	w, _ := s.CreateOrGetWorkstream(ctx, p.ID, "main")
 	c, _ := s.CreateConversation(ctx, w.ID, "")
 
-	d, err := s.InsertDiff(ctx, c.ID, "/repo/r/.odo/diffs/1.diff", "base0", "")
+	d, err := s.InsertDiff(ctx, c.ID, "/repo/r/.odo/diffs/1.diff", "base0", "", "")
 	if err != nil {
 		t.Fatalf("InsertDiff: %v", err)
 	}

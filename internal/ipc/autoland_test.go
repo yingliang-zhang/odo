@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/yingliang-zhang/odo/internal/store"
+	"github.com/yingliang-zhang/odo/internal/worktree"
 )
 
 // autolandRepo builds a git repo whose base tree has a top-level file and
@@ -1645,7 +1646,7 @@ func TestAutoLandLadderNoFork(t *testing.T) {
 		if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		d, err := rig.store.InsertDiff(context.Background(), convID, path, head, "")
+		d, err := rig.store.InsertDiff(context.Background(), convID, path, head, "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1747,7 +1748,7 @@ func TestStrandedPendingDiffs(t *testing.T) {
 		if err := os.WriteFile(path, []byte(patchDoc("README.md", 1)), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		d, err := f.st.InsertDiff(ctx, convID, path, "", "")
+		d, err := f.st.InsertDiff(ctx, convID, path, "", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1799,6 +1800,258 @@ func TestStrandedPendingDiffs(t *testing.T) {
 	want := []int64{d2.ID, d3.ID, d5.ID, d7.ID} // workstream-then-diff order preserved
 	if fmt.Sprint(ids) != fmt.Sprint(want) {
 		t.Errorf("stranded ids = %v, want %v", ids, want)
+	}
+}
+
+// startPanelCaptureStub is startPanelStub plus prompt capture: every
+// request's user content lands in the returned snapshot (mutex-guarded —
+// panel legs fan out concurrently, so capture ORDER is nondeterministic).
+func startPanelCaptureStub(t *testing.T, reply func(call int64, model string) (int, string)) (*int64, func() []string) {
+	t.Helper()
+	calls := new(int64)
+	var mu sync.Mutex
+	var prompts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var text string
+		if len(req.Messages) > 0 {
+			_ = json.Unmarshal(req.Messages[len(req.Messages)-1].Content, &text)
+		}
+		mu.Lock()
+		prompts = append(prompts, text)
+		mu.Unlock()
+		n := atomic.AddInt64(calls, 1)
+		status, out := reply(n, req.Model)
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "gateway boom"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": out}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+	return calls, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), prompts...)
+	}
+}
+
+// TestRecoverReFireAnchorsStoredGoal (schema v3, the #34 false
+// objective-mismatch rejection): a diff re-fired by recoverPendingDiffs
+// long after its producing run — a NEWER human message has since landed in
+// the same conversation — is judged against the goal stored on its row,
+// never the conversation's newest message. #34 was auto-rejected because
+// the re-fire anchored "现在coding.sudoai.cc 应该可以访问了" (a connectivity
+// note) against an unrelated 2,500-line batch; every judge flagged the
+// mismatch.
+func TestRecoverReFireAnchorsStoredGoal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test, rm2@test\nauto_apply: main\n")
+	_, captured := startPanelCaptureStub(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nlooks correct"
+	})
+	f := newAutonomyFixture(t)
+	root, _ := visualAutolandRepo(t) // HEAD carries .odo-verify (echo PASS)
+	// The diff's conversation lives under the ROOT project — the recovery
+	// enumerates pending diffs by s.projectRoot's project.
+	ctx := context.Background()
+	p, err := f.st.CreateOrGetProject(ctx, root, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := f.st.CreateOrGetWorkstream(ctx, p.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := f.st.CreateConversation(ctx, w.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchPath := filepath.Join(f.dir, "p.diff")
+	if err := os.WriteFile(patchPath, []byte(realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "gui", "src", "app.ts"), []byte("export const x = 2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The producing run's worktree (production shape: .odo/worktrees/<id>,
+	// NEVER the main checkout — the land retires this dir, not main): a
+	// real git worktree so the committed .odo-verify is visible to the
+	// gate, exactly like a drained run's dir.
+	wt := filepath.Join(t.TempDir(), "wt")
+	gitIn(t, root, "worktree", "add", "--detach", wt)
+	d, err := f.st.InsertDiff(ctx, c.ID, patchPath,
+		gitOut(t, root, "rev-parse", "HEAD"), wt, "BUILD THE ORIGINAL BATCH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The poisoning message: human chatter that postdates the producing run.
+	if _, err := f.st.AppendEvent(ctx, c.ID, store.EventUserMessage,
+		`{"text":"现在coding.sudoai.cc 应该可以访问了"}`); err != nil {
+		t.Fatal(err)
+	}
+	// The land retires the diff's bound worktree via s.mgr — the real
+	// manager against the repo, same as production.
+	s := &Server{store: f.st, projectRoot: root, mgr: worktree.NewManager(root)}
+	s.recoverPendingDiffs(ctx)
+
+	// The re-fire fans out in goroutines; wait for both legs.
+	deadline := time.Now().Add(30 * time.Second)
+	for len(captured()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	prompts := captured()
+	if len(prompts) != 2 {
+		t.Fatalf("panel prompts = %d, want 2 legs (re-fired gate): %v", len(prompts), prompts)
+	}
+	for i, p := range prompts {
+		if !strings.Contains(p, "BUILD THE ORIGINAL BATCH") {
+			t.Errorf("leg %d prompt lacks the diff row's stored objective:\n%s", i, p[:min(600, len(p))])
+		}
+		if strings.Contains(p, "coding.sudoai.cc") {
+			t.Errorf("leg %d prompt anchored the LATER human message — the #34 false-anchor bug:\n%s", i, p[:min(600, len(p))])
+		}
+	}
+	// Proof the pipeline ran to completion on the stored objective: the
+	// re-fire lands asynchronously past the panel, so poll for the row's
+	// terminal status instead of racing the accept.
+	var got store.Diff
+	for time.Now().Before(deadline) {
+		var gerr error
+		got, gerr = f.st.GetDiff(ctx, d.ID)
+		if gerr != nil {
+			t.Fatal(gerr)
+		}
+		if got.Status != store.DiffPending {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted (unanimous panel on the true objective)", got.Status)
+	}
+}
+
+// TestReviewDiffAnchorProvenance covers the manual review_diff wiring of
+// the same fix, both branches of diffGoal: a stored goal beats the
+// conversation's newest message; a legacy NULL-goal row keeps the
+// originGoal fallback (newest non-slash human message).
+func TestReviewDiffAnchorProvenance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
+	_, captured := startPanelCaptureStub(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nlooks correct"
+	})
+	f := newAutonomyFixture(t)
+	s := &Server{store: f.st, projectRoot: f.dir}
+	ctx := context.Background()
+
+	d1, err := f.st.InsertDiff(ctx, f.c.ID, writePatch(t, f.dir, "p1.diff", patchSrc("src/a.go", 1, 1, false)), "", "", "BUILD THE ORIGINAL BATCH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Legacy row: no goal recorded (pre-v3 journal shape).
+	d2, err := f.st.InsertDiff(ctx, f.c.ID, writePatch(t, f.dir, "p2.diff", patchSrc("src/b.go", 1, 1, false)), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.AppendEvent(ctx, f.c.ID, store.EventUserMessage,
+		`{"text":"现在coding.sudoai.cc 应该可以访问了"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.handleReviewDiff(ctx, Request{DiffID: d1.ID}); err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range captured() {
+		if !strings.Contains(p, "BUILD THE ORIGINAL BATCH") || strings.Contains(p, "coding.sudoai.cc") {
+			t.Errorf("stored-goal leg %d prompt = wrong anchor:\n%s", i, p[:min(600, len(p))])
+		}
+	}
+	if _, err := s.handleReviewDiff(ctx, Request{DiffID: d2.ID}); err != nil {
+		t.Fatal(err)
+	}
+	legs := captured()[2:]
+	if len(legs) != 2 {
+		t.Fatalf("legacy-row legs = %d, want 2", len(legs))
+	}
+	for i, p := range legs {
+		if !strings.Contains(p, "coding.sudoai.cc") {
+			t.Errorf("legacy leg %d lost the originGoal fallback:\n%s", i, p[:min(600, len(p))])
+		}
+	}
+}
+
+// writePatch drops patch text at dir/name and returns the path.
+func writePatch(t *testing.T, dir, name, patch string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestAutoLandBlockPrecedence (2026-08-22 panel review, deepseek/kimi):
+// producing-run evidence (run_errored, tainted verdict) outranks the
+// once-per-lifetime single_judge_panel advisory — the advisory's one shot
+// fires on the first CLEAN diff, and per-diff failure rows stay
+// attributable to the run, never masked as a config complaint.
+func TestAutoLandBlockPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
+	calls := startPanelStub(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nlooks correct"
+	})
+	f := newAutonomyFixture(t)
+	root, sha := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+
+	// Errored producing run at N=1: run_errored wins, advisory keeps its shot.
+	d1 := f.addDiff(t, "a.diff", patchSrc("src/a.go", 1, 1, false))
+	d1.BaseSHA = &sha
+	s.autoLand(context.Background(), d1, root, "goal", true, "")
+	// Tainted verdict at N=1: same class, same precedence.
+	d2 := f.addDiff(t, "b.diff", patchSrc("src/a.go", 1, 1, false))
+	d2.BaseSHA = &sha
+	s.autoLand(context.Background(), d2, root, "goal", false, verdictNoText)
+	// First CLEAN diff earns the one advisory.
+	d3 := f.addDiff(t, "c.diff", patchSrc("src/a.go", 1, 1, false))
+	d3.BaseSHA = &sha
+	s.autoLand(context.Background(), d3, root, "goal", false, "")
+
+	want := []string{"run_errored", "run_no_text", "single_judge_panel"}
+	if got := blockedReasons(t, f.st, f.c.ID); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("blocked reasons = %v, want %v", got, want)
+	}
+	if n := atomic.LoadInt64(calls); n != 0 {
+		t.Errorf("panel calls = %d, want 0 (every block precedes panel spend)", n)
+	}
+	for _, d := range []store.Diff{d1, d2, d3} {
+		got, err := f.st.GetDiff(context.Background(), d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffPending {
+			t.Errorf("diff %d status = %q, want pending", got.ID, got.Status)
+		}
 	}
 }
 

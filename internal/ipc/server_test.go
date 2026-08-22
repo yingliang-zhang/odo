@@ -588,7 +588,7 @@ func baseBoundDiff(t *testing.T, f autonomyFixture, root, name, patch string) st
 	if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d, err := f.st.InsertDiff(context.Background(), f.c.ID, path, gitOut(t, root, "rev-parse", "HEAD"), "")
+	d, err := f.st.InsertDiff(context.Background(), f.c.ID, path, gitOut(t, root, "rev-parse", "HEAD"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

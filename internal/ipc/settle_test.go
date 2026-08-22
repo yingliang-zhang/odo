@@ -1403,7 +1403,7 @@ func TestSettleBaseStaleRoundSpawnsAndLands(t *testing.T) {
 	})), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d0, err := rig.store.InsertDiff(context.Background(), convID, patchPath, oldBase, "")
+	d0, err := rig.store.InsertDiff(context.Background(), convID, patchPath, oldBase, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

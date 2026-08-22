@@ -1540,7 +1540,7 @@ func TestLoopOwnedSeedDiffIDs(t *testing.T) {
 		if err := os.WriteFile(path, []byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		d, err := rig.store.InsertDiff(ctx, convID, path, "", "")
+		d, err := rig.store.InsertDiff(ctx, convID, path, "", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}

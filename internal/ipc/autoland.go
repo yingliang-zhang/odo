@@ -282,6 +282,27 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	if len(models) == 0 {
 		return
 	}
+	// Producing-run evidence outranks the panel-size advisory (2026-08-22
+	// panel review, deepseek/kimi): run_errored and tainted-verdict rows
+	// are per-diff, actionable diagnostics — if the once-per-lifetime
+	// single_judge advisory fired first, it would mask them on the only
+	// diff class where the run's own failure evidence exists, and consume
+	// its one shot on a diff the config wasn't responsible for.
+	if runErrored {
+		s.journalAutoLandBlocked(ctx, d, "run_errored", "the producing run ended with agent_error", nil, "")
+		return
+	}
+	// run_verdict gate (epoch-8, outstanding #1): a tainted run is blocked
+	// before ANY other spend — "有 diff 零 text" means the tool side effects
+	// are real but the answer/summary never made it back, so there is no
+	// self-report-free confidence a panel verdict could stand on. The diff
+	// stays pending for the human (conservative, same posture as
+	// base_stale). false_stop here is the belt-and-suspenders case: it
+	// implies zero tool calls, but a phantom diff still never auto-lands.
+	if runVerdict != "" {
+		s.journalAutoLandBlocked(ctx, d, "run_"+runVerdict, "the producing run's verdict is "+runVerdict+" (no reliable output)", nil, "")
+		return
+	}
 	// P1 #8 (2026-08-22 panel review): N=1 "unanimity" degrades the panel
 	// to a single judge — one model's ACCEPT would land work the doctrine
 	// (3-model blind panel, log.md:50 deferred item) assumes ≥2 dissent
@@ -296,21 +317,6 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 				"prefs 'review:' configures a single model — auto-land requires a ≥2-model panel (N=1 unanimity is a single judge with no dissent channel); the diff stays pending for human review",
 				nil, "")
 		}
-		return
-	}
-	if runErrored {
-		s.journalAutoLandBlocked(ctx, d, "run_errored", "the producing run ended with agent_error", nil, "")
-		return
-	}
-	// run_verdict gate (epoch-8, outstanding #1): a tainted run is blocked
-	// before ANY other spend — "有 diff 零 text" means the tool side effects
-	// are real but the answer/summary never made it back, so there is no
-	// self-report-free confidence a panel verdict could stand on. The diff
-	// stays pending for the human (conservative, same posture as
-	// base_stale). false_stop here is the belt-and-suspenders case: it
-	// implies zero tool calls, but a phantom diff still never auto-lands.
-	if runVerdict != "" {
-		s.journalAutoLandBlocked(ctx, d, "run_"+runVerdict, "the producing run's verdict is "+runVerdict+" (no reliable output)", nil, "")
 		return
 	}
 	data, err := os.ReadFile(d.PathOnDisk)
@@ -631,9 +637,11 @@ func (s *Server) recoverPendingDiffs(ctx context.Context) {
 			baseSHA = *r.BaseSHA
 		}
 		log.Printf("recover-pending-diffs: re-triggering auto-land for diff #%d (conv %d, base %s)", r.ID, r.ConversationID, baseSHA)
-		// Fix B4: derive the goal from the conversation's last non-revise
-		// user_message so the panel has the user's original instruction.
-		go s.maybeAutoLand(r.Diff, wtPath, s.originGoal(ctx, r.ConversationID), false, "")
+		// Fix B4: the panel judges against the user's original instruction.
+		// Schema v3: the diff row carries it verbatim — the conversation's
+		// newest message is the wrong anchor for a diff produced runs ago
+		// (the #34 false objective-mismatch rejection).
+		go s.maybeAutoLand(r.Diff, wtPath, s.diffGoal(ctx, r.Diff), false, "")
 	}
 }
 

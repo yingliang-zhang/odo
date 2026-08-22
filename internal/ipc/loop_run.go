@@ -197,7 +197,7 @@ func (s *Server) loopSeed(ctx context.Context, conversationID int64, st *loopSta
 		if d.WorktreePath != nil {
 			wtPath = *d.WorktreePath
 		}
-		s.autoLand(ctx, d, wtPath, s.originGoal(ctx, conversationID), false, "")
+		s.autoLand(ctx, d, wtPath, s.diffGoal(ctx, d), false, "")
 		if after, err := s.store.GetDiff(ctx, diffID); err == nil && after.Status == store.DiffPending {
 			s.journalLoopBestEffort(ctx, conversationID, st.id, loopModeAudit, loopKindSuspended, map[string]interface{}{
 				"cause":  "seed_blocked",

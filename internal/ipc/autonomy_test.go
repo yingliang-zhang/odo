@@ -221,7 +221,7 @@ func (f autonomyFixture) addDiff(t *testing.T, name, patch string) store.Diff {
 	if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d, err := f.st.InsertDiff(context.Background(), f.c.ID, path, "", "")
+	d, err := f.st.InsertDiff(context.Background(), f.c.ID, path, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

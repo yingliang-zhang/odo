@@ -662,7 +662,7 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CurrentSHA: %v", err)
 		}
-		d, err := rig.store.InsertDiff(ctx, convID, p, head, "")
+		d, err := rig.store.InsertDiff(ctx, convID, p, head, "", "")
 		if err != nil {
 			t.Fatalf("InsertDiff: %v", err)
 		}
@@ -754,7 +754,7 @@ func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CurrentSHA: %v", err)
 		}
-		d, err := rig.store.InsertDiff(ctx, convID, p, head, "")
+		d, err := rig.store.InsertDiff(ctx, convID, p, head, "", "")
 		if err != nil {
 			t.Fatalf("InsertDiff: %v", err)
 		}
