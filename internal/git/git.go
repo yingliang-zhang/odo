@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // run executes git with -C dir and returns combined-stdout on success.
@@ -680,6 +681,20 @@ func CurrentSHA(repoPath string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// HeadCommitTime returns the commit time of the repoPath HEAD commit
+// (unix seconds, converted to UTC). Read-only, same CurrentSHA precedent.
+func HeadCommitTime(repoPath string) (time.Time, error) {
+	out, err := run(repoPath, "log", "-1", "--format=%ct", "HEAD")
+	if err != nil {
+		return time.Time{}, err
+	}
+	sec, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("git log: parse HEAD commit time %q: %w", strings.TrimSpace(out), err)
+	}
+	return time.Unix(sec, 0).UTC(), nil
 }
 
 // DiffRange returns `git diff base..head` for repoPath (commit-to-commit —

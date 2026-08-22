@@ -216,7 +216,7 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 		}
 		name := strings.TrimSuffix(filepath.Base(m), ".md")
 		if retracted[name] {
-			continue // retracted by the contradiction pass: record stays, injection stops
+			continue // journaled cause:"retract" (curated/human paths only — candidates never filter): record stays, injection stops
 		}
 		content, err := os.ReadFile(m)
 		if err != nil {

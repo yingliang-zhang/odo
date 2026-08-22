@@ -103,6 +103,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yingliang-zhang/odo/internal/git"
 	"github.com/yingliang-zhang/odo/internal/store"
 	"github.com/yingliang-zhang/odo/internal/worktree"
 )
@@ -434,10 +435,12 @@ func (s *Server) settleBaseStale(ctx context.Context, d store.Diff, diffText, fe
 
 // settleDraft is the shared ladder read-decide-spawn for every revise
 // trigger: status re-check → suspension → round cap (majority-accept
-// valve is panel-evidence-only) → content caps → lineage/no-progress →
-// spawn. feedback is the verbatim fence content the repair prompt embeds
-// (panel comments for needs_fixes, conflict detail for base_stale); its
-// sha16 is the second no-progress comparator.
+// valve is panel-evidence-only AND, since the 2026-08-22 security cut,
+// never applies to protected gate source diffs — a gate diff at the cap
+// suspends for a unanimous verdict or the human Accept) → content caps →
+// lineage/no-progress → spawn. feedback is the verbatim fence content
+// the repair prompt embeds (panel comments for needs_fixes, conflict
+// detail for base_stale); its sha16 is the second no-progress comparator.
 func (s *Server) settleDraft(ctx context.Context, d store.Diff, diffText string, trigger settleTrigger, feedback string, commentModels []string, reviews []ReviewResult) {
 	// Fix B3: re-check diff status — a concurrent accept/reject/supersede
 	// may have changed it between autoLand's read and this call.
@@ -464,10 +467,33 @@ func (s *Server) settleDraft(ctx context.Context, d store.Diff, diffText string,
 		return
 	}
 	if len(st.rounds) >= settleMaxReviseRounds {
+		// Gate-source exclusion (2026-08-22 security cut): the
+		// majority-accept valve NEVER applies to a diff touching a
+		// protected gate source file — 2/3 accept + 1 dissent must not
+		// rewrite the reviewing pipeline itself. A gate diff at the cap
+		// suspends for the human Accept click (or a journaled unanimous
+		// panel verdict: panelVerdictAttestsDiff no longer honors
+		// majority_accept). A patch-path parse failure is treated as a
+		// gate hit here: fail-closed, an unparseable diff whose paths
+		// cannot even be listed never earns the majority valve.
+		paths, perr := git.PatchPaths(d.PathOnDisk)
+		_, gateHit := gateSourceHit(paths)
+		if perr != nil {
+			log.Printf("settle: majority valve skipped for diff %d — patch paths unparseable: %v (fail-closed gate exclusion)", d.ID, perr)
+			gateHit = true
+		}
+		if gateHit {
+			s.journalLadder(ctx, d.ConversationID, "ladder_suspended",
+				"gate source diff: the majority-accept valve does not apply; unanimous panel verdict or human Accept required")
+			s.journalAutoLandBlocked(ctx, d, "ladder_suspended",
+				"gate source diff: majority-accept valve inapplicable; unanimous verdict or human Accept required", reviews, cv)
+			return
+		}
 		// 3 consecutive revise rounds ended without a landing.
-		// Majority-accept valve (2026-08-16, tri-model 3/3): if ≥2/3
-		// models accept AND zero rejects AND zero infra/truncated legs,
-		// auto-land with a majority_accept marker instead of suspending.
+		// Majority-accept valve (2026-08-16, tri-model 3/3; gate-source
+		// diffs excluded above since 2026-08-22): if ≥2/3 models accept
+		// AND zero rejects AND zero infra/truncated legs, auto-land with
+		// a majority_accept marker instead of suspending.
 		// The dissent was given 3 repair rounds to converge; if 2/3
 		// still accept after that, the remaining needs_fixes is most
 		// likely a false positive or a style nit, not a latent defect.

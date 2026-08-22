@@ -144,6 +144,13 @@ func lastReviewAction(events []store.Event, action string) *store.Event {
 //   - learner vetoes: kept/dropped counts from the memory_propose event's
 //     stats field (memory_kept/dropped, user_kept/dropped) — the ratio
 //     exposes learner quality without a separate audit.
+//   - memory apply (P0-4): the batch's OUTCOME from the LAST memory_apply
+//     for the section epoch: "accepted <n>, rejected <m> (<actor>)" citing
+//     review_action/memory_apply + seq — per-epoch "proposals: N" alone
+//     made "30 batches proposed, 0 applied" invisible here. The absence is
+//     the fold-time record: "pending" when the epoch's batch never got its
+//     decision row (panel off, apply failed, human still deciding),
+//     "none" when the learner proposed nothing.
 //   - recall notes: recallCount (from lastRecallCount), citing the
 //     user_message whose recall array was measured.
 func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCount int, distillEpoch int) []ledgerMetric {
@@ -161,7 +168,8 @@ func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCou
 	// M6 fix: filter by epoch to prevent cross-epoch misattribution.
 	// A zero-proposal distill must show "0", not inherit the previous
 	// epoch's memory_propose count.
-	if pe := lastReviewActionByEpoch(events, "memory_propose", distillEpoch); pe != nil {
+	pe := lastReviewActionByEpoch(events, "memory_propose", distillEpoch)
+	if pe != nil {
 		var pp struct {
 			Proposals []json.RawMessage `json:"proposals"`
 			Stats     vetoStats         `json:"stats"`
@@ -190,6 +198,31 @@ func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCou
 		}
 	} else {
 		metrics = append(metrics, ledgerMetric{label: "proposals", value: "0", event: "memory_propose"})
+	}
+
+	// P0-4 (apply outcome): counts come from the same daemon-computed
+	// metrics key the "(apply)" section quotes; the actor is additive
+	// (autoActor panel rows name it, pre-panel/human rows carry none).
+	if ae := lastReviewActionByEpoch(events, "memory_apply", distillEpoch); ae != nil {
+		var ap struct {
+			Metrics map[string]int `json:"metrics"`
+			Actor   string         `json:"actor"`
+		}
+		_ = json.Unmarshal(ae.Payload, &ap)
+		value := fmt.Sprintf("accepted %d, rejected %d", ap.Metrics["accepted"], ap.Metrics["rejected"])
+		if ap.Actor != "" {
+			value += fmt.Sprintf(" (%s)", ap.Actor)
+		}
+		metrics = append(metrics, ledgerMetric{
+			label: "memory apply",
+			value: value,
+			event: "review_action/memory_apply",
+			seq:   ae.Seq,
+		})
+	} else if pe != nil {
+		metrics = append(metrics, ledgerMetric{label: "memory apply", value: "pending", event: "memory_apply"})
+	} else {
+		metrics = append(metrics, ledgerMetric{label: "memory apply", value: "none", event: "memory_apply"})
 	}
 
 	recall := ledgerMetric{label: "recall notes", value: strconv.Itoa(recallCount), event: "user_message"}

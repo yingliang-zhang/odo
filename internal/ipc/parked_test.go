@@ -247,6 +247,10 @@ func TestParkedGoalSurvivesRestart(t *testing.T) {
 	omp := adapter.NewOMP(mgr.StateDir())
 	srv := NewServer(st, root, omp, mgr)
 	srv.autoDisabled = true
+	// C11: same dark-launch as startRig — the recovered run must stay
+	// in flight for the assertions; a live 2s tick would drain it (and
+	// outlive the deferred store close).
+	srv.livenessDisabled.Store(true)
 
 	// recoverParkedGoals ran in NewServer. The parked goal should have
 	// been found AND auto-dequeued (parked_goals defaults to auto). Verify

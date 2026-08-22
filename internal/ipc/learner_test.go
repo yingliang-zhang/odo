@@ -1848,3 +1848,81 @@ func TestLearnerViaMoa(t *testing.T) {
 		}
 	})
 }
+
+// TestDistillBatchSuperseded covers the P0-4 gate-theater blind spot: a
+// pending UNCONSUMED batch (no review prefs → the gate is inert, no
+// auto-apply, no human click) is re-pinned away by the next distill's
+// marker and would vanish journal-silent with its learner spend. The fold
+// must journal exactly one memory_update{layer:"learner",
+// cause:"batch_superseded"} — epoch + proposal count — immediately after
+// the marker, and replaying the same pin must never journal a second row.
+func TestDistillBatchSuperseded(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch\n\nFold.\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", testLearnerOneRule)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	convID, d1 := runToDistill(t, rig, root)
+	if d1.MemoryProposals != 1 || d1.Epoch != 2 {
+		t.Fatalf("distill 1 = proposals %d epoch %d, want 1/2", d1.MemoryProposals, d1.Epoch)
+	}
+	// Batch epoch 1 sits pending. Snapshot the journal exactly as
+	// distillCore does pre-marker: the old pin still resolves.
+	pre := allEvents(t, rig, convID)
+	prev := findPendingBatch(pre)
+	if !prev.exists || prev.consumed || prev.epoch != 1 || len(prev.proposals) != 1 {
+		t.Fatalf("pre-distill pending batch = %+v, want one unconsumed proposal at epoch 1", prev)
+	}
+
+	// Second fold: the marker (epoch 3) re-pins pending to epoch 2 and
+	// orphans batch 1 — the crash/refuse leftover scenario.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	rig.pollUntilDone(t, convID)
+	d2 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if d2.Epoch != 3 {
+		t.Fatalf("distill 2 epoch = %d, want 3", d2.Epoch)
+	}
+
+	events := allEvents(t, rig, convID)
+	rows := memoryUpdatesByCause(t, events, "batch_superseded")
+	if len(rows) != 1 {
+		t.Fatalf("batch_superseded rows = %d, want exactly 1: %v", len(rows), rows)
+	}
+	row := rows[0]
+	if row["layer"] != "learner" || row["epoch"] != float64(1) {
+		t.Errorf("supersede row layer/epoch = %v/%v, want learner/1", row["layer"], row["epoch"])
+	}
+	want := "1 proposal(s) from epoch 1 superseded by distill epoch 3"
+	if row["detail"] != want {
+		t.Errorf("supersede detail = %q, want %q (no refusal suffix: nothing was gated)", row["detail"], want)
+	}
+	// Placement: immediately after the fold marker — the crash window is
+	// a single append.
+	markerSeq := eventSeqByAction(t, events, "distill")
+	supSeq := 0
+	for _, ev := range events {
+		if ev.Type != store.EventMemoryUpdate {
+			continue
+		}
+		var mu map[string]interface{}
+		_ = json.Unmarshal(ev.Payload, &mu)
+		if mu["cause"] == "batch_superseded" {
+			supSeq = ev.Seq
+		}
+	}
+	if supSeq != markerSeq+1 {
+		t.Errorf("supersede row seq = %d, want marker seq %d + 1 (immediately after the marker)", supSeq, markerSeq)
+	}
+
+	// Idempotent re-fold: replaying the same supersede pin reports no
+	// second row — the dedup folds the CURRENT journal, which now carries
+	// the row distill 2 journaled (one row per superseded batch,
+	// restart-dedup discipline).
+	rig.server.journalBatchSuperseded(context.Background(), convID, prev, 3)
+	if rows := memoryUpdatesByCause(t, allEvents(t, rig, convID), "batch_superseded"); len(rows) != 1 {
+		t.Fatalf("batch_superseded rows after replay = %d, want 1 (idempotent)", len(rows))
+	}
+}

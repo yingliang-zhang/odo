@@ -12,12 +12,20 @@ import (
 
 // M6 (Precision + Ledger) §4: the distiller's contradiction pass. When a new
 // epoch note contradicts an older one ("Auth switched from JWT to session
-// cookies" vs "Authentication uses JWT"), the daemon retracts the stale note
-// WITH A RECORD (ADR-0003 inv 3): a memory_update{layer:"note",
-// cause:"retract"} journal event. The old note's file is never mutated (inv
-// 2: epoch notes are append-only records); the recall path (recall.go)
-// filters retracted notes out of the injection set. Detection is a
-// daemon-side token heuristic — no LLM in the data path (inv 4).
+// cookies" vs "Authentication uses JWT"), the daemon journals an ADVISORY
+// record (ADR-0003 inv 3): memory_update{layer:"note",
+// cause:"contradiction_candidate"}. Detection is advisory-only
+// (2026-08-22): the 2-token overlap heuristic mass-false-retracted in
+// production (25 of 28 distills journaled a retract; a whole epoch series
+// was wiped out of recall before a human could disagree), so the daemon's
+// automatic behavior stops at the candidate row — only the curated/human
+// paths ever journal cause:"retract", and only cause:"retract" filters the
+// recall injection set (recall.go) and the auto_age clock. A candidate row
+// therefore never hides a note; it is the flag a curator or human resolves.
+// The old note's file is never mutated (inv 2: epoch notes are append-only
+// records) and before_sha == after_sha on every row this pass writes.
+// Detection is a daemon-side token heuristic — no LLM in the data path
+// (inv 4).
 
 const (
 	// contradictionScanCap bounds the older notes scanned (newest-first,
@@ -26,14 +34,14 @@ const (
 	contradictionScanCap = 50
 
 	// contradictionSnippetCap bounds the contradicting sentence quoted in
-	// the journaled retraction detail.
+	// the journaled candidate detail.
 	contradictionSnippetCap = 120
 
 	// contradictionOverlapMin is the count of shared NON-SIGNAL salient
 	// tokens a candidate sentence must have with an old-note sentence to
 	// flag a contradiction. 1 was the M6 barn door — any single shared
-	// keyword ("journal", "window") plus a negation token retracted; 2
-	// requires topical coincidence before a note is declared dead.
+	// keyword ("journal", "window") plus a negation token flagged; 2
+	// requires topical coincidence before a note is declared suspect.
 	contradictionOverlapMin = 2
 )
 
@@ -54,7 +62,7 @@ const (
 // never joined EITHER salient set — its only role was gating candidacy;
 // m6_test.go states the mechanism accurately.) query-time stopWords stays
 // untouched: negations remain salient for recall scoring, just never for
-// retraction overlap.
+// candidate overlap.
 var contradictionSignals = map[string]bool{
 	"not": true, "no": true, "longer": true, "switched": true,
 	"replaced": true, "removed": true, "instead": true, "changed": true,
@@ -175,16 +183,57 @@ func detectContradictions(newNote string, oldNotes []epochNote) []contradiction 
 	return out
 }
 
+// flaggedNoteSet is the contradiction pass's dedup view of the journal:
+// the note names already ON THE RECORD — retracted (cause:"retract",
+// journaled only by curated/human paths) or flagged contradiction-candidate
+// by an earlier pass. Same detail contract as RetractionSetFromEvents
+// (first token = `<ws>-epoch-<N>` note name; a retract/candidate adds, an
+// unretract removes: the repair clears the note's flag for future passes).
+// It gates ONLY candidate re-journaling — recall/age gating keeps honoring
+// cause:"retract" alone, so an advisory row never filters the injection
+// set. RetractionSetFromEvents' exported semantics are deliberately
+// unchanged: this is the sibling that counts candidates as flagged.
+func flaggedNoteSet(events []store.Event) map[string]bool {
+	out := map[string]bool{}
+	for _, ev := range events {
+		if ev.Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Layer  string `json:"layer"`
+			Cause  string `json:"cause"`
+			Detail string `json:"detail"`
+		}
+		if err := json.Unmarshal(ev.Payload, &p); err != nil || p.Layer != "note" {
+			continue
+		}
+		name, _, _ := strings.Cut(p.Detail, " ")
+		if name == "" {
+			continue
+		}
+		switch p.Cause {
+		case "retract", "contradiction_candidate":
+			out[name] = true
+		case "unretract":
+			delete(out, name)
+		}
+	}
+	return out
+}
+
 // runContradictionPass compares the just-written note against ALL older
 // epoch notes of its workstream (the full note set via allEpochNotes — not
 // the query-selected 12 KB recall window, which would miss the
-// contradiction by construction). Each contradiction is journaled as
-// memory_update{layer:"note", cause:"retract"} with before_sha == after_sha
-// (the retraction is a journal record, not a file mutation). Notes
-// already in the journal's retraction set (and repeated flags against one
-// note inside a single pass) are skipped — no duplicate records. Returns
-// the journaled count (recorded on the distill review_action as
-// "contradictions").
+// contradiction by construction). Each flagged note is journaled as an
+// ADVISORY memory_update{layer:"note", cause:"contradiction_candidate"}
+// with before_sha == after_sha (the candidate is a journal record, not a
+// file mutation — and it never filters recall; see the file header for the
+// 2026-08-22 advisory-only contract and the production false-positive
+// evidence behind it). A note already on the journal's flagged set — by a
+// curated/human cause:"retract" or by an earlier candidate row — is not
+// re-journaled, and repeated flags against one note inside a single pass
+// journal once (no duplicate records). Returns the journaled count
+// (recorded on the distill review_action as "contradictions").
 // Journaling failures are logged, never fatal — the distill succeeds.
 func (s *Server) runContradictionPass(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int) int {
 	notes, err := allEpochNotes(s.projectRoot)
@@ -206,29 +255,37 @@ func (s *Server) runContradictionPass(ctx context.Context, conversationID int64,
 	for _, n := range olds {
 		contents[n.name] = n.content
 	}
-	// A note already retracted is out of the recall set; re-journaling it
-	// would only duplicate the retraction record.
-	retracted := s.retractedNotes(ctx, conversationID)
+	// Cross-pass dedup: a note already flagged (candidate row from an
+	// earlier pass, or a curated/human retract) is out of the advisory
+	// surface; re-journaling it would only duplicate the record. The scan
+	// fails open (empty set) like the recall path's own fold — a missed
+	// dedup costs one duplicate advisory, never a lost note.
+	flagged := map[string]bool{}
+	if events, err := s.store.ListEvents(ctx, conversationID, 0); err != nil {
+		log.Printf("contradiction pass: list events: %v", err)
+	} else {
+		flagged = flaggedNoteSet(events)
+	}
 	journaled := 0
 	for _, c := range found {
-		if retracted[c.oldNote] {
-			continue // already retracted: the record stands, don't re-journal
+		if flagged[c.oldNote] {
+			continue // already on the record: don't re-journal
 		}
 		sha := sha16([]byte(contents[c.oldNote]))
 		if _, err := s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":      "note",
-			"cause":      "retract",
+			"cause":      "contradiction_candidate",
 			"detail":     fmt.Sprintf("%s contradicted by %s: %s", c.oldNote, noteName, c.snippet),
 			"before_sha": sha,
 			"after_sha":  sha,
 		})); err != nil {
-			log.Printf("contradiction pass: journal retract %s: %v", c.oldNote, err)
+			log.Printf("contradiction pass: journal candidate %s: %v", c.oldNote, err)
 			continue
 		}
 		journaled++
-		// Two new-note sentences can flag the same old note; one retraction
+		// Two new-note sentences can flag the same old note; one candidate
 		// record per note suffices.
-		retracted[c.oldNote] = true
+		flagged[c.oldNote] = true
 	}
 	return journaled
 }

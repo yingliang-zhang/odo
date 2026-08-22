@@ -47,7 +47,9 @@ func main() {
 	// (Wave 1 of the self-improving MVP) is the memory-rule outcome audit
 	// with flag sinks; `odo unretract <note>` (M17 F3) and the rules-audit
 	// sinks are the WRITE CLIs — they journal via the store's own write
-	// open. Any other invocation without a subcommand runs the daemon.
+	// open; `odo retract <note>` (2026-08-22) joins them as the human
+	// resolution of a contradiction candidate. Any other invocation
+	// without a subcommand runs the daemon.
 	if args := flag.Args(); len(args) > 0 {
 		switch args[0] {
 		case "wiki":
@@ -68,6 +70,8 @@ func main() {
 			os.Exit(runRulesCLI(args[1:]))
 		case "unretract":
 			os.Exit(runUnretractCLI(args[1:]))
+		case "retract":
+			os.Exit(runRetractCLI(args[1:]))
 		case "models":
 			os.Exit(runModelsCLI(args[1:]))
 		}

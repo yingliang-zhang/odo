@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/git"
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -350,11 +351,16 @@ func m6DistillFlow(t *testing.T, note1, note2 string) (*testRig, int64, []store.
 	return rig, convID, events
 }
 
-// TestContradictionPassFlagsConflict (spec test 6): the new note carries
-// the signal token "switched" and shares ≥2 NON-SIGNAL salient tokens
-// ("jwt", "tokens") with the old note (M17 F2 raised the retract leg
-// from ≥1 — the fixtures share two tokens) → one contradiction; distill
-// journals the retraction event and the old note file is NOT mutated.
+// TestContradictionPassFlagsConflict (spec test 6, advisory-only since
+// 2026-08-22): the new note carries the signal token "switched" and shares
+// ≥2 NON-SIGNAL salient tokens ("jwt", "tokens") with the old note (M17 F2
+// raised the flag leg from ≥1 — the fixtures share two tokens) → one
+// contradiction CANDIDATE; distill journals exactly one advisory
+// memory_update{layer:"note", cause:"contradiction_candidate"} naming
+// main-epoch-1, ZERO cause:"retract" rows (detection never retracts — the
+// heuristic mass-false-retracted in production), the old note file is NOT
+// mutated, and recall STILL injects main-epoch-1 (a candidate does not
+// filter the recall set).
 func TestContradictionPassFlagsConflict(t *testing.T) {
 	// Unit level: the heuristic itself.
 	old := []epochNote{{name: "main-epoch-1", content: "Authentication uses JWT tokens.\n"}}
@@ -370,23 +376,26 @@ func TestContradictionPassFlagsConflict(t *testing.T) {
 	}
 
 	// End to end: distill #2 journals memory_update{layer:"note",
-	// cause:"retract"} naming main-epoch-1.
-	rig, _, events := m6DistillFlow(t,
+	// cause:"contradiction_candidate"} naming main-epoch-1.
+	rig, convID, events := m6DistillFlow(t,
 		"# Epoch 1\n\nAuthentication uses JWT tokens.\n",
 		"# Epoch 2\n\nAuth switched from JWT tokens to session cookies.\n")
-	retracts := memoryUpdatesByCause(t, events, "retract")
-	if len(retracts) != 1 {
-		t.Fatalf("retract events = %d, want 1", len(retracts))
+	candidates := memoryUpdatesByCause(t, events, "contradiction_candidate")
+	if len(candidates) != 1 {
+		t.Fatalf("contradiction_candidate events = %d, want 1", len(candidates))
 	}
-	if retracts[0]["layer"] != "note" {
-		t.Errorf("retract layer = %v, want note", retracts[0]["layer"])
+	if candidates[0]["layer"] != "note" {
+		t.Errorf("candidate layer = %v, want note", candidates[0]["layer"])
 	}
-	detail, _ := retracts[0]["detail"].(string)
+	detail, _ := candidates[0]["detail"].(string)
 	if !strings.HasPrefix(detail, "main-epoch-1 contradicted by main-epoch-2: ") {
-		t.Errorf("retract detail = %q, want main-epoch-1 contradicted by main-epoch-2", detail)
+		t.Errorf("candidate detail = %q, want main-epoch-1 contradicted by main-epoch-2", detail)
 	}
-	if retracts[0]["before_sha"] != retracts[0]["after_sha"] {
-		t.Errorf("before_sha %v != after_sha %v (the file is never mutated)", retracts[0]["before_sha"], retracts[0]["after_sha"])
+	if candidates[0]["before_sha"] != candidates[0]["after_sha"] {
+		t.Errorf("before_sha %v != after_sha %v (the file is never mutated)", candidates[0]["before_sha"], candidates[0]["after_sha"])
+	}
+	if retracts := memoryUpdatesByCause(t, events, "retract"); len(retracts) != 0 {
+		t.Fatalf("retract events = %d, want 0 — detection is advisory-only (2026-08-22)", len(retracts))
 	}
 	// The distill review_action carries the M6 contradiction count.
 	distills := payloadsByAction(t, events, "distill")
@@ -397,16 +406,33 @@ func TestContradictionPassFlagsConflict(t *testing.T) {
 		t.Errorf("distill #2 contradictions = %v, want 1", distills[1]["contradictions"])
 	}
 	// Inv 2: epoch 1's file still holds the original record — the
-	// retraction is a journal event, never a file mutation.
+	// candidate is a journal event, never a file mutation.
 	got := readFileStr(t, filepath.Join(rig.root, "wiki", "main-epoch-1.md"))
 	if !strings.Contains(got, "Authentication uses JWT tokens.") || strings.Contains(got, "switched") {
 		t.Errorf("epoch-1 file no longer the original record: %q", got)
 	}
+	// Advisory-only: the candidate does NOT filter the recall set —
+	// main-epoch-1 rides the next send beside main-epoch-2.
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "auth"})
+	recall := recallPathsFromEvent(t, sent.Event)
+	var sawEpoch1, sawEpoch2 int
+	for _, p := range recall {
+		if strings.HasSuffix(p, "main-epoch-1.md") {
+			sawEpoch1++
+		}
+		if strings.HasSuffix(p, "main-epoch-2.md") {
+			sawEpoch2++
+		}
+	}
+	if sawEpoch1 != 1 || sawEpoch2 != 1 {
+		t.Errorf("recall = %v, want both main-epoch-1.md and main-epoch-2.md (a candidate never filters recall)", recall)
+	}
+	rig.pollUntilDone(t, convID)
 }
 
 // TestContradictionPassNoFalsePositive (spec test 7): shared salient token
-// without a contradiction signal never flags — an affirmative addition is
-// not a retraction.
+// without a contradiction signal never flags — an affirmative addition
+// yields no candidate, no retract.
 func TestContradictionPassNoFalsePositive(t *testing.T) {
 	old := []epochNote{{name: "main-epoch-1", content: "Authentication uses JWT.\n"}}
 	if found := detectContradictions("Added a JWT refresh endpoint.", old); len(found) != 0 {
@@ -416,6 +442,9 @@ func TestContradictionPassNoFalsePositive(t *testing.T) {
 	_, _, events := m6DistillFlow(t,
 		"# Epoch 1\n\nAuthentication uses JWT.\n",
 		"# Epoch 2\n\nAdded a JWT refresh endpoint.\n")
+	if n := len(memoryUpdatesByCause(t, events, "contradiction_candidate")); n != 0 {
+		t.Errorf("contradiction_candidate events = %d, want 0 (no false positive)", n)
+	}
 	if n := len(memoryUpdatesByCause(t, events, "retract")); n != 0 {
 		t.Errorf("retract events = %d, want 0 (no false positive)", n)
 	}
@@ -694,13 +723,17 @@ func TestDiffGuardRejectsProtectedPaths(t *testing.T) {
 }
 
 // TestHumanAcceptGateSourceAllowed (2026-08-15 consensus restore, extended
-// 2026-08-20): a diff touching a protected gate source (internal/ipc/
-// autoland.go et al.) lands via the human Accept click (the unconditional
-// escape), and via a non-human actor ONLY behind panel evidence — a
-// journaled unanimous verdict whose patch_sha16 matches the landed bytes
-// (panelVerdictAttestsDiff). No evidence → refused; a verdict bound to
-// different bytes → refused. Memory paths (.odo//wiki/) stay refused for
-// every actor.
+// 2026-08-20 and 2026-08-22): a diff touching a protected gate source
+// (internal/ipc/autoland.go et al.) lands via the human Accept click (the
+// unconditional escape), and via a non-human actor ONLY behind panel
+// evidence — a journaled UNANIMOUS verdict whose patch_sha16 matches the
+// landed bytes (panelVerdictAttestsDiff). No evidence → refused; a
+// verdict bound to different bytes → refused; a majority_accept row
+// bound to the exact bytes → refused too (2026-08-22 security cut: the
+// settle ladder's majority verdict never attests gate sources — 2/3
+// accept + 1 dissent must not rewrite the reviewing pipeline itself),
+// while the human Accept click still lands that same diff. Memory paths
+// (.odo//wiki/) stay refused for every actor.
 func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
@@ -758,18 +791,18 @@ func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 	// Evidence bound to DIFFERENT bytes (a stale verdict for an earlier
 	// generation of the diff): still refused. Journal a verdict whose
 	// patch_sha16 does not match the on-disk patch.
-	journalMoaVerdict := func(d store.Diff, patchSHA string) {
+	journalMoaVerdict := func(d store.Diff, consensus, patchSHA string) {
 		t.Helper()
 		if _, err := rig.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
 			"action": "moa_review", "actor": autoActor, "diff_id": d.ID,
-			"consensus_verdict": "accept", "patch_sha16": patchSHA,
+			"consensus_verdict": consensus, "patch_sha16": patchSHA,
 		})); err != nil {
 			t.Fatalf("journal verdict: %v", err)
 		}
 	}
 	gatePatch3 := "diff --git a/internal/ipc/risk.go b/internal/ipc/risk.go\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/internal/ipc/risk.go\n@@ -0,0 +1 @@\n+package generated\n"
 	dStale := seed("gate-stale.diff", gatePatch3)
-	journalMoaVerdict(dStale, sha16([]byte("different bytes entirely")))
+	journalMoaVerdict(dStale, "accept", sha16([]byte("different bytes entirely")))
 	if _, err := rig.server.handleDiffAction(ctx, dStale.ID, "accept", autoActor, ""); err == nil ||
 		!strings.Contains(err.Error(), "internal/ipc/risk.go") {
 		t.Fatalf("auto accept behind a stale verdict err = %v, want a refusal naming internal/ipc/risk.go", err)
@@ -780,7 +813,7 @@ func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 
 	// A journaled unanimous verdict bound to the EXACT patch bytes: the
 	// 2026-08-20 doctrine path — the gate-source diff auto-lands.
-	journalMoaVerdict(dAuto, sha16([]byte(gatePatch2)))
+	journalMoaVerdict(dAuto, "accept", sha16([]byte(gatePatch2)))
 	if _, err := rig.server.handleDiffAction(ctx, dAuto.ID, "accept", autoActor, ""); err != nil {
 		t.Fatalf("auto accept behind exact-byte panel evidence: %v", err)
 	}
@@ -789,6 +822,30 @@ func TestHumanAcceptGateSourceAllowed(t *testing.T) {
 	}
 	if got, err := rig.store.GetDiff(ctx, dAuto.ID); err != nil || got.Status != store.DiffAccepted {
 		t.Errorf("auto-landed gate diff status = %v (%v), want accepted", got.Status, err)
+	}
+
+	// A journaled MAJORITY_ACCEPT row bound to the EXACT patch bytes: the
+	// 2026-08-22 security cut — the settle ladder's majority verdict lost
+	// gate-attestation power (panelVerdictAttestsDiff honors only
+	// unanimous "accept"), so autoActor must REFUSE even with the row on
+	// the journal. The diff stays pending; the human Accept click stays
+	// the unconditional escape and lands the same bytes.
+	gatePatch4 := "diff --git a/internal/ipc/ledger.go b/internal/ipc/ledger.go\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/internal/ipc/ledger.go\n@@ -0,0 +1 @@\n+package generated\n"
+	dMaj := seed("gate-majority.diff", gatePatch4)
+	journalMoaVerdict(dMaj, "majority_accept", sha16([]byte(gatePatch4)))
+	if _, err := rig.server.handleDiffAction(ctx, dMaj.ID, "accept", autoActor, ""); err == nil ||
+		!strings.Contains(err.Error(), "internal/ipc/ledger.go") {
+		t.Fatalf("auto accept behind a majority_accept verdict err = %v, want a protected-path refusal naming internal/ipc/ledger.go", err)
+	}
+	if got, err := rig.store.GetDiff(ctx, dMaj.ID); err != nil || got.Status != store.DiffPending {
+		t.Errorf("majority-rowed gate diff status = %v (%v), want pending", got.Status, err)
+	}
+	resp = rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: dMaj.ID})
+	if !resp.Applied {
+		t.Fatalf("human accept of the majority-rowed gate diff: applied = false (resp %+v) — the human escape stays unconditional", resp)
+	}
+	if got := readFileStr(t, filepath.Join(root, "internal/ipc/ledger.go")); got != "package generated\n" {
+		t.Errorf("gate file after human accept = %q, want the applied content", got)
 	}
 }
 
@@ -896,10 +953,12 @@ func TestDiffGuardCQuotedPath(t *testing.T) {
 	}
 }
 
-// TestContradictionPassDoesNotReJournalRetracted (K3 hardening): a note
-// already in the journal's retraction set is never re-journaled — neither
-// by a later pass re-flagging the same fact, nor by two sentences of one
-// new note flagging the same old note.
+// TestContradictionPassDoesNotReJournalRetracted (K3 hardening, advisory
+// contract 2026-08-22): a note already on the journal record is never
+// re-journaled — not by a later pass re-flagging the same candidate fact,
+// not by two sentences of one new note flagging it in one pass, and not by
+// a pass re-flagging a note a curated/human path already retracted (the
+// cause:"retract" record stands alone; re-advising it would only be noise).
 func TestContradictionPassDoesNotReJournalRetracted(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
@@ -912,23 +971,46 @@ func TestContradictionPassDoesNotReJournalRetracted(t *testing.T) {
 	writeEpochNote(t, root, "main-epoch-1", "Auth uses JWT tokens.\n")
 	writeEpochNote(t, root, "main-epoch-2", "Build system notes for the project.\n")
 
-	// In-pass dedup: two sentences flag the same old note → one journal entry.
+	// In-pass dedup: two sentences flag the same old note → one candidate.
 	const flagTwice = "Auth switched from JWT tokens to session cookies.\nAuth switched from JWT tokens to session cookies.\n"
 	if n := rig.server.runContradictionPass(ctx, convID, "main-epoch-3", flagTwice, 3); n != 1 {
 		t.Fatalf("first pass = %d, want 1 (duplicate sentences journal once)", n)
 	}
-	// Cross-pass dedup: epoch 1 is now retracted; a re-flag must not duplicate.
+	// Cross-pass dedup: epoch 1 stands candidate-flagged; a re-flag must
+	// not duplicate the advisory row.
 	const flag = "Auth switched from JWT tokens to session cookies.\n"
 	if n := rig.server.runContradictionPass(ctx, convID, "main-epoch-4", flag, 4); n != 0 {
-		t.Fatalf("second pass = %d, want 0 (epoch 1 already retracted)", n)
+		t.Fatalf("second pass = %d, want 0 (epoch 1 already flagged)", n)
 	}
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
-	retracts := memoryUpdatesByCause(t, events, "retract")
-	if len(retracts) != 1 {
-		t.Fatalf("retract events = %d, want exactly 1 — no duplicate retraction", len(retracts))
+	candidates := memoryUpdatesByCause(t, events, "contradiction_candidate")
+	if len(candidates) != 1 {
+		t.Fatalf("candidate events = %d, want exactly 1 — no duplicate advisory", len(candidates))
 	}
-	if detail, _ := retracts[0]["detail"].(string); !strings.HasPrefix(detail, "main-epoch-1 contradicted by main-epoch-3") {
-		t.Errorf("retract detail = %q, want main-epoch-1 contradicted by main-epoch-3", detail)
+	if detail, _ := candidates[0]["detail"].(string); !strings.HasPrefix(detail, "main-epoch-1 contradicted by main-epoch-3") {
+		t.Errorf("candidate detail = %q, want main-epoch-1 contradicted by main-epoch-3", detail)
+	}
+
+	// Curated/human path: a note already cause:"retract"-ed is not
+	// re-candidated either — the retract record stands and the pass adds
+	// nothing on top of it.
+	if _, err := rig.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+		"layer":  "note",
+		"cause":  "retract",
+		"detail": "main-epoch-2 retracted: superseded by curated index",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	const flagRetracted = "The build system is no longer used for the project — removed.\n"
+	if n := rig.server.runContradictionPass(ctx, convID, "main-epoch-5", flagRetracted, 5); n != 0 {
+		t.Fatalf("pass against retracted note = %d, want 0 (the retract record stands)", n)
+	}
+	events = rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	if n := len(memoryUpdatesByCause(t, events, "contradiction_candidate")); n != 1 {
+		t.Errorf("candidate events after retract seeding = %d, want still exactly 1", n)
+	}
+	if n := len(memoryUpdatesByCause(t, events, "retract")); n != 1 {
+		t.Errorf("retract events = %d, want exactly 1 (the seeded curated row — the daemon journals none)", n)
 	}
 }
 
@@ -1041,5 +1123,173 @@ func TestIsProtectedPathCaseFold(t *testing.T) {
 		if got := isProtectedPath(tc.path); got != tc.want {
 			t.Errorf("isProtectedPath(%q) = %v, want %v", tc.path, got, tc.want)
 		}
+	}
+}
+
+// ledgerEpochSection slices the section body under header up to the next
+// "## " heading (or EOF).
+func ledgerEpochSection(t *testing.T, ledger, header string) string {
+	t.Helper()
+	i := strings.Index(ledger, header)
+	if i < 0 {
+		t.Fatalf("ledger missing section %q:\n%s", header, ledger)
+	}
+	body := ledger[i:]
+	if j := strings.Index(body[len(header):], "\n## "); j >= 0 {
+		body = body[:len(header)+j]
+	}
+	return body
+}
+
+// TestLedgerMemoryApplyMetric (P0-4): the epoch section's "memory apply"
+// row is the batch's OUTCOME — "proposals: N" alone made "30 batches
+// proposed, 0 applied" invisible. LAST apply for the section epoch wins,
+// additive actor renders in parens, and the absence records distinguish a
+// proposed-but-never-applied batch ("pending") from a proposal-free epoch
+// ("none") — never leaking across epochs.
+func TestLedgerMemoryApplyMetric(t *testing.T) {
+	mkApply := func(seq, epoch, accepted, rejected int, actor string) store.Event {
+		p := map[string]interface{}{
+			"action":  "memory_apply",
+			"epoch":   epoch,
+			"metrics": map[string]int{"accepted": accepted, "rejected": rejected},
+		}
+		if actor != "" {
+			p["actor"] = actor
+		}
+		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(mustJSON(p))}
+	}
+	mkPropose := func(seq, epoch int) store.Event {
+		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(mustJSON(map[string]interface{}{
+			"action": "memory_propose", "epoch": epoch,
+			"proposals": []interface{}{map[string]interface{}{"target": "memory.md"}},
+		}))}
+	}
+	distillEv := store.Event{Seq: 30, Type: store.EventReviewAction, Payload: json.RawMessage(mustJSON(map[string]interface{}{
+		"action": "distill", "epoch": 3,
+	}))}
+	rowFor := func(events []store.Event, epoch int) ledgerMetric {
+		t.Helper()
+		for _, m := range distillLedgerMetrics(events, distillEv, 0, epoch) {
+			if m.label == "memory apply" {
+				return m
+			}
+		}
+		t.Fatalf("no memory apply metric for epoch %d", epoch)
+		return ledgerMetric{}
+	}
+
+	row := rowFor([]store.Event{mkPropose(2, 2), mkApply(5, 2, 1, 0, autoActor)}, 2)
+	if row.value != "accepted 1, rejected 0 (auto_panel)" || row.event != "review_action/memory_apply" || row.seq != 5 {
+		t.Errorf("apply row = %+v, want accepted 1, rejected 0 (auto_panel) citing review_action/memory_apply seq 5", row)
+	}
+	// A later re-apply supersedes the first; human rows carry no actor
+	// (additive), so no parens.
+	row = rowFor([]store.Event{mkPropose(2, 2), mkApply(5, 2, 1, 0, autoActor), mkApply(9, 2, 2, 1, "")}, 2)
+	if row.value != "accepted 2, rejected 1" || row.event != "review_action/memory_apply" || row.seq != 9 {
+		t.Errorf("re-apply row = %+v, want the LAST apply's counts, no parens, seq 9", row)
+	}
+	row = rowFor([]store.Event{mkPropose(2, 2)}, 2)
+	if row.value != "pending" || row.event != "memory_apply" || row.seq != 0 {
+		t.Errorf("pending row = %+v, want pending (no memory_apply event) seq 0", row)
+	}
+	row = rowFor(nil, 2)
+	if row.value != "none" || row.event != "memory_apply" || row.seq != 0 {
+		t.Errorf("no-batch row = %+v, want none (no memory_apply event) seq 0", row)
+	}
+	row = rowFor([]store.Event{mkPropose(2, 1), mkApply(5, 1, 1, 0, autoActor), mkPropose(7, 2)}, 2)
+	if row.value != "pending" || row.seq != 0 {
+		t.Errorf("cross-epoch row = %+v, want pending (epoch 1's apply never leaks into epoch 2)", row)
+	}
+}
+
+// TestLedgerMemoryApplyOutcome (P0-4): with a unanimous panel the batch is
+// consumed in-fold, and the EPOCH section itself closes on the outcome —
+// "accepted 1, rejected 0 (auto_panel)" citing the memory_apply seq —
+// beside the pre-existing "(apply)" section. The consumed batch journals
+// no batch_superseded row.
+func TestLedgerMemoryApplyOutcome(t *testing.T) {
+	rig, root, _, _ := armedDistillRig(t, "# Epoch 1\n\nDecided to always run the suite after landing.\n", testLearnerOneRule, acceptAll)
+	defer rig.stop(t)
+
+	convID, d := runToDistill(t, rig, root)
+	if d.MemoryProposals != 1 {
+		t.Fatalf("distill MemoryProposals = %d, want 1", d.MemoryProposals)
+	}
+
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	applySeq := eventSeqByAction(t, events, "memory_apply")
+	if applySeq == 0 {
+		t.Fatal("no memory_apply journaled — the unanimous panel must auto-apply in-fold")
+	}
+	if rows := memoryUpdatesByCause(t, events, "batch_superseded"); len(rows) != 0 {
+		t.Errorf("batch_superseded rows = %v, want none for the panel-consumed batch", rows)
+	}
+
+	ledger := readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
+	want := fmt.Sprintf("- memory apply: accepted 1, rejected 0 (auto_panel) (review_action/memory_apply seq %d)", applySeq)
+	if !strings.Contains(ledger, want) {
+		t.Errorf("ledger missing the apply-outcome row %q:\n%s", want, ledger)
+	}
+	if sec := ledgerEpochSection(t, ledger, "## main/epoch 1 — "); !strings.Contains(sec, want) {
+		t.Errorf("epoch section missing the apply-outcome row:\n%s", sec)
+	}
+	if !strings.Contains(ledger, "## main/epoch 1 (apply) — ") {
+		t.Errorf("ledger missing the pre-existing (apply) section:\n%s", ledger)
+	}
+}
+
+// TestLedgerMemoryApplyAbsence (P0-4): the absence IS the fold-time record
+// — a pending batch reads "pending (no memory_apply event)" and a
+// proposal-free epoch reads "none (no memory_apply event)".
+func TestLedgerMemoryApplyAbsence(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch\n\nNote.\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", testLearnerOneRule)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	// No review prefs: the gate is inert, the batch stays pending.
+
+	convID, d1 := runToDistill(t, rig, root)
+	if d1.MemoryProposals != 1 {
+		t.Fatalf("distill 1 MemoryProposals = %d, want 1", d1.MemoryProposals)
+	}
+	ledger := readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
+	if sec := ledgerEpochSection(t, ledger, "## main/epoch 1 — "); !strings.Contains(sec, "- memory apply: pending (no memory_apply event)") {
+		t.Errorf("epoch 1 section missing the pending record:\n%s", sec)
+	}
+
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", testLearnerEmpty)
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	rig.pollUntilDone(t, convID)
+	d2 := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if d2.MemoryProposals != 0 || d2.Epoch != 3 {
+		t.Fatalf("distill 2 = proposals %d epoch %d, want 0/3", d2.MemoryProposals, d2.Epoch)
+	}
+	ledger = readFileStr(t, filepath.Join(root, ".odo", "ledger.md"))
+	if sec := ledgerEpochSection(t, ledger, "## main/epoch 2 — "); !strings.Contains(sec, "- memory apply: none (no memory_apply event)") {
+		t.Errorf("epoch 2 section missing the no-batch record:\n%s", sec)
+	}
+}
+
+// TestDeployStaleness (P0-4 deploy witness): the pure comparison the
+// witness wires to os.Executable() mtime vs the project repo's HEAD commit
+// time. Only the helper is unit-tested (fake times) — the wiring is
+// best-effort/log-only by design.
+func TestDeployStaleness(t *testing.T) {
+	head := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	if d := deployStaleness(head.Add(-22*time.Hour), head); d != 22*time.Hour {
+		t.Errorf("22h-stale binary drift = %v, want 22h", d)
+	}
+	if d := deployStaleness(head.Add(-deployStaleGrace), head); d != 0 {
+		t.Errorf("grace-boundary drift = %v, want 0 (stale means MORE than the grace)", d)
+	}
+	if got, want := deployStaleness(head.Add(-deployStaleGrace-time.Second), head), deployStaleGrace+time.Second; got != want {
+		t.Errorf("one second past the grace = %v, want %v", got, want)
+	}
+	if d := deployStaleness(head.Add(time.Minute), head); d != 0 {
+		t.Errorf("binary newer than HEAD = %v, want 0 (deploys are not stale)", d)
 	}
 }

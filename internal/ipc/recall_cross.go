@@ -196,9 +196,10 @@ func topicCitations(content string) []string {
 
 // siblingRetractionGate answers whether a sibling candidate note is
 // retracted in its OWN workstream's active conversation. The current
-// conversation's retraction set cannot see alien notes — the contradiction
-// pass only ever retracts home-workstream notes — so gating per candidate
-// is the only correct reading of the retraction record. Sets are cached
+// conversation's retraction set cannot see alien notes — retraction rows
+// are journaled conversation-scoped against home-workstream notes — so
+// gating per candidate is the only correct reading of the retraction
+// record. Sets are cached
 // per workstream per call: one send costs at most one events scan per
 // distinct sibling workstream. Every store-level failure (unregistered
 // project, deleted workstream, no active conversation) fails OPEN — a

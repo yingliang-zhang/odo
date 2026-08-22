@@ -17,6 +17,24 @@
 > No new tables, no new event types — payload-key extensions only
 > (ADR-0002 preserved).
 
+> **Revision 2026-08-22 (panel P0-3): contradiction detection is advisory-only.**
+> The token heuristic mass-false-retracted in production (25 of 28 distills
+> journaled a retract; whole epoch series silently left the recall injection
+> set). Every statement below that says the contradiction pass "journals
+> `cause:"retract"`" or that the pass's row "excludes the note from recall"
+> is superseded: `runContradictionPass` now journals
+> `memory_update{layer:"note", cause:"contradiction_candidate"}` (same detail
+> contract and sha pair) — a flag, never a filter. Only curated/human paths
+> journal `cause:"retract"`, and only that cause filters recall and the
+> auto_age clock. The human resolution emitters are the WRITE CLIs
+> `odo retract <note> [reason…]` (2026-08-22; resolves a candidate with a
+> byte-bound record) and `odo unretract <note>` (M17 F3; repairs a false
+> retract). The wiki badge / sidebar chip surfaces keep consuming
+> `cause:"retract"` rows (real retracts); candidates live in the journal
+> (`odo journal search contradiction_candidate`) pending a GUI surface.
+> Detection mechanism, dedup, scan scope, and the distill review_action
+> `contradictions` count are unchanged.
+
 ## Pain
 
 - I ask the agent about "authentication" and it re-asks a question epoch 1

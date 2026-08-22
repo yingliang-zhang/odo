@@ -141,6 +141,11 @@ func startRig(t *testing.T, root string) *testRig {
 	// assert byte-stable journals, so rigs dark-launch it (auto_test.go
 	// opts back in per test).
 	srv.autoDisabled = true
+	// C11: same posture for the liveness drain — default ON in production,
+	// dark-launched in rigs so drains stay explicit (poll-driven) and
+	// journals stay deterministic. liveness_test.go is the opt-in
+	// coverage (the auto_test.go convention).
+	srv.livenessDisabled.Store(true)
 
 	// Socket in its own short dir: macOS caps sun_path at ~104 chars and
 	// t.TempDir() paths under /var/folders are already ~60.
@@ -160,6 +165,10 @@ func startRig(t *testing.T, root string) *testRig {
 
 func (r *testRig) stop(t *testing.T) {
 	t.Helper()
+	// C11: stop the liveness drain FIRST — liveness_test.go opt-ins leave
+	// a live tick, and a tick journals under s.mu; it must not outlive the
+	// store close below (idempotent with the Wait path).
+	r.server.stopLiveness()
 	// M12: disarm pending auto-distill timers before closing the store —
 	// a 120s timer firing into a closed journal outlives its test.
 	r.server.mu.Lock()
@@ -4665,6 +4674,7 @@ func TestOrphanedRequestClosedOnDaemonRestart(t *testing.T) {
 	newBootServer := func() *Server {
 		srv := NewServer(st, root, adapter.NewOMP(mgr.StateDir()), mgr)
 		srv.autoDisabled = true // same dark-launch as startRig: no timer noise
+		srv.livenessDisabled.Store(true) // C11 ditto: no background drains
 		return srv
 	}
 

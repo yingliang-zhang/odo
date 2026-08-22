@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -233,6 +234,26 @@ type Server struct {
 	autoIdle      time.Duration
 	autoJitter    time.Duration
 	autoCurateAge time.Duration
+	// C11 (2026-08-22 P0): daemon-side liveness drain. drainRun used to be
+	// reachable only from pollLocked — i.e. only while the GUI kept
+	// polling — so a closed GUI wedged every in-flight run mid-conversation:
+	// no terminal event, and for /loop fix/implement runs no
+	// loopPipelineAfterRun/fireLoopTick (the loop died silently).
+	// runLivenessDrain is the daemon-side counterpart of the GUI poll
+	// loop: it ticks at livenessInterval (0 → livenessDrainInterval) and
+	// advances every unfinished run one drain step. Atomics, not plain
+	// fields, because the goroutine reads them continuously while tests
+	// assign post-construction (the autoDisabled seam, but -race-clean):
+	// disabled dark-launches the drain for byte-stable pre-C11 rigs —
+	// production never sets it (the M12 default-ON posture).
+	livenessDisabled atomic.Bool
+	livenessInterval atomic.Int64 // nanoseconds; 0 → livenessDrainInterval
+	// Shutdown: Wait (and rig teardown) close livenessStop once BEFORE
+	// draining wg — a tick journals under s.mu and must not race the store
+	// close. livenessWG joins the goroutine so teardown is deterministic.
+	livenessStop chan struct{}
+	livenessOnce sync.Once
+	livenessWG   sync.WaitGroup
 	// M18 W2 item 4 fail-closed drill (autoCurateAge seam precedent):
 	// non-nil ONLY in tests — assembleRunPrompt calls it between layer
 	// assembly and buildPrompt to simulate a receipt diverging from the
@@ -273,6 +294,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		panelProg:    make(map[int64]*PanelProgress),
 		loops:        make(map[int64]struct{}),
 		autoJitter:   autoStartupJitterMax,
+		livenessStop: make(chan struct{}),
 	}
 	s.adapters[""] = ad
 	s.adapters["omp"] = ad
@@ -299,13 +321,68 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// M19 (V7): restart recovery for /loop — mid-audit/design loops
 	// (side-effect-free) re-run; mid-run loops suspend restart_mid_run.
 	s.recoverLoops(context.Background())
+	// Deploy witness (P0-4): the daemon once ran a stale binary ~22h
+	// behind HEAD with zero signal (wiki/main-epoch-12.md). Compare the
+	// binary mtime against the project repo's HEAD commit time and log a
+	// prominent WARNING when stale — log-only, never fatal, and silent
+	// when projectRoot is not a git repo or git fails.
+	s.logDeployWitness()
 	// Re-trigger auto-land for pending diffs that were stranded by a
 	// daemon restart (run drained before the pipeline fired, or a restart
 	// mid-pipeline). Diffs whose outcomes are already journaled are NOT
 	// re-fired — the dedup filter lives with the pipeline (autoland.go,
 	// recoverPendingDiffs/strandedPendingDiffs).
 	go s.recoverPendingDiffs(context.Background())
+	// C11 ("GUI-closed loops continue"): the daemon-side counterpart of
+	// the GUI's 350ms poll loop — with zero GUI traffic, runs must still
+	// drain to their terminal event or /loop wedged permanently (2026-08
+	// panel P0). Same fire-and-forget shape as recoverPendingDiffs; the
+	// goroutine is joined by stopLiveness (Wait) at shutdown.
+	s.livenessWG.Add(1)
+	go s.runLivenessDrain()
 	return s
+}
+
+// deployStaleGrace is the drift the deploy witness tolerates before
+// warning — rebuild jitter and clock skew below this stay silent.
+const deployStaleGrace = 5 * time.Minute
+
+// deployStaleness reports how far a daemon binary's mtime lags the project
+// repo's HEAD commit time. Zero when the binary is at or after HEAD minus
+// the grace — only a binary OLDER than HEAD by more than deployStaleGrace
+// is stale. Pure comparison so the unit test can drive it with fake times.
+func deployStaleness(binaryMtime, headCommit time.Time) time.Duration {
+	if d := headCommit.Sub(binaryMtime); d > deployStaleGrace {
+		return d
+	}
+	return 0
+}
+
+// logDeployWitness is the deploy witness body: compare os.Executable()'s
+// mtime against the HEAD commit time of the project repo and log a
+// prominent WARNING when the binary predates HEAD (P0-4 — a stale daemon
+// serving a newer checkout is otherwise invisible; ~22h of drift went
+// unnoticed, wiki/main-epoch-12.md). Every step is best-effort: a
+// non-git project root, a git failure, or an unresolvable binary logs
+// nothing, and no failure is ever fatal at startup.
+func (s *Server) logDeployWitness() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return
+	}
+	head, err := git.HeadCommitTime(s.projectRoot)
+	if err != nil {
+		return
+	}
+	if drift := deployStaleness(fi.ModTime(), head); drift > 0 {
+		log.Printf("WARNING: daemon binary stale (binary mtime < HEAD commit time): %s mtime %s is %s older than HEAD commit %s of %s — rebuild/redeploy the daemon",
+			exe, fi.ModTime().UTC().Format(time.RFC3339), drift.Round(time.Second),
+			head.UTC().Format(time.RFC3339), s.projectRoot)
+	}
 }
 
 // RegisterAdapter makes ad selectable via the send_message "adapter" field
@@ -372,6 +449,10 @@ func (s *Server) Serve(listener net.Listener) error {
 // in-flight requests — e.g. a distill still inside its 10-minute agent run —
 // before shutdown cleanup kills agents and closes the journal.
 func (s *Server) Wait() {
+	// C11: stop the liveness drain FIRST — its tick takes s.mu and
+	// journals; joined here (bounded by one in-flight tick) so no tick is
+	// alive when shutdown cleanup kills agents and closes the journal.
+	s.stopLiveness()
 	s.wg.Wait()
 	s.curateWG.Wait()
 	// M19: loop driver goroutines (audit/design MoA fan-outs) drain too.
@@ -2004,10 +2085,84 @@ func resolveMaxConcurrent() int {
 	return n
 }
 
+// livenessDrainInterval is the production cadence of the daemon-side
+// liveness drain (C11, 2026-08-22 P0). Deliberately slow next to the GUI's
+// 350ms poll cadence: the poll drain is the interactive path, this tick is
+// only the no-GUI floor — it takes the same s.mu as pollLocked, so each
+// tick can stall admissions/drains by one drain step and must not be
+// chatty. Tests shrink it through the livenessInterval atomic.
+const livenessDrainInterval = 2 * time.Second
+
+// runLivenessDrain is the daemon-side counterpart of the GUI's poll loop
+// (C11, "GUI-closed loops continue"): every tick advances every unfinished
+// run one drain step, so a run reaches its terminal event — and a /loop
+// fix/implement run fires loopPipelineAfterRun/fireLoopTick — even with
+// zero GUI traffic. Started in NewServer, stopped by stopLiveness (Wait /
+// rig teardown). The interval re-resolves per tick so the test seam takes
+// effect immediately; the disabled check sits INSIDE the loop so a rig
+// flipping the switch needs no restart.
+func (s *Server) runLivenessDrain() {
+	defer s.livenessWG.Done()
+	for {
+		interval := time.Duration(s.livenessInterval.Load())
+		if interval <= 0 {
+			interval = livenessDrainInterval
+		}
+		t := time.NewTimer(interval)
+		select {
+		case <-s.livenessStop:
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		if s.livenessDisabled.Load() {
+			continue // dark-launched (test rigs): ticks fire, the body skips
+		}
+		s.drainActiveRuns()
+	}
+}
+
+// drainActiveRuns is one liveness tick body: advance every unfinished run
+// exactly as pollLocked would (same s.mu discipline — drainRun's
+// consumed/finished cursor must never advance concurrently or the same
+// events journal twice). Errors are logged and the tick moves on: one
+// failing run must never wedge the others, and this goroutine must never
+// die — it IS the liveness contract, so a panic is swallowed with a log
+// line rather than propagated (same fail-closed posture as the orphaned-
+// request recovery: a dead tick regresses to the pre-C11 GUI-only wedge,
+// invisibly).
+func (s *Server) drainActiveRuns() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ipc: liveness drain: recovered panic: %v (tick continues next interval)", r)
+		}
+	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, meta := range s.runs {
+		if meta.finished {
+			continue
+		}
+		if err := s.drainRun(context.Background(), meta); err != nil {
+			log.Printf("ipc: liveness drain: run %s: %v (retrying next tick)", meta.runID, err)
+		}
+	}
+}
+
+// stopLiveness closes the drain's stop channel exactly once and blocks
+// until the goroutine exits. Wait calls it before draining wg (shutdown),
+// rig teardown calls it before closing the store — a tick in flight
+// journals under s.mu and must not outlive the journal.
+func (s *Server) stopLiveness() {
+	s.livenessOnce.Do(func() { close(s.livenessStop) })
+	s.livenessWG.Wait()
+}
+
 // drainRun pulls new adapter events into the journal once. When the terminal
 // event arrives it extracts the worktree diff exactly once and records it.
-// Caller holds s.mu (called from handlePollEvents): consumed/finished must
-// not advance concurrently or the same events journal twice.
+// Caller holds s.mu (called from handlePollEvents — and, since C11, from
+// the liveness drain's drainActiveRuns): consumed/finished must not
+// advance concurrently or the same events journal twice.
 func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	evs, err := s.adapterFor(meta.adapter).Events(ctx, meta.runID, meta.consumed)
 	if err != nil {
@@ -2539,10 +2694,12 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		//       an agent-produced patch into daemon-owned content).
 		//   (2) protectedGateFiles — a non-human actor (autoActor, loopActor,
 		//       …) may land them ONLY behind panel evidence:
-		//       panelVerdictAttestsDiff requires a journaled unanimous
-		//       verdict row (or the settle ladder's majority verdict) whose
-		//       patch_sha16 matches the exact bytes being landed — the
-		//       judged never modifies its own judge without its judges.
+		//       panelVerdictAttestsDiff requires a journaled UNANIMOUS
+		//       verdict row (consensus "accept"; the settle ladder's
+		//       majority verdict lost attestation power in the 2026-08-22
+		//       security cut) whose patch_sha16 matches the exact bytes
+		//       being landed — the judged never modifies its own judge
+		//       without its judges.
 		//       The human Accept click stays the unconditional escape.
 		patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
 		if gerr == nil {
@@ -3784,7 +3941,7 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// P1-2 committed-phase supersession probe (auto triggers only): the
 	// pinned window above keeps every marker honest, but journal growth
 	// past lastSeq that this fold did not author — its own mid-fold rows
-	// are contradiction retracts, skill_gate discards, and the
+	// are contradiction candidates, skill_gate discards, and the
 	// memory_propose batch, and the attributed metadata bookkeeping
 	// (curate/index/pins layers) is read fresh at prompt time rather than
 	// render-covered — with no post-commit input through the gate
@@ -3811,6 +3968,20 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 				trigger, winStats.events, winStats.eligibleBytes))
 			return Response{}, errAutoDistillSuperseded
 		}
+	}
+
+	// P0-4 batch-supersede snapshot: capture the PRE-marker pending batch
+	// BEFORE the fold marker re-pins the pending epoch to newEpoch−1.
+	// findPendingBatch resolves pending from the LATEST distill marker,
+	// so the old pin stops resolving the moment the marker lands — a
+	// post-marker scan could never see the orphan again. Best-effort: a
+	// list failure logs and skips the row (bookkeeping never fails the
+	// fold).
+	var prevBatch pendingBatch
+	if pre, perr := s.store.ListEvents(ctx, c.ID, 0); perr == nil {
+		prevBatch = findPendingBatch(pre)
+	} else {
+		log.Printf("distill: batch_superseded snapshot: list events: %v", perr)
 	}
 
 	newEpoch, err := s.store.IncrementEpoch(ctx, c.ID)
@@ -3881,10 +4052,12 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		return Response{}, err
 	}
 
-	// M6: ledger append (best-effort, after the distill event so its seq is
-	// citable). Section header uses c.Epoch — the distilled note's epoch,
-	// not newEpoch (the counter after increment).
-	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
+	// P0-4: the marker just re-pinned the pending epoch to newEpoch−1.
+	// Close the ledger on an older unconsumed batch the re-pin orphaned
+	// (crash-lost between propose and apply, or sweeper-refused via
+	// user.md overflow) — one idempotent batch_superseded row, journaled
+	// immediately after the marker so the crash window is a single append.
+	s.journalBatchSuperseded(ctx, c.ID, prevBatch, newEpoch)
 
 	// Panel-gated memory apply: the fold committed and the marker made
 	// this distill's batch the pending one — decide it from the riding
@@ -3895,6 +4068,15 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	if len(models) > 0 {
 		s.autoApplyProposals(ctx, c, batchProposals, len(models))
 	}
+
+	// M6: ledger append (best-effort, after the distill event so its seq
+	// is citable; AFTER the panel apply — P0-4 — so the epoch section's
+	// "memory apply" row records the outcome the fold just decided instead
+	// of rendering "pending" on the apply that lands a moment later, the
+	// "30 batches proposed, 0 applied" blind spot). Section header uses
+	// c.Epoch — the distilled note's epoch, not newEpoch (the counter
+	// after increment).
+	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
 
 	// M12: the fold retired the window. Evaluate the conditional
 	// auto-curate (never chained: it fires only when the notes/age
@@ -3991,8 +4173,10 @@ func windowEvents(events []store.Event) []store.Event {
 // unownedFoldGrowth reports whether the journal grew past a fold's pinned
 // window end with rows the fold itself could not have authored — the only
 // rows distillCore journals between render and marker are contradiction
-// retracts (memory_update{layer:note, cause:retract}), skill_gate discards,
-// the memory_propose batch, and their journal-failure fallbacks. Also
+// candidates (memory_update{layer:note, cause:contradiction_candidate};
+// legacy cause:retract rows from curated/human paths stay attributed on the
+// same fold-authorship grounds), skill_gate discards, the memory_propose
+// batch, and their journal-failure fallbacks. Also
 // attributed (never render-covered, but safe): the daemon's curated-wiki
 // and pins bookkeeping — review_action{action:"curate"} and
 // memory_update{layer: curator | index | pins}, all causes. Those rows
@@ -4028,14 +4212,18 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 				Layer string `json:"layer"`
 				Cause string `json:"cause"`
 			}
-			// Fold-authored: contradiction retracts, learner/gate/apply
-			// failure fallbacks. Metadata layers read FRESH at prompt
+			// Fold-authored: contradiction candidates (advisory-only
+			// since 2026-08-22) and any legacy retract row, learner/gate/
+			// apply failure fallbacks; learner batch bookkeeping
+			// (batch_superseded close-outs, P0-4). Metadata layers read
+			// FRESH at prompt
 			// time (memory.md, user.md, skills, wiki on disk, ledger,
 			// curated wiki, index, pins): their rows describe input
 			// bookkeeping, not coverage — a same-conversation human apply
 			// or wiki commit landing mid-fold must not abort it.
 			if jsonUnmarshalOK(ev.Payload, &p) && ((p.Layer == "note" && p.Cause == "retract") ||
-				(p.Layer == "learner" && p.Cause == "failed") ||
+				(p.Layer == "note" && p.Cause == "contradiction_candidate") ||
+				(p.Layer == "learner" && (p.Cause == "failed" || p.Cause == "batch_superseded")) ||
 				p.Layer == "skills" || p.Layer == "memory" || p.Layer == "user" ||
 				p.Layer == "apply" || p.Layer == "ledger" || p.Layer == "wiki" ||
 				p.Layer == "curator" || p.Layer == "index" || p.Layer == "pins") {
@@ -4298,9 +4486,11 @@ func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response,
 // gates. 2026-08-20 user doctrine supersedes "must never auto-land":
 // their diffs route through the full verify+panel pipeline like any
 // other, annotated as gate-source for the panel, and land only behind
-// panelVerdictAttestsDiff — a journaled verdict bound to the exact patch
-// bytes (the judged still never modifies its own judge without its
-// judges; the human Accept click stays the unconditional escape).
+// panelVerdictAttestsDiff — a journaled UNANIMOUS verdict bound to the
+// exact patch bytes (2026-08-22 cut: the settle ladder's majority_accept
+// verdict never attests gate sources; the judged still never modifies
+// its own judge without its judges, and the human Accept click stays the
+// unconditional escape).
 //
 // Case-insensitive: macOS APFS/HFS+ resolve .ODO/ and Wiki/ identically.
 var protectedGateFiles = map[string]bool{
@@ -4354,13 +4544,24 @@ func gateSourceHit(paths []string) (string, bool) {
 // panelVerdictAttestsDiff is the gate-source evidence gate (2026-08-20
 // user doctrine, layer (2) of the accept-time guard): a non-human accept
 // of gate source files requires a journaled moa_review row — actor
-// auto_panel, consensus "accept" (the settle ladder's "majority_accept"
-// verdict rows count too, being the ladder's own panel settlement) — whose
-// recorded patch_sha16 matches the diff's CURRENT on-disk bytes. The sha
-// binding is the point: the panel must have judged exactly the bytes being
+// auto_panel, consensus "accept", NOTHING ELSE — whose recorded
+// patch_sha16 matches the diff's CURRENT on-disk bytes. The sha binding
+// is the point: the panel must have judged exactly the bytes being
 // landed, never an earlier generation of the diff, and the judged never
 // modifies its own judge without its judges. Every failure (patch read,
 // journal read, no matching row) is fail-closed.
+//
+// 2026-08-22 security cut: the settle ladder's "majority_accept" verdict
+// rows NO LONGER attest gate sources. The majority-accept valve (2/3
+// accept + 1 dissent) must never rewrite the reviewing pipeline itself,
+// so settle never lands a gate diff via majority — gate diffs that
+// exhaust the revise ladder reach the round cap and suspend for a
+// unanimous verdict or the human Accept click, and the gate check sits
+// INSIDE the valve branch (settleDraft) before any majority journal
+// row could be written. A majority_accept row may still exist in the
+// journal for NON-gate diffs — it just never attests gate sources here.
+// Historical majority_accept rows in production journals lose their
+// gate-attestation power on upgrade; that is the intended cut.
 func (s *Server) panelVerdictAttestsDiff(ctx context.Context, d store.Diff) bool {
 	data, err := os.ReadFile(d.PathOnDisk)
 	if err != nil {
@@ -4387,7 +4588,7 @@ func (s *Server) panelVerdictAttestsDiff(ctx context.Context, d store.Diff) bool
 			continue
 		}
 		if p.Action == "moa_review" && p.Actor == autoActor && p.DiffID == d.ID &&
-			(p.Consensus == "accept" || p.Consensus == "majority_accept") && p.PatchSHA == want {
+			p.Consensus == "accept" && p.PatchSHA == want {
 			return true
 		}
 	}

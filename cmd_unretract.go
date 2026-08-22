@@ -14,11 +14,13 @@ import (
 )
 
 // M17 F3: `odo unretract <note-basename>` — the false-positive retraction
-// repair emitter. The contradiction pass retracts with a journal record
-// (memory_update{layer:"note", cause:"retract"}), and the recall path has
-// always CONSUMED cause:"unretract" (retractedNoteSet deletes the name) —
-// nothing ever emitted it. This CLI is the manual emitter for a tri-model-
-// audited false positive (e.g. the F2 production case, seqs 5144–5149):
+// repair emitter. Only curated/human paths journal
+// memory_update{layer:"note", cause:"retract"} (the contradiction pass has
+// been advisory-only since 2026-08-22 — it journals candidate rows, never
+// retracts), and the recall path has always CONSUMED cause:"unretract"
+// (retractedNoteSet deletes the name). This CLI is the manual emitter for
+// a tri-model-audited false positive (e.g. the F2 production case, seqs
+// 5144–5149, retracted on the pre-M17 barn door):
 //
 //	memory_update{layer:"note", cause:"unretract",
 //	               detail:"<name> unretracted by user (repairs false-positive retraction)"}

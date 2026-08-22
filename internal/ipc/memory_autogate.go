@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -152,4 +153,73 @@ func (s *Server) journalAutoApplyFailed(ctx context.Context, conversationID int6
 		"epoch":  epoch,
 		"detail": cause.Error(),
 	}))
+}
+
+// batchSupersededReported folds existing batch_superseded rows for epoch:
+// the supersede journal is idempotent — one row per superseded batch per
+// journal, so a replay (a hand-restored journal, a test re-fold) never
+// double-counts the orphan.
+func batchSupersededReported(events []store.Event, epoch int) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Layer string `json:"layer"`
+			Cause string `json:"cause"`
+			Epoch int    `json:"epoch"`
+		}
+		if json.Unmarshal(events[i].Payload, &p) == nil &&
+			p.Layer == "learner" && p.Cause == "batch_superseded" && p.Epoch == epoch {
+			return true
+		}
+	}
+	return false
+}
+
+// journalBatchSuperseded closes the ledger on an orphaned proposal batch:
+// the just-journaled distill marker (newEpoch) re-pinned the pending epoch
+// to newEpoch−1, so an OLDER unconsumed batch — left by a crash between
+// propose journal and apply, or sweeper-refused via user.md overflow —
+// falls out of every future findPendingBatch scan: its proposals, learner
+// spend, and panel reviews would vanish journal-silent (ADR-0003
+// gate-theater blind spot, P0-4). prev is the PRE-marker batch, snapshotted
+// before the marker appended (the old pin stops resolving the moment the
+// marker lands). A consumed batch never reports — its memory_apply row IS
+// the close-out. A refused-then-superseded batch still gets this one row:
+// the refusal explains why it pended, the supersede closes it (the detail
+// names the auto_apply_failed row). The dedup folds the CURRENT journal,
+// never the caller's snapshot, so the row stays idempotent under any
+// replay (crash-recovery, a hand-restored journal); best-effort with a
+// log on failure and cancel-free, same discipline as
+// journalAutoApplyFailed: the fold committed at the marker, so the row
+// must not die with a dropped client.
+func (s *Server) journalBatchSuperseded(ctx context.Context, conversationID int64, prev pendingBatch, newEpoch int) {
+	if !prev.exists || prev.consumed || prev.epoch == newEpoch-1 {
+		// consumed: the apply row closed the batch; epoch match: the
+		// marker kept the same pin (defensive — IncrementEpoch moves past
+		// the old marker in every reachable path).
+		return
+	}
+	events, err := s.store.ListEvents(context.WithoutCancel(ctx), conversationID, 0)
+	if err != nil {
+		log.Printf("distill: batch_superseded dedup scan: list events: %v", err)
+		return
+	}
+	if batchSupersededReported(events, prev.epoch) {
+		return
+	}
+	detail := fmt.Sprintf("%d proposal(s) from epoch %d superseded by distill epoch %d",
+		len(prev.proposals), prev.epoch, newEpoch)
+	if autoApplyRefused(events, prev.epoch) {
+		detail += "; auto_apply_failed recorded"
+	}
+	if _, err := s.store.AppendEvent(context.WithoutCancel(ctx), conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+		"layer":  "learner",
+		"cause":  "batch_superseded",
+		"epoch":  prev.epoch,
+		"detail": detail,
+	})); err != nil {
+		log.Printf("distill: journal batch_superseded (epoch %d): %v", prev.epoch, err)
+	}
 }

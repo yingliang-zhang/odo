@@ -845,6 +845,116 @@ func testSettleRoundCapSuspendsAndResumes(t *testing.T) {
 	}
 }
 
+// settleGateWrapper is the stub agent wrapper for the gate-source round
+// cap test: every run copies its prompt into internal/ipc/settle.go — a
+// protectedGateFiles member — so every diff the revise chain produces
+// touches a gate source.
+const settleGateWrapper = `#!/bin/sh
+prompt_file="$2"
+output_file="$3"
+sleep 1
+mkdir -p internal/ipc
+cp "$prompt_file" internal/ipc/settle.go
+printf 'did gate work\n' > "$output_file"
+exit 0
+`
+
+// TestSettleMajorityValveExcludesGateSource (2026-08-22 security cut): a
+// GATE-SOURCE diff (internal/ipc/settle.go rides the patch) that exhausts
+// the revise ladder under a 2/3-accept panel must NOT take the
+// majority-accept valve — 2/3 accept + 1 dissent never rewrites the
+// reviewing pipeline itself. At the round cap the ladder journals the
+// ladder_suspended transition (ledger row + blocked row, both naming the
+// gate exclusion), the majority_accept moa_review row is never journaled,
+// no accept action fires, and every chain diff stays pending for a
+// unanimous verdict or the human Accept click.
+func TestSettleMajorityValveExcludesGateSource(t *testing.T) {
+	rig := settleRigWrapper(t, func(call int64, model string) (int, string) {
+		// 2/3 accept + 1 dissent every round — satisfies the valve
+		// condition (accepts*3 >= 2*len(reviews), zero rejects, zero
+		// infra/truncated) — with per-call unique comments so the
+		// no-progress stop never fires for the WRONG reason under the
+		// round-cap microscope.
+		switch model {
+		case "rm1":
+			return 200, fmt.Sprintf("ACCEPT\nplausible %d", call)
+		case "rm2":
+			return 200, fmt.Sprintf("ACCEPT\nsound %d", call)
+		default:
+			return 200, fmt.Sprintf("NEEDS_FIXES\nfix issue %d", call)
+		}
+	}, settleGateWrapper)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "first attempt at the task"})
+	done1 := pollDone(t, rig, convID)
+	d0 := done1.Diff.ID
+
+	// Three revise rounds spawn and complete; the FOURTH needs_fixes-zone
+	// evaluation (rounds == cap) is where the valve would have fired.
+	waitSettle(t, rig.store, convID, "round 1 spawn", func(sc settleScan) bool { return len(sc.markers) == 1 })
+	pollDone(t, rig, convID)
+	waitSettle(t, rig.store, convID, "round 2 spawn", func(sc settleScan) bool { return len(sc.markers) == 2 })
+	pollDone(t, rig, convID)
+	waitSettle(t, rig.store, convID, "round 3 spawn", func(sc settleScan) bool { return len(sc.markers) == 3 })
+	pollDone(t, rig, convID)
+
+	// The gate exclusion: the round-cap evaluation suspends the ladder
+	// instead of majority-landing — BOTH the ledger transition and the
+	// blocked row name the gate-source valve exclusion.
+	sc := waitSettle(t, rig.store, convID, "gate-source ladder suspension", func(sc settleScan) bool {
+		return len(sc.memory) == 1 && sc.memory[0]["cause"] == "ladder_suspended"
+	})
+	if detail := fmt.Sprint(sc.memory[0]["detail"]); !strings.Contains(detail, "gate source diff: the majority-accept valve does not apply") {
+		t.Errorf("suspension ledger detail = %q, want the gate-source valve exclusion named", detail)
+	}
+	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "ladder_suspended" {
+		t.Fatalf("blocked reasons = %v, want [ladder_suspended]", got)
+	}
+	if detail := fmt.Sprint(sc.blocked[0]["detail"]); !strings.Contains(detail, "gate source diff: majority-accept valve inapplicable") {
+		t.Errorf("blocked detail = %q, want the gate-source valve exclusion named", detail)
+	}
+	if len(sc.rounds) != 3 || sc.rounds[0]["round"] != float64(1) || sc.rounds[1]["round"] != float64(2) || sc.rounds[2]["round"] != float64(3) {
+		t.Fatalf("rounds = %v, want exactly rounds 1, 2 and 3", sc.rounds)
+	}
+	for _, r := range sc.rounds {
+		if r["origin_diff_id"] != float64(d0) {
+			t.Errorf("round %v origin = %v, want chain root %d", r["round"], r["origin_diff_id"], d0)
+		}
+	}
+
+	// The valve was SKIPPED: no moa_review row exists at all (every
+	// evaluation was the needs_fixes zone, and the cap exited before the
+	// valve could journal majority_accept), and no accept action fired.
+	for _, m := range sc.moaRows {
+		t.Errorf("moa_review row journaled for a capped gate diff: %v", m)
+	}
+	for _, a := range sc.accepts {
+		t.Errorf("accept action journaled for a capped gate diff: %v", a)
+	}
+
+	// Every diff in the chain stays pending; nothing applied to main.
+	diffs, err := rig.store.ListDiffs(context.Background(), convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diffs) != 4 {
+		t.Errorf("diff count = %d, want 4 (origin + 3 repair products)", len(diffs))
+	}
+	for _, d := range diffs {
+		if d.Status != store.DiffPending {
+			t.Errorf("diff %d status = %s, want pending (the majority valve never landed it)", d.ID, d.Status)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(rig.root, "internal", "ipc", "settle.go")); !os.IsNotExist(err) {
+		t.Error("internal/ipc/settle.go exists in main — the gate diff applied despite the exclusion")
+	}
+	settleQuiet(t, rig.store, convID, 2*time.Second, "a fourth revise spawn", func(sc settleScan) bool {
+		return len(sc.markers) > 3 || len(sc.rounds) > 3
+	})
+}
+
 // settleConstWrapper writes identical content on every run — the repair
 // run's patch is byte-identical to the original's (the no-progress stop's
 // trigger).
