@@ -842,7 +842,10 @@ func TestTodoBootRematerialization(t *testing.T) {
 	// one journal scan, not from any prior process memory.
 	st2 := s.store
 	fresh := NewServer(st2, s.projectRoot, nil, nil)
-	ml := fresh.runMemoryLayers(ctx, "main", convID, "continue")
+	ml, err := fresh.runMemoryLayers(ctx, "main", convID, "continue")
+	if err != nil {
+		t.Fatalf("fresh runMemoryLayers: %v", err)
+	}
 	if !strings.Contains(ml.todo, "t1: survives the reboot") {
 		t.Errorf("fresh server todo block = %q", ml.todo)
 	}

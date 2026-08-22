@@ -92,7 +92,7 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 		return Response{}, err
 	}
 
-	out, err := runDesignMoa(ctx, "design_moa", s.projectRoot, goal, req.ContextFiles, "")
+	out, err := runDesignMoa(ctx, "design_moa", s.projectRoot, goal, req.ContextFiles, "", s.sharedMoa())
 	if err != nil {
 		return fail(err, err.Error())
 	}
@@ -143,7 +143,9 @@ type designMoaOutcome struct {
 // truncation: partial leg text never feeds the consolidator, and a
 // consolidator truncation fails the whole pass (the fail-closed
 // convention). Journaling stays with the caller.
-func runDesignMoa(ctx context.Context, opName, root, goal string, contextFiles []string, consolidatorModel string) (designMoaOutcome, error) {
+// client is the Server's shared MoA client (P1 #10) — design legs
+// contend on the same daemon-wide semaphore as every other moa route.
+func runDesignMoa(ctx context.Context, opName, root, goal string, contextFiles []string, consolidatorModel string, client *moa.Client) (designMoaOutcome, error) {
 	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
 	if len(models) == 0 {
 		return designMoaOutcome{}, errors.New("No review models configured for " + opName + ". Set the 'review:' line in prefs.md.")
@@ -159,8 +161,7 @@ func runDesignMoa(ctx context.Context, opName, root, goal string, contextFiles [
 	// Blind legs: independent QueryWithTools loops, repo-root scope. Same
 	// prompt, same tools, no cross-leg visibility — the seal holds because
 	// the executor exposes only reads and each leg builds its own message
-	// chain.
-	client := moa.NewClientFromEnv("", "")
+	// chain. All legs share the caller's client (P1 #10).
 	exec := newFSToolExecutorRooted(root)
 	tools := moaFSTools()
 	legSystem := "You are an expert design reviewer producing one independent, self-contained design proposal." +

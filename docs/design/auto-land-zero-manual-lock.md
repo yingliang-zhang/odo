@@ -87,6 +87,8 @@ go build ./... && go vet ./... && go test ./...
 6. Verify path selection is default-deny: mixed Go+GUI diffs use the Go gate
 7. `.odo-verify` self-modification blocked by supply-chain gate
 8. Risk classifier exemption is observational only; supply_chain + destructive stay
+9. Verify child runs under an allowlisted env AND a scratch HOME (P1 #11, 2026-08-22): env-shaped keys are stripped by `verifyEnviron`, file-shaped credentials (`~/.ssh`, `~/.aws`, `~/.config`) are hidden outright; only the credential-free tool caches (GOCACHE/GOMODCACHE/GOPATH, playwright browsers) are mounted back, by name. Sandbox construction failure fails the gate closed.
+10. Every MoA request (panel, review, design, learner/curate/distill one-shots, vision/preview) rides the Server's single shared client (P1 #10, 2026-08-22) — its in-flight semaphore is the daemon-wide review-lane cap, never a per-leg private one.
 
 ## Verification
 
@@ -115,6 +117,8 @@ User directive: manual diff review is redundant; every review must be automatic.
 **Executor evidence gate** (`server.go: panelVerdictAttestsDiff`): a non-human accept of gate source files requires a journaled `moa_review{actor:auto_panel, consensus_verdict: accept}` row whose `patch_sha16` matches the **exact on-disk patch bytes** being landed. The sha binding prevents a verdict for an earlier generation of the diff from unlocking land. All failures are fail-closed. The human Accept click stays the unconditional escape; memory paths stay refused for every actor. **2026-08-22 cut**: `majority_accept` no longer attests gate-source landings — the settle ladder's round-cap majority valve now excludes gate-source diffs outright (they suspend for unanimous verdict or human Accept), and attestation ignores the consensus even if a historical row carries matching bytes.
 
 **Residual risk (accepted by user)**: the panel is now the sole guard against the pipeline weakening its own judge (previously the mechanical gate short-circuited before any model saw the diff). Mitigations retained: unanimity across heterogeneous models, the diff body fenced as data, the gate-source annotation priming REJECT for gate weakening, byte-bound verdict evidence, and every outcome journaled (`auto_land_blocked` / `moa_review` / `accept`).
+
+**Panel-size arm rule (2026-08-22 P1 #8)**: auto-land arms only at ≥2 review models. N=1 "unanimity" is a single judge with no dissent channel, so one `review:` model leaves the pipeline unarmed — the first attempt per daemon lifetime journals one `auto_land_blocked{single_judge_panel}` advisory, later diffs pend silent for the human. Advisory surfaces (`/panel`, `review_diff`) stay N-unrestricted.
 
 **Loop pipeline unchanged**: `/loop` fix rounds land with `loopActor` and no panel, so their protected-path suspension stays — `panelVerdictAttestsDiff` structurally refuses a loopActor gate-source land (no auto_panel verdict rows exist for it).
 

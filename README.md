@@ -99,7 +99,7 @@ Developer-experience wave (from tri-model DX analysis 2026-08-18, ranked):
 ### Features
 
 - **Conversation-centric**: every run journals typed events (`user_message`, `agent_text`, `agent_tool_call`, `agent_tool_result`, `agent_done`, `agent_error`, `review_action`, `memory_update`) to an append-only SQLite store
-- **Journal tooling** (read-only CLIs, no LLM): `odo journal` folded/range/tail/search replay; `odo recall audit` recall-miss telemetry; `odo skills audit` skill receipt×outcome join + flags; `odo autonomy audit` per-class accept streaks; `odo rules audit` memory-rule receipt×outcome join + harmful/effective flags (journaled + ledger.md sinks; self-improving Wave 1 measure step)
+- **Journal tooling** (read-only CLIs, no LLM): `odo journal` folded/range/tail/search replay; `odo recall audit` recall-miss telemetry; `odo skills audit` skill receipt×outcome join + flags; `odo autonomy audit` per-class accept streaks; `odo rules audit` memory-rule receipt×outcome join + harmful/effective flags (journaled + ledger.md sinks; self-improving Wave 1 measure step). Lifecycle: `odo journal rotate` (the one non-read-only journal CLI) archives `journal.sqlite*` to `.odo/archive/` — offline only, refused while the daemon is live
 - **Live streaming**: OMP `--mode json` JSONL stream tailed with byte-offset cursor; preview bubble shows in-flight block with pulsing caret; adaptive poll (350ms running / 1500ms idle)
 - **Auto-land pipeline**: pref-gated (`auto_apply: main`) zero-manual-intervention landing — verify (path-scoped) → 3-model blind panel → unanimous accept → auto-land, or needs_fixes → auto-revise ladder (≤3 rounds) → majority accept (≥2/3) → auto-land; supersede old chain diffs; journaled `auto_land_blocked` + `auto_revise_round` audit
 - **Memory architecture**: 6-layer (journal → epoch notes → topic pages → memory.md → user.md → ledger.md), one-way promotion, contradiction detection + retraction
@@ -111,7 +111,7 @@ Developer-experience wave (from tri-model DX analysis 2026-08-18, ranked):
 - **Chat search** (⌘F): in-conversation text search with jump-to-match
 - **Markdown rendering**: agent text renders as markdown with syntax-highlighted code blocks
 - **Skills**: global (`~/.odo/skills/`) and project-local (`.odo/skills/`) markdown skills, keyword-matched for prompt injection, full CRUD via GUI
-- **Skill distillation**: learner proposes skills from conversation patterns; three-tier gating (auto-discard / human-gate / auto-accept) with MoA review
+- **Skill distillation**: learner proposes skills from conversation patterns; three-tier gating (auto-discard / human-gate / auto-accept) with MoA review. Off by default (P1 #12) — prefs `skills_distill: on` re-enables
 - **MoA review**: run a diff through N parallel models, results journal as one review_action event
 - **Design-MoA** (R-W4): for nontrivial tasks, 3 blind design proposals → consolidator → journaled DESIGN LOCK (human amend/veto) → single implementer → existing MoA review; opt-in via `prefs design_via: moa`; mechanical fixes stay single-model
 - **Slash advisors**: `/panel` (MoA fan-out) and `/vision` (K3 image analysis) route around the agent for direct-API answers with the same injection receipts; `/preview <url> [prompt]` screenshots a **localhost-only** page with headless chromium (per-shot spawn → navigate → capture → exit, 45s cap; external hosts refused — no MCP tool channel, no visible pane, no CDP attach) and feeds the PNG through the `/vision` pipeline with a `preview_captured` receipt event; first run: `PATH=~/.hermes/node/bin:$PATH npx playwright install chromium`
@@ -314,7 +314,11 @@ and `dropped_seqs`, with cap boundaries rendered as actionable markers
 (`odo journal range A B`) — the audit trail for "what did run N see?" is
 complete, and its omissions are themselves journaled.
 Promotion flows one way up: journal → epoch note → topic page → memory.md →
-user.md (a rule seen in 2+ projects earns global promotion).
+user.md. The learner's automatic user.md promotion was removed (P1 #12,
+ADR-0003 amendment): single-project registries made its 2+-project gate
+unreachable and it leaked sibling projects' memory.md to the review
+gateway — user.md is human-written, and automatic folds skip the learner
+unless prefs carry `learner_auto: on`.
 
 ### Session continuity
 

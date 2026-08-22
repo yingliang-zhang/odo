@@ -118,6 +118,17 @@ func gitStatus(t *testing.T, dir string) string {
 	return string(out)
 }
 
+// resetSharedMoa re-arms the Server's shared MoA client (P1 #10) for the
+// next use. Production builds it ONCE per daemon lifetime (env and keys
+// are fixed there); a test that hot-swaps MOA_BASE_URL mid-Server must
+// reset explicitly, or every later leg keeps hitting the FIRST mock
+// gateway (the sync.Once already consumed its URL).
+func resetSharedMoa(t *testing.T, s *Server) {
+	t.Helper()
+	s.moaOnce = sync.Once{}
+	s.moaShared = nil
+}
+
 // startRig builds a project repo and a live daemon bound to it.
 func startRig(t *testing.T, root string) *testRig {
 	t.Helper()
@@ -4041,7 +4052,10 @@ func TestMemoryLayersReceiptCoverageReflect(t *testing.T) {
 		}
 	}
 
-	cold := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	cold, err := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	if err != nil {
+		t.Fatalf("cold runMemoryLayers: %v", err)
+	}
 	if cold.resume == "" || cold.replay != "" {
 		t.Fatalf("cold assembly: resume present=%v replay empty=%v, want card + no replay", cold.resume != "", cold.replay == "")
 	}
@@ -4061,7 +4075,10 @@ func TestMemoryLayersReceiptCoverageReflect(t *testing.T) {
 
 	append(store.EventUserMessage, map[string]interface{}{"text": "zeta follow-up"})
 	append(store.EventAgentText, map[string]interface{}{"text": "zeta done"})
-	warm := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	warm, err := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	if err != nil {
+		t.Fatalf("warm runMemoryLayers: %v", err)
+	}
 	if warm.replay == "" || warm.resume != "" {
 		t.Fatalf("warm assembly: replay present=%v resume empty=%v, want replay + no card", warm.replay != "", warm.resume == "")
 	}
@@ -4136,6 +4153,29 @@ func (c *countingAdapter) Events(_ context.Context, _ string, _ int) ([]adapter.
 }
 func (c *countingAdapter) Cancel(_ context.Context, _ string) error { return nil }
 func (c *countingAdapter) Close(_ context.Context, _ string) error  { return nil }
+
+// TestRunMemoryLayersJournalReadFailure: a journal READ failure refuses
+// prompt assembly with a precise cause. The pre-fix shape swallowed the
+// error and assembled a blind prompt (no replay, no recall, no rule
+// snapshots) with zero trace — the one silent hole on the fail-closed
+// chain.
+func TestRunMemoryLayersJournalReadFailure(t *testing.T) {
+	s, convID := bareServer(t)
+	if err := s.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.runMemoryLayers(context.Background(), "main", convID, "hi"); err == nil ||
+		!strings.Contains(err.Error(), "list journal events") {
+		t.Errorf("runMemoryLayers error = %v, want a list journal events refusal", err)
+	}
+	prompt, payload, err := s.assembleRunPrompt(context.Background(), "main", convID, "hi")
+	if err == nil || !strings.Contains(err.Error(), "journal read failed") {
+		t.Errorf("assembleRunPrompt error = %v, want the blind-prompt refusal", err)
+	}
+	if prompt != "" || payload != nil {
+		t.Errorf("refused assembly returned prompt=%q payload=%v, want both empty", prompt, payload)
+	}
+}
 
 // TestSendFailsClosedOnReceiptBreach: with a receipt diverging from the
 // injected layers (test seam simulating the production gap this gate

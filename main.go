@@ -41,7 +41,10 @@ func main() {
 	// M6: subcommand dispatch. `odo wiki read <page>` / `odo ledger [tail N]`
 	// are pull-based recall CLIs that read files directly (no daemon);
 	// `odo journal <sub>` is the read-only rehydration CLI for folded
-	// events; `odo recall audit` (M12 Batch 3a) is the read-only recall
+	// events — its `rotate` outlier is offline-only lifecycle: it renames
+	// the journal into .odo/archive/ (move-not-delete) and refuses while
+	// the instance lock below says a daemon is live; `odo recall audit`
+	// (M12 Batch 3a) is the read-only recall
 	// miss-rate report; `odo skills audit` / `odo autonomy audit` (M15)
 	// are read-only outcome-observability reports; `odo rules audit`
 	// (Wave 1 of the self-improving MVP) is the memory-rule outcome audit

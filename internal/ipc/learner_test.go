@@ -24,7 +24,9 @@ import (
 //     without re-running the distill machinery.
 //
 // Every test pins HOME to a temp dir (user.md/injection hermeticity); rigs
-// without a sibling need leave ODO_REGISTRY_PATH to startRig's temp default.
+// leave ODO_REGISTRY_PATH to startRig's temp default (P1-12: the learner no
+// longer consults the sibling registry — TestRunLearnerIgnoresSiblingRegistry
+// pins that).
 
 // learnerFlowWrapper serves every prompt the daemon builds: the plain agent
 // run (hello.txt), the distill one-shot (note body from ODO_DISTILL_OUTPUT),
@@ -46,6 +48,44 @@ cp "$prompt_file" hello.txt
 printf 'Created hello.txt as requested.\n' > "$output_file"
 exit 0
 `
+
+// learnerMarkWrapper behaves like learnerFlowWrapper and additionally
+// appends one line to $ODO_LEARNER_MARK and copies the learner prompt aside
+// to $ODO_LEARNER_PROMPT on every learner one-shot — the observability seam
+// for the P1-12 throttle/cutover tests (did the learner run, what did the
+// gateway see).
+const learnerMarkWrapper = `#!/bin/sh
+prompt_file="$2"
+output_file="$3"
+if grep -q "memory learner pass" "$prompt_file"; then
+  echo x >> "$ODO_LEARNER_MARK"
+  [ -n "$ODO_LEARNER_PROMPT" ] && cp "$prompt_file" "$ODO_LEARNER_PROMPT"
+  cat "$ODO_LEARNER_OUTPUT" > "$output_file"
+  exit 0
+fi
+if grep -q "Summarize the key decisions" "$prompt_file"; then
+  cat "$ODO_DISTILL_OUTPUT" > "$output_file"
+  exit 0
+fi
+sleep 1
+cp "$prompt_file" hello.txt
+printf 'Created hello.txt as requested.\n' > "$output_file"
+exit 0
+`
+
+// learnerRuns counts the learnerMarkWrapper one-shots so far (0 when the
+// mark file is absent — the file system's own proof the learner never ran).
+func learnerRuns(t *testing.T, mark string) int {
+	t.Helper()
+	b, err := os.ReadFile(mark)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(b), "\n")
+}
 
 // setOneShotEnv pins a one-shot output (distill note / learner JSON) to a
 // file and points the wrapper's env seam at it.
@@ -756,22 +796,16 @@ func TestDistillEmptyWindow(t *testing.T) {
 }
 
 // TestLearnerVetoesWeakEvidence covers the daemon-side evidence gate: a
-// memory proposal whose evidence is not the just-written note name and a
-// user proposal backed by <2 distinct registered projects are dropped and
-// counted; only the kept proposal reaches the journal.
+// memory proposal whose evidence is not the just-written note name is
+// dropped and counted; only the kept proposal reaches the journal.
 func TestLearnerVetoesWeakEvidence(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
-	// The note contains the user-proposal rule text, so the veto is squared
-	// on the <2-projects gate (registry holds the bound project only), not on
-	// missing text evidence.
 	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 1\n\nAlways verify conclusions with a concrete tool result.\n")
 	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[
 {"rule":"Always run go test ./... before claiming done.","evidence":"main-epoch-1","contradicts":""},
 {"rule":"Never skip the type checker.","evidence":"main-epoch-WRONG","contradicts":""}
-],"user":[
-{"rule":"Always verify conclusions with a concrete tool result.","projects":["odo","ananke"]}
 ],"reaffirm":[]}`)
 	rig := startRig(t, root)
 	defer rig.stop(t)
@@ -801,9 +835,15 @@ func TestLearnerVetoesWeakEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("stats missing: %v", proposes[0])
 	}
-	for k, want := range map[string]int{"memory_kept": 1, "memory_dropped": 1, "user_kept": 0, "user_dropped": 1} {
+	for k, want := range map[string]int{"memory_kept": 1, "memory_dropped": 1} {
 		if stats[k] != float64(want) {
 			t.Errorf("stats[%s] = %v, want %d (all stats %v)", k, stats[k], want, stats)
+		}
+	}
+	// P1-12: the stats map carries no promotion-branch counters anymore.
+	for _, dead := range []string{"user_kept", "user_dropped"} {
+		if _, present := stats[dead]; present {
+			t.Errorf("stats carries deleted counter %q: %v", dead, stats)
 		}
 	}
 }
@@ -1230,134 +1270,6 @@ func TestMemoryRetractionToArchive(t *testing.T) {
 	}
 	if d, _ := retracts[1]["detail"].(string); !strings.Contains(d, `no match for contradicts: "Prefer hand-rolled shell scripts."`) {
 		t.Errorf("retract detail = %v, want the no-match surfacing", d)
-	}
-}
-
-// TestUserMDPromotionCrossProject covers Demo B: with two registered sibling
-// projects whose memory.md holds the same imperative, a learner user proposal
-// is kept with daemon-verified project names (never the LLM's self-tags) and
-// apply writes the "seen:" line to ~/.odo/user.md. A second batch that would
-// overflow the 4 KB user cap is refused wholesale and writes nothing.
-func TestUserMDPromotionCrossProject(t *testing.T) {
-	root := initRepo(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	// Two siblings, each holding the recurring rule in their .odo/memory.md.
-	rule := "Always verify conclusions with a concrete tool result."
-	type sib struct {
-		name  string
-		added string
-	}
-	var rows []RegistryRow
-	for _, s := range []sib{{"ananke", "2026-01-02T00:00:00Z"}, {"projb", "2026-01-01T00:00:00Z"}} {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, ".odo"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, ".odo", "memory.md"),
-			[]byte("- "+rule+" — cites: main-epoch-3; reaffirmed: 3\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		resolved, err := filepath.EvalSymlinks(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		rows = append(rows, RegistryRow{Root: resolved, Name: s.name, Added: s.added})
-	}
-	regPath := filepath.Join(t.TempDir(), "projects.json")
-	b, err := json.Marshal(rows)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(regPath, append(b, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("ODO_REGISTRY_PATH", regPath)
-
-	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
-	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 1\n\n"+rule+"\n")
-	// Self-tagged project names are bogus on purpose: the daemon must
-	// replace them with the verified recurrence set.
-	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[],"user":[
-{"rule":"`+rule+`","projects":["bogus-llm-tag"]}
-],"reaffirm":[]}`)
-	rig := startRig(t, root)
-	defer rig.stop(t)
-
-	convID, d := runToDistill(t, rig, root)
-	if d.MemoryProposals != 1 {
-		t.Fatalf("distill MemoryProposals = %d, want 1 (the user proposal)", d.MemoryProposals)
-	}
-
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ownName := filepath.Base(resolvedRoot)
-	// sibling order: Added desc (ananke after projb registration date wins).
-	wantProjects := []string{ownName, "ananke", "projb"}
-
-	pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID})
-	if pend.Epoch != 1 || len(pend.Proposals) != 1 {
-		t.Fatalf("memory_proposals = epoch %d, %d proposals; want epoch 1, 1", pend.Epoch, len(pend.Proposals))
-	}
-	up := pend.Proposals[0]
-	if up.Target != "user.md" || up.Rule != rule {
-		t.Errorf("user proposal = %+v", up)
-	}
-	if fmt.Sprint(up.Projects) != fmt.Sprint(wantProjects) {
-		t.Errorf("daemon-verified projects = %v, want %v (LLM self-tags replaced)", up.Projects, wantProjects)
-	}
-
-	applied := rig.call(t, Request{
-		Cmd:            CmdApplyMemory,
-		ConversationID: convID,
-		Epoch:          1,
-		Accepted:       []MemoryAccept{{Target: "user.md", Index: 0}},
-	})
-	if !applied.Applied {
-		t.Fatal("apply_memory: applied must be true")
-	}
-	userPath := filepath.Join(home, ".odo", "user.md")
-	wantLine := "- " + rule + " — seen: " + strings.Join(wantProjects, ", ") + "\n"
-	if got := readFileStr(t, userPath); got != wantLine {
-		t.Errorf("user.md = %q, want %q", got, wantLine)
-	}
-	if fi, err := os.Stat(userPath); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("user.md mode = %v (err %v), want 0600", fi, err)
-	}
-	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
-	userUpdates := 0
-	for _, mu := range memoryUpdatesByCause(t, events, "apply") {
-		if mu["layer"] == "user" {
-			userUpdates++
-		}
-	}
-	if userUpdates != 1 {
-		t.Errorf("memory_update(apply, layer user) = %d, want 1", userUpdates)
-	}
-
-	// Second batch: a single rule too large for the remaining headroom is
-	// refused wholesale — nothing written, nothing journaled, batch pending.
-	oversized := strings.Repeat("r", 4100)
-	seedProposeBatch(t, rig, convID, 2, []MemoryProposal{
-		{Target: "user.md", Rule: oversized, Projects: []string{ownName, "ananke"}},
-	}, nil)
-	resp := rig.callExpectErr(t, Request{
-		Cmd:            CmdApplyMemory,
-		ConversationID: convID,
-		Epoch:          2,
-		Accepted:       []MemoryAccept{{Target: "user.md", Index: 0}},
-	})
-	if !strings.Contains(resp.Error, "would exceed") {
-		t.Errorf("overflow apply error = %q, want mention of would exceed", resp.Error)
-	}
-	if got := readFileStr(t, userPath); got != wantLine {
-		t.Errorf("user.md after refused apply = %q, want unchanged %q", got, wantLine)
-	}
-	if pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID}); pend.Epoch != 2 {
-		t.Errorf("refused apply consumed the batch: memory_proposals epoch = %d, want 2 pending", pend.Epoch)
 	}
 }
 
@@ -1924,5 +1836,97 @@ func TestDistillBatchSuperseded(t *testing.T) {
 	rig.server.journalBatchSuperseded(context.Background(), convID, prev, 3)
 	if rows := memoryUpdatesByCause(t, allEvents(t, rig, convID), "batch_superseded"); len(rows) != 1 {
 		t.Fatalf("batch_superseded rows after replay = %d, want 1 (idempotent)", len(rows))
+	}
+}
+
+// TestLearnerPromptContract pins the P1-12 prompt shape: by default the
+// learner sees only the new note and this project's memory.md — no
+// procedures contract, no user promotion clause, no sibling/user.md inputs
+// (cross-project content stops crossing the gateway). skillsDistillEnabled
+// on restores the procedures contract ALONE.
+func TestLearnerPromptContract(t *testing.T) {
+	def := learnerPrompt("main-epoch-1", "# Epoch 1\n\nnote body", "- Always run go test — cites: x; reaffirmed: 1", false)
+	for _, absent := range []string{`"procedures"`, `"user"`, "user.md", "SIBLING PROJECTS"} {
+		if strings.Contains(def, absent) {
+			t.Errorf("default prompt carries %q — the contract is gone by default:\n%s", absent, def)
+		}
+	}
+	for _, want := range []string{"memory learner pass", `"memory"`, "reaffirm", "main-epoch-1", "note body", "CURRENT .odo/memory.md"} {
+		if !strings.Contains(def, want) {
+			t.Errorf("default prompt missing %q:\n%s", want, def)
+		}
+	}
+	on := learnerPrompt("main-epoch-1", "# Epoch 1\n\nnote body", "", true)
+	if !strings.Contains(on, `"procedures"`) || !strings.Contains(on, "kebab-case") {
+		t.Errorf("opt-in prompt missing the procedures contract:\n%s", on)
+	}
+	for _, absent := range []string{`"user"`, "user.md", "SIBLING PROJECTS"} {
+		if strings.Contains(on, absent) {
+			t.Errorf("opt-in prompt resurrected %q — procedures opt-in must not restore the user branch", absent)
+		}
+	}
+}
+
+// TestRunLearnerIgnoresSiblingRegistry (P1-12 cutover proof): the learner no
+// longer consults the sibling registry or ~/.odo/user.md — hand-seeded
+// registry rows (one real sibling holding a canary rule, one junk row whose
+// root does not exist) and a user.md canary must never appear in the
+// learner prompt the gateway receives.
+func TestRunLearnerIgnoresSiblingRegistry(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	mark := filepath.Join(t.TempDir(), "learner.mark")
+	t.Setenv("ODO_LEARNER_MARK", mark)
+	promptCopy := filepath.Join(t.TempDir(), "learner-prompt.txt")
+	t.Setenv("ODO_LEARNER_PROMPT", promptCopy)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerMarkWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 1\n\nDecided things.\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[],"reaffirm":[]}`)
+	writeUserMD(t, home, "USERMD-CANARY durable principle\n")
+
+	// Registry: one real sibling holding a canary rule, one junk row whose
+	// root does not exist (the pre-P1-12 staging read would skip the junk
+	// row; now neither row is consulted at all).
+	sibDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sibDir, ".odo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibDir, ".odo", "memory.md"),
+		[]byte("- SIBLING-CANARY rule — cites: main-epoch-3; reaffirmed: 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(sibDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []RegistryRow{
+		{Root: resolved, Name: "sib-canary", Added: "2026-01-02T00:00:00Z"},
+		{Root: filepath.Join(t.TempDir(), "does-not-exist"), Name: "junk", Added: "2026-01-01T00:00:00Z"},
+	}
+	regJSON, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regPath := filepath.Join(t.TempDir(), "projects.json")
+	if err := os.WriteFile(regPath, append(regJSON, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ODO_REGISTRY_PATH", regPath)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	_, d := runToDistill(t, rig, root)
+	if d.WikiPath == "" {
+		t.Fatal("manual distill failed")
+	}
+	if n := learnerRuns(t, mark); n != 1 {
+		t.Fatalf("learner one-shots = %d, want 1 (manual distill always runs it)", n)
+	}
+	prompt := readFileStr(t, promptCopy)
+	for _, absent := range []string{"SIBLING-CANARY", "USERMD-CANARY", "SIBLING PROJECTS", "~/.odo/user.md"} {
+		if strings.Contains(prompt, absent) {
+			t.Errorf("learner prompt carries %q — cross-project/user inputs must not reach the gateway:\n%.200s", absent, prompt)
+		}
 	}
 }

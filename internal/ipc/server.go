@@ -254,6 +254,28 @@ type Server struct {
 	livenessStop chan struct{}
 	livenessOnce sync.Once
 	livenessWG   sync.WaitGroup
+	// P1 #8 (2026-08-22 panel review): an N=1 "unanimous" panel is a
+	// single judge with no dissent channel, so auto-land stays UNARMED at
+	// one review model. The first attempt journals ONE
+	// auto_land_blocked{single_judge_panel} advisory per daemon lifetime —
+	// an unconfigured panel is the ordinary silent state (M20), but the
+	// DEGRADED panel must not be invisible. Advisory surfaces only
+	// (/panel, review_diff) stay N-unrestricted.
+	singleJudgeAdvised atomic.Bool
+	// P1 #9: moa legs (/panel tool loop, reviewWithModel) carry an outer
+	// deadline — moa.TimeoutForModel in production. Tests override through
+	// here to drill a hanging leg in wall-clock time (receiptBreachForTest
+	// seam precedent: production never sets it).
+	legTimeoutForTest time.Duration
+	// P1 #10: ONE shared MoA client per Server. Per-leg NewClientFromEnv
+	// gave every leg a FRESH client, so the client's in-flight semaphore
+	// (moa defaultMaxInFlight=5) never contended — a skills/distill gate
+	// batch (N proposals × M review legs) fired N×M concurrent requests
+	// at the gateway. The shared client's sem is the daemon-wide cap on
+	// review-lane concurrency. Lazy: built at first use so tests keep
+	// per-Server env control (MOA_BASE_URL set before any moa traffic).
+	moaOnce   sync.Once
+	moaShared *moa.Client
 	// M18 W2 item 4 fail-closed drill (autoCurateAge seam precedent):
 	// non-nil ONLY in tests — assembleRunPrompt calls it between layer
 	// assembly and buildPrompt to simulate a receipt diverging from the
@@ -1112,23 +1134,24 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 // with its receipt entry. The events list happens BEFORE the caller
 // journals the new message, so the replay never contains the message whose
 // text lands verbatim at the prompt's end.
-func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversationID int64, text string) memoryLayers {
-	var events []store.Event
-	eventsOK := false
-	if evs, lerr := s.store.ListEvents(ctx, conversationID, 0); lerr == nil {
-		events = evs
-		eventsOK = true
+// A journal READ failure is returned, never swallowed: the previous shape
+// degraded to a blind prompt (no replay, no recall, no rule snapshots)
+// with zero trace — the one silent hole on the fail-closed chain. Every
+// caller funnels through assembleRunPrompt, which refuses the run on this
+// error with a journaled agent_error.
+func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversationID int64, text string) (memoryLayers, error) {
+	events, lerr := s.store.ListEvents(ctx, conversationID, 0)
+	if lerr != nil {
+		return memoryLayers{}, fmt.Errorf("memory layers: list journal events: %w", lerr)
 	}
 	ml := s.memoryLayers(ctx, wsName, conversationID, recallQuery(text, events))
 	// W2 item 3: materialize changed rule files. The send/continuation/
 	// retry/revise callers all funnel through here BEFORE journaling the
 	// user_message the prompt serves, so the snapshot rows land ahead of
 	// it; a nil-but-fresh event list (zero rows) still snapshots.
-	if eventsOK {
-		s.journalRuleSnapshots(ctx, conversationID, events)
-	}
+	s.journalRuleSnapshots(ctx, conversationID, events)
 	if events == nil {
-		return ml
+		return ml, nil
 	}
 	ml.replay, ml.replayFirst, ml.replayLast, ml.replayAfter, ml.replayDropped = buildReplay(events)
 	if ml.replay == "" {
@@ -1144,7 +1167,7 @@ func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversatio
 		ml.todo = block
 		ml.receipt["journal#todo"] = sha16([]byte(block))
 	}
-	return ml
+	return ml, nil
 }
 
 // journalRecall serializes the recall payload for the user_message event
@@ -1466,7 +1489,12 @@ func assertPromptReceipts(ml memoryLayers, prompt string, payload map[string]int
 // so the caller can journal the attempt before refusing — evidence-first.
 // attachments ride the send path only (revise/continuation pass none).
 func (s *Server) assembleRunPrompt(ctx context.Context, wsName string, conversationID int64, text string, attachments ...string) (prompt string, payload map[string]interface{}, err error) {
-	ml := s.runMemoryLayers(ctx, wsName, conversationID, text)
+	ml, lerr := s.runMemoryLayers(ctx, wsName, conversationID, text)
+	if lerr != nil {
+		// Fail closed on a journal read failure: no blind prompt assembles,
+		// and callers' existing assertErr handling journals the refusal.
+		return "", nil, fmt.Errorf("journal read failed — refusing a blind prompt: %w", lerr)
+	}
 	if s.receiptBreachForTest != nil {
 		// Test seam (autoCurateAge precedent): simulates a layer-assembly
 		// bug — the receipt diverging from the injected content — to drill
@@ -3136,6 +3164,25 @@ func consensusVerdict(reviews []ReviewResult) string {
 // error as comments: a review that never happened must not read as an
 // accept.
 //
+// legTimeout bounds one moa leg's outer deadline (P1 #9): production is
+// moa.TimeoutForModel — one worst-case attempt chain at the model's hard
+// output cap, the designLeg/auditLeg precedent. The legTimeoutForTest
+// seam shrinks it for wall-clock deadline drills (production never sets
+// it, the receiptBreachForTest precedent).
+func (s *Server) legTimeout(model string) time.Duration {
+	if s.legTimeoutForTest > 0 {
+		return s.legTimeoutForTest
+	}
+	return moa.TimeoutForModel(model)
+}
+
+// sharedMoa returns the Server's single MoA client (P1 #10) — see the
+// moaShared field for why every review/advisory/design leg must ride it.
+func (s *Server) sharedMoa() *moa.Client {
+	s.moaOnce.Do(func() { s.moaShared = moa.NewClientFromEnv("", "") })
+	return s.moaShared
+}
+
 // M18 batch B additions (journal surfaces only — the verdict contract is
 // byte-identical): every leg carries base_url, the scrubbed endpoint it
 // truly hit (provider honesty: prefs' model@provider is a label, the one
@@ -3146,10 +3193,19 @@ func consensusVerdict(reviews []ReviewResult) string {
 // legs journal no thinking (noise discipline).
 func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt string) ReviewResult {
 	label := m.model + "@" + m.provider
-	client := moa.NewClientFromEnv("", "")
+	// P1 #10: the SHARED client — a per-leg one would give every leg a
+	// private semaphore (see moaShared).
+	client := s.sharedMoa()
 	baseURL := scrubBaseURL(client.BaseURL)
 	system := "You are a code reviewer. Review the following diff and provide your verdict."
-	res, err := client.Query(ctx, m.model, system, prompt)
+	// P1 #9: same outer-deadline class as the /panel leg — an unbounded
+	// gateway stall would otherwise wedge the auto-land pipeline (its
+	// Background ctx carries no deadline) and every skills/distill gate
+	// batch. The leg's Infra result fails the round closed, never an
+	// accidental accept.
+	lctx, cancel := context.WithTimeout(ctx, s.legTimeout(m.model))
+	defer cancel()
+	res, err := client.Query(lctx, m.model, system, prompt)
 	if err != nil {
 		// M18: the leg never reached a verdict — transport/auth/timeout
 		// is INFRA, not dissent. The Verdict stays needs_fixes (the M16
@@ -3265,8 +3321,10 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	// journaled receipt must agree.
 	scope := resolvePanelContextScope()
 
-	// Fan out to N models via direct API (parallel, no OMP process).
-	client := moa.NewClientFromEnv("", "")
+	// Fan out to N models via direct API (parallel, no OMP process) on the
+	// shared client (P1 #10) so panel legs contend for the daemon-wide cap
+	// instead of each holding a private semaphore.
+	client := s.sharedMoa()
 	// E1: read-only, home-scoped FS tools (read_file/grep/glob) let panel
 	// models ground answers in real files instead of hand-pasted context.
 	// Round 0 → moa default cap. Every executed call is journaled below.
@@ -3334,7 +3392,14 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		go func(legIdx int) {
 			defer wg.Done()
 			label := m.model + "@" + m.provider
-			resp, calls, err := client.QueryWithTools(ctx, m.model, system, text, tools, exec.Execute, 0)
+			// P1 #9: per-leg outer deadline (the designLeg/auditLeg
+			// precedent) — one worst-case attempt chain; a hung gateway
+			// dies a typed timeout and the panel answers on the surviving
+			// legs instead of holding the consult for hours (16 tool
+			// rounds × 1173s worst).
+			lctx, cancel := context.WithTimeout(ctx, s.legTimeout(m.model))
+			defer cancel()
+			resp, calls, err := client.QueryWithTools(lctx, m.model, system, text, tools, exec.Execute, 0)
 			s.mu.Lock()
 			prog.Done++
 			prog.Legs[legIdx].Done = true
@@ -3565,15 +3630,19 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("slash receipt assertion failed: %w", aerr))
 	}
 
-	client := moa.NewClientFromEnv("", "")
+	client := s.sharedMoa() // P1 #10: shared sem, not a per-leg one
+	// P1 #9: same outer deadline as the /panel leg (one worst-case
+	// attempt chain) — a hung vision leg must not hold the consult.
+	vctx, cancel := context.WithTimeout(ctx, s.legTimeout(slashVisionModel))
+	defer cancel()
 	var res moa.Result
 	switch {
 	case imageErr != nil:
 		err = imageErr
 	case len(images) > 0:
-		res, err = client.QueryWithImages(ctx, slashVisionModel, system, text, images)
+		res, err = client.QueryWithImages(vctx, slashVisionModel, system, text, images)
 	default:
-		res, err = client.Query(ctx, slashVisionModel, system, text)
+		res, err = client.Query(vctx, slashVisionModel, system, text)
 	}
 
 	var resultText string
@@ -3867,11 +3936,22 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	}
 
 	// Learner pass (M4 §2 + M9): propose behavior rules and skill procedures
-	// from the note just written. runLearner no longer journals —
+	// from the note just written. Automatic triggers skip the learner by
+	// default (P1-12, learnerAutoEnabled: 28 automatic runs over 4 days
+	// produced zero applied rules, so the one-shot is manual-only unless
+	// the prefs escape hatch opts back in). The policy narrows HERE in
+	// distillCore because this is where manual and automatic folds meet —
+	// runLearner itself stays trigger-blind. runLearner no longer journals —
 	// distillCore journals after gating the proposals. A learner
 	// failure degrades to a journaled memory_update and never fails the
 	// distill.
-	proposals, reaffirm, stats, learnerRec, _ := s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
+	var proposals []MemoryProposal
+	var reaffirm []string
+	var stats vetoStats
+	var learnerRec *moaReceipt
+	if trigger == distillTriggerManual || learnerAutoEnabled() {
+		proposals, reaffirm, stats, learnerRec, _ = s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
+	}
 
 	// Panel gate (M9 origins, now all targets): every proposal × every
 	// review model fans out. memory/user rules are gated straight into the
@@ -5268,7 +5348,7 @@ func (s *Server) runDistillAgent(ctx context.Context, prompt string) (string, *d
 // unaffected — this check is upstream of every artifact write.
 func (s *Server) runDistillViaMoa(ctx context.Context, prompt string) (string, *distillReceipt, error) {
 	model := adapter.ReadSettings().OrchestratorModel
-	client := moa.NewClientFromEnv("", "")
+	client := s.sharedMoa() // P1 #10: distill traffic contends on the same cap
 	ctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(model))
 	defer cancel()
 	res, err := client.Query(ctx, model, "", prompt)
@@ -5333,9 +5413,10 @@ func (r *moaReceipt) journal(m map[string]interface{}, prefix string) {
 // answer fails CLOSED: a partial proposal set or topic rewrite must never
 // reach parsers/vet or the page writer. task names the pass in messages
 // ("learner" | "curator").
-func runMoaOneShot(ctx context.Context, task, prompt string) (string, *moaReceipt, error) {
+// client is the caller's (P1 #10: the Server's shared) MoA client — one
+// semaphore pool governs every moa route, review lane and one-shots alike.
+func runMoaOneShot(ctx context.Context, client *moa.Client, task, prompt string) (string, *moaReceipt, error) {
 	model := adapter.ReadSettings().OrchestratorModel
-	client := moa.NewClientFromEnv("", "")
 	ctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(model))
 	defer cancel()
 	res, err := client.Query(ctx, model, "", prompt)

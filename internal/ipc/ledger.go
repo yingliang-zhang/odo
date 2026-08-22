@@ -141,8 +141,10 @@ func lastReviewAction(events []store.Event, action string) *store.Event {
 //   - proposals: the length of the proposals array on the learner's
 //     memory_propose event; "0 (no memory_propose event)" when the learner
 //     proposed nothing (the absence is the record).
-//   - learner vetoes: kept/dropped counts from the memory_propose event's
-//     stats field (memory_kept/dropped, user_kept/dropped) — the ratio
+//   - learner vetoes: kept/dropped totals from the memory_propose event's
+//     stats field, broken down by memory contract (plus legacy
+//     user_kept/dropped when a pre-P1-12 journal carries them — the
+//     promotion branch is deleted and new rows render none) — the ratio
 //     exposes learner quality without a separate audit.
 //   - memory apply (P0-4): the batch's OUTCOME from the LAST memory_apply
 //     for the section epoch: "accepted <n>, rejected <m> (<actor>)" citing
@@ -182,16 +184,29 @@ func distillLedgerMetrics(events []store.Event, distillEv store.Event, recallCou
 			seq:   pe.Seq,
 		})
 		// Learner veto breakdown: shows how many of the learner's
-		// raw proposals survived daemon-side evidence vetting.
-		totalKept := pp.Stats.MemoryKept + pp.Stats.UserKept + pp.Stats.ProceduresKept
-		totalDropped := pp.Stats.MemoryDropped + pp.Stats.UserDropped + pp.Stats.ProceduresDropped
+		// raw proposals survived daemon-side evidence vetting. The totals
+		// include the M9 procedure counters; the breakdown names the memory
+		// contract, plus the legacy user counters when a pre-P1-12 journal
+		// still carries them (the promotion branch is deleted — new rows
+		// render none, replayed old rows keep their truth).
+		var legacy struct {
+			Stats struct {
+				UserKept    int `json:"user_kept"`
+				UserDropped int `json:"user_dropped"`
+			} `json:"stats"`
+		}
+		_ = json.Unmarshal(pe.Payload, &legacy)
+		totalKept := pp.Stats.MemoryKept + pp.Stats.ProceduresKept + legacy.Stats.UserKept
+		totalDropped := pp.Stats.MemoryDropped + pp.Stats.ProceduresDropped + legacy.Stats.UserDropped
 		if totalKept > 0 || totalDropped > 0 {
+			breakdown := fmt.Sprintf("mem %d/%d", pp.Stats.MemoryKept, pp.Stats.MemoryDropped)
+			if legacy.Stats.UserKept > 0 || legacy.Stats.UserDropped > 0 {
+				breakdown += fmt.Sprintf(", user %d/%d", legacy.Stats.UserKept, legacy.Stats.UserDropped)
+			}
 			metrics = append(metrics, ledgerMetric{
 				label: "learner vetoes",
-				value: fmt.Sprintf("kept: %d, dropped: %d (mem %d/%d, user %d/%d)",
-					totalKept, totalDropped,
-					pp.Stats.MemoryKept, pp.Stats.MemoryDropped,
-					pp.Stats.UserKept, pp.Stats.UserDropped),
+				value: fmt.Sprintf("kept: %d, dropped: %d (%s)",
+					totalKept, totalDropped, breakdown),
 				event: "review_action/memory_propose",
 				seq:   pe.Seq,
 			})

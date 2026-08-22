@@ -22,7 +22,14 @@ package ipc
 //	loop_verdict{round, verdict: clean|fix|audit_infra|stall|round_cap,
 //	            blocking_fps[], new_fps[], carried_fps[], reason}
 //	loop_fix_spawn{round, findings_count, findings_sha16,
-//	            prompt_tokens_est, diff_id? (respawn reference)}
+//	            prompt_tokens_est}
+//	loop_diff_bound{diff_id, round? (Mode A) | task? (Mode B)}
+//	            the loop⇄diff binding, journaled at DRAIN when the
+//	            run's diff is inserted (the diff does not exist at
+//	            spawn — P1 #13; the spawn row's old diff_id contract
+//	            was dead). Task attribution (loopAdjudicateTask's
+//	            accept/blocked gating) and the boot recovery's
+//	            exclusion (loopOwnedSeedDiffIDs) key on it.
 //	loop_suspended{cause, detail?}   cause: audit_infra | stall |
 //	            fix_no_diff | run_tainted | risk:<class> |
 //	            subject_too_large | seed_blocked | restart_mid_run |
@@ -47,6 +54,14 @@ package ipc
 // land failures) rides review_action auto_land_blocked{actor:"auto_loop",
 // reason:"loop_*"} — the blocked-row-as-evidence channel, nothing about
 // loop STATE (V1's review_action purity is about lifecycle rows).
+//
+// Mode B task adjudication attributes a post-spawn accept/blocked
+// review_action to the task ONLY through the loop_diff_bound chain (a
+// revise ladder's product rows chain to the bound diff via
+// origin_diff_id) — or, on pre-binding journals (no loop_diff_bound
+// row anywhere for the loop), by the pipeline-actor fallback
+// (auto_loop/auto_panel). A human accept, or an unrelated inbox diff's
+// pipeline rows, never resolve the task (P1 #13).
 
 import (
 	"context"
@@ -67,20 +82,21 @@ const loopActor = "auto_loop"
 
 // loop kinds (the discriminated EventLoopEvent payload's kind key).
 const (
-	loopKindStarted         = "loop_started"
-	loopKindDesignLock      = "loop_design_lock"
-	loopKindTaskSpawn       = "loop_task_spawn"
-	loopKindTaskDone        = "loop_task_done"
-	loopKindAuditRound      = "loop_audit_round"
-	loopKindVerdict         = "loop_verdict"
-	loopKindFixSpawn        = "loop_fix_spawn"
-	loopKindSuspended       = "loop_suspended"
-	loopKindCompleted       = "loop_completed"
-	loopKindStopped         = "loop_stopped"
-	loopKindBudgetExceeded  = "loop_budget_exceeded"
-	loopKindRecovered       = "loop_recovered"
-	loopKindResumed         = "loop_resumed"
-	loopKindNotified        = "loop_notified"
+	loopKindStarted        = "loop_started"
+	loopKindDesignLock     = "loop_design_lock"
+	loopKindTaskSpawn      = "loop_task_spawn"
+	loopKindTaskDone       = "loop_task_done"
+	loopKindAuditRound     = "loop_audit_round"
+	loopKindVerdict        = "loop_verdict"
+	loopKindFixSpawn       = "loop_fix_spawn"
+	loopKindDiffBound      = "loop_diff_bound"
+	loopKindSuspended      = "loop_suspended"
+	loopKindCompleted      = "loop_completed"
+	loopKindStopped        = "loop_stopped"
+	loopKindBudgetExceeded = "loop_budget_exceeded"
+	loopKindRecovered      = "loop_recovered"
+	loopKindResumed        = "loop_resumed"
+	loopKindNotified       = "loop_notified"
 )
 
 // Loop modes.
@@ -92,11 +108,11 @@ const (
 
 // loop verdicts (loop_verdict.verdict; closed set per the design lock).
 const (
-	loopVerdictClean     = "clean"
-	loopVerdictFix       = "fix"
+	loopVerdictClean      = "clean"
+	loopVerdictFix        = "fix"
 	loopVerdictAuditInfra = "audit_infra"
-	loopVerdictStall     = "stall"
-	loopVerdictRoundCap  = "round_cap"
+	loopVerdictStall      = "stall"
+	loopVerdictRoundCap   = "round_cap"
 )
 
 // loopTaskDone statuses (loop_task_done.status).
@@ -373,7 +389,7 @@ type loopTask struct {
 // loopState is one loop's derived state — the ONLY authority over what
 // the loop does next (in-memory maps are liveness fast paths only).
 type loopState struct {
-	id           int64 // seq of loop_started
+	id           int64  // seq of loop_started
 	status       string // active | suspended | completed | stopped
 	cause        string // suspended cause (latest)
 	mode         string // audit | tasks
@@ -399,6 +415,14 @@ type loopState struct {
 	// or a post-suspension re-audit decision), "" while open. The tick
 	// launches the next audit round on either resolved value.
 	fixOutcome string
+
+	// loop_diff_bound bindings (P1 #13): the drain-journaled loop⇄diff
+	// map. boundDiffs pairs with the start row's seed_diffs as the boot
+	// recovery's exclusion (loopOwnedSeedDiffIDs); boundTasks gates
+	// loopAdjudicateTask's accept/blocked attribution. Nil until the
+	// loop's first binding row.
+	boundDiffs map[int64]bool
+	boundTasks map[int64]int // diff id → Mode B task n
 
 	spentTokens   int
 	fixesLanded   int // accept{actor:auto_loop} rows
@@ -635,6 +659,22 @@ func foldLoopRow(st *loopState, ev store.Event, kind string) {
 		st.fixOpen = true
 		st.fixOutcome = ""
 		st.fixSpawnSeq = ev.Seq
+	case loopKindDiffBound:
+		// P1 #13: the loop⇄diff binding row (drain-journaled). A fix
+		// respawn after restart binds a second diff for the same round —
+		// every bound id accumulates and stays in the exclusion set.
+		if diffID := int64(jsonInt(ev.Payload, "diff_id")); diffID > 0 {
+			if st.boundDiffs == nil {
+				st.boundDiffs = map[int64]bool{}
+			}
+			st.boundDiffs[diffID] = true
+			if t := jsonInt(ev.Payload, "task"); t >= 1 {
+				if st.boundTasks == nil {
+					st.boundTasks = map[int64]int{}
+				}
+				st.boundTasks[diffID] = t
+			}
+		}
 	case loopKindDesignLock:
 		t := jsonInt(ev.Payload, "task")
 		if t >= 1 && t <= len(st.tasks) {
@@ -753,4 +793,61 @@ func fmtLoopMode(st *loopState) string {
 		return loopModeTasksFinal
 	}
 	return st.mode
+}
+
+// loopOwnedSeedDiffIDs is recoverPendingDiffs' loop-exclusion set (P1
+// #13): the pending diff ids a NON-terminal loop already owns, from two
+// sources — loop_diff_bound rows (a drained loop run's inserted diff;
+// the loop's own pipeline owns its outcome) and the loop_started row's
+// seed_diffs (pending inbox diffs the loop claimed up front; they
+// pre-date any pipeline run, so no binding row can ever name them).
+// Without the exclusion the boot recovery re-fires auto-land on a diff
+// the loop's restart tick simultaneously re-drives (the double-panel
+// twin). Terminal loops (completed/stopped) contribute NOTHING: their
+// orphans return to the normal inbox flow. Store read failures
+// propagate (never a silently partial set — the exclusion is
+// complete-or-absent; whether to proceed open or closed on error is
+// the caller's policy, documented there).
+func (s *Server) loopOwnedSeedDiffIDs(ctx context.Context) (map[int64]bool, error) {
+	p, err := s.store.GetProjectByRoot(ctx, s.projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.store.ListAllPendingDiffs(ctx, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	pendingByConv := map[int64]map[int64]bool{}
+	var convOrder []int64
+	for _, r := range rows {
+		if _, ok := pendingByConv[r.ConversationID]; !ok {
+			pendingByConv[r.ConversationID] = map[int64]bool{}
+			convOrder = append(convOrder, r.ConversationID)
+		}
+		pendingByConv[r.ConversationID][r.ID] = true
+	}
+	out := map[int64]bool{}
+	for _, convID := range convOrder {
+		events, err := s.store.ListEvents(ctx, convID, 0)
+		if err != nil {
+			return nil, err
+		}
+		pending := pendingByConv[convID]
+		for _, st := range deriveLoopStates(events) {
+			if st.terminal() {
+				continue
+			}
+			for id := range st.boundDiffs {
+				if pending[id] {
+					out[id] = true
+				}
+			}
+			for _, id := range st.seedDiffs {
+				if pending[id] {
+					out[id] = true
+				}
+			}
+		}
+	}
+	return out, nil
 }

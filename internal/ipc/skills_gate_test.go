@@ -129,7 +129,7 @@ func TestVetProcedures_Slugify(t *testing.T) {
 	}{
 		{Name: "Run Tests Before Commit!", Description: "Use when done.", Keywords: []string{"test"}, Body: "# Run Tests"},
 	})
-	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 1 {
 		t.Fatalf("procedures = %d, want 1: %+v", len(procedures), procedures)
 	}
@@ -150,7 +150,7 @@ func TestVetProcedures_EmptyNameDropped(t *testing.T) {
 	}{
 		{Name: "!!!", Description: "d", Keywords: []string{"k"}, Body: "b"},
 	})
-	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 0 {
 		t.Errorf("procedures = %d, want 0 (name slugifies to empty)", len(procedures))
 	}
@@ -180,7 +180,7 @@ func TestVetProcedures_Cap3(t *testing.T) {
 		}
 	}
 	res := makeLearnerResult(procs)
-	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 3 {
 		t.Errorf("procedures = %d, want 3 (cap-3)", len(procedures))
 	}
@@ -199,7 +199,7 @@ func TestVetProcedures_Dedupe(t *testing.T) {
 		{Name: "my-skill", Description: "d", Keywords: []string{"k"}, Body: "b"},
 		{Name: "my-skill", Description: "d2", Keywords: []string{"k2"}, Body: "b2"},
 	})
-	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 1 {
 		t.Errorf("procedures = %d, want 1 (dedupe)", len(procedures))
 	}
@@ -221,7 +221,7 @@ func TestVetProcedures_BodyCap(t *testing.T) {
 	}{
 		{Name: "big-skill", Description: "d", Keywords: []string{"k"}, Body: longBody},
 	})
-	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 0 {
 		t.Errorf("procedures = %d, want 0 (body over cap)", len(procedures))
 	}
@@ -241,7 +241,7 @@ func TestVetProcedures_BadKeywords(t *testing.T) {
 		{Name: "empty-kw", Description: "d", Keywords: []string{}, Body: "b"},
 		{Name: "comma-kw", Description: "d", Keywords: []string{"has,comma"}, Body: "b"},
 	})
-	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 0 {
 		t.Errorf("procedures = %d, want 0 (all bad keywords)", len(procedures))
 	}
@@ -259,7 +259,7 @@ func TestVetProcedures_DescriptionSanitize(t *testing.T) {
 	}{
 		{Name: "good", Description: "line1\nline2\ttabbed", Keywords: []string{"k"}, Body: "b"},
 	})
-	_, procedures, _, _ := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, _ := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 1 {
 		t.Fatalf("procedures = %d, want 1", len(procedures))
 	}
@@ -280,7 +280,7 @@ func TestVetProcedures_EmptyDescriptionDropped(t *testing.T) {
 	}{
 		{Name: "no-desc", Description: "", Keywords: []string{"k"}, Body: "b"},
 	})
-	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, t.TempDir())
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), true)
 	if len(procedures) != 0 {
 		t.Errorf("procedures = %d, want 0 (empty description)", len(procedures))
 	}
@@ -307,12 +307,35 @@ func TestVetProcedures_ScanSkillsConflict(t *testing.T) {
 	}{
 		{Name: "existing-skill", Description: "New version.", Keywords: []string{"k"}, Body: "b"},
 	})
-	_, procedures, _, _ := vetLearnerOutput(res, "epoch-1.md", "", "", "test", nil, root)
+	_, procedures, _, _ := vetLearnerOutput(res, "epoch-1.md", "", root, true)
 	if len(procedures) != 1 {
 		t.Fatalf("procedures = %d, want 1 (conflict still kept, just flagged)", len(procedures))
 	}
 	if !strings.Contains(procedures[0].Contradicts, "overwrites existing skill: existing-skill") {
 		t.Errorf("contradicts = %q, want overwrites existing skill", procedures[0].Contradicts)
+	}
+}
+
+// TestVetProcedures_OffByDefault pins the skillsDistillEnabled=false vet
+// contract: the prompt never offered the procedures array, so one arriving
+// anyway is out-of-contract input — dropped wholesale, NOT counted as gate
+// drops (the stats count deliberation, never unrequested output).
+func TestVetProcedures_OffByDefault(t *testing.T) {
+	res := makeLearnerResult([]struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Keywords    []string `json:"keywords"`
+		Body        string   `json:"body"`
+	}{
+		{Name: "run-tests", Description: "Use when verifying.", Keywords: []string{"test"}, Body: "# Run Tests"},
+	})
+	_, procedures, _, stats := vetLearnerOutput(res, "epoch-1.md", "", t.TempDir(), false)
+	if len(procedures) != 0 {
+		t.Errorf("procedures = %d, want 0 (contract omitted — no vetted skills)", len(procedures))
+	}
+	if stats.ProceduresKept != 0 || stats.ProceduresDropped != 0 {
+		t.Errorf("stats = kept %d dropped %d, want 0/0 (unrequested output is not a gate drop)",
+			stats.ProceduresKept, stats.ProceduresDropped)
 	}
 }
 

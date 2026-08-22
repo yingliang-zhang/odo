@@ -252,6 +252,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 		srv := stub(t, func(string) (int, interface{}) { return 200, textResp("ACCEPT\nShip it.") })
 		t.Setenv("MOA_BASE_URL", srv.URL)
 		t.Setenv("SUDO_CODING_KEY", "test-key")
+		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
 		if rr.Verdict != "accept" {
 			t.Fatalf("verdict = %q, want accept", rr.Verdict)
@@ -270,6 +271,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 		})
 		t.Setenv("MOA_BASE_URL", srv.URL)
 		t.Setenv("SUDO_CODING_KEY", "test-key")
+		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
 		if rr.Verdict != "needs_fixes" {
 			t.Fatalf("verdict = %q, want needs_fixes", rr.Verdict)
@@ -285,6 +287,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 		})
 		t.Setenv("MOA_BASE_URL", srv.URL)
 		t.Setenv("SUDO_CODING_KEY", "test-key")
+		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
 		if len(rr.ThinkingMD) > 4*1024+len("\n…[truncated]") || !strings.HasSuffix(rr.ThinkingMD, "…[truncated]") {
 			t.Errorf("thinking_md len = %d, want capped 4KB with truncation marker", len(rr.ThinkingMD))
@@ -295,6 +298,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 		srv := stub(t, func(string) (int, interface{}) { return 200, textResp("REJECT\nnope, wrong layer") })
 		t.Setenv("MOA_BASE_URL", srv.URL)
 		t.Setenv("SUDO_CODING_KEY", "test-key")
+		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
 		if rr.Verdict != "reject" {
 			t.Fatalf("verdict = %q, want reject", rr.Verdict)
@@ -308,6 +312,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 		srv := stub(t, func(string) (int, interface{}) { return 500, nil })
 		t.Setenv("MOA_BASE_URL", srv.URL)
 		t.Setenv("SUDO_CODING_KEY", "test-key")
+		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
 		if !rr.Infra || rr.Verdict != "needs_fixes" {
 			t.Fatalf("infra leg = %+v, want Infra needs_fixes", rr)
@@ -335,6 +340,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 		t.Cleanup(srv.Close)
 		t.Setenv("MOA_BASE_URL", srv.URL)
 		t.Setenv("SUDO_CODING_KEY", "test-key")
+		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
 		if rr.Verdict != "accept" {
 			t.Fatalf("verdict = %q, want accept", rr.Verdict)
@@ -352,6 +358,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 		srv := stub(t, func(string) (int, interface{}) { return 200, textResp("ACCEPT\nok") })
 		t.Setenv("MOA_BASE_URL", "https://user:sekret@"+strings.TrimPrefix(srv.URL, "http://"))
 		t.Setenv("SUDO_CODING_KEY", "test-key")
+		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
 		if strings.Contains(rr.BaseURL, "sekret") || strings.Contains(rr.BaseURL, "user@") {
 			t.Errorf("base_url leaked credentials: %q", rr.BaseURL)

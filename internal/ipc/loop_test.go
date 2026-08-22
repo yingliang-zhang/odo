@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1227,6 +1228,75 @@ func TestLoopTasksFlagsLeadNotTaskText(t *testing.T) {
 	}
 }
 
+// TestLoopAdmissionConcurrentSingleWinner pins C10's atomicity (P1 #6):
+// N concurrent /loop admissions on one conversation settle exactly one
+// started row — every loser refuses already-active. The pre-fix fold ran
+// outside the critical section, so two admissions could both pass it and
+// double-start one conversation's loops.
+func TestLoopAdmissionConcurrentSingleWinner(t *testing.T) {
+	rig, _ := loopRig(t, nil, "")
+	convID := loopBoot(t, rig)
+
+	const n = 4
+	errs := make([]string, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := net.Dial("unix", rig.sock)
+			if err != nil {
+				errs[i] = "dial: " + err.Error()
+				return
+			}
+			defer conn.Close()
+			if err := json.NewEncoder(conn).Encode(Request{Cmd: CmdSendMessage, ConversationID: convID,
+				Text: "/loop tasks 1. probe admission"}); err != nil {
+				errs[i] = "encode: " + err.Error()
+				return
+			}
+			var resp Response
+			if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+				errs[i] = "decode: " + err.Error()
+				return
+			}
+			if !resp.OK {
+				errs[i] = resp.Error
+			}
+		}()
+	}
+	wg.Wait()
+
+	refusals := 0
+	for i, e := range errs {
+		if e == "" {
+			continue
+		}
+		refusals++
+		if !strings.Contains(e, "already") {
+			t.Errorf("client %d: error = %q, want the already-active refusal", i, e)
+		}
+	}
+	if refusals != n-1 {
+		t.Fatalf("refusals = %d, want exactly %d — one admission must win, the rest refuse", refusals, n-1)
+	}
+
+	// Replies land after the appends, so the fold is settled at this
+	// point: exactly one loop_started row and one active loop.
+	sc := scanLoop(t, rig.store, convID)
+	if started := sc.ofKind(loopKindStarted); len(started) != 1 {
+		t.Fatalf("started rows = %d, want exactly 1", len(started))
+	}
+
+	// The winner keeps driving (design stage follows the spawn tick);
+	// stop it and wait the stop out so teardown never closes the store
+	// mid-journal.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/loop stop"})
+	waitLoop(t, rig.store, convID, "stopped", func(sc loopScan) bool {
+		return len(sc.ofKind(loopKindStopped)) == 1
+	})
+}
+
 // TestLoopAuditRequiresAutoApply pins the P2 preflight parity: Mode A
 // refuses pre-journal when auto_apply is not main, exactly like Mode B.
 func TestLoopAuditRequiresAutoApply(t *testing.T) {
@@ -1286,5 +1356,281 @@ func TestLoopAdjudicateSkipsRejectedDiff(t *testing.T) {
 	rig.server.loopAdjudicateTask(ctx, convID, loopID, 1)
 	if done := scanLoop(t, rig.store, convID).ofKind(loopKindTaskDone); len(done) != 1 {
 		t.Errorf("re-adjudication double-journaled: done rows = %d, want 1", len(done))
+	}
+}
+
+// --- P1 #13 (loop⇄diff attribution by binding, never wall-clock) ----------------
+
+// seedLoopTask journals a tasks-mode loop with one spawned task and
+// returns its loop id — the attribution drills' fixture shape.
+func seedLoopTask(t *testing.T, rig *testRig, convID int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	ev, err := rig.server.journalLoop(ctx, convID, 0, loopModeTasks, loopKindStarted, map[string]interface{}{
+		"base": "abc", "max_rounds": 10, "budget_tokens": 2_000_000, "hold_severity": "P2",
+		"tasks": []string{"task one"}, "task_source": "inline",
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopID := int64(ev.Seq)
+	if _, err := rig.server.journalLoop(ctx, convID, loopID, loopModeTasks, loopKindTaskSpawn,
+		map[string]interface{}{"task": 1}, 0); err != nil {
+		t.Fatal(err)
+	}
+	return loopID
+}
+
+// journalReview appends one review_action row (payload literal) — the
+// settle-row half of the attribution drills.
+func journalReview(t *testing.T, rig *testRig, convID int64, payload string) {
+	t.Helper()
+	if _, err := rig.store.AppendEvent(context.Background(), convID, store.EventReviewAction, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// bindLoopDiff journals the loop_diff_bound row the drain writes for
+// one task (the diff does not exist at spawn — the binding lands at
+// drain).
+func bindLoopDiff(t *testing.T, rig *testRig, convID, loopID int64, task int, diffID int64) {
+	t.Helper()
+	if _, err := rig.server.journalLoop(context.Background(), convID, loopID, loopModeTasks, loopKindDiffBound,
+		map[string]interface{}{"task": task, "diff_id": diffID}, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLoopAdjudicateIgnoresUnboundAccept pins P1 #13 (a): with a
+// loop_diff_bound row on the journal, an accept of an UNRELATED diff —
+// pipeline or human actor, later seq, same conversation — leaves the
+// task open. Attribution keys on the binding, never on wall-clock.
+func TestLoopAdjudicateIgnoresUnboundAccept(t *testing.T) {
+	rig, _ := loopRig(t, nil, "")
+	convID := loopBoot(t, rig)
+	ctx := context.Background()
+	loopID := seedLoopTask(t, rig, convID)
+	bindLoopDiff(t, rig, convID, loopID, 1, 7)
+	// The restart double-fire's churn: the recovery's re-landed inbox
+	// diff and a human click on a foreign diff, both post-spawn.
+	journalReview(t, rig, convID, `{"action":"accept","actor":"auto_panel","diff_id":9}`)
+	journalReview(t, rig, convID, `{"action":"accept","diff_id":10}`)
+	rig.server.loopAdjudicateTask(ctx, convID, loopID, 1)
+	if done := scanLoop(t, rig.store, convID).ofKind(loopKindTaskDone); len(done) != 0 {
+		t.Fatalf("task resolved on unbound accepts: %v", done)
+	}
+	// The task's own bound diff still resolves it afterwards (no wedge).
+	journalReview(t, rig, convID, `{"action":"accept","actor":"auto_panel","diff_id":7}`)
+	rig.server.loopAdjudicateTask(ctx, convID, loopID, 1)
+	if done := scanLoop(t, rig.store, convID).ofKind(loopKindTaskDone); len(done) != 1 ||
+		fmt.Sprint(done[0]["status"]) != loopTaskLanded || fmt.Sprint(done[0]["diff_id"]) != "7" {
+		t.Fatalf("done rows = %v, want exactly one landed row carrying diff 7", done)
+	}
+}
+
+// TestLoopAdjudicateBoundAcceptLands pins P1 #13 (b — the regression
+// guard): an accept of the task's OWN bound diff closes the task as
+// landed — including the revise ladder's product, whose settle rows
+// arrive under the product id and chain to the bound diff via
+// origin_diff_id (the Mode B ladder happy path).
+func TestLoopAdjudicateBoundAcceptLands(t *testing.T) {
+	rig, _ := loopRig(t, nil, "")
+	convID := loopBoot(t, rig)
+	ctx := context.Background()
+	loopID := seedLoopTask(t, rig, convID)
+	bindLoopDiff(t, rig, convID, loopID, 1, 7)
+	journalReview(t, rig, convID, `{"action":"accept","actor":"auto_panel","diff_id":7}`)
+	rig.server.loopAdjudicateTask(ctx, convID, loopID, 1)
+	done := scanLoop(t, rig.store, convID).ofKind(loopKindTaskDone)
+	if len(done) != 1 || fmt.Sprint(done[0]["status"]) != loopTaskLanded || fmt.Sprint(done[0]["diff_id"]) != "7" {
+		t.Fatalf("done rows = %v, want one landed row carrying diff 7", done)
+	}
+
+	// The ladder: a repair round on the bound diff produces diff 8; the
+	// pipeline lands the PRODUCT. A HUMAN accept of that product closes
+	// the task too — the bound lane keys on the chain root, not the
+	// actor.
+	loopID = seedLoopTask(t, rig, convID)
+	bindLoopDiff(t, rig, convID, loopID, 1, 7)
+	journalReview(t, rig, convID, `{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":7,"origin_diff_id":7}`)
+	journalReview(t, rig, convID, `{"action":"auto_revise_product","actor":"auto_panel","product_diff_id":8,"origin_diff_id":7}`)
+	journalReview(t, rig, convID, `{"action":"accept","diff_id":8}`)
+	rig.server.loopAdjudicateTask(ctx, convID, loopID, 1)
+	done = scanLoop(t, rig.store, convID).ofKind(loopKindTaskDone)
+	if len(done) != 2 || fmt.Sprint(done[1]["status"]) != loopTaskLanded || fmt.Sprint(done[1]["diff_id"]) != "8" {
+		t.Fatalf("done rows = %v, want the ladder product's accept to land the task (diff_id 8)", done)
+	}
+	if fmt.Sprint(done[1]["loop_id"]) != fmt.Sprint(loopID) {
+		t.Errorf("the ladder landing journaled loop_id %v, want %d", done[1]["loop_id"], loopID)
+	}
+}
+
+// TestLoopAdjudicateBlockedAttribution pins P1 #13's blocked discipline:
+// an auto_land_blocked row settles the task ONLY when it names a diff in
+// the task's bound chain. An unrelated inbox diff's blocked row is
+// inert; the chain-bound blocked row settles settle_blocked (task done
+// + loop suspension), evidence preserved.
+func TestLoopAdjudicateBlockedAttribution(t *testing.T) {
+	rig, _ := loopRig(t, nil, "")
+	convID := loopBoot(t, rig)
+	ctx := context.Background()
+	loopID := seedLoopTask(t, rig, convID)
+	bindLoopDiff(t, rig, convID, loopID, 1, 7)
+	journalReview(t, rig, convID, `{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_mixed","diff_id":9}`)
+	rig.server.loopAdjudicateTask(ctx, convID, loopID, 1)
+	sc := scanLoop(t, rig.store, convID)
+	if done := sc.ofKind(loopKindTaskDone); len(done) != 0 {
+		t.Fatalf("task settled on an unbound blocked row: %v", done)
+	}
+	// The ladder product's blocked row (chained to the bound diff) settles.
+	journalReview(t, rig, convID, `{"action":"auto_revise_product","actor":"auto_panel","product_diff_id":8,"origin_diff_id":7}`)
+	journalReview(t, rig, convID, `{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_mixed","diff_id":8}`)
+	rig.server.loopAdjudicateTask(ctx, convID, loopID, 1)
+	sc = scanLoop(t, rig.store, convID)
+	done := sc.ofKind(loopKindTaskDone)
+	if len(done) != 1 || fmt.Sprint(done[0]["status"]) != loopTaskSettleBlocked {
+		t.Fatalf("done rows = %v, want one settle_blocked row for the chain-bound blocked diff", done)
+	}
+	if causes := sc.causes(); len(causes) == 0 || causes[len(causes)-1] != "settle_blocked" {
+		t.Errorf("causes = %v, want the last cause settle_blocked", causes)
+	}
+}
+
+// TestLoopDiffBoundFold pins P1 #13 (c): the loop_diff_bound rows fold
+// into state — the same deriveLoopStates pass a restart rebuilds from.
+// Task bindings map diff→task; a Mode A (round) binding never claims a
+// task. The start row's seed_diffs stay folded for the recovery
+// exclusion.
+func TestLoopDiffBoundFold(t *testing.T) {
+	mk := func(seq int, payload string) store.Event {
+		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
+	}
+	events := []store.Event{
+		mk(1, `{"kind":"loop_started","mode":"tasks","base":"abc","max_rounds":10,"budget_tokens":2000000,"hold_severity":"P2","tasks":["task one"],"seed_diffs":[3],"spent_tokens":0}`),
+		mk(2, `{"kind":"loop_task_spawn","loop_id":1,"task":1,"spent_tokens":10}`),
+		mk(4, `{"kind":"loop_diff_bound","loop_id":1,"task":1,"diff_id":7,"spent_tokens":10}`),
+		mk(5, `{"kind":"loop_diff_bound","loop_id":1,"round":2,"diff_id":11,"spent_tokens":20}`),
+	}
+	st := deriveLoopStates(events)[0]
+	if !st.boundDiffs[7] || !st.boundDiffs[11] {
+		t.Errorf("boundDiffs = %v, want 7 and 11", st.boundDiffs)
+	}
+	if st.boundTasks[7] != 1 {
+		t.Errorf("boundTasks = %v, want 7→1", st.boundTasks)
+	}
+	if _, ok := st.boundTasks[11]; ok {
+		t.Errorf("a Mode A binding must not claim a task: boundTasks = %v", st.boundTasks)
+	}
+	if len(st.seedDiffs) != 1 || st.seedDiffs[0] != 3 {
+		t.Errorf("seedDiffs = %v, want [3]", st.seedDiffs)
+	}
+}
+
+// TestLoopOwnedSeedDiffIDs pins P1 #13 (d) — the recoverPendingDiffs
+// exclusion set: exactly the pending diffs a NON-terminal loop owns via
+// loop_diff_bound, plus the active loop's claimed seed_diffs. A
+// completed loop's bound diff and an unbound inbox diff are NOT
+// loop-owned (they return to the boot recovery's re-fire set).
+func TestLoopOwnedSeedDiffIDs(t *testing.T) {
+	rig, _ := loopRig(t, nil, "")
+	convID := loopBoot(t, rig)
+	ctx := context.Background()
+	mkDiff := func(name string) int64 {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := rig.store.InsertDiff(ctx, convID, path, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.ID
+	}
+	boundDone := mkDiff("done.diff")     // bound to a completed loop — excluded
+	boundActive := mkDiff("active.diff") // bound to an active loop — owned
+	seedActive := mkDiff("seed.diff")    // the active loop's seed claim — owned
+	_ = mkDiff("inbox.diff")             // a plain pending inbox diff — excluded
+
+	// A completed loop with a bound pending diff.
+	ev, err := rig.server.journalLoop(ctx, convID, 0, loopModeTasks, loopKindStarted, map[string]interface{}{
+		"base": "abc", "max_rounds": 10, "budget_tokens": 2_000_000, "hold_severity": "P2",
+		"tasks": []string{"done task"}, "task_source": "inline",
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneID := int64(ev.Seq)
+	if _, err := rig.server.journalLoop(ctx, convID, doneID, loopModeTasks, loopKindDiffBound,
+		map[string]interface{}{"task": 1, "diff_id": boundDone}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.server.journalLoop(ctx, convID, doneID, loopModeTasks, loopKindCompleted,
+		map[string]interface{}{"rounds": 0}, 0); err != nil {
+		t.Fatal(err)
+	}
+	// An active loop with a drained binding AND a claimed seed.
+	ev, err = rig.server.journalLoop(ctx, convID, 0, loopModeAudit, loopKindStarted, map[string]interface{}{
+		"base": "abc", "max_rounds": 10, "budget_tokens": 2_000_000, "hold_severity": "P2",
+		"seed_diffs": []int64{seedActive},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeID := int64(ev.Seq)
+	if _, err := rig.server.journalLoop(ctx, convID, activeID, loopModeAudit, loopKindDiffBound,
+		map[string]interface{}{"round": 1, "diff_id": boundActive}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := rig.server.loopOwnedSeedDiffIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]bool{boundActive: true, seedActive: true}
+	if len(got) != len(want) {
+		t.Fatalf("loopOwnedSeedDiffIDs = %v, want %v", got, want)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("loopOwnedSeedDiffIDs = %v, missing %d (%v)", got, id, want)
+		}
+	}
+}
+
+// TestJournalLoopDiffBoundRow pins the drain-journaled binding row's
+// shape: implement runs carry task, fix runs carry round, never both,
+// and the row rides the loop's common keys (actor auto_loop).
+func TestJournalLoopDiffBoundRow(t *testing.T) {
+	rig, _ := loopRig(t, nil, "")
+	convID := loopBoot(t, rig)
+	ctx := context.Background()
+	ev, err := rig.server.journalLoop(ctx, convID, 0, loopModeTasks, loopKindStarted, map[string]interface{}{
+		"base": "abc", "max_rounds": 10, "budget_tokens": 2_000_000, "hold_severity": "P2",
+		"tasks": []string{"task one"}, "task_source": "inline",
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopID := int64(ev.Seq)
+	rig.server.journalLoopDiffBound(ctx, &runMeta{conversationID: convID, loopID: loopID, loopKind: "implement", loopTask: 1}, 7)
+	rig.server.journalLoopDiffBound(ctx, &runMeta{conversationID: convID, loopID: loopID, loopKind: "fix", loopRound: 2}, 11)
+	rows := scanLoop(t, rig.store, convID).ofKind(loopKindDiffBound)
+	if len(rows) != 2 {
+		t.Fatalf("binding rows = %v, want 2", rows)
+	}
+	if fmt.Sprint(rows[0]["task"]) != "1" || fmt.Sprint(rows[0]["diff_id"]) != "7" {
+		t.Errorf("implement binding = %v, want task 1 / diff 7", rows[0])
+	}
+	if _, has := rows[0]["round"]; has {
+		t.Errorf("implement binding must not carry round: %v", rows[0])
+	}
+	if fmt.Sprint(rows[1]["round"]) != "2" || fmt.Sprint(rows[1]["diff_id"]) != "11" {
+		t.Errorf("fix binding = %v, want round 2 / diff 11", rows[1])
+	}
+	if _, has := rows[1]["task"]; has {
+		t.Errorf("fix binding must not carry task: %v", rows[1])
+	}
+	if fmt.Sprint(rows[0]["actor"]) != loopActor {
+		t.Errorf("binding actor = %v, want %s", rows[0]["actor"], loopActor)
 	}
 }

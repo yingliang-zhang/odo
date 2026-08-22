@@ -136,9 +136,9 @@ func TestUnownedFoldGrowthMemoryPipelineRows(t *testing.T) {
 // --- end-to-end through distill ---
 
 const (
-	testLearnerOneRule = `{"memory":[{"rule":"Run the full ipc suite after every landing.","evidence":"main-epoch-1","contradicts":""}],"user":[],"procedures":[],"reaffirm":[]}`
-	testLearnerEmpty   = `{"memory":[],"user":[],"procedures":[],"reaffirm":[]}`
-	testLearnerOneSkill = `{"memory":[],"user":[],"procedures":[{"name":"run-go-tests","description":"Use when verifying Go work.","keywords":["test"],"body":"# Run Go Tests\n\n1. go test ./..."}],"reaffirm":[]}`
+	testLearnerOneRule  = `{"memory":[{"rule":"Run the full ipc suite after every landing.","evidence":"main-epoch-1","contradicts":""}],"procedures":[],"reaffirm":[]}`
+	testLearnerEmpty    = `{"memory":[],"procedures":[],"reaffirm":[]}`
+	testLearnerOneSkill = `{"memory":[],"procedures":[{"name":"run-go-tests","description":"Use when verifying Go work.","keywords":["test"],"body":"# Run Go Tests\n\n1. go test ./..."}],"reaffirm":[]}`
 )
 
 // armedDistillRig wires the shared fixture: repo + HOME + OMP wrapper +
@@ -151,7 +151,9 @@ func armedDistillRig(t *testing.T, note, learnerJSON string, reply func(call int
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
 	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", note)
 	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", learnerJSON)
-	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\n")
+	// skills_distill: procedure distillation is off by default (P1-12);
+	// this suite pins the panel GATE, so its learner output opts back in.
+	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\nskills_distill: on\n")
 	calls := startPanelStub(t, reply)
 	rig := startRig(t, root)
 	return rig, root, home, calls
@@ -320,7 +322,7 @@ func TestDistillSweepsLegacyBatch(t *testing.T) {
 	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\n")
 	calls := startPanelStub(t, acceptAll)
 	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 2\n\nSecond note.\n")
-	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[{"rule":"Rebase the later diff before reviewing it.","evidence":"main-epoch-2","contradicts":""}],"user":[],"procedures":[],"reaffirm":[]}`)
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[{"rule":"Rebase the later diff before reviewing it.","evidence":"main-epoch-2","contradicts":""}],"procedures":[],"reaffirm":[]}`)
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt again"})
 	rig.pollUntilDone(t, convID)
 	rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})

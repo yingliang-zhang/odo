@@ -293,7 +293,7 @@ func TestPhantomDiffVerdictBlocksAutoLand(t *testing.T) {
 	// M20 arming gate: prefs without a review: line leave the pipeline
 	// unarmed (silent exit, zero journal) — arm it so the verdict gate is
 	// exercised. Same form as the landed autoland_test.go isolation fix.
-	writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\nauto_apply: main\n")
 	counter := filepath.Join(t.TempDir(), "invocations")
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, phantomDiffStub(counter)))
 	rig := startRig(t, root)
@@ -329,6 +329,14 @@ func TestPhantomDiffVerdictBlocksAutoLand(t *testing.T) {
 // TestVerdictBlocksUnit pins the gate order at the unit seam: a verdicted
 // producing run is blocked BEFORE any verify/panel spend, both classes.
 func TestVerdictBlocksUnit(t *testing.T) {
+	// Hermetic HOME + armed panel: this unit previously read the REAL
+	// ~/.odo/prefs.md (green only on machines whose prefs carried a
+	// review: line) — isolate it like the autoland fixtures, and arm two
+	// models so the pipeline reaches the verdict gate (P1 #8: N=1 stays
+	// unarmed now).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	s := &Server{store: f.st, projectRoot: root}

@@ -59,10 +59,12 @@ package ipc
 //	                 every time — conservative, never a false accept.
 //	verify gate     the repo-root `.odo-verify` command re-runs at the
 //	                 run's worktree root with an allowlisted child
-//	                 environment (verifyEnviron) — the gate executes the
-//	                 agent's unreviewed code, and the daemon's keys must
-//	                 never be visible to it (panel P0). Absent/failed =
-//	                 blocked, always.
+//	                 environment (verifyEnviron) under a scratch HOME
+//	                 (P1 #11: env-shaped keys stripped, file-shaped
+//	                 credentials hidden; go/playwright caches mounted by
+//	                 name) — the gate executes the agent's unreviewed
+//	                 code, and the daemon's secrets must never be visible
+//	                 to it (panel P0). Absent/failed = blocked, always.
 //	verify          M18 batch B: an exit-0 verify whose output tail
 //	evidence         carries ZERO test evidence (no PASS token, no go
 //	                 "ok" line, no non-zero N-passed count — the
@@ -174,6 +176,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -277,6 +280,22 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// verify_unconfigured rows off projects that never armed the panel.
 	models := parseReviewModels(adapter.LoadPrefsRaw("review"))
 	if len(models) == 0 {
+		return
+	}
+	// P1 #8 (2026-08-22 panel review): N=1 "unanimity" degrades the panel
+	// to a single judge — one model's ACCEPT would land work the doctrine
+	// (3-model blind panel, log.md:50 deferred item) assumes ≥2 dissent
+	// channels for. The pipeline stays UNARMED at one model; the first
+	// attempt per daemon lifetime journals a single_judge_panel advisory
+	// (the degraded state must not be invisible — unlike the ordinary
+	// unconfigured silent return above), later diffs pend silent for the
+	// human. Advisory surfaces (/panel, review_diff) are N-unrestricted.
+	if len(models) == 1 {
+		if s.singleJudgeAdvised.CompareAndSwap(false, true) {
+			s.journalAutoLandBlocked(ctx, d, "single_judge_panel",
+				"prefs 'review:' configures a single model — auto-land requires a ≥2-model panel (N=1 unanimity is a single judge with no dissent channel); the diff stays pending for human review",
+				nil, "")
+		}
 		return
 	}
 	if runErrored {
@@ -549,6 +568,9 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 // panel. Diffs with a terminal pipeline row (pipelineTerminalDiffIDs)
 // are skipped; only panel_infra stays retryable (infra is not a verdict
 // — this re-fire IS its designed retry channel, the panelInfraLeg block).
+// Diffs owned by a non-terminal loop (seed + loop_diff_bound rows) are
+// likewise skipped (P1 #13): recoverLoops' tick is their retry channel,
+// and both firing together was the boot-time double-panel spend.
 //
 // Each surviving diff spawns a goroutine whose maybeAutoLand re-checks
 // the pref and re-adjudicates base freshness (P0a refresh) — the same
@@ -575,6 +597,29 @@ func (s *Server) recoverPendingDiffs(ctx context.Context) {
 	}
 	if skipped := len(rows) - len(stranded); skipped > 0 {
 		log.Printf("recover-pending-diffs: %d/%d pending diffs already adjudicated — skipping their re-fire", skipped, len(rows))
+	}
+	// P1 #13: a NON-TERMINAL loop owns its seed and loop-produced diffs —
+	// recoverLoops' tick re-drives them, and re-firing auto-land here would
+	// double the verify+panel spend on the same rows (the restart double-
+	// panel fix's sibling case, boot-time this time). An enumeration error
+	// fails OPEN (the spend duplicates; nothing lands twice — acceptMu
+	// serializes the land gate either way).
+	if owned, oerr := s.loopOwnedSeedDiffIDs(ctx); oerr != nil {
+		log.Printf("recover-pending-diffs: loop seed enumeration: %v (failing open — loop-owned diffs may re-fire alongside their loops)", oerr)
+	} else if len(owned) > 0 {
+		var keep []store.PendingDiffRow
+		skipped := 0
+		for _, r := range stranded {
+			if owned[r.ID] {
+				skipped++
+				continue
+			}
+			keep = append(keep, r)
+		}
+		if skipped > 0 {
+			log.Printf("recover-pending-diffs: %d pending diff(s) owned by active loops — recoverLoops drives them, skipping their re-fire", skipped)
+		}
+		stranded = keep
 	}
 	for _, r := range stranded {
 		wtPath := ""
@@ -971,7 +1016,29 @@ func runVerify(ctx context.Context, worktreePath, cmd string) (string, error) {
 	// its init()/TestMain). It must never see the daemon's secrets — the
 	// panel API keys are process env (kimi's panel P0: exfiltration fires
 	// pre-review, even when the diff is later blocked).
-	proc.Env = verifyEnviron(os.Environ())
+	env := verifyEnviron(os.Environ())
+	// P1 #11: the env allowlist blocks key-SHAPED leaks, but FILE-shaped
+	// credentials (~/.ssh, ~/.aws, ~/.config, XDG-compliant apps whose
+	// config root derives from HOME) stayed readable — a second exfil
+	// channel of the same m16 P0 class. Verify now runs against an empty
+	// scratch HOME; the two credential-free caches the toolchain needs
+	// (go's build/module cache, playwright's browser install) are mounted
+	// back EXPLICITLY below so a per-verify sandbox doesn't turn every
+	// run into a cold rebuild/re-download. An unbuildable sandbox means
+	// the gate cannot hold its posture: fail closed.
+	scratch, err := os.MkdirTemp("", "odo-verify-home-")
+	if err != nil {
+		return "", fmt.Errorf("verify sandbox: %w (refusing to run unreviewed code against a credential-filled HOME)", err)
+	}
+	defer os.RemoveAll(scratch)
+	if home := os.Getenv("HOME"); home != "" {
+		env = append(env, goToolchainCacheEnv()...)
+		if dir := playwrightBrowsersDir(home); dir != "" {
+			env = append(env, "PLAYWRIGHT_BROWSERS_PATH="+dir)
+		}
+	}
+	env = setEnv(env, "HOME="+scratch)
+	proc.Env = env
 	out, err := proc.CombinedOutput()
 	if len(out) > autoLandVerifyTailBytes {
 		out = out[len(out)-autoLandVerifyTailBytes:]
@@ -990,6 +1057,75 @@ func runVerify(ctx context.Context, worktreePath, cmd string) (string, error) {
 // verify_failed. Known residual: a GOPROXY URL with embedded basic-auth
 // rides in via the GO prefix — private-proxy users accept that exposure
 // to their own proxy; gateway keys are never GO-shaped.
+//
+// The HOME the allowlist passes is REPLACED by the caller (P1 #11 scratch
+// HOME) — it stays in the list so the no-hardcoded-OS shell basics stay in
+// one place, and so a future reader sees env policy here and sandbox policy
+// at runVerify, never two partial env builders.
+
+// setEnv replaces NAME's entry in env (or appends it) so the slice never
+// carries duplicates (exec dedupes last-wins, but a single source beats a
+// reader auditing two HOME lines).
+func setEnv(env []string, kv string) []string {
+	name, _, _ := strings.Cut(kv, "=")
+	for i, e := range env {
+		if strings.HasPrefix(e, name+"=") {
+			env[i] = kv
+			return env
+		}
+	}
+	return append(env, kv)
+}
+
+// goToolchainCacheEnv mounts the go toolchain's caches into the verify
+// sandbox (P1 #11): the values are resolved against the REAL environment
+// (so a user's go/env-configured GOPATH/GOCACHE keeps working), then re-
+// exported explicitly since the child's HOME no longer resolves them.
+// GOCACHE/GOMODCACHE/GOPATH hold no credentials — GONOSUMDB-style
+// credential-adjacent knobs stay OUT (they ride the GO passthrough only
+// when explicitly set in the daemon's env, the pre-#11 posture). A missing
+// go binary (non-go project) yields nothing; the verify command itself
+// decides whether that is fatal.
+func goToolchainCacheEnv() []string {
+	out, err := exec.Command("go", "env", "GOCACHE", "GOMODCACHE", "GOPATH").Output()
+	if err != nil {
+		return nil
+	}
+	names := []string{"GOCACHE", "GOMODCACHE", "GOPATH"}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var env []string
+	for i, name := range names {
+		if i < len(lines) {
+			if v := strings.TrimSpace(lines[i]); v != "" {
+				env = append(env, name+"="+v)
+			}
+		}
+	}
+	return env
+}
+
+// playwrightBrowsersDir locates the installed playwright browser cache the
+// gui-scoped verify needs under a scratch HOME (npx playwright test would
+// otherwise attempt a cold re-download and fail offline). It holds no
+// credentials; PLAYWRIGHT_BROWSERS_PATH is deliberately NOT in
+// verifyEnviron's allowlist — env extension is opt-in per directory, and
+// this is the one audited exception. "" when uninstalled (e2e-free
+// projects lose nothing).
+func playwrightBrowsersDir(home string) string {
+	if v := os.Getenv("PLAYWRIGHT_BROWSERS_PATH"); v != "" {
+		return v
+	}
+	var dir string
+	if runtime.GOOS == "darwin" {
+		dir = filepath.Join(home, "Library", "Caches", "ms-playwright")
+	} else {
+		dir = filepath.Join(home, ".cache", "ms-playwright")
+	}
+	if st, err := os.Stat(dir); err == nil && st.IsDir() {
+		return dir
+	}
+	return ""
+}
 func verifyEnviron(environ []string) []string {
 	var out []string
 	for _, kv := range environ {

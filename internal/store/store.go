@@ -175,7 +175,12 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("store: create db dir: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", path)
+	// mmap_size(0): the journaled therapy of record for the recurring
+	// modernc.org/sqlite WAL-recovery SIGBUS (UI-epoch-10/11,
+	// bug-fix-epoch-4) — therapy, not a proven root-cause fix; the reader
+	// path below disables mmap for the same crash class. synchronous(FULL)
+	// makes commit durability explicit instead of relying on build defaults.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=mmap_size(0)&_pragma=synchronous(FULL)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open: %w", err)
@@ -198,7 +203,9 @@ func (s *Store) Close() error {
 // CLI): no directory creation, no migrations, query_only — so it can never
 // mutate a journal a live daemon owns. Errors when the file is absent.
 func OpenReadOnly(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", path)
+	// mmap_size(0) here too — the CLI reader maps the same live WAL the
+	// daemon writes, so it shares the SIGBUS crash class (Open above).
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)&_pragma=mmap_size(0)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open read-only: %w", err)

@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/git"
-	"github.com/yingliang-zhang/odo/internal/moa"
 	"github.com/yingliang-zhang/odo/internal/store"
 	"github.com/yingliang-zhang/odo/internal/worktree"
 )
@@ -292,7 +291,7 @@ func (s *Server) runAuditRound(loopID, conversationID int64, st *loopState, even
 		return
 	}
 
-	client := moa.NewClientFromEnv("", "")
+	client := s.sharedMoa()
 	legs := auditFanout(ctx, client, models, auditSystem, prompt)
 	var perLeg [][]finding
 	completeLegs := 0
@@ -586,12 +585,37 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 
 // --- drain seams: the loop-owned pipelines after a loop run finishes --------------
 
+// journalLoopDiffBound writes the loop⇄diff binding row (P1 #13 — the
+// spawn row's old diff_id contract was dead: the diff is inserted at
+// drain, not spawn, so the binding lands here). loopAdjudicateTask
+// attributes the task's accept/blocked rows by it, and
+// loopOwnedSeedDiffIDs excludes the diff from the boot recovery's
+// pending-diff re-fire.
+func (s *Server) journalLoopDiffBound(ctx context.Context, meta *runMeta, diffID int64) {
+	payload := map[string]interface{}{"diff_id": diffID}
+	mode := loopModeAudit
+	if meta.loopKind == "implement" {
+		mode = loopModeTasks
+		payload["task"] = meta.loopTask
+	} else if meta.loopRound > 0 {
+		payload["round"] = meta.loopRound
+	}
+	s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, mode, loopKindDiffBound, payload, s.loopSpent(ctx, meta.conversationID, meta.loopID))
+}
+
 // loopPipelineAfterRun is drainRun's terminal-tail branch for
 // loop-provenance runs (C1: the marker skips maybeAutoLand; the loop's
 // own pipeline runs instead, under loopWG).
 func (s *Server) loopPipelineAfterRun(meta *runMeta, d store.Diff, verdict string) {
 	ctx := context.Background()
 	defer s.fireLoopTick(meta.conversationID)
+	// Bind the drained diff to its loop phase FIRST (P1 #13). Journaled
+	// even when the fold moved on (a stale drain): the binding is pure
+	// provenance — attribution gates and the boot recovery's exclusion
+	// read it regardless of the phase's liveness (a suspended loop's
+	// late diff still belongs to the loop, a stopped loop's orphans are
+	// filtered by the exclusion's terminal check).
+	s.journalLoopDiffBound(ctx, meta, d.ID)
 	if !s.loopDrainActive(ctx, meta) {
 		return
 	}
@@ -761,16 +785,27 @@ func (s *Server) loopImplementPipeline(ctx context.Context, meta *runMeta, d sto
 
 // loopAdjudicateTask folds settle's terminal rows for one task (C8: the
 // loop learns outcomes from the journal, it never duplicates the ladder):
-// landed on any accept after the spawn; settle_blocked on any terminal
+// landed on the task's diff's accept; settle_blocked on its terminal
 // blocked row with no later accept; nothing while a repair round is in
 // flight. Also the rescue path for a pipeline lost to a restart (the
 // recovery tick calls it when the spawn has no live run).
+//
+// Attribution (P1 #13) keys on the loop_diff_bound chain, never on
+// wall-clock: a review row counts toward the task only when its diff
+// chain-roots at a bound diff (a revise ladder's product chains via
+// origin_diff_id) — or, on a pre-binding journal (no loop_diff_bound
+// row anywhere for this loop), when the row passes the legacy lane:
+// pipeline actor (auto_loop/auto_panel) for accept/blocked, any actor
+// for reject/revise (the P2-g human-reject rescue survives). A human
+// accept of an unrelated inbox diff NEVER closes the task.
 func (s *Server) loopAdjudicateTask(ctx context.Context, conversationID, loopID int64, task int) {
 	events, err := s.store.ListEvents(ctx, conversationID, 0)
 	if err != nil {
 		return
 	}
 	spawnSeq := 0
+	taskBound := map[int64]bool{}
+	hasBindings := false
 	for _, ev := range events {
 		if ev.Type != store.EventLoopEvent {
 			continue
@@ -790,10 +825,74 @@ func (s *Server) loopAdjudicateTask(ctx context.Context, conversationID, loopID 
 			if jsonInt(ev.Payload, "task") == task {
 				return
 			}
+		case loopKindDiffBound:
+			// P1 #13: one binding row anywhere for this loop switches
+			// attribution from pre-binding (wall-clock + actor) to
+			// bound-diff-only.
+			hasBindings = true
+			if jsonInt(ev.Payload, "task") == task {
+				if id := int64(jsonInt(ev.Payload, "diff_id")); id > 0 {
+					taskBound[id] = true
+				}
+			}
 		}
 	}
 	if spawnSeq == 0 {
 		return
+	}
+	// Revise-ladder edges (a ladder round's/product's diff → its origin):
+	// the task's own ladder settles under the PRODUCT's id, so its
+	// accept/blocked rows attribute only through the chain root.
+	chainParent := map[int64]int64{}
+	for _, ev := range events {
+		if ev.Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action        string `json:"action"`
+			DiffID        int64  `json:"diff_id"`
+			ProductDiffID int64  `json:"product_diff_id"`
+			OriginDiffID  int64  `json:"origin_diff_id"`
+		}
+		if !jsonUnmarshalOK(ev.Payload, &p) {
+			continue
+		}
+		switch p.Action {
+		case "auto_revise_round":
+			if p.DiffID > 0 && p.OriginDiffID > 0 && p.DiffID != p.OriginDiffID {
+				chainParent[p.DiffID] = p.OriginDiffID
+			}
+		case "auto_revise_product":
+			if p.ProductDiffID > 0 && p.OriginDiffID > 0 {
+				chainParent[p.ProductDiffID] = p.OriginDiffID
+			}
+		}
+	}
+	// attributedToTask gates a settle row onto this task (P1 #13): the
+	// row's diff must chain-root at one of the task's bound diffs — or,
+	// on a pre-binding journal, fall back to wall-clock order.
+	// humanOK=false lanes (accept, blocked) additionally require a
+	// pipeline actor in the fallback; humanOK=true lanes (reject,
+	// revise) preserve the pre-binding behavior for either actor (the
+	// P2-g human-reject rescue).
+	attributedToTask := func(diffID int64, actor string, humanOK bool) bool {
+		for id, depth := diffID, 0; id > 0 && depth < 64; depth++ {
+			if taskBound[id] {
+				return true
+			}
+			next, ok := chainParent[id]
+			if !ok {
+				break
+			}
+			id = next
+		}
+		if hasBindings {
+			return false
+		}
+		if humanOK {
+			return true
+		}
+		return actor == loopActor || actor == autoActor
 	}
 	var landedDiff int64
 	var blockedReason, blockedDetail string
@@ -804,32 +903,60 @@ func (s *Server) loopAdjudicateTask(ctx context.Context, conversationID, loopID 
 			continue
 		}
 		var p struct {
-			Action string `json:"action"`
-			Actor  string `json:"actor"`
-			DiffID int64  `json:"diff_id"`
-			Reason string `json:"reason"`
-			Detail string `json:"detail"`
+			Action        string `json:"action"`
+			Actor         string `json:"actor"`
+			DiffID        int64  `json:"diff_id"`
+			ProductDiffID int64  `json:"product_diff_id"`
+			OriginDiffID  int64  `json:"origin_diff_id"`
+			Reason        string `json:"reason"`
+			Detail        string `json:"detail"`
 		}
 		if !jsonUnmarshalOK(ev.Payload, &p) {
 			continue
 		}
 		switch p.Action {
 		case "accept":
-			// Any landing after the spawn (original or repair product,
-			// either actor — a HUMAN accept resolves the task too).
+			// Bound chain or the pre-binding pipeline-actor fallback only
+			// (P1 #13): an accept of an unrelated diff — human or auto —
+			// must never resolve the task.
+			if !attributedToTask(p.DiffID, p.Actor, false) {
+				continue
+			}
 			landedDiff = p.DiffID
 			blockedReason = ""
 			reviseInFlight = false
 		case "reject":
-			// A human reject of the task's pending diff — its resolution
-			// lands in the default branch (P2: post-restart inspection).
+			// The human reject of the task's pending diff — its
+			// resolution lands in the default branch (the P2-g rescue;
+			// bound lane keys on the chain root).
+			if !attributedToTask(p.DiffID, p.Actor, true) {
+				continue
+			}
 			rejected = true
 		case "auto_revise_round":
+			if !attributedToTask(p.DiffID, p.Actor, true) {
+				continue
+			}
 			reviseInFlight = true
 			blockedReason = ""
 		case "auto_revise_product":
+			// The product's own settle rows arrive under product_diff_id;
+			// they chain to the task through origin_diff_id.
+			pid := p.ProductDiffID
+			if pid == 0 {
+				pid = p.DiffID
+			}
+			if !attributedToTask(pid, p.Actor, true) {
+				continue
+			}
 			reviseInFlight = false // the product arrived; its own pipeline decides
 		case "auto_land_blocked":
+			// Same discipline as accept: the blocked row must name a diff
+			// in the task's bound chain (or the journal is pre-binding
+			// and the actor is pipeline automation).
+			if !attributedToTask(p.DiffID, p.Actor, false) {
+				continue
+			}
 			blockedReason, blockedDetail = p.Reason, p.Detail
 			reviseInFlight = false
 		}
@@ -949,7 +1076,7 @@ func (s *Server) runLoopDesign(loopID, conversationID int64, st *loopState, t lo
 		}, st.spentTokens)
 		return
 	}
-	out, err := runDesignMoa(ctx, "loop_design", s.projectRoot, goal, nil, loopConsolidatorModel())
+	out, err := runDesignMoa(ctx, "loop_design", s.projectRoot, goal, nil, loopConsolidatorModel(), s.sharedMoa())
 	if err != nil {
 		s.journalLoopBestEffort(ctx, conversationID, loopID, loopModeTasks, loopKindSuspended, map[string]interface{}{
 			"cause":  "design_infra",

@@ -13,9 +13,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -353,7 +356,7 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 	newServer := func(t *testing.T) (autonomyFixture, *Server, string, string) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
-		writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
+		writePrefs(t, home, "review: rm1@test, rm2@test\nauto_apply: main\n")
 		f := newAutonomyFixture(t)
 		root, sha := autolandRepo(t)
 		return f, &Server{store: f.st, projectRoot: root}, root, sha
@@ -427,6 +430,99 @@ func TestAutoLandBlockedPaths(t *testing.T) {
 	})
 }
 
+// TestAutoLandSingleJudgeUnarmed (P1 #8): a review: line with ONE model
+// leaves the pipeline UNARMED — N=1 "unanimity" is a single judge with no
+// dissent channel. The FIRST attempt per daemon lifetime journals exactly
+// one single_judge_panel advisory row, zero panel calls fire, and later
+// diffs pend silent; advisory surfaces (/panel, review_diff) stay
+// N-unrestricted, proven by the review_diff leg below.
+func TestAutoLandSingleJudgeUnarmed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
+	calls := startPanelStub(t, func(call int64, model string) (int, string) {
+		return 200, "ACCEPT\nlooks correct"
+	})
+	f := newAutonomyFixture(t)
+	root, sha := autolandRepo(t)
+	if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: f.st, projectRoot: root}
+
+	diffIDs := make([]int64, 0, 2)
+	for _, name := range []string{"a.diff", "b.diff"} {
+		d := f.addDiff(t, name, patchSrc("src/a.go", 1, 1, false))
+		d.BaseSHA = &sha
+		s.autoLand(context.Background(), d, root, "goal", false, "")
+		diffIDs = append(diffIDs, d.ID)
+	}
+	// Exactly ONE advisory across both attempts; zero panel spend.
+	if got := blockedReasons(t, f.st, f.c.ID); len(got) != 1 || got[0] != "single_judge_panel" {
+		t.Fatalf("blocked reasons = %v, want exactly [single_judge_panel] (one advisory per daemon lifetime)", got)
+	}
+	if n := atomic.LoadInt64(calls); n != 0 {
+		t.Errorf("panel calls = %d, want 0 (the unarmed pipeline spends nothing)", n)
+	}
+	if got := blockedDetails(t, f.st, f.c.ID); len(got) != 1 || !strings.Contains(got[0], "single model") {
+		t.Errorf("advisory details = %v, want one row naming the single-model cause", got)
+	}
+	for _, id := range diffIDs {
+		got, err := f.st.GetDiff(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.DiffPending {
+			t.Errorf("diff %d status = %q, want pending (unarmed never resolves)", id, got.Status)
+		}
+	}
+
+	// Advisory carve-out: review_diff consults the single model normally —
+	// it only advises, it never lands.
+	resp, err := s.handleReviewDiff(context.Background(), Request{DiffID: diffIDs[0]})
+	if err != nil {
+		t.Fatalf("review_diff on a 1-model config: %v (advisory surfaces are N-unrestricted)", err)
+	}
+	if len(resp.Reviews) != 1 || resp.Reviews[0].Verdict != "accept" {
+		t.Errorf("advisory reviews = %+v, want the single model's accept", resp.Reviews)
+	}
+	if n := atomic.LoadInt64(calls); n != 1 {
+		t.Errorf("panel calls after review_diff = %d, want 1 (only the advisory consult ran)", n)
+	}
+}
+
+// TestReviewLegOuterDeadline (P1 #9): a hung review leg dies at the
+// leg's outer deadline as an Infra result (needs_fixes — never an
+// accidental accept) instead of wedging the auto-land pipeline on a dead
+// gateway (autoLand's Background ctx carries no deadline of its own).
+func TestReviewLegOuterDeadline(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Bounded hang: the client's leg deadline (50ms) must fire long
+		// before this 2s answer; the bound keeps srv.Close deterministic.
+		time.Sleep(2 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": "too-late-answer"}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	s := &Server{legTimeoutForTest: 50 * time.Millisecond}
+	start := time.Now()
+	rr := s.reviewWithModel(context.Background(), reviewModel{model: "rm1", provider: "test"}, "review this diff")
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("review leg held %v — the leg deadline must fire", elapsed)
+	}
+	if !rr.Infra || rr.Verdict != "needs_fixes" || !strings.Contains(rr.Comments, "review failed") {
+		t.Errorf("result = %+v, want an Infra needs_fixes review-failed leg", rr)
+	}
+}
+
 // TestMaybeAutoLandPrefOffSilent (M20): the off kill switch leaves NO
 // journal trace even when the panel is fully armed — a disabled feature
 // deserves no noise (blocked attempts are the evidence, silence is the
@@ -451,7 +547,7 @@ func TestMaybeAutoLandPrefOffSilent(t *testing.T) {
 		t.Setenv("HOME", home)
 		// review: line but NO auto_apply line — the M20 default must arm
 		// the pipeline; reaching the verify gate proves it (blocked row).
-		writePrefs(t, home, "review: rm1@test\n")
+		writePrefs(t, home, "review: rm1@test, rm2@test\n")
 		f := newAutonomyFixture(t)
 		root, sha := autolandRepo(t)
 		s := &Server{store: f.st, projectRoot: root}
@@ -473,7 +569,7 @@ func TestAutoLandVerifyNoEvidence(t *testing.T) {
 	arm := func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
-		writePrefs(t, home, "review: rm1@test\n")
+		writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	}
 	t.Run("zero evidence blocks", func(t *testing.T) {
 		arm(t)
@@ -569,7 +665,7 @@ func visualAutolandRepo(t *testing.T) (root, sha string) {
 func TestAutoLandVisualDiffUnanimousAcceptLands(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	calls := startPanelStub(t, func(call int64, model string) (int, string) {
 		return 200, "ACCEPT\nlooks correct"
 	})
@@ -585,8 +681,8 @@ func TestAutoLandVisualDiffUnanimousAcceptLands(t *testing.T) {
 	}))
 
 	s.autoLand(context.Background(), d, root, "goal", false, "")
-	if n := atomic.LoadInt64(calls); n != 1 {
-		t.Fatalf("panel calls = %d, want 1", n)
+	if n := atomic.LoadInt64(calls); n != 2 {
+		t.Fatalf("panel calls = %d, want 2 (one per model leg)", n)
 	}
 	sc := scanSettle(t, f.st, f.c.ID)
 	if got := sc.blockedReasons(); len(got) != 0 {
@@ -638,7 +734,7 @@ func TestAutoLandVisualDiffUnanimousAcceptLands(t *testing.T) {
 func TestAutoLandStartedRowsPinStageBoundaries(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	startPanelStub(t, func(call int64, model string) (int, string) {
 		return 200, "ACCEPT\nlooks correct"
 	})
@@ -788,7 +884,7 @@ exit 0
 func TestAutoLandFinalRefreshClean(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
@@ -807,23 +903,26 @@ func TestAutoLandFinalRefreshClean(t *testing.T) {
 	// The panel stub drifts main HEAD inside its handler — a racing human
 	// commit while the verdict is in flight — then replies ACCEPT for
 	// every leg anyway: the verdict genuinely arrived, just under a HEAD
-	// the land no longer applies to without a rebase.
+	// the land no longer applies to without a rebase. (First leg only:
+	// the drifted commit can't repeat under a 2-model panel.)
 	calls := startPanelStub(t, func(call int64, model string) (int, string) {
-		if werr := os.WriteFile(filepath.Join(root, "drift.txt"), []byte("racing human commit\n"), 0o644); werr != nil {
-			t.Errorf("drift write: %v", werr)
-		}
-		for _, args := range [][]string{{"add", "drift.txt"}, {"commit", "-m", "drift"}} {
-			argv := append([]string{"-C", root, "-c", "user.email=odo@test", "-c", "user.name=odo"}, args...)
-			if out, gerr := exec.Command("git", argv...).CombinedOutput(); gerr != nil {
-				t.Errorf("drift %v: %v: %s", args, gerr, out)
+		if call == 1 {
+			if werr := os.WriteFile(filepath.Join(root, "drift.txt"), []byte("racing human commit\n"), 0o644); werr != nil {
+				t.Errorf("drift write: %v", werr)
+			}
+			for _, args := range [][]string{{"add", "drift.txt"}, {"commit", "-m", "drift"}} {
+				argv := append([]string{"-C", root, "-c", "user.email=odo@test", "-c", "user.name=odo"}, args...)
+				if out, gerr := exec.Command("git", argv...).CombinedOutput(); gerr != nil {
+					t.Errorf("drift %v: %v: %s", args, gerr, out)
+				}
 			}
 		}
 		return 200, "ACCEPT\nlooks correct"
 	})
 
 	s.autoLand(context.Background(), d, root, "goal", false, "")
-	if n := atomic.LoadInt64(calls); n != 1 {
-		t.Fatalf("panel calls = %d, want 1", n)
+	if n := atomic.LoadInt64(calls); n != 2 {
+		t.Fatalf("panel calls = %d, want 2 (one per model leg)", n)
 	}
 	sc := scanSettle(t, f.st, f.c.ID)
 	if got := sc.blockedReasons(); len(got) != 0 {
@@ -984,7 +1083,7 @@ func TestHandleDiffActionStaleRefusalIsSentinel(t *testing.T) {
 func TestAutoLandPreSpendRefreshClean(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
@@ -1003,8 +1102,8 @@ func TestAutoLandPreSpendRefreshClean(t *testing.T) {
 		return 200, "ACCEPT\nlooks correct"
 	})
 	s.autoLand(context.Background(), d, root, "goal", false, "")
-	if n := atomic.LoadInt64(calls); n != 1 {
-		t.Errorf("panel calls = %d, want 1 (a clean probe proceeds to the panel)", n)
+	if n := atomic.LoadInt64(calls); n != 2 {
+		t.Errorf("panel calls = %d, want 2 — one per model leg (a clean probe proceeds to the panel)", n)
 	}
 	sc := scanSettle(t, f.st, f.c.ID)
 	if got := sc.blockedReasons(); len(got) != 0 {
@@ -1076,7 +1175,7 @@ func TestAutoLandPreSpendRefreshClean(t *testing.T) {
 func TestAutoLandPreSpendRefreshConflict(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\n") // M20: the arming gate precedes every gate
+	writePrefs(t, home, "review: rm1@test, rm2@test\n") // M20: the arming gate precedes every gate
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	s := &Server{store: f.st, projectRoot: root}
@@ -1152,7 +1251,7 @@ func TestAutoLandPreSpendRefreshConflict(t *testing.T) {
 func TestAutoLandFinalRefreshConflict(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	if err := os.WriteFile(filepath.Join(root, ".odo-verify"), []byte("echo PASS\n"), 0o644); err != nil {
@@ -1169,22 +1268,26 @@ func TestAutoLandFinalRefreshConflict(t *testing.T) {
 	// The panel stub drifts main ONTO src/a.go mid-verdict — a racing
 	// human edit of the very file the diff rewrites — then replies ACCEPT:
 	// the evidence is real, the rebase genuinely cannot merge them.
+	// (First leg only: the drifted commit can't repeat under a 2-model
+	// panel.)
 	calls := startPanelStub(t, func(call int64, model string) (int, string) {
-		if werr := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // racing human edit\n"), 0o644); werr != nil {
-			t.Errorf("drift write: %v", werr)
-		}
-		for _, args := range [][]string{{"add", "src/a.go"}, {"commit", "-m", "racing edit"}} {
-			argv := append([]string{"-C", root, "-c", "user.email=odo@test", "-c", "user.name=odo"}, args...)
-			if out, gerr := exec.Command("git", argv...).CombinedOutput(); gerr != nil {
-				t.Errorf("drift %v: %v: %s", args, gerr, out)
+		if call == 1 {
+			if werr := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // racing human edit\n"), 0o644); werr != nil {
+				t.Errorf("drift write: %v", werr)
+			}
+			for _, args := range [][]string{{"add", "src/a.go"}, {"commit", "-m", "racing edit"}} {
+				argv := append([]string{"-C", root, "-c", "user.email=odo@test", "-c", "user.name=odo"}, args...)
+				if out, gerr := exec.Command("git", argv...).CombinedOutput(); gerr != nil {
+					t.Errorf("drift %v: %v: %s", args, gerr, out)
+				}
 			}
 		}
 		return 200, "ACCEPT\nlooks correct"
 	})
 
 	s.autoLand(context.Background(), d, root, "goal", false, "")
-	if n := atomic.LoadInt64(calls); n != 1 {
-		t.Fatalf("panel calls = %d, want 1 (the panel RAN — the block rides its evidence)", n)
+	if n := atomic.LoadInt64(calls); n != 2 {
+		t.Fatalf("panel calls = %d, want 2 — one per model leg (the panel RAN — the block rides its evidence)", n)
 	}
 	sc := scanSettle(t, f.st, f.c.ID)
 	// M20: the blocked evidence row now rides INTO the settle ladder —
@@ -1199,8 +1302,8 @@ func TestAutoLandFinalRefreshConflict(t *testing.T) {
 		t.Errorf("consensus_verdict = %v, want accept riding as advisory evidence", row["consensus_verdict"])
 	}
 	reviews, _ := row["reviews"].([]interface{})
-	if len(reviews) != 1 {
-		t.Errorf("reviews = %v, want the 1-model panel attached", row["reviews"])
+	if len(reviews) != 2 {
+		t.Errorf("reviews = %v, want the full 2-model panel attached", row["reviews"])
 	}
 	if detail, _ := row["detail"].(string); !strings.Contains(detail, "the verify and panel attested the pre-drift tree") {
 		t.Errorf("detail = %q, want the pre-drift attestation advisory", detail)
@@ -1262,7 +1365,7 @@ func TestAutoLandFinalRefreshConflict(t *testing.T) {
 func TestAutoLandAlreadyLandedFastPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	f := newAutonomyFixture(t)
 	root, _ := autolandRepo(t)
 	s := &Server{store: f.st, projectRoot: root}
@@ -1393,11 +1496,12 @@ func TestAcceptAlreadyLandedFreshBase(t *testing.T) {
 func TestAutoLandParallelPipelines(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
-	// Rendezvous: a leg waits until BOTH pipelines' legs have arrived.
-	// A bare counter latch lets the second arriver miss the peak (first
-	// decrements before second's first load) and pin the wait a whole
-	// deadline — a channel closed at 2 releases both deterministically.
+	writePrefs(t, home, "review: rm1@test, rm2@test\nauto_apply: main\n")
+	// Rendezvous: a leg waits until BOTH pipelines' legs have arrived
+	// (2 models × 2 pipelines = 4 legs). A bare counter latch lets the
+	// last arriver miss the peak (an early leg decrements before the
+	// last's first load) and pins the wait a whole deadline — a channel
+	// closed at 4 releases all deterministically.
 	// The 30s safety net releases a permanently serialized pipeline so a
 	// regression (autoLandMu restored) fails rather than hangs.
 	var inFlight, maxFlight int64
@@ -1410,7 +1514,7 @@ func TestAutoLandParallelPipelines(t *testing.T) {
 				break
 			}
 		}
-		if cur == 2 {
+		if cur == 4 {
 			close(both)
 		} else {
 			select {
@@ -1446,11 +1550,11 @@ func TestAutoLandParallelPipelines(t *testing.T) {
 	go func() { defer wg.Done(); s.maybeAutoLand(d2, root, "goal", false, "") }()
 	wg.Wait()
 
-	if n := atomic.LoadInt64(calls); n != 2 {
-		t.Fatalf("panel calls = %d, want 2 (one leg per pipeline)", n)
+	if n := atomic.LoadInt64(calls); n != 4 {
+		t.Fatalf("panel calls = %d, want 4 (two legs per pipeline)", n)
 	}
-	if got := atomic.LoadInt64(&maxFlight); got != 2 {
-		t.Fatalf("max in-flight panel legs = %d, want 2 — the pipelines must overlap (autoLandMu is gone)", got)
+	if got := atomic.LoadInt64(&maxFlight); got != 4 {
+		t.Fatalf("max in-flight panel legs = %d, want 4 — both pipelines' legs must overlap (autoLandMu is gone)", got)
 	}
 	sc := scanSettle(t, f.st, f.c.ID)
 	if got := sc.blockedReasons(); len(got) != 0 {
@@ -1695,5 +1799,176 @@ func TestStrandedPendingDiffs(t *testing.T) {
 	want := []int64{d2.ID, d3.ID, d5.ID, d7.ID} // workstream-then-diff order preserved
 	if fmt.Sprint(ids) != fmt.Sprint(want) {
 		t.Errorf("stranded ids = %v, want %v", ids, want)
+	}
+}
+
+// TestReviewFanoutSharedClientBoundsInflight (P1 #10): every leg used to
+// build a FRESH moa client, so the per-client in-flight semaphore
+// (defaultMaxInFlight in internal/moa — unexported there; 5 at writing)
+// never contended: an N-leg gate batch fired N concurrent requests at the
+// gateway (the 8×3=24 distill-gate storm the review flagged). The
+// Server's shared client re-arms that semaphore as the daemon-wide cap:
+// an 8-leg fan-out must pile up no more than 5 concurrent requests while
+// still returning every leg's verdict.
+func TestReviewFanoutSharedClientBoundsInflight(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+
+	var inflight, maxSeen atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := inflight.Add(1)
+		for {
+			if m := maxSeen.Load(); n <= m || maxSeen.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(150 * time.Millisecond) // long enough for all 8 legs to try to pile up
+		inflight.Add(-1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": "ACCEPT"}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	defer srv.Close()
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	models := make([]reviewModel, 8)
+	for i := range models {
+		models[i] = reviewModel{model: fmt.Sprintf("rm%d", i), provider: "test"}
+	}
+	reviews := rig.server.reviewFanout(context.Background(), models, "prompt")
+	if len(reviews) != 8 {
+		t.Fatalf("legs = %d, want 8", len(reviews))
+	}
+	for i, r := range reviews {
+		if r.Verdict != "accept" {
+			t.Errorf("leg %d verdict = %q (%s), want accept", i, r.Verdict, r.Comments)
+		}
+	}
+	if got := maxSeen.Load(); got > 5 {
+		t.Errorf("max in-flight = %d, want ≤ 5 — the shared client's semaphore is not bounding the fan-out", got)
+	}
+}
+
+// TestRunVerifyScratchHomeShieldsFileCredentials (P1 #11): the env
+// allowlist blocks key-shaped leaks, but before the sandbox the verify's
+// unreviewed code could still READ file-shaped credentials (~/.ssh,
+// ~/.aws) and exfiltrate them (same m16 P0 class, different shape). The
+// scratch HOME must hide them byte-completely, and runVerify must clean
+// the sandbox up after itself.
+func TestRunVerifyScratchHomeShieldsFileCredentials(t *testing.T) {
+	home := t.TempDir()
+	for _, rel := range []string{".ssh", ".aws", ".config"} {
+		if err := os.MkdirAll(filepath.Join(home, rel), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "id_rsa"), []byte("DECOY-KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".aws", "credentials"), []byte("DECOY-CREDS"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	tail, err := runVerify(context.Background(), t.TempDir(),
+		`printf 'HOME=%s\n' "$HOME"; test ! -e "$HOME/.ssh/id_rsa" && test ! -e "$HOME/.aws/credentials" && echo SHIELDED; cat "$HOME/.ssh/id_rsa" 2>/dev/null || echo PLAINTEXT-MISS; echo PASS`)
+	if err != nil {
+		t.Fatalf("verify errored: %v (tail %q)", err, tail)
+	}
+	if !strings.Contains(tail, "SHIELDED") || !strings.Contains(tail, "PLAINTEXT-MISS") || !strings.Contains(tail, "PASS") {
+		t.Errorf("shielding markers missing from tail %q", tail)
+	}
+	if strings.Contains(tail, "DECOY-KEY") || strings.Contains(tail, home) {
+		t.Errorf("real HOME or its credentials leaked into the verify child: %q", tail)
+	}
+	// Sandbox lifecycle: the scratch dir the child saw must be gone.
+	scratch := strings.TrimPrefix(strings.SplitN(strings.TrimSpace(tail), "\n", 2)[0], "HOME=")
+	if scratch == home || scratch == "" || scratch == os.Getenv("HOME") {
+		t.Fatalf("child HOME = %q, want a scratch dir (real home %q)", scratch, home)
+	}
+	if _, serr := os.Stat(scratch); !os.IsNotExist(serr) {
+		t.Errorf("scratch dir %q still on disk after runVerify (stat err %v)", scratch, serr)
+	}
+}
+
+// TestRunVerifyMountsGoToolchainCaches (P1 #11): the sandbox must not cold-
+// start the toolchain — GOCACHE/GOMODCACHE/GOPATH are re-exported from the
+// REAL environment's resolution so a per-verify scratch HOME keeps the
+// warm caches (without it, every auto-land verify re-downloads modules).
+func TestRunVerifyMountsGoToolchainCaches(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not on PATH")
+	}
+	t.Setenv("HOME", t.TempDir())
+	out, err := exec.Command("go", "env", "GOCACHE", "GOMODCACHE", "GOPATH").Output()
+	if err != nil {
+		t.Skipf("go env unusable: %v", err)
+	}
+	want := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(want) != 3 {
+		t.Skipf("unexpected go env shape: %q", out)
+	}
+
+	tail, err := runVerify(context.Background(), t.TempDir(), `printf '%s\n%s\n%s\n' "$GOCACHE" "$GOMODCACHE" "$GOPATH"`)
+	if err != nil {
+		t.Fatalf("verify errored: %v (tail %q)", err, tail)
+	}
+	got := strings.Split(strings.TrimSpace(tail), "\n")
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Errorf("child caches = %q, want %q", got, want)
+	}
+}
+
+// TestPlaywrightBrowsersDir (P1 #11): the gui verify's browser cache is
+// the one audited env exception — found when installed, silent when not,
+// env override always honored.
+func TestPlaywrightBrowsersDir(t *testing.T) {
+	home := t.TempDir()
+	if got := playwrightBrowsersDir(home); got != "" {
+		t.Fatalf("uninstalled browsers = %q, want \"\"", got)
+	}
+	var dir string
+	if runtime.GOOS == "darwin" {
+		dir = filepath.Join(home, "Library", "Caches", "ms-playwright")
+	} else {
+		dir = filepath.Join(home, ".cache", "ms-playwright")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := playwrightBrowsersDir(home); got != dir {
+		t.Errorf("installed browsers = %q, want %q", got, dir)
+	}
+	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", "/custom/browsers")
+	if got := playwrightBrowsersDir(home); got != "/custom/browsers" {
+		t.Errorf("override = %q, want /custom/browsers", got)
+	}
+}
+
+// TestSetEnv pins the single-entry contract: replace-on-name-match only
+// (the HOMEBREW-vs-HOME prefix trap), append otherwise.
+func TestSetEnv(t *testing.T) {
+	env := setEnv([]string{"A=1", "HOME=/old"}, "HOME=/new")
+	if n := strings.Count(strings.Join(env, "\n"), "HOME="); n != 1 {
+		t.Fatalf("HOME entries = %d, want 1 in %v", n, env)
+	}
+	if env[1] != "HOME=/new" {
+		t.Errorf("replaced = %q, want HOME=/new", env[1])
+	}
+	env = setEnv(env, "B=2")
+	if env[len(env)-1] != "B=2" {
+		t.Errorf("append result tail = %q, want B=2", env[len(env)-1])
+	}
+	env = setEnv([]string{"HOMEBREW=/x"}, "HOME=/n")
+	if len(env) != 2 || env[1] != "HOME=/n" {
+		t.Errorf("HOMEBREW prefix trap: %v, want [HOMEBREW=/x HOME=/n]", env)
 	}
 }

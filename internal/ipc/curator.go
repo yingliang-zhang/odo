@@ -583,7 +583,7 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 	raw := ""
 	var rec *moaReceipt
 	if resolveVia("curator", "curator_via") == viaMoa {
-		raw, rec, err = runMoaOneShot(ctx, "curator", prompt)
+		raw, rec, err = runMoaOneShot(ctx, s.sharedMoa(), "curator", prompt)
 	} else {
 		ad := s.distillAdapter
 		if ad == nil {

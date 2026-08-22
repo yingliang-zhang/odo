@@ -372,8 +372,12 @@ func (s *Server) handlePreviewQuery(ctx context.Context, c *store.Conversation, 
 		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("slash receipt assertion failed: %w", aerr))
 	}
 
-	client := moa.NewClientFromEnv("", "")
-	res, qerr := client.QueryWithImages(ctx, slashVisionModel, system, prompt, []moa.VisionImage{
+	client := s.sharedMoa() // P1 #10: shared cap, no per-leg semaphore
+	// P1 #9: same outer deadline as the /panel leg (one worst-case
+	// attempt chain) — a hung K3 leg must not hold the consult.
+	vctx, cancel := context.WithTimeout(ctx, s.legTimeout(slashVisionModel))
+	defer cancel()
+	res, qerr := client.QueryWithImages(vctx, slashVisionModel, system, prompt, []moa.VisionImage{
 		{Path: shot.Path, MediaType: moa.ImageMediaType(shot.Path), Data: shot.Data},
 	})
 

@@ -23,7 +23,7 @@ journal-anchored architecture instead.
 | topic pages | `wiki/topics/*.md` (M5) | project | curator | via index | — |
 | `index.md` | `wiki/index.md` (M5) | project | curator | always (M5+) | ≤2 KB |
 | `memory.md` | `.odo/memory.md` (M4) | project | distiller, human | always | ≤4 KB |
-| `user.md` | `~/.odo/user.md` (M3 reads, M4 learns) | global | learner, human | always | ≤4 KB |
+| `user.md` | `~/.odo/user.md` (M3) | global | human (P1 #12: learner promotion removed) | always | ≤4 KB |
 | `ledger.md` | `.odo/ledger.md` (M6) | project | daemon only | never (pulled) | — |
 | `memory-archive.md` | `.odo/memory-archive.md` (M4) | project | distiller | never | append-only |
 
@@ -76,8 +76,18 @@ will have (topic page)?
 
 - **Promotion** (one-way up): journal → (distill) → epoch note → (curator)
   → topic page → memory.md → user.md. The user.md promotion candidate is a
-  principle observed in **2+ projects'** memory.md files — a concrete
-  cross-project recurrence signal.
+  principle observed in **2+ projects**' memory.md files — a concrete
+  cross-project recurrence signal. **Amended (P1 #12, 2026-08-22):** the
+  learner's automatic user.md promotion branch is REMOVED — production
+  registries carry one project, so the 2+ gate could never fire (dead
+  code), and it shipped sibling projects' memory.md contents to the
+  third-party gateway (a cross-project leak). user.md is human-written;
+  the learner proposes project-level memory.md rules only, and automatic
+  folds skip the learner entirely unless prefs carry `learner_auto: on`
+  (28 automatic runs / 4 days / zero applied rules). Skills distillation
+  is likewise off by default until the propose→apply loop is proven to
+  close (P0 #4): prefs `skills_distill: on` re-enables the procedures
+  contract.
 - **user.md evidence rule:** a principle enters user.md only from (a) an
   explicit user statement ("always", "never", "I prefer") or (b) a recurring
   REJECT-comment / steering theme. Single ambiguous signals stay project-level.

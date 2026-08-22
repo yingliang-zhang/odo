@@ -128,6 +128,13 @@ func (s *Server) journalLoopSlash(ctx context.Context, c *store.Conversation, te
 	return err
 }
 
+// loopAlreadyActiveError is the C10 refusal, one text for every admission
+// check (the tests pin "already").
+func loopAlreadyActiveError(st *loopState) error {
+	return fmt.Errorf("loop: a %s loop is already %s for this conversation%s — /loop resume or /loop stop first",
+		st.mode, st.status, loopCauseSuffix(st))
+}
+
 // loopStartAudit implements /loop audit [base=<sha>] [rounds=N] [budget=T].
 func (s *Server) loopStartAudit(ctx context.Context, c *store.Conversation, args string) (Response, error) {
 	// Preflight parity with Mode B (P2): Mode A's fix rounds land through
@@ -139,93 +146,99 @@ func (s *Server) loopStartAudit(ctx context.Context, c *store.Conversation, args
 	// Flags lead; Mode A has no body — a non-flag token past the leading
 	// run is ignored (same as before, when unknown keys landed in opts).
 	flags, _ := loopLeadingFlags(args)
-	// Slash integrity gates (the /panel precedent): an in-flight AUTO
-	// distill is cancelled pre-note; a manual one refuses. The one-loop
-	// admission check (C10) rides the SAME critical section (P2 — an
-	// unlocked fold raced a sibling /loop admission into a double start).
-	s.mu.Lock()
-	if err := s.gateAutoDistillForSendLocked(ctx, c.ID); err != nil {
-		s.mu.Unlock()
-		return Response{}, err
-	}
-	if runID, ok := s.byConv[c.ID]; ok {
-		if meta := s.runs[runID]; meta != nil && !meta.finished {
-			s.mu.Unlock()
-			return Response{}, fmt.Errorf("loop: agent already running for conversation %d — /loop audit starts on landed work", c.ID)
+	// C10 admission (P1): the one-loop fold AND the started-row append
+	// share ONE critical section — previously the fold ran after Unlock,
+	// and two concurrent /loop admissions could both pass it and double
+	// start. Refusal precedence over "already active" is unchanged from
+	// the pre-fix order (distill gate > running agent > active loop >
+	// arg errors), so the section spans the arg refusals too; a human-rate
+	// slash pays the git probes under s.mu for atomicity.
+	ev, err := func() (store.Event, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		// Slash integrity gates (the /panel precedent): an in-flight AUTO
+		// distill is cancelled pre-note; a manual one refuses.
+		if err := s.gateAutoDistillForSendLocked(ctx, c.ID); err != nil {
+			return store.Event{}, err
 		}
-	}
-	st, _, err := s.loopActiveState(ctx, c.ID)
-	s.mu.Unlock()
-	if err != nil {
-		return Response{}, err
-	}
-	if st != nil {
-		return Response{}, fmt.Errorf("loop: a %s loop is already %s for this conversation%s — /loop resume or /loop stop first",
-			st.mode, st.status, loopCauseSuffix(st))
-	}
+		if runID, ok := s.byConv[c.ID]; ok {
+			if meta := s.runs[runID]; meta != nil && !meta.finished {
+				return store.Event{}, fmt.Errorf("loop: agent already running for conversation %d — /loop audit starts on landed work", c.ID)
+			}
+		}
+		st, _, err := s.loopActiveState(ctx, c.ID)
+		if err != nil {
+			return store.Event{}, err
+		}
+		if st != nil {
+			return store.Event{}, loopAlreadyActiveError(st)
+		}
 
-	base := flags["base"]
-	if base == "" {
-		if base, err = git.CurrentSHA(s.projectRoot); err != nil {
-			return Response{}, fmt.Errorf("loop: read main HEAD: %w", err)
+		base := flags["base"]
+		if base == "" {
+			if base, err = git.CurrentSHA(s.projectRoot); err != nil {
+				return store.Event{}, fmt.Errorf("loop: read main HEAD: %w", err)
+			}
 		}
-	}
-	rounds, budget := loopMaxRounds(), loopBudgetTokens()
-	if v := flags["rounds"]; v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
-			rounds = n
+		rounds, budget := loopMaxRounds(), loopBudgetTokens()
+		if v := flags["rounds"]; v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+				rounds = n
+			}
 		}
-	}
-	if v := flags["budget"]; v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 100_000 {
-			budget = n
+		if v := flags["budget"]; v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 100_000 {
+				budget = n
+			}
 		}
-	}
-	auditors := loopAuditorModels()
-	if len(auditors) == 0 {
-		return Response{}, fmt.Errorf("loop: no auditor models — set the 'review:' line (or loop_auditor_models:) in prefs.md")
-	}
+		auditors := loopAuditorModels()
+		if len(auditors) == 0 {
+			return store.Event{}, fmt.Errorf("loop: no auditor models — set the 'review:' line (or loop_auditor_models:) in prefs.md")
+		}
 
-	// SEED listing (V6): the conversation's pending diffs ride the started
-	// row; the driver lands each via s.autoLand verbatim first.
-	pending, err := s.store.ListPendingDiffs(ctx, c.ID)
-	if err != nil {
-		return Response{}, fmt.Errorf("loop: list pending diffs: %w", err)
-	}
-	// nothing_to_audit (V6): no diffs to seed, an empty accumulated
-	// subject, and no explicit base to audit from — refuse pre-journal.
-	if len(pending) == 0 && flags["base"] == "" {
-		subject, derr := git.DiffRange(s.projectRoot, base, "HEAD")
-		if derr != nil {
-			return Response{}, fmt.Errorf("loop: resolve subject: %w", derr)
+		// SEED listing (V6): the conversation's pending diffs ride the
+		// started row; the driver lands each via s.autoLand verbatim
+		// first.
+		pending, err := s.store.ListPendingDiffs(ctx, c.ID)
+		if err != nil {
+			return store.Event{}, fmt.Errorf("loop: list pending diffs: %w", err)
 		}
-		if strings.TrimSpace(subject) == "" {
-			return Response{}, fmt.Errorf("loop: nothing_to_audit — no pending diffs and no accumulated diff (pass base=<sha> to audit a range)")
+		// nothing_to_audit (V6): no diffs to seed, an empty accumulated
+		// subject, and no explicit base to audit from — refuse
+		// pre-journal.
+		if len(pending) == 0 && flags["base"] == "" {
+			subject, derr := git.DiffRange(s.projectRoot, base, "HEAD")
+			if derr != nil {
+				return store.Event{}, fmt.Errorf("loop: resolve subject: %w", derr)
+			}
+			if strings.TrimSpace(subject) == "" {
+				return store.Event{}, fmt.Errorf("loop: nothing_to_audit — no pending diffs and no accumulated diff (pass base=<sha> to audit a range)")
+			}
 		}
-	}
 
-	seedIDs := make([]int64, 0, len(pending))
-	for _, d := range pending {
-		seedIDs = append(seedIDs, d.ID)
-	}
-	if err := s.journalLoopSlash(ctx, c, "/loop audit "+args); err != nil {
-		return Response{}, err
-	}
-	auditorLabels := make([]string, 0, len(auditors))
-	for _, m := range auditors {
-		auditorLabels = append(auditorLabels, m.model+"@"+m.provider)
-	}
-	// The loop's id IS this row's seq (the lock's convention); the fold
-	// derives it from seq (loop_started rows carry loop_id 0 — mutating
-	// the payload post-append would break journal purity).
-	ev, err := s.journalLoop(ctx, c.ID, 0, loopModeAudit, loopKindStarted, map[string]interface{}{
-		"base":          base,
-		"max_rounds":    rounds,
-		"budget_tokens": budget,
-		"hold_severity": loopHoldSeverity(),
-		"auditors":      auditorLabels,
-		"seed_diffs":    seedIDs,
-	}, 0)
+		seedIDs := make([]int64, 0, len(pending))
+		for _, d := range pending {
+			seedIDs = append(seedIDs, d.ID)
+		}
+		if err := s.journalLoopSlash(ctx, c, "/loop audit "+args); err != nil {
+			return store.Event{}, err
+		}
+		auditorLabels := make([]string, 0, len(auditors))
+		for _, m := range auditors {
+			auditorLabels = append(auditorLabels, m.model+"@"+m.provider)
+		}
+		// The loop's id IS this row's seq (the lock's convention); the
+		// fold derives it from seq (loop_started rows carry loop_id 0 —
+		// mutating the payload post-append would break journal purity).
+		return s.journalLoop(ctx, c.ID, 0, loopModeAudit, loopKindStarted, map[string]interface{}{
+			"base":          base,
+			"max_rounds":    rounds,
+			"budget_tokens": budget,
+			"hold_severity": loopHoldSeverity(),
+			"auditors":      auditorLabels,
+			"seed_diffs":    seedIDs,
+		}, 0)
+	}()
 	if err != nil {
 		return Response{}, err
 	}
@@ -240,13 +253,15 @@ func (s *Server) loopStartTasks(ctx context.Context, c *store.Conversation, args
 	if adapter.ReadSettings().AutoApply != "main" {
 		return Response{}, fmt.Errorf("loop: /loop tasks requires auto_apply: main (the implement stage's review IS the auto-land pipeline)")
 	}
+	// Early fold: fast "already active" and queue-goal derivation, both
+	// pre-any-side-effect (the locked admission below re-folds — this one
+	// is a UX shortcut, never the atomic check).
 	st, events, err := s.loopActiveState(ctx, c.ID)
 	if err != nil {
 		return Response{}, err
 	}
 	if st != nil {
-		return Response{}, fmt.Errorf("loop: a %s loop is already %s for this conversation%s — /loop resume or /loop stop first",
-			st.mode, st.status, loopCauseSuffix(st))
+		return Response{}, loopAlreadyActiveError(st)
 	}
 	// Flags lead (P2): only the leading run of k=v tokens parses as
 	// options; the REST is the task source. A k=v-looking token inside
@@ -280,19 +295,6 @@ func (s *Server) loopStartTasks(ctx context.Context, c *store.Conversation, args
 		}
 	}
 
-	s.mu.Lock()
-	if err := s.gateAutoDistillForSendLocked(ctx, c.ID); err != nil {
-		s.mu.Unlock()
-		return Response{}, err
-	}
-	if runID, ok := s.byConv[c.ID]; ok {
-		if meta := s.runs[runID]; meta != nil && !meta.finished {
-			s.mu.Unlock()
-			return Response{}, fmt.Errorf("loop: agent already running for conversation %d", c.ID)
-		}
-	}
-	s.mu.Unlock()
-
 	rounds, budget := loopMaxRounds(), loopBudgetTokens()
 	if v := flags["rounds"]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
@@ -307,9 +309,6 @@ func (s *Server) loopStartTasks(ctx context.Context, c *store.Conversation, args
 	base, err := git.CurrentSHA(s.projectRoot)
 	if err != nil {
 		return Response{}, fmt.Errorf("loop: read main HEAD: %w", err)
-	}
-	if err := s.journalLoopSlash(ctx, c, "/loop tasks "+args); err != nil {
-		return Response{}, err
 	}
 	auditors := loopAuditorModels()
 	auditorLabels := make([]string, 0, len(auditors))
@@ -331,7 +330,36 @@ func (s *Server) loopStartTasks(ctx context.Context, c *store.Conversation, args
 	if len(goalSeqs) > 0 {
 		payload["task_goal_seqs"] = goalSeqs
 	}
-	ev, err := s.journalLoop(ctx, c.ID, 0, loopModeTasks, loopKindStarted, payload, 0)
+
+	// C10 admission (P1): the one-loop fold AND the started-row append
+	// share ONE critical section — previously the fold ran fully unlocked
+	// (before parsing), and a sibling /loop admission interleaved between
+	// it and the append double-started. The locked re-fold is the only
+	// atomic check; the early fold above stays a fast pre-side-effect
+	// refusal so parse/gate errors still lose to "already active".
+	ev, err := func() (store.Event, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.gateAutoDistillForSendLocked(ctx, c.ID); err != nil {
+			return store.Event{}, err
+		}
+		if runID, ok := s.byConv[c.ID]; ok {
+			if meta := s.runs[runID]; meta != nil && !meta.finished {
+				return store.Event{}, fmt.Errorf("loop: agent already running for conversation %d", c.ID)
+			}
+		}
+		st, _, err := s.loopActiveState(ctx, c.ID)
+		if err != nil {
+			return store.Event{}, err
+		}
+		if st != nil {
+			return store.Event{}, loopAlreadyActiveError(st)
+		}
+		if err := s.journalLoopSlash(ctx, c, "/loop tasks "+args); err != nil {
+			return store.Event{}, err
+		}
+		return s.journalLoop(ctx, c.ID, 0, loopModeTasks, loopKindStarted, payload, 0)
+	}()
 	if err != nil {
 		return Response{}, err
 	}

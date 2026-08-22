@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,7 +130,9 @@ func armPendingNow(srv *Server, convID int64, trigger string) {
 // fold parks in its COMMITTED phase (post-checkpoint, pre-marker) for ~3s,
 // so P1-2 tests can drive sends / synthetic journal growth at a
 // deterministic point of the fold. The distill one-shot and agent runs
-// stay fast.
+// stay fast. P1-12: auto folds skip the learner by default, so every
+// consumer of this seam must arm `learner_auto: on` in prefs — the tests
+// pin the committed-phase gate, not the learner scheduler posture.
 const autoSlowLearnerWrapper = `#!/bin/sh
 prompt_file="$2"
 output_file="$3"
@@ -638,6 +643,111 @@ func TestAutoDistillFailureJournals(t *testing.T) {
 	}
 	if markers := payloadsByAction(t, allEvents(t, rig, convID), "distill"); len(markers) != 0 {
 		t.Errorf("failed distill left markers: %v", markers)
+	}
+}
+
+// TestAutoDistillSkipsLearnerByDefault (P1-12): an auto fold without prefs
+// never invokes the learner — no learner prompt is even built (wrapper mark
+// seam stays empty), zero learner moa traffic (an armed learner_via: moa
+// stub records no call), and the fold journals no memory_propose while the
+// fold itself succeeds. The manual /distill on the same journal still runs
+// the full learner path.
+func TestAutoDistillSkipsLearnerByDefault(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	mark := filepath.Join(t.TempDir(), "learner.mark")
+	t.Setenv("ODO_LEARNER_MARK", mark)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerMarkWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Auto fold\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", testLearnerOneRule)
+	// Even on the moa route an auto fold must ship no learner traffic: arm
+	// the route against a stub whose only verdict is "was I called".
+	var moaCalls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		moaCalls.Add(1)
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer srv.Close()
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+	writePrefs(t, home, "learner_via: moa\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	journalWindow(t, rig, convID, 6, 3000)
+
+	armPendingNow(rig.server, convID, distillTriggerIdle)
+	rig.server.runAutoDistill(convID, distillTriggerIdle)
+
+	if rows := autoRows(t, rig, convID, "fired"); len(rows) != 1 {
+		t.Fatalf("fired rows = %v, want 1 (the fold itself succeeds)", rows)
+	}
+	if n := learnerRuns(t, mark); n != 0 {
+		t.Errorf("learner one-shots on auto fold = %d, want 0", n)
+	}
+	if n := moaCalls.Load(); n != 0 {
+		t.Errorf("learner moa traffic on auto fold = %d calls, want 0", n)
+	}
+	if proposes := payloadsByAction(t, allEvents(t, rig, convID), "memory_propose"); len(proposes) != 0 {
+		t.Errorf("memory_propose rows on auto fold = %d, want 0", len(proposes))
+	}
+
+	// The manual distill on the same journal runs the learner exactly as
+	// before: the learner_via line comes off (OMP route), one one-shot
+	// fires, one proposal batch lands.
+	writePrefs(t, home, "")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT",
+		`{"memory":[{"rule":"Always run go test ./... before claiming done.","evidence":"main-epoch-2","contradicts":""}],"reaffirm":[]}`)
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
+	rig.pollUntilDone(t, convID)
+	d := rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
+	if n := learnerRuns(t, mark); n != 1 {
+		t.Errorf("learner one-shots after manual distill = %d, want 1", n)
+	}
+	if d.MemoryProposals != 1 {
+		t.Errorf("manual distill MemoryProposals = %d, want 1", d.MemoryProposals)
+	}
+	if proposes := payloadsByAction(t, allEvents(t, rig, convID), "memory_propose"); len(proposes) != 1 {
+		t.Errorf("memory_propose rows after manual distill = %d, want 1", len(proposes))
+	}
+}
+
+// TestLearnerAutoPrefRestores (P1-12): the `learner_auto: on` escape hatch
+// opts an auto fold back into the learner pass — one one-shot ships on the
+// automatic trigger and its batch journals.
+func TestLearnerAutoPrefRestores(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	mark := filepath.Join(t.TempDir(), "learner.mark")
+	t.Setenv("ODO_LEARNER_MARK", mark)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerMarkWrapper))
+	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Auto fold\n")
+	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", testLearnerOneRule)
+	writePrefs(t, home, "learner_auto: on\n")
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	journalWindow(t, rig, convID, 6, 3000)
+
+	armPendingNow(rig.server, convID, distillTriggerIdle)
+	rig.server.runAutoDistill(convID, distillTriggerIdle)
+
+	if rows := autoRows(t, rig, convID, "fired"); len(rows) != 1 {
+		t.Fatalf("fired rows = %v, want 1", rows)
+	}
+	if n := learnerRuns(t, mark); n != 1 {
+		t.Errorf("learner one-shots on opted-in auto fold = %d, want 1", n)
+	}
+	if proposes := payloadsByAction(t, allEvents(t, rig, convID), "memory_propose"); len(proposes) != 1 {
+		t.Errorf("memory_propose rows = %d, want 1 (opt-in restores the batch)", len(proposes))
 	}
 }
 
@@ -1389,7 +1499,11 @@ func TestAutoUrgentUpgradeSupersedesIdle(t *testing.T) {
 // window and replay instead of folded-away-unseen.
 func TestAutoCommittedPhaseSendFoldsPinnedWindow(t *testing.T) {
 	root := initRepo(t)
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// P1-12: auto folds skip the learner by default — opt back in so the
+	// slow-learner seam keeps the committed phase open for this test.
+	writePrefs(t, home, "learner_auto: on\n")
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, autoSlowLearnerWrapper))
 	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Pinned fold\n")
 	rig := startRig(t, root)
@@ -1484,7 +1598,11 @@ func TestAutoCommittedPhaseSendFoldsPinnedWindow(t *testing.T) {
 // fold over the grown window.
 func TestAutoCommittedPhaseSupersededByActivity(t *testing.T) {
 	root := initRepo(t)
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// P1-12: auto folds skip the learner by default — opt back in so the
+	// slow-learner seam keeps the committed phase open for this test.
+	writePrefs(t, home, "learner_auto: on\n")
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, autoSlowLearnerWrapper))
 	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Should never be linked\n")
 	rig := startRig(t, root)
@@ -1550,7 +1668,11 @@ func TestAutoCommittedPhaseSupersededByActivity(t *testing.T) {
 // and the epoch moves.
 func TestAutoCommittedPhaseBookkeepingKeepsFold(t *testing.T) {
 	root := initRepo(t)
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// P1-12: auto folds skip the learner by default — opt back in so the
+	// slow-learner seam keeps the committed phase open for this test.
+	writePrefs(t, home, "learner_auto: on\n")
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, autoSlowLearnerWrapper))
 	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Fold with mid-fold bookkeeping\n")
 	rig := startRig(t, root)

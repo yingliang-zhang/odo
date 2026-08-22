@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -318,6 +319,7 @@ func TestJournalCLIRejectsBadArgs(t *testing.T) {
 		{"search", "q", "--limit", "0"},
 		{"search", "q", "--limit=x"},
 		{"search", "q", "--limit"},
+		{"rotate", "extra"},
 	} {
 		if _, _, code := captureCLI(t, func() int { return runJournalCLI(args) }); code != 2 {
 			t.Errorf("args %v: exit %d, want 2 (usage)", args, code)
@@ -344,6 +346,130 @@ func TestJournalCLIFromRunWorktree(t *testing.T) {
 	if seqs := stdoutSeqs(t, stdout); fmt.Sprint(seqs) != "[1 2 3]" {
 		t.Errorf("folded from worktree seqs = %v, want [1 2 3]", seqs)
 	}
+}
+
+// fileDigest pins rotate's move-not-delete contract: archived bytes are
+// the SAME bytes (a rename), not a rewrite.
+func fileDigest(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// TestJournalCLIRotateRefusesLiveDaemon pins the fail-closed half: while
+// the instance lock says a daemon is live (main.go's own liveness
+// authority — the TestInstanceLockGuard fake), rotate refuses cleanly
+// naming the stop path and disturbs nothing (journal intact, no archive
+// dir created by the refusal).
+func TestJournalCLIRotateRefusesLiveDaemon(t *testing.T) {
+	root := t.TempDir()
+	seedJournal(t, root, []string{"user_message"})
+	t.Chdir(root)
+
+	lock, err := acquireInstanceLock(filepath.Join(root, ".odo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	_, stderr, code := captureCLI(t, func() int {
+		return runJournalCLI([]string{"rotate"})
+	})
+	if code != 1 {
+		t.Fatalf("rotate under a live daemon: exit %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "live odo daemon") || !strings.Contains(stderr, "stop the daemon first") {
+		t.Errorf("refusal stderr %q, want it to name the live daemon and how to stop it", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".odo", "journal.sqlite")); err != nil {
+		t.Errorf("journal disturbed by a refused rotate: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".odo", "archive")); !os.IsNotExist(err) {
+		t.Error("archive dir created by a refused rotate — refuse must precede any filesystem act")
+	}
+}
+
+// TestJournalCLIRotateOffline pins the offline path: journal.sqlite and
+// every present sidecar move-not-delete into .odo/archive/ under one
+// timestamped basename, stdout prints what happened, and the journal the
+// daemon recreates on its next start is empty (store.Open's own migrate —
+// rotate never pre-creates one).
+func TestJournalCLIRotateOffline(t *testing.T) {
+	root := t.TempDir()
+	seedJournal(t, root, []string{"user_message", "agent_text", "agent_done"})
+	t.Chdir(root)
+
+	dbPath := filepath.Join(root, ".odo", "journal.sqlite")
+	dbSum := fileDigest(t, dbPath)
+	// The sidecars the store's WAL DSN can leave, plus pre-WAL rollback
+	// residue — all planted with known bytes so byte-identity is checkable.
+	for _, sfx := range []string{"-wal", "-shm", "-journal"} {
+		if err := os.WriteFile(dbPath+sfx, []byte("sidecar-bytes"+sfx), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdout, stderr, code := captureCLI(t, func() int {
+		return runJournalCLI([]string{"rotate"})
+	})
+	if code != 0 {
+		t.Fatalf("offline rotate: exit %d, stderr %q", code, stderr)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, ".odo", "archive"))
+	if err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Fatalf("archive holds %d files, want 4 (db + 3 sidecars): %v", len(entries), entries)
+	}
+	names := map[string]bool{}
+	for _, e := range entries {
+		names[e.Name()] = true
+	}
+	// One shared timestamp across the family: journal-<stamp>.sqlite(+*).
+	var base string
+	for n := range names {
+		if strings.HasSuffix(n, ".sqlite") {
+			base = strings.TrimSuffix(n, ".sqlite")
+		}
+	}
+	if !strings.HasPrefix(base, "journal-") {
+		t.Fatalf("archived db name %q, want journal-<stamp>.sqlite", base+".sqlite")
+	}
+	for _, sfx := range []string{".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal"} {
+		if !names[base+sfx] {
+			t.Errorf("archive missing %s", base+sfx)
+		}
+		// The pre-rotate path must be GONE (moved, not copied).
+		if _, err := os.Stat(dbPath + strings.TrimPrefix(sfx, ".sqlite")); !os.IsNotExist(err) {
+			t.Errorf("journal.sqlite%s still in .odo/ after rotate", strings.TrimPrefix(sfx, ".sqlite"))
+		}
+	}
+	if got := fileDigest(t, filepath.Join(root, ".odo", "archive", base+".sqlite")); got != dbSum {
+		t.Errorf("archived db digest changed — rotate must MOVE bytes, got %s want %s", got, dbSum)
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".odo", "archive", base+".sqlite-wal"))
+	if err != nil || string(b) != "sidecar-bytes-wal" {
+		t.Errorf("archived wal bytes = %q, want the planted sidecar verbatim", b)
+	}
+	if !strings.Contains(stdout, base+".sqlite") || !strings.Contains(stdout, "recreates an empty journal") {
+		t.Errorf("stdout %q, want the archived name + the recreate note", stdout)
+	}
+
+	// Next-start behavior: store.Open recreates a schema-complete EMPTY
+	// journal at the old path (no project row) — rotate pre-created nothing.
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("recreated journal open: %v", err)
+	}
+	if _, err := st.GetProjectByRoot(context.Background(), root); err == nil {
+		t.Error("recreated journal should be empty (project row present)")
+	}
+	st.Close()
 }
 
 func TestJournalCLIReadOnlyNeverWrites(t *testing.T) {

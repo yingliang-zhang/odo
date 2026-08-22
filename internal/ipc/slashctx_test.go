@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 )
@@ -120,6 +121,92 @@ func recordingMoaServer(t *testing.T, text string, rec *moaRecorder) *httptest.S
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// TestPanelLegOuterDeadline (P1 #9): a hung panel leg dies at the leg's
+// outer deadline as a typed error, and the consult still answers on the
+// surviving legs — the pre-fix shape held the RPC for hours (16 tool
+// rounds × one worst-case attempt chain).
+func TestPanelLegOuterDeadline(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	writePrefs(t, home, "review: pm1@test, pm2@test\n")
+	// pm1 answers instantly; pm2's bounded hang (2s) far outlives the
+	// client's 50ms leg deadline — the dead-line leg must error while the
+	// alive leg completes, and the bound keeps srv.Close deterministic.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		text := "alive-leg-answer"
+		if req.Model == "pm2" {
+			time.Sleep(2 * time.Second)
+			text = "too-late-answer"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"content":     []map[string]string{{"type": "text", "text": text}},
+			"stop_reason": "end_turn",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MOA_BASE_URL", srv.URL)
+	t.Setenv("SUDO_CODING_KEY", "test-key")
+
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	rig.server.legTimeoutForTest = 50 * time.Millisecond
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	start := time.Now()
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel deadline probe"})
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("/panel held %v — the hung leg must die at the leg deadline, not hold the consult", elapsed)
+	}
+
+	answeredDone := false
+	for _, ev := range rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events {
+		switch ev.Type {
+		case store.EventAgentDone:
+			var p struct {
+				Panel bool `json:"panel"`
+			}
+			if err := json.Unmarshal(ev.Payload, &p); err == nil && p.Panel {
+				answeredDone = true
+			}
+		case store.EventAgentText:
+			var p struct {
+				Panel  bool `json:"panel"`
+				Models []struct {
+					Model string `json:"model"`
+					Text  string `json:"text"`
+					Error string `json:"error"`
+				} `json:"models"`
+			}
+			if err := json.Unmarshal(ev.Payload, &p); err != nil || !p.Panel {
+				continue
+			}
+			for _, m := range p.Models {
+				switch m.Model {
+				case "pm1@test":
+					if m.Text != "alive-leg-answer" {
+						t.Errorf("alive leg text = %q, want the survivor's answer", m.Text)
+					}
+				case "pm2@test":
+					if !strings.Contains(m.Error, "deadline") {
+						t.Errorf("hung leg error = %q, want a typed deadline error", m.Error)
+					}
+				}
+			}
+		}
+	}
+	if !answeredDone {
+		t.Error("agent_done{panel:true} missing — the consult must complete on the surviving legs")
+	}
 }
 
 // seedSlashFixture seeds every memory layer the slash block must carry:
@@ -254,6 +341,7 @@ func TestPanelContextBlock(t *testing.T) {
 	// genuine user turn and the prior slash USER message stay in.
 	rec2 := &moaRecorder{}
 	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "panel-answer-beta", rec2).URL)
+	resetSharedMoa(t, rig.server) // the shared client (P1 #10) consumed the alpha URL
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel second question"})
 	system = rec2.all()[0].System
 	if strings.Contains(system, "panel-answer-alpha") {
@@ -313,6 +401,7 @@ func TestPanelContextScopeProjectOnly(t *testing.T) {
 	writePrefs(t, home, "review: pm1@test\npanel_context_scope: bogus\n")
 	rec2 := &moaRecorder{}
 	t.Setenv("MOA_BASE_URL", recordingMoaServer(t, "panel-answer", rec2).URL)
+	resetSharedMoa(t, rig.server) // the shared client (P1 #10) consumed the alpha URL
 	sent2 := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/panel scoped again"})
 	if system = rec2.all()[0].System; !strings.Contains(system, "USERPRINCIPLE") {
 		t.Error("unknown panel_context_scope must fail to default (full), not to silence")

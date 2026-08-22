@@ -19,6 +19,31 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+// TestOpenReadOnlyDisablesMmap: the CLI reader shares the daemon's live
+// WAL file, so it must carry the same SIGBUS-therapy DSN hardening.
+func TestOpenReadOnlyDisablesMmap(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "journal.sqlite")
+	w, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	r, err := OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer r.Close()
+	var mmapSize int64
+	if err := r.DB().QueryRowContext(context.Background(), `PRAGMA mmap_size`).Scan(&mmapSize); err != nil {
+		t.Fatalf("mmap_size: %v", err)
+	}
+	if mmapSize != 0 {
+		t.Errorf("mmap_size = %d, want 0 (mmap disabled)", mmapSize)
+	}
+}
+
 func TestOpenMigrates(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -49,6 +74,24 @@ func TestOpenMigrates(t *testing.T) {
 	}
 	if mode != "wal" {
 		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+
+	// DSN hardening (SIGBUS therapy of record + explicit sync durability):
+	// memory-mapped I/O is off and commits fsync at FULL, not a build
+	// default that can drift under us.
+	var syncMode int
+	if err := s.DB().QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&syncMode); err != nil {
+		t.Fatalf("synchronous: %v", err)
+	}
+	if syncMode != 2 {
+		t.Errorf("synchronous = %d, want 2 (FULL)", syncMode)
+	}
+	var mmapSize int64
+	if err := s.DB().QueryRowContext(ctx, `PRAGMA mmap_size`).Scan(&mmapSize); err != nil {
+		t.Fatalf("mmap_size: %v", err)
+	}
+	if mmapSize != 0 {
+		t.Errorf("mmap_size = %d, want 0 (mmap disabled)", mmapSize)
 	}
 
 	// Foreign keys are enforced: an event referencing a missing conversation fails.

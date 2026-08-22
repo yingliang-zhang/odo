@@ -9,20 +9,29 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
+	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // M4 (Learning): the learner pass runs at the distill epoch boundary,
-// proposing behavior rules for .odo/memory.md (project) and ~/.odo/user.md
-// (global, recurrence-gated). Proposals land in the journal first; the
-// daemon remains the only writer (ADR-0003 inv 1, 7). The default decision
-// is the review panel's (panel-gated memory apply — distillCore auto-applies
-// after the fold commits); a human apply_memory remains as the fallback
-// (no review models configured, refused auto-apply, manual salvage).
+// proposing behavior rules for .odo/memory.md (project). Proposals land in
+// the journal first; the daemon remains the only writer (ADR-0003 inv 1, 7).
+// The default decision is the review panel's (panel-gated memory apply —
+// distillCore auto-applies after the fold commits); a human apply_memory
+// remains as the fallback (no review models configured, refused auto-apply,
+// manual salvage) and still consumes legacy user.md batches.
+//
+// P1-12 scheduler posture: a MANUAL distill always runs the learner; an
+// automatic fold skips it by default (learnerAutoEnabled — 28 automatic
+// runs over 4 days produced zero applied rules). Skills (procedures)
+// distillation is opt-in via skillsDistillEnabled. The user.md promotion
+// branch and its sibling-projects prompt input are deleted outright: the
+// ≥2-projects recurrence gate could never fire with a one-row projects
+// registry (dead code), and staging sibling memory.md files piped
+// cross-project content into the gateway on every run.
 
 const (
 	// learnerTimeout bounds the one-shot orchestrator learner run that
@@ -225,20 +234,17 @@ func normalizeRule(s string) string {
 
 // learnerResult is the JSON object the orchestrator one-shot must emit
 // (spec §2 output contract). M9 adds the optional `procedures` array for
-// skill distillation.
+// skill distillation; P1-12 removed the `user` array with the promotion
+// branch (a stray key in an old fixture simply parses to nothing).
 type learnerResult struct {
 	Memory []struct {
 		Rule        string `json:"rule"`
 		Evidence    string `json:"evidence"`
 		Contradicts string `json:"contradicts"`
 	} `json:"memory"`
-	User []struct {
-		Rule     string   `json:"rule"`
-		Projects []string `json:"projects"`
-	} `json:"user"`
 	// M9: reusable workflows discovered in this epoch. The daemon composes
 	// the SKILL.md frontmatter from these fields — the LLM never produces
-	// YAML directly.
+	// YAML directly. Read by the vet only when skillsDistillEnabled.
 	Procedures []struct {
 		Name        string   `json:"name"`
 		Description string   `json:"description"`
@@ -266,20 +272,12 @@ func parseLearnerOutput(raw string) (*learnerResult, error) {
 	return &res, nil
 }
 
-// siblingMemory is one registered sibling project's memory.md content as
-// staged for the learner (name from the registry row).
-type siblingMemory struct {
-	name    string
-	content string
-}
-
 // vetoStats counts daemon-side evidence vetoes (journaled in the propose
-// event's stats, spec §2). M9 adds procedure (skill) counters.
+// event's stats, spec §2). M9 adds procedure (skill) counters; P1-12
+// removed the user counters with the promotion branch.
 type vetoStats struct {
 	MemoryKept        int `json:"memory_kept"`
 	MemoryDropped     int `json:"memory_dropped"`
-	UserKept          int `json:"user_kept"`
-	UserDropped       int `json:"user_dropped"`
 	ProceduresKept    int `json:"procedures_kept,omitempty"`
 	ProceduresDropped int `json:"procedures_dropped,omitempty"`
 }
@@ -339,16 +337,15 @@ func isSingleTokenKeyword(kw string) bool {
 // self-tagging can't be trusted with (ADR-0003 inv 4 discipline):
 //   - memory proposals: evidence must equal the just-written note name and the
 //     rule must not already appear verbatim in current memory.md;
-//   - user proposals: the normalized rule must appear in ≥2 distinct
-//     registered projects' staged inputs ({own memory.md, new note} ∪ sibling
-//     memory.mds); kept proposals get daemon-verified Projects names.
-//     (With <2 registered projects this gate can never pass.)
-//   - M9 procedures: slugified kebab-case name, body cap, keyword single-token
-//     check, cap-3, batch-internal dedupe, and scanSkills conflict detection.
+//   - M9 procedures (only when proceduresOn — skillsDistillEnabled):
+//     slugified kebab-case name, body cap, keyword single-token check, cap-3,
+//     batch-internal dedupe, and scanSkills conflict detection. With
+//     proceduresOn false the prompt never offered the contract, so a
+//     procedures array in the answer is out-of-contract input — ignored
+//     wholesale, and never counted as gate drops in the stats.
 //
-// ownName names the bound project in the verified projects list.
 // projectRoot is used for the scanSkills conflict check (M9).
-func vetLearnerOutput(res *learnerResult, noteName, ownMem, noteContent, ownName string, siblings []siblingMemory, projectRoot string) (proposals []MemoryProposal, procedures []vettedProcedure, reaffirm []string, stats vetoStats) {
+func vetLearnerOutput(res *learnerResult, noteName, ownMem, projectRoot string, proceduresOn bool) (proposals []MemoryProposal, procedures []vettedProcedure, reaffirm []string, stats vetoStats) {
 	for _, mp := range res.Memory {
 		if mp.Rule == "" || mp.Evidence != noteName || strings.Contains(ownMem, mp.Rule) {
 			stats.MemoryDropped++
@@ -362,32 +359,7 @@ func vetLearnerOutput(res *learnerResult, noteName, ownMem, noteContent, ownName
 		stats.MemoryKept++
 	}
 
-	// Per-project staged input haystacks (normalized): bound project gets
-	// {memory.md, new note}; each sibling gets its memory.md.
 	norm := normalizeRule
-	ownHay := norm(ownMem) + "\n" + norm(noteContent)
-	for _, up := range res.User {
-		nr := norm(up.Rule)
-		if nr == "" {
-			stats.UserDropped++
-			continue
-		}
-		var matched []string
-		if strings.Contains(ownHay, nr) {
-			matched = append(matched, ownName)
-		}
-		for _, sib := range siblings {
-			if strings.Contains(norm(sib.content), nr) {
-				matched = append(matched, sib.name)
-			}
-		}
-		if len(matched) < 2 {
-			stats.UserDropped++ // recurrence gate: ≥2 distinct projects
-			continue
-		}
-		proposals = append(proposals, MemoryProposal{Target: "user.md", Rule: up.Rule, Projects: matched})
-		stats.UserKept++
-	}
 
 	// Reaffirm targets survive only if they name an existing daemon-formatted
 	// rule (an opaque line has no reaffirmed field to bump).
@@ -401,6 +373,10 @@ func vetLearnerOutput(res *learnerResult, noteName, ownMem, noteContent, ownName
 		if existing[norm(t)] {
 			reaffirm = append(reaffirm, t)
 		}
+	}
+
+	if !proceduresOn {
+		return proposals, nil, reaffirm, stats
 	}
 
 	// M9: procedure (skill) vetting. The daemon composes the SKILL.md
@@ -472,40 +448,37 @@ func vetLearnerOutput(res *learnerResult, noteName, ownMem, noteContent, ownName
 	return proposals, procedures, reaffirm, stats
 }
 
-// learnerPrompt renders the learner one-shot prompt with inputs in the
-// spec's stable order: new note → own memory.md → siblings → user.md.
-func learnerPrompt(noteName, noteContent, ownMem string, siblings []siblingMemory, userMem string) string {
+// learnerPrompt renders the learner one-shot prompt: the new epoch note
+// plus this project's current memory.md — the only content that crosses
+// the gateway now (P1-12 deleted the sibling-projects section and the
+// user.md promotion clause). proceduresOn (skillsDistillEnabled) appends
+// the M9 procedures contract; the prompt and the vet gate read the same
+// flag so the contract is never half-present.
+func learnerPrompt(noteName, noteContent, ownMem string, proceduresOn bool) string {
+	goal := "Extract behavior-shaping rules"
+	procsShape := ""
+	procsRule := ""
+	if proceduresOn {
+		goal = "Extract behavior-shaping rules and reusable procedures"
+		procsShape = `,"procedures":[{"name":"<kebab-case>","description":"<one line>","keywords":["k1","k2"],"body":"# Title\n\nSteps..."}]`
+		procsRule = "- procedures: reusable workflows discovered in this epoch that would help future sessions. Each must be a multi-step how-to with clear trigger conditions. Name must be kebab-case [a-z0-9-]+. Max 3 procedures. Keywords must be single tokens (no commas, no spaces). Body is markdown starting with a \"# Title\" heading. Do NOT include YAML frontmatter — the daemon composes it.\n"
+	}
 	var b strings.Builder
-	b.WriteString(`You are running odo's memory learner pass. Extract behavior-shaping rules and reusable procedures from the newly distilled epoch note below. A rule is an imperative statement that changes what an agent DOES on every future run ("always run go test before claiming done", "prefer compact output") — not a record, fact, or narrative.
+	fmt.Fprintf(&b, `You are running odo's memory learner pass. %s from the newly distilled epoch note below. A rule is an imperative statement that changes what an agent DOES on every future run ("always run go test before claiming done", "prefer compact output") — not a record, fact, or narrative.
 
 Output JSON ONLY (no prose, no markdown fence), exactly this shape:
-{"memory":[{"rule":"<imperative>","evidence":"` + noteName + `","contradicts":""}],"user":[{"rule":"<imperative>","projects":["<p1>","<p2>"]}],"procedures":[{"name":"<kebab-case>","description":"<one line>","keywords":["k1","k2"],"body":"# Title\n\nSteps..."}],"reaffirm":["<existing rule text>"]}
+{"memory":[{"rule":"<imperative>","evidence":"%s","contradicts":""}]%s,"reaffirm":["<existing rule text>"]}
 
 Rules:
-- memory: behavioral rules from the NEW note only, absent from the current memory.md. "evidence" must be exactly "` + noteName + `". "contradicts" is optional: the verbatim text of one existing memory.md rule the new rule contradicts ("" otherwise).
-- user: a rule proposing promotion to the global user.md is allowed ONLY when the same rule (same meaning, any wording) already appears in at least 2 registered projects' inputs below (this project's memory.md or new note, plus sibling memory.md files). Name those projects in "projects". If fewer than 2 projects are shown, "user" must be [].
-- procedures: reusable workflows discovered in this epoch that would help future sessions. Each must be a multi-step how-to with clear trigger conditions. Name must be kebab-case [a-z0-9-]+. Max 3 procedures. Keywords must be single tokens (no commas, no spaces). Body is markdown starting with a "# Title" heading. Do NOT include YAML frontmatter — the daemon composes it.
-- reaffirm: optional list of memory.md rule texts from the CURRENT memory.md that the new note shows still being followed.
+- memory: behavioral rules from the NEW note only, absent from the current memory.md. "evidence" must be exactly "%s". "contradicts" is optional: the verbatim text of one existing memory.md rule the new rule contradicts ("" otherwise).
+%s- reaffirm: optional list of memory.md rule texts from the CURRENT memory.md that the new note shows still being followed.
 - Use empty arrays when nothing qualifies. Output the JSON object and nothing else.
 
-=== NEW EPOCH NOTE: ` + noteName + ` ===
-`)
+=== NEW EPOCH NOTE: %s ===
+`, goal, noteName, procsShape, noteName, procsRule, noteName)
 	b.WriteString(orEmpty(noteContent))
 	b.WriteString("\n\n=== CURRENT .odo/memory.md (this project) ===\n")
 	b.WriteString(orEmpty(ownMem))
-	b.WriteString("\n\n=== SIBLING PROJECTS' memory.md FILES ===\n")
-	if len(siblings) == 0 {
-		b.WriteString("(none registered)")
-	} else {
-		for i, sib := range siblings {
-			if i > 0 {
-				b.WriteString("\n")
-			}
-			fmt.Fprintf(&b, "--- project: %s ---\n%s", sib.name, orEmpty(sib.content))
-		}
-	}
-	b.WriteString("\n\n=== ~/.odo/user.md (global) ===\n")
-	b.WriteString(orEmpty(userMem))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -517,13 +490,35 @@ func orEmpty(s string) string {
 	return s
 }
 
+// learnerAutoEnabled reports whether the learner one-shot may ride an
+// AUTOMATIC distill (a manual /distill always runs it). Default off: 28
+// automatic learner runs over 4 days produced zero applied rules, so the
+// unconditional one-shot on every auto fold was pure spend — an epoch
+// stride (every N folds) would only thin a zero-yield run instead of
+// removing it, hence manual-only. Escape hatch: `learner_auto: on`
+// restores the pre-P1-12 always-on shape.
+func learnerAutoEnabled() bool {
+	return adapter.LoadPrefsRaw("learner_auto") == "on"
+}
+
+// skillsDistillEnabled reports whether the learner prompt offers the
+// procedures contract and the vet gate may emit skills proposals. Default
+// off: an accepted skill lands in .odo/skills and injects into every
+// prompt, so procedure distillation waits for the explicit
+// `skills_distill: on` opt-in until its landing-rate gate ships. Both the
+// prompt and the vet read this flag — the contract is never half-present.
+func skillsDistillEnabled() bool {
+	return adapter.LoadPrefsRaw("skills_distill") == "on"
+}
+
 // runLearner executes the learner one-shot for the just-distilled note (M9
 // refactor: no longer journals memory_propose internally). It returns the
-// vetted proposals (memory + user + skills), reaffirm targets, veto
-// stats, and — on the prefs `learner_via: moa` route (R-W3) — the
-// wire-request receipt (nil on the OMP route). handleDistill journals the
-// memory_propose after gating the skill proposals. On failure it journals
-// memory_update{layer:"learner", cause:"failed"} and returns empty results.
+// vetted proposals (memory, plus skills when skillsDistillEnabled),
+// reaffirm targets, veto stats, and — on the prefs `learner_via: moa`
+// route (R-W3) — the wire-request receipt (nil on the OMP route).
+// handleDistill journals the memory_propose after gating the skill
+// proposals. On failure it journals memory_update{layer:"learner",
+// cause:"failed"} and returns empty results.
 //
 // epoch is the distilled note's epoch (conversation epoch BEFORE the
 // increment), so batch identity is `latest distill newEpoch − 1` (spec §5).
@@ -537,10 +532,7 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 	}
 
 	ownMem := readProjectMemory(s.projectRoot) // prompt input is capped (§2)
-	ownName := filepath.Base(s.resolvedRoot)
-
-	sibs := siblingMemories(s.resolvedRoot)
-	userMem := readUserMemory()
+	procs := skillsDistillEnabled()
 
 	// R-W3: the prefs `learner_via:` switch picks the completion route
 	// (absent/"omp" → the historical OMP one-shot; "moa" → one direct
@@ -549,13 +541,13 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 	// parsed text, never an action.
 	rawText := ""
 	if resolveVia("learner", "learner_via") == viaMoa {
-		rawText, rec, err = runMoaOneShot(ctx, "learner", learnerPrompt(noteName, noteContent, ownMem, sibs, userMem))
+		rawText, rec, err = runMoaOneShot(ctx, s.sharedMoa(), "learner", learnerPrompt(noteName, noteContent, ownMem, procs))
 	} else {
 		ad := s.distillAdapter
 		if ad == nil {
 			ad = s.adapterFor("") // same fallback as runDistillAgent
 		}
-		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, sibs, userMem), learnerTimeout)
+		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, procs), learnerTimeout)
 	}
 	if err != nil {
 		fail(fmt.Errorf("learner run: %w", err))
@@ -568,7 +560,7 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 		// attestable even though the answer failed to parse.
 		return nil, nil, vetoStats{}, rec, nil
 	}
-	proposals, procedures, reaffirm, stats := vetLearnerOutput(res, noteName, ownMem, noteContent, ownName, sibs, s.projectRoot)
+	proposals, procedures, reaffirm, stats := vetLearnerOutput(res, noteName, ownMem, s.projectRoot, procs)
 
 	// M9: compose SKILL.md for each surviving procedure. The daemon
 	// assembles the frontmatter — the LLM never produces YAML.
@@ -585,38 +577,6 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 	}
 
 	return proposals, reaffirm, stats, rec, nil
-}
-
-// siblingMemories returns up to 3 registered sibling projects' memory.md
-// contents, newest-registered first (spec §2 input 3). The bound project
-// (resolved-root equality) is excluded. Reads exactly
-// filepath.Join(row.Root, ".odo", "memory.md") — roots were EvalSymlinks'd
-// at registration, no symlink resolution at read time.
-func siblingMemories(resolvedRoot string) []siblingMemory {
-	rows := registeredProjects()
-	sibs := make([]RegistryRow, 0, len(rows))
-	for _, r := range rows {
-		if r.Root == resolvedRoot {
-			continue
-		}
-		sibs = append(sibs, r)
-	}
-	sort.Slice(sibs, func(i, j int) bool { return sibs[i].Added > sibs[j].Added })
-	if len(sibs) > 3 {
-		sibs = sibs[:3]
-	}
-	out := make([]siblingMemory, 0, len(sibs))
-	for _, r := range sibs {
-		path := filepath.Join(r.Root, ".odo", memoryFileName)
-		if filepath.Clean(path) != filepath.Join(r.Root, ".odo", memoryFileName) {
-			continue // defensive: only the literal constructed path
-		}
-		out = append(out, siblingMemory{
-			name:    r.Name,
-			content: capAtLineBoundary(readFileFull(path), memoryCap),
-		})
-	}
-	return out
 }
 
 // --- apply: rotation / retraction planning (no disk I/O) ----------------------
@@ -861,8 +821,8 @@ type pendingBatch struct {
 	exists    bool
 	// Consumption details (from the memory_apply row; empty while pending).
 	applyActor string
-	accepted  []MemoryAccept
-	rejected  []MemoryAccept
+	accepted   []MemoryAccept
+	rejected   []MemoryAccept
 }
 
 // findPendingBatch recovers the pending proposal batch from the journal: the

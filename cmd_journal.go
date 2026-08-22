@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/ipc"
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -28,6 +30,7 @@ import (
 //	odo journal range A [B] — events with seq in [A, B] (B optional: to end)
 //	odo journal tail N   — the conversation's last N events
 //	odo journal search <terms> — keyword hits across active workstreams
+//	odo journal rotate   — archive the journal offline (daemon must be down)
 //
 // Output is one JSON object per line (stdout), same shape poll_events
 // serves; a human summary of the resolved window goes to stderr. The
@@ -35,6 +38,16 @@ import (
 // `odo journal search <terms>` to locate the seq window, then
 // `odo journal folded` (or `range`) to pull it — never guessing from
 // the note.
+//
+// `odo journal rotate` is the family's lifecycle outlier (P1, 2026-08-22
+// panel: journal/artifacts had zero lifecycle — the reset window needed
+// hand accounting). It never opens the journal at all: renaming live
+// SQLite files under an open WAL handle would splice bytes, so rotation
+// REFUSES while the instance lock says a daemon is live, then renames
+// journal.sqlite + sidecars into .odo/archive/ (move-not-delete — bytes
+// are never destroyed; a reset is a human act with a recoverable record).
+// The next daemon start recreates an empty journal through store.Open's
+// own create+migrate path — nothing here pre-creates one.
 
 // journalUsage is printed on invocation errors (exit 2).
 const journalUsage = `usage: odo journal <subcommand> [--workstream <name>]
@@ -42,7 +55,9 @@ const journalUsage = `usage: odo journal <subcommand> [--workstream <name>]
   range A [B]     events with seq in [A, B]; B omitted reads to the end
   tail N          the conversation's last N events
   search <terms>  keyword search across ALL active workstreams, newest first
-                  [--limit N] (default 20; % and _ are LIKE wildcards)`
+                  [--limit N] (default 20; % and _ are LIKE wildcards)
+  rotate          move journal.sqlite + sidecars to .odo/archive/ (refused
+                  while a live daemon holds the instance lock)`
 
 // runJournalCLI dispatches `odo journal <sub>`.
 func runJournalCLI(args []string) int {
@@ -87,6 +102,17 @@ func runJournalCLI(args []string) int {
 	ctx := context.Background()
 	sub := positional[0]
 	rest := positional[1:]
+
+	// rotate is the family's outlier: it never opens the journal (renaming
+	// files under a live WAL handle would splice bytes), so it branches
+	// before ANY store open.
+	if sub == "rotate" {
+		if len(rest) != 0 {
+			fmt.Fprintln(os.Stderr, journalUsage)
+			return 2
+		}
+		return journalRotate()
+	}
 
 	// search is conversation-independent (project-wide, cross-workstream):
 	// resolve the store+project only, so it also works on workstreams with
@@ -338,6 +364,117 @@ func journalSearch(ctx context.Context, jp journalProj, query string, limit int)
 			return 1
 		}
 	}
+	return 0
+}
+
+// journalRotate implements `odo journal rotate` (P1, 2026-08-22 panel:
+// journal/artifacts had zero lifecycle). Move-not-delete: journal.sqlite
+// and every present sidecar are RENAMED into .odo/archive/ as
+// journal-<YYYYMMDD-HHMMSS UTC>.sqlite(+*); nothing is unlinked. The next
+// daemon start recreates an empty journal through store.Open's
+// create+migrate path — this CLI deliberately does not pre-create one.
+//
+// Liveness is the daemon's own single-instance flock (<stateDir>/odo.lock
+// via acquireInstanceLock — main.go's authority for "a live daemon serves
+// this project", not a second invented probe). Refusing on contention is
+// only half the reason to hold it: the lock ALSO serializes against a
+// daemon BOOTING mid-rotate — such a daemon exits 3 before opening the
+// journal, so the moves below race nothing. The GUI bridge's socket probe
+// (daemon_alive) is equal for truth but gives no mutual exclusion.
+//
+// Move order is load-bearing: WAL first, then the other sidecars, the
+// main DB last. After a crash mid-rotate, .odo/ either still holds the
+// main DB (sqlite opens it at its last checkpoint — the already-archived
+// WAL simply isn't applied, a consistent older state) or is empty (the
+// next daemon start recreates everything) — but NEVER a fresh empty DB
+// beside a STALE WAL from the pre-rotate journal, which sqlite would try
+// to recover into the new database. A present destination refuses the
+// whole run: archived bytes are never overwritten.
+func journalRotate() int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo journal rotate: resolve cwd: %v\n", err)
+		return 1
+	}
+	root, err := journalRoot(cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo journal rotate: %v\n", err)
+		return 1
+	}
+	stateDir := filepath.Join(root, ".odo")
+
+	lock, err := acquireInstanceLock(stateDir)
+	if err != nil {
+		if errors.Is(err, errDaemonAlreadyRunning) {
+			fmt.Fprintf(os.Stderr, "odo journal rotate: a live odo daemon serves this project — refusing to rotate the journal under it (lock %s held); stop the daemon first (quit the app, or kill the odo process), then re-run\n",
+				filepath.Join(stateDir, "odo.lock"))
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "odo journal rotate: %v\n", err)
+		return 1
+	}
+	defer lock.Close()
+
+	archiveDir := filepath.Join(stateDir, "archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "odo journal rotate: create %s: %v\n", archiveDir, err)
+		return 1
+	}
+
+	stamp := time.Now().UTC().Format("20060102-150405")
+	// journal.sqlite-journal is pre-WAL rollback residue — the store's DSN
+	// pins journal_mode(WAL) so a healthy project never has one; moved
+	// when present anyway (move-not-delete admits no exceptions).
+	sidecars := []string{"-wal", "-journal", "-shm"}
+	moves := make([][2]string, 0, len(sidecars)+1)
+	for _, sfx := range sidecars {
+		moves = append(moves, [2]string{
+			filepath.Join(stateDir, "journal.sqlite"+sfx),
+			filepath.Join(archiveDir, "journal-"+stamp+".sqlite"+sfx),
+		})
+	}
+	moves = append(moves, [2]string{
+		filepath.Join(stateDir, "journal.sqlite"),
+		filepath.Join(archiveDir, "journal-"+stamp+".sqlite"),
+	})
+
+	rel := func(p string) string {
+		if r, err := filepath.Rel(root, p); err == nil {
+			return r
+		}
+		return p
+	}
+	// Fail closed on overlap: a second rotation inside the same second
+	// must never trample the first rotation's archived files.
+	for _, m := range moves {
+		if _, err := os.Stat(m[1]); err == nil {
+			fmt.Fprintf(os.Stderr, "odo journal rotate: %s already exists — a rotation already landed this second; refusing to overwrite archived bytes (re-run after the clock ticks, or move it aside)\n",
+				rel(m[1]))
+			return 1
+		}
+	}
+
+	moved, failed := 0, 0
+	for _, m := range moves {
+		err := os.Rename(m[0], m[1])
+		switch {
+		case err == nil:
+			moved++
+			fmt.Printf("%s (from %s)\n", rel(m[1]), rel(m[0]))
+		case errors.Is(err, os.ErrNotExist):
+			// Sidecar checkpointed away or never written — nothing to move.
+		default:
+			failed++
+			fmt.Fprintf(os.Stderr, "odo journal rotate: move %s → %s: %v\n", rel(m[0]), rel(m[1]), err)
+		}
+	}
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, "odo journal rotate: incomplete — %d file(s) moved into %s but %d failed; .odo/ may hold a partial set, inspect before restarting the daemon\n",
+			moved, rel(archiveDir), failed)
+		return 1
+	}
+	fmt.Printf("rotated %d journal file(s) into %s — the daemon recreates an empty journal on next start\n",
+		moved, rel(archiveDir))
 	return 0
 }
 

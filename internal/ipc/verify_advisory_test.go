@@ -64,7 +64,7 @@ func armedVerifyServer(t *testing.T) (autonomyFixture, *Server, string, string) 
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test\nauto_apply: main\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test\nauto_apply: main\n")
 	f := newAutonomyFixture(t)
 	root, sha := autolandRepo(t)
 	return f, &Server{store: f.st, projectRoot: root}, root, sha

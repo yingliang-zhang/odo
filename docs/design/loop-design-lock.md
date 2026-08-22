@@ -43,7 +43,10 @@ autocomplete. This file is the implementing contract; the milestone spec is
    the revise ladder. Loop round counters must not coexist with ladder
    counters on the same conversation.
 10. **One active loop per conversation** (fold-derived; in-memory fast path
-    `s.loops` is liveness-only, `s.designing` precedent).
+    `s.loops` is liveness-only, `s.designing` precedent). Admission is
+    atomic (2026-08-22 P1 #6): the fold AND the `loop_started` append
+    share one `s.mu` critical section in both start paths — concurrent
+    /loop admissions settle exactly one winner.
 11. **GUI-closed loops continue** (daemon-owned; chip re-derives on reopen).
     Esc/`/loop stop` terminal-cancels: in-flight fix run cancelled, fix
     diffs already landed stay landed (journaled).
@@ -107,11 +110,17 @@ veto_design | stop | resume(budget)}` (Mode B design gate + chip buttons).
 ## loop_event kinds (journal)
 
 `loop_started, loop_design_lock, loop_task_spawn, loop_task_done,
-loop_audit_round, loop_verdict, loop_fix_spawn, loop_suspended,
-loop_completed, loop_stopped, loop_budget_exceeded, loop_recovered,
-loop_resumed, loop_notified`. Common keys: `kind, loop_id (seq of
+loop_audit_round, loop_verdict, loop_fix_spawn, loop_diff_bound,
+loop_suspended, loop_completed, loop_stopped, loop_budget_exceeded,
+loop_recovered, loop_resumed, loop_notified`. Common keys: `kind, loop_id (seq of
 loop_started), mode (audit|tasks|tasks_final), actor:"auto_loop",
-spent_tokens (cumulative)`. Per-leg wire receipts riding audit/design rows:
+spent_tokens (cumulative)`. P1 #13 (2026-08-22): `loop_diff_bound{diff_id,
+round?|task?}` journals at DRAIN when a loop-bound run's diff is inserted —
+the loop⇄diff binding (the spawn row's old `diff_id?` contract was dead:
+the diff does not exist at spawn). `loopAdjudicateTask` attributes
+accept/blocked rows to a task ONLY through this chain (pre-binding
+journals keep the pipeline-actor fallback); recoverPendingDiffs skips
+non-terminal loops' bound + seed diffs (the boot double-panel twin). Per-leg wire receipts riding audit/design rows:
 `model, verdict (complete|parse_error|infra|truncated), findings_count,
 request_sha16, request_bytes, output_tokens, escalations, base_url_scrubbed`.
 Fix prompts journal as verbatim `user_message` rows with marker
