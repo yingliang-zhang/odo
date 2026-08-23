@@ -1,7 +1,0 @@
-# Deployment Chain & Binary Lifecycle
-
-- Deploy chain: worktree commit → FF merge to main → npm run tauri:build in the main checkout (~30s) → ditto replace /Applications/Odo.app → app restart; GUI-only changes leave the daemon untouched; daemon Go changes additionally rebuild both Go binaries (~/Projects/odo/odo and ~/.odo/bin/odo) with sha parity verified (main-epoch-8) (UI-epoch-10)
-- Deploy order rule: replace binaries BEFORE kill, then ensure_daemon_running auto-respawns daemons from the fresh binary (~16s after app launch); verified end-to-end multiple times with daemon PIDs and SHAs matched across both binary locations (UI-epoch-10) (main-epoch-7) (main-epoch-6)
-- Wave convention: work stays uncommitted in the worktree until the user says commit/merge; incident lesson: git stash pop without --index drops the index (a first commit contained only server.go; reset --soft redone) (main-epoch-8)
-- Two work-recovery incidents prove the safety nets: vanished worktree edits were recovered from the journal diffs table pending-diff capture, and a wiped M20 worktree was restored byte-identical from the diff-23 capture (12 files spot-checked); a full doctrine change lost pre-registration is recoverable only by replaying the session transcript output.txt (main-epoch-8) (UI-epoch-10)
-- `odo status` / `odo diffs` do not exist as CLI subcommands — running them in a worktree cwd falls into the daemon-spawn path and is killed by the 300s timeout; in the main checkout it hits the flock guard and exits 3 (harmless UX trap) (main-epoch-7)

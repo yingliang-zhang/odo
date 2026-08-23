@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Session Summary — odo: #26 Verification, tsc Fix, Doctrine Rebuild (#27), Full Binary Redeploy
 
 Context: odo project's GUI-epoch review pipeline. "Doctrine" = the auto-land zero-manual-lock redesign: agent-authored diffs to gate source files are no longer hard-blocked; they land via panel risk annotation plus a byte-bound evidence gate, with human accept only as legacy fallback.

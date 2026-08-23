@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Diff adjudication #21–#26, GUI lock fix, and daemon restart storm — epoch 10
 
 ## Decisions
