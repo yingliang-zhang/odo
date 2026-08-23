@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo Session: Recovering Orphaned Commits and Major-Vote Policy Patch
 
 ## Problem discovered

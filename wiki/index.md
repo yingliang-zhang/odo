@@ -1,13 +1,13 @@
 # Project Wiki Index
 
 ## Topics
-- Auto-Land Pipeline & Gate Doctrine → topics/auto-land-and-gate-doctrine.md
-- Diff Adjudication & Restart Recovery → topics/diff-adjudication-and-restart-recovery.md
-- Daemon Lifecycle, Crashes & Process Safety → topics/daemon-lifecycle-and-crashes.md
-- MoA Client Infrastructure → topics/moa-infrastructure.md
-- Design-MoA Pipeline → topics/design-moa.md
-- Conversation Control: Steer Queue, Advisory Commands & Panel UX → topics/conversation-control.md
-- Composer & IME Handling → topics/composer-and-ime.md
-- Scrolling & Workstream Switching → topics/scrolling-and-workstream-switching.md
-- GUI Layout & Status Surface → topics/gui-layout-and-status-surface.md
-- Testing & Verification Environment → topics/testing-and-verification-environment.md
+- Auto-Land Panel Voting Policy → topics/auto-land-panel-policy.md
+- Gate-Source Protection & Landing Doctrine → topics/gate-source-protection.md
+- Daemon Binary Deployment & Recovery → topics/daemon-deployment.md
+- Restart Recovery & Daemon Hardening → topics/restart-recovery.md
+- MoA Chain: Resilience, Receipts, Design-MoA → topics/moa-chain.md
+- Steering Queue → topics/steering-queue.md
+- Composer, IME & Advisory Slash → topics/composer-and-advisory.md
+- Workstream Switching: Performance & Scroll → topics/workstream-switching.md
+- GUI Structure & Visibility → topics/gui-visibility.md
+- Testing & Build Environment → topics/testing-environment.md
