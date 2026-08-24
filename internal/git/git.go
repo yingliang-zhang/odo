@@ -357,12 +357,42 @@ func HasUnmergedEntries(repoPath string) (bool, error) {
 // or untracked changes — the daemon's own-directory "anything to commit?"
 // probe (wiki auto-commit skips a no-op commit).
 func HasPathChanges(repoPath string, paths []string) (bool, error) {
-	args := append([]string{"status", "--porcelain", "--"}, paths...)
-	out, err := run(repoPath, args...)
+	dirty, err := DirtyPaths(repoPath, paths)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(out) != "", nil
+	return len(dirty) > 0, nil
+}
+
+// DirtyPaths returns the subset of the given paths carrying staged,
+// unstaged, or untracked changes. This is the accept/refresh pre-apply
+// refusal check (tri-review P0, 2026-08-24): git apply --3way over a
+// user's uncommitted work either fails — and RollbackPatchApply's
+// reset+checkout then restores HEAD bytes over edits the tool never
+// touched — or merges cleanly and sweeps those edits into the accept
+// commit. Naming the dirty paths up front turns both outcomes into a
+// clear, retryable refusal. porcelain -z records rename/copy partners
+// as a bare second field; those ride along best-effort (the caller only
+// names paths in the refusal message, never acts on them).
+func DirtyPaths(repoPath string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"status", "--porcelain", "-z", "--"}, paths...)
+	out, err := run(repoPath, args...)
+	if err != nil {
+		return nil, err
+	}
+	var dirty []string
+	for _, f := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
+		switch {
+		case len(f) > 3:
+			dirty = append(dirty, f[3:]) // "XY <path>"
+		case f != "":
+			dirty = append(dirty, f) // rename/copy partner path
+		}
+	}
+	return dirty, nil
 }
 
 // CommitPaths creates a commit limited to the given paths: the current

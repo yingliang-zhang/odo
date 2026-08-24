@@ -617,6 +617,75 @@ func TestReviewDuringLiveRunKeepsLiveRun(t *testing.T) {
 	}
 }
 
+// TestReviewOfOlderDiffRetiresItsOwnRun pins retireRun's target selection
+// (tri-review P1, 2026-08-24): with TWO finished runs pending review on one
+// conversation, reviewing the OLDER diff must close that diff's own run and
+// remove ITS worktree — never the newer run byConv happens to bind. The old
+// byConv-first selection closed the newer run, deleted ITS worktree (mid
+// auto-land verify, when that run's own diff was still in the pipeline),
+// and unbound the conversation while the reviewed diff's worktree was
+// orphaned.
+func TestReviewOfOlderDiffRetiresItsOwnRun(t *testing.T) {
+	root := initRepo(t)
+	// HOME isolation: readUserMemory injects the real ~/.odo/user.md into
+	// the prompt the stub copies into hello.txt.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	// Run 1 completes → diff A pending; run 1 finished but still in the maps.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "run one"})
+	done1 := rig.pollUntilDone(t, convID)
+	if done1.Diff == nil {
+		t.Fatal("run 1: no diff")
+	}
+	runID1 := rig.server.byConv[convID]
+	wt1 := rig.server.runs[runID1].worktreePath
+
+	// Run 2 completes → diff B pending; byConv now binds run 2.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "run two"})
+	done2 := rig.pollUntilDone(t, convID)
+	if done2.Diff == nil {
+		t.Fatal("run 2: no diff")
+	}
+	runID2 := rig.server.byConv[convID]
+	if runID2 == "" || runID2 == runID1 {
+		t.Fatalf("run 2 binding = %q, want a fresh run id distinct from %q", runID2, runID1)
+	}
+	wt2 := rig.server.runs[runID2].worktreePath
+
+	// Review the OLDER diff: it lands, its own run and worktree retire.
+	acc := rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: done1.Diff.ID})
+	if !acc.Applied {
+		t.Fatalf("accept run-1 diff: %+v", acc)
+	}
+	if got := readFileStr(t, filepath.Join(root, "hello.txt")); got != "run one" {
+		t.Errorf("hello.txt = %q, want run one's accepted content", got)
+	}
+	if meta1 := rig.server.runs[runID1]; meta1 != nil {
+		t.Errorf("reviewed run still tracked: %+v", meta1)
+	}
+	if _, err := os.Stat(wt1); err == nil {
+		t.Error("reviewed diff's own worktree survived its review")
+	}
+
+	// The newer run survives untouched: still bound, still tracked, ITS
+	// worktree still on disk. Under byConv-first selection all three died.
+	if got := rig.server.byConv[convID]; got != runID2 {
+		t.Errorf("byConv after review = %q, want newer run %q still bound", got, runID2)
+	}
+	if meta2 := rig.server.runs[runID2]; meta2 == nil {
+		t.Error("newer run closed by the older diff's review")
+	}
+	if _, err := os.Stat(wt2); err != nil {
+		t.Errorf("newer run's worktree removed by the older diff's review: %v", err)
+	}
+}
+
 // TestAcceptDoesNotSweepMainCheckout pins P0 end to end through the socket:
 // accept commits only the diff's own files. Dirt the user left in the main
 // checkout — a modified tracked file and an untracked scratch file — is
@@ -759,6 +828,124 @@ func reviewActionRowsFor(t *testing.T, f autonomyFixture, d store.Diff) []map[st
 		}
 	}
 	return rows
+}
+
+// TestAcceptRefusesDirtyPatchPaths pins the tri-review P0 pre-apply refusal
+// (fresh base): the main checkout carries uncommitted user work on the
+// patch's OWN paths. Before the guard, a failed --3way triggered the I7
+// rollback — reset+checkout restoring HEAD bytes over edits the tool never
+// touched (the failed apply itself wrote NOTHING) — and a clean merge
+// swept the edits into the accept commit. The accept now refuses, names
+// the dirty paths, writes nothing, journals nothing, and stays pending;
+// committing the user's work unblocks the retry. Dirt on OTHER paths never
+// blocks (TestAcceptDoesNotSweepMainCheckout).
+func TestAcceptRefusesDirtyPatchPaths(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // agent edit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+
+	refuse := func(stage bool) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // user work\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if stage {
+			gitIn(t, root, "add", "src/a.go")
+		}
+		_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
+		if err == nil {
+			t.Fatalf("stage=%v: accept over dirty patch paths: want refusal", stage)
+		}
+		for _, want := range []string{"uncommitted changes", "src/a.go"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("stage=%v: err = %q, want it to name %q", stage, err.Error(), want)
+			}
+		}
+		if errors.Is(err, errBaseStale) {
+			t.Errorf("stage=%v: err wraps errBaseStale — user dirt must never fire the auto-revise round", stage)
+		}
+		// Nothing was attempted: user bytes intact, status pending, no rows.
+		if got := readFileStr(t, filepath.Join(root, "src", "a.go")); got != "package src // user work\n" {
+			t.Errorf("stage=%v: src/a.go = %q, want the user's work intact", stage, got)
+		}
+		if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+			t.Fatal(gerr)
+		} else if got.Status != store.DiffPending {
+			t.Errorf("stage=%v: diff status = %q, want pending", stage, got.Status)
+		}
+		if rows := reviewActionRowsFor(t, f, d); len(rows) != 0 {
+			t.Errorf("stage=%v: journal rows = %v, want none (a refusal is not an outcome)", stage, rows)
+		}
+		gitIn(t, root, "reset", "-q", "HEAD", "--", "src/a.go")
+		gitIn(t, root, "checkout", "--", "src/a.go")
+	}
+	refuse(false) // unstaged edit on the patch path
+	refuse(true)  // staged edit on the patch path
+
+	// Retryable by construction: with the path clean the same accept lands.
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", ""); err != nil {
+		t.Fatalf("accept on clean patch paths: %v", err)
+	}
+	if got := readFileStr(t, filepath.Join(root, "src", "a.go")); got != "package src // agent edit\n" {
+		t.Errorf("src/a.go = %q, want the accepted agent edit", got)
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+}
+
+// TestAcceptRefreshRefusesDirtyPatchPaths pins the same refusal on the
+// STALE-base refresh path: HEAD moved on a disjoint path, and the patch's
+// own path carries uncommitted user work. The refresh is refused BEFORE
+// any apply — journaled as refresh_attempted{dirty_refusal} (the trail
+// must say why a stale base did not refresh), the error does NOT wrap
+// errBaseStale (an auto-revise would regenerate a patch that hits the
+// same refusal), and the user's bytes survive byte-identical.
+func TestAcceptRefreshRefusesDirtyPatchPaths(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // agent edit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	driftMain(t, root, "drift.go") // HEAD moves off the base on a disjoint path
+	if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // user work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
+	if err == nil {
+		t.Fatal("refresh over dirty patch paths: want refusal")
+	}
+	for _, want := range []string{"uncommitted changes", "src/a.go"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to name %q", err.Error(), want)
+		}
+	}
+	if errors.Is(err, errBaseStale) {
+		t.Error("err wraps errBaseStale — auto-land would auto-revise into the same refusal")
+	}
+	if got := readFileStr(t, filepath.Join(root, "src", "a.go")); got != "package src // user work\n" {
+		t.Errorf("src/a.go = %q, want the user's work intact", got)
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending", got.Status)
+	}
+	rows := reviewActionRowsFor(t, f, d)
+	if len(rows) != 1 || rows[0]["action"] != "refresh_attempted" || rows[0]["outcome"] != "dirty_refusal" {
+		t.Fatalf("journal rows = %v, want exactly refresh_attempted{dirty_refusal}", rows)
+	}
 }
 
 // TestAcceptStaleBaseRefreshConflict (P0a; supersedes fix-INT's
@@ -3140,6 +3327,49 @@ func TestReadFile(t *testing.T) {
 	}
 	if len(got.FileContent) != readFileMaxBytes {
 		t.Errorf("big file content = %d bytes, want %d", len(got.FileContent), readFileMaxBytes)
+	}
+}
+
+// TestReadFileSparsePreview pins the streaming large-file branch
+// (tri-review P2): a file orders of magnitude past the cap — a sparse
+// 4 GiB log stand-in — previews with truncation set and its head intact.
+// The bytes past the cap must never be read (the pre-fix implementation
+// os.ReadFile'd the whole file before slicing; a multi-GB read would not
+// survive the test's memory/time budget).
+func TestReadFileSparsePreview(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+
+	// Text head (the binary guard reads only the first 8 KiB), then a hole
+	// out to 4 GiB — holes return NULs lazily, so reads stay cheap.
+	head := strings.Repeat("a", 16*1024) + "\n"
+	huge := filepath.Join(root, "huge.log")
+	fh, err := os.OpenFile(huge, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fh.WriteString(head); err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.Truncate(4 << 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := rig.call(t, Request{Cmd: CmdReadFile, Path: "huge.log"})
+	if !got.FileTruncated {
+		t.Error("4 GiB sparse file: truncated flag missing")
+	}
+	if len(got.FileContent) != readFileMaxBytes {
+		t.Errorf("sparse preview = %d bytes, want %d", len(got.FileContent), readFileMaxBytes)
+	}
+	if !strings.HasPrefix(got.FileContent, head) {
+		t.Error("sparse preview head mangled — prefix must match the written bytes")
 	}
 }
 

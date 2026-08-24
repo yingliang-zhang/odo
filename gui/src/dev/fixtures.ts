@@ -524,6 +524,15 @@ export const runState = { foreground: false };
 // reply so a test can sample the pre-landing DOM deterministically; fail
 // rejects like an unreachable daemon ("bootstrap: connection refused").
 export const bootstrapCtl = { delayMs: 0, fail: false };
+// Switch-phase landing signal (companion to bootstrapCtl): count of
+// bootstrap replies the mock has SERVED per workstreamId. A served reply
+// proves that request already consulted the fail/delay knobs — a test
+// that arms fail only after observing the count advance can no longer
+// fail the PREVIOUS switch's still-in-flight bootstrap (the switch-cache
+// spec's deterministic flake: the optimistic flip renders the cache
+// synchronously, but the mock's fixed 50ms latency means arming within
+// that window targets the wrong request).
+export const bootstrapLandings: Record<string, number> = {};
 
 // M7 preview knob (same pattern as runState): the mock's poll response
 // mirrors this so e2e can simulate a streaming in-flight block — never

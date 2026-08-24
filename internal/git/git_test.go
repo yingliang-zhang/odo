@@ -677,3 +677,50 @@ func TestShowHEADFile(t *testing.T) {
 		t.Error("absent-from-HEAD file: want error (fail-open to the advisory)")
 	}
 }
+// DirtyPaths backs the accept/refresh pre-apply refusal (tri-review P0):
+// staged, unstaged, and untracked changes on the queried paths are all
+// named; clean paths and paths outside the query set are not.
+func TestDirtyPaths(t *testing.T) {
+	repo := newPatchRepo(t)
+	writeAndCommit(t, repo, "staged.txt", "base")
+	writeAndCommit(t, repo, "outside.txt", "base")
+
+	// base.txt: unstaged edit; staged.txt: staged edit; new.txt: untracked.
+	// outside.txt is dirty too but never queried — scoping must hold.
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "staged.txt"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, repo, "add", "staged.txt")
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "outside.txt"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, err := DirtyPaths(repo, []string{"base.txt", "staged.txt", "new.txt", "clean.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(dirty, ",")
+	for _, want := range []string{"base.txt", "staged.txt", "new.txt"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dirty = %q, want it to name %q", got, want)
+		}
+	}
+	for _, absent := range []string{"clean.txt", "outside.txt"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("dirty = %q, want %q excluded (clean or out of scope)", got, absent)
+		}
+	}
+
+	// Commit the edits: everything drops out of the result.
+	mustRun(t, repo, "add", "-A")
+	mustRun(t, repo, "commit", "-m", "settle")
+	if dirty, err = DirtyPaths(repo, []string{"base.txt", "staged.txt", "new.txt"}); err != nil || len(dirty) != 0 {
+		t.Errorf("after commit: dirty = %v, %v, want empty", dirty, err)
+	}
+}

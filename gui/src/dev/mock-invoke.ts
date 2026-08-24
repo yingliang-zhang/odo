@@ -34,7 +34,13 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         setTimeout(resolve, fx.bootstrapCtl.delayMs);
         await promise;
       }
-      return fx.makeBootstrap(args?.projectRoot ?? undefined, args?.workstreamId ?? undefined);
+      const payload = fx.makeBootstrap(args?.projectRoot ?? undefined, args?.workstreamId ?? undefined);
+      // Serve-time landing signal: the fail/delay knobs were already
+      // consulted above, so a test observing this count knows arming a
+      // failure now can only target FUTURE bootstraps.
+      const key = String(args?.workstreamId ?? "");
+      fx.bootstrapLandings[key] = (fx.bootstrapLandings[key] ?? 0) + 1;
+      return payload;
     }
     case "list_projects": {
       return fx.projects;

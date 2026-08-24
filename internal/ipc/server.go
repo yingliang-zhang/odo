@@ -2544,6 +2544,24 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 // HEAD, while a non-sentinel refusal (protected path, conflicted index,
 // apply error) stays log-only.
 var errBaseStale = errors.New("base stale")
+// dirtyPatchRefusal builds the pre-apply refusal shared by the fresh- and
+// stale-base accept paths (tri-review P0, 2026-08-24): the main checkout
+// carries uncommitted user work on the patch's own paths, and applying
+// over it is lossy in BOTH directions — a failed --3way rolls back to
+// HEAD bytes over content the pipeline never touched; a clean merge
+// sweeps the user's edits into the accept commit. The diff stays pending
+// and the error names the paths, so committing or stashing them makes
+// the accept retryable. Unlike a stale-base failure this is NOT wrapped
+// in errBaseStale: the auto-land caller's errors.Is branch would fire an
+// auto-revise whose regenerated patch hits the same refusal — user dirt
+// needs a human, not another ~8-minute verify round.
+func dirtyPatchRefusal(dirty []string) error {
+	shown := dirty
+	if len(dirty) > 5 {
+		shown = append(shown[:5:5], fmt.Sprintf("… (+%d more)", len(dirty)-5))
+	}
+	return fmt.Errorf("accept_diff: main checkout has uncommitted changes on the patch's own paths (%s); commit or stash them, then retry the accept — the pipeline refuses to apply over them", strings.Join(shown, ", "))
+}
 
 // baseAdjudication is checkAndRefreshBase's tri-state verdict (M20: the
 // already-landed resolution joined fresh/refreshed).
@@ -2643,6 +2661,17 @@ func (s *Server) checkAndRefreshBase(ctx context.Context, d *store.Diff) (baseAd
 	patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
 	if gerr != nil {
 		return baseFresh, fmt.Errorf("accept_diff: parse patch paths for refresh: %w", gerr)
+	}
+	// P0 pre-apply refusal: never refresh over the user's uncommitted work
+	// (see dirtyPatchRefusal). The already-landed probe above rescued the
+	// identical-content case; whatever is dirty here genuinely differs.
+	// Not an apply attempt, but the trail must say WHY a stale base did
+	// not refresh (hard rule 6) — journal the refusal as its own outcome.
+	if dirty, derr := git.DirtyPaths(s.projectRoot, patchPaths); derr != nil {
+		return baseFresh, fmt.Errorf("accept_diff: check dirty patch paths for refresh: %w", derr)
+	} else if len(dirty) > 0 {
+		s.journalRefreshAttempt(ctx, *d, "accept_apply", "dirty_refusal", base, head, nil)
+		return baseFresh, dirtyPatchRefusal(dirty)
 	}
 	baseHEAD, baseDisk, berr := git.CapturePatchBaseline(s.projectRoot, patchPaths)
 	if berr != nil {
@@ -2866,6 +2895,18 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 			}
 		}
 		if adj == baseFresh && !alreadyLanded {
+			// P0 pre-apply refusal (see dirtyPatchRefusal): never apply over
+			// the user's uncommitted work on the patch's own paths. The M20
+			// identical-content rescue above already ran, so whatever is
+			// dirty here genuinely differs from the post-image. The diff
+			// stays pending (NOT conflict — nothing was attempted).
+			if gerr == nil {
+				if dirty, derr := git.DirtyPaths(s.projectRoot, patchPaths); derr != nil {
+					return Response{}, fmt.Errorf("accept_diff: check dirty patch paths: %w", derr)
+				} else if len(dirty) > 0 {
+					return Response{}, dirtyPatchRefusal(dirty)
+				}
+			}
 			var baseHEAD, baseDisk map[string]bool
 			if gerr == nil {
 				var berr error
@@ -3054,23 +3095,48 @@ func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
 // no-diff retire out of drainRun). Removal failures are logged, not fatal —
 // the review already happened and the startup sweeper converges orphans.
 // Caller holds s.mu (via retireRunForDiff, or drainRun's no-diff path).
+//
+// Target selection (tri-review P1, 2026-08-24): the run retired is the one
+// whose worktreePath IS the reviewed diff's own — never whichever run the
+// conversation's byConv binding happens to point at last. Under back-to-back
+// runs that binding is a DIFFERENT finished run, and the old byConv-first
+// selection closed it and deleted ITS worktree — mid auto-land verify, if
+// that run's own diff was still in the pipeline — while the reviewed diff's
+// worktree was orphaned. The byConv binding selects only when there is no
+// worktree to match (drainRun's no-diff retire, legacy pre-v2 diff rows).
 func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT string) {
 	var wtPath, liveWT, closedRunID string
-	if runID, ok := s.byConv[conversationID]; ok {
-		if meta := s.runs[runID]; meta != nil {
-			if !meta.finished {
-				// The conversation's active binding is a LIVE run — closing
-				// it would kill the in-flight agent mid-write (accept/reject
-				// interrupting a running agent). Leave run and maps alone.
-				liveWT = meta.worktreePath
-			} else {
-				wtPath = meta.worktreePath
-				_ = s.adapterFor(meta.adapter).Close(ctx, runID)
-				delete(s.runs, runID)
-				closedRunID = runID
+
+	targetID := ""
+	if fallbackWT != "" {
+		for id, meta := range s.runs {
+			if meta != nil && meta.worktreePath == fallbackWT {
+				targetID = id
+				break
 			}
 		}
-		if liveWT == "" {
+	} else if runID, ok := s.byConv[conversationID]; ok {
+		targetID = runID
+	}
+	if meta := s.runs[targetID]; meta != nil {
+		if !meta.finished {
+			// The target is a LIVE run — closing it would kill the
+			// in-flight agent mid-write (accept/reject interrupting a
+			// running agent). Leave run and maps alone.
+			liveWT = meta.worktreePath
+		} else {
+			wtPath = meta.worktreePath
+			_ = s.adapterFor(meta.adapter).Close(ctx, targetID)
+			delete(s.runs, targetID)
+			closedRunID = targetID
+		}
+	}
+	// Binding hygiene: reap the conversation's binding only when it points
+	// at a run this call closed, or at one already gone from the map. A
+	// binding to a DIFFERENT run — live or finished — survives: that run
+	// retires with its own diff's review.
+	if boundID, ok := s.byConv[conversationID]; ok {
+		if boundID == closedRunID || s.runs[boundID] == nil {
 			delete(s.byConv, conversationID)
 		}
 	}
@@ -4976,6 +5042,9 @@ func (s *Server) handleReadFile(_ context.Context, req Request) (Response, error
 		return Response{}, fmt.Errorf("read_file: binary file (not previewable): %q", req.Path)
 	}
 	// Cap: read the whole file only when it fits, else truncate at the cap.
+	// The large-file branch STREAMS cap+1 bytes (tri-review P2, 2026-08-24):
+	// os.ReadFile here would pull a multi-GB log/dataset fully into daemon
+	// memory before the slice — the stated cap must bound the read too.
 	info, err := os.Stat(canonical)
 	if err != nil {
 		return Response{}, fmt.Errorf("read_file: %w", err)
@@ -4983,7 +5052,15 @@ func (s *Server) handleReadFile(_ context.Context, req Request) (Response, error
 	var content []byte
 	truncated := false
 	if info.Size() > readFileMaxBytes {
-		content, err = os.ReadFile(canonical)
+		fh, oerr := os.Open(canonical)
+		if oerr != nil {
+			return Response{}, fmt.Errorf("read_file: %w", oerr)
+		}
+		content, err = io.ReadAll(io.LimitReader(fh, readFileMaxBytes+1))
+		cerr := fh.Close()
+		if err == nil {
+			err = cerr
+		}
 		if err == nil && len(content) > readFileMaxBytes {
 			content = content[:readFileMaxBytes]
 			truncated = true

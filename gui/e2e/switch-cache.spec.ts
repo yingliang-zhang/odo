@@ -68,10 +68,23 @@ test("failed repeat switch restores the pre-flip view and stays retryable", asyn
   // Warm feat's cache entry.
   await feat.click();
   await expect(page.locator(FEAT_MARKER)).toBeVisible();
+  // MAIN_MARKER below is the optimistic flip's synchronous cache render —
+  // main's authoritative bootstrap is still in flight behind the mock's
+  // fixed 50ms latency, and arming fail BEFORE it lands fails the MAIN
+  // switch (its rollback correctly restores feat) instead of feat's. The
+  // serve-time counter proves the knobs were already consulted for it.
+  const mainLandings = () =>
+    page.evaluate(() => {
+      const fx = window.__odoFixtures;
+      if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
+      return fx.bootstrapLandings["1"] ?? 0;
+    });
+  const landedBefore = await mainLandings();
   await sidebar.locator(".ws-item", { hasText: "main" }).first().click();
   await expect(page.locator(MAIN_MARKER)).toBeVisible();
+  await expect.poll(mainLandings, { timeout: 8_000 }).toBe(landedBefore + 1);
 
-  // Daemon unreachable for the target: the optimistic flip renders…
+  // Daemon unreachable for the target: the optimistic flip renders……
   await setBootstrapCtl(page, { fail: true });
   await feat.click();
   expect(await page.locator(FEAT_MARKER).count()).toBeGreaterThan(0);
