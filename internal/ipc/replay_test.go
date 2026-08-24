@@ -5,8 +5,10 @@ package ipc
 // end-to-end through the send-path integration tests.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,6 +264,98 @@ func TestPromptAdvertisesJournalPull(t *testing.T) {
 	if !strings.Contains(string(agents), "odo journal folded|range|tail") ||
 		!strings.Contains(string(agents), "odo journal search <terms>") {
 		t.Error("AGENTS.md project rules do not name the journal pull paths")
+	}
+}
+
+// agentsMDRig builds the bootstrap-owned layout generateAgentsMD expects:
+// a git root with .odo/ materialized (production opens the store first).
+func agentsMDRig(t *testing.T) (root, odoDir string) {
+	t.Helper()
+	root = initRepo(t)
+	odoDir = filepath.Join(root, ".odo")
+	if err := os.MkdirAll(odoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root, odoDir
+}
+
+// TestAgentsMDSkipsEscapingRuleSymlink (2026-08-24 tri-review P0): .odo/ is committable, so an implanted memory.md symlink pointing at an
+// external secret must degrade to "section absent" — the prompt bridge
+// carries NEITHER the secret bytes nor a ## Memory heading — exactly the
+// containment the sibling rule readers already had.
+func TestAgentsMDSkipsEscapingRuleSymlink(t *testing.T) {
+	root, odoDir := agentsMDRig(t)
+	external := filepath.Join(t.TempDir(), "secret.md")
+	const secret = "EXTERNAL-SECRET-BYTES"
+	if err := os.WriteFile(external, []byte(secret+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(odoDir, "memory.md")); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+	(&Server{projectRoot: root}).generateAgentsMD()
+	agents, err := os.ReadFile(filepath.Join(odoDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if strings.Contains(string(agents), secret) {
+		t.Errorf("AGENTS.md copied external secret bytes through the planted symlink:\n%s", agents)
+	}
+	if strings.Contains(string(agents), "## Memory") {
+		t.Errorf("AGENTS.md rendered a ## Memory section for an escaping symlink:\n%s", agents)
+	}
+}
+
+// TestAgentsMDReadsSymlinkWithinOdo: the in-dir fast path stays intact —
+// a pins.md symlink resolving deeper INSIDE the project-odo root reads
+// like a plain file (only escapes degrade).
+func TestAgentsMDReadsSymlinkWithinOdo(t *testing.T) {
+	root, odoDir := agentsMDRig(t)
+	target := filepath.Join(odoDir, "pins-real.md")
+	const pins = "pin it down\n"
+	if err := os.WriteFile(target, []byte(pins), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(odoDir, "pins.md")); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+	(&Server{projectRoot: root}).generateAgentsMD()
+	agents, err := os.ReadFile(filepath.Join(odoDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agents), "## Pins") || !strings.Contains(string(agents), pins) {
+		t.Errorf("AGENTS.md lost the in-dir symlink target's pins:\n%s", agents)
+	}
+}
+
+// TestAgentsMDRefusesSymlinkWrite: the write-side twin — the daemon owns
+// AGENTS.md, so a planted symlink at the path must NOT be followed onto
+// the external file it names. generation logs and skips; the external
+// file stays byte-unchanged and no error escapes.
+func TestAgentsMDRefusesSymlinkWrite(t *testing.T) {
+	root, odoDir := agentsMDRig(t)
+	external := filepath.Join(t.TempDir(), "sentinel.md")
+	const sentinel = "SENTINEL-DO-NOT-OVERWRITE\n"
+	if err := os.WriteFile(external, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(odoDir, "AGENTS.md")); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+	var buf bytes.Buffer
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+	(&Server{projectRoot: root}).generateAgentsMD() // must not panic or write
+
+	if got, err := os.ReadFile(external); err != nil || string(got) != sentinel {
+		t.Errorf("external AGENTS.md target = %q, %v, want the sentinel bytes untouched", got, err)
+	}
+	if !strings.Contains(buf.String(), "refusing to write through symlink") {
+		t.Errorf("log = %q, want the skipped write logged", buf.String())
 	}
 }
 

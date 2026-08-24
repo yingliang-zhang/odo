@@ -53,7 +53,7 @@ import {
   SwitchCache,
 } from "./switch_cache";
 import { deriveLoopStates, loopMode } from "./loop";
-import { sameDiff, sameDiffList } from "./diff_stable";
+import { sameAutoDistillList, sameCountMap, sameDiff, sameDiffInfoExList, sameDiffList, sameIdList } from "./diff_stable";
 import { derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
@@ -402,16 +402,27 @@ export default function App() {
         const id = Number(k);
         if (Number.isFinite(id)) pending[id] = v;
       }
-      setPendingCounts(pending);
+      setPendingCounts((prev) => (sameCountMap(prev, pending) ? prev : pending));
       const parked: Record<number, number> = {};
       for (const [k, v] of Object.entries(counts.parked_goals ?? {})) {
         const id = Number(k);
         if (Number.isFinite(id)) parked[id] = v;
       }
-      setParkedGoals(parked);
-      setRunningWorkstreams(counts.running_workstreams ?? []);
-      setAutoDistill(counts.auto_distill ?? []);
-      setDistillingConvs(counts.distilling_convs ?? []);
+      setParkedGoals((prev) => (sameCountMap(prev, parked) ? prev : parked));
+      // tri-review P2 #5 (2026-08-24): all five setters prev-bail through the
+      // diff_stable comparators — the daemon deserializes fresh references
+      // every tick even when nothing changed, and the badge lists (running
+      // / auto_distill / distilling_convs) arrive in randomized Go-map
+      // order, so bare setState re-rendered the sidebar, StatusBar, and
+      // every memo'd keep-alive panel on every refresh for zero visual
+      // change. Same pattern as setDiffs below; semantics documented in
+      // the diff_stable module header.
+      const running = counts.running_workstreams ?? [];
+      setRunningWorkstreams((prev) => (sameIdList(prev, running) ? prev : running));
+      const auto = counts.auto_distill ?? [];
+      setAutoDistill((prev) => (sameAutoDistillList(prev, auto) ? prev : auto));
+      const distilling = counts.distilling_convs ?? [];
+      setDistillingConvs((prev) => (sameIdList(prev, distilling) ? prev : distilling));
       pendingTotalRef.current = Object.values(pending).reduce((a, b) => a + b, 0);
     } catch {
       // Stale badges are fine; never disturb the poll loop.
@@ -432,7 +443,11 @@ export default function App() {
     try {
       const resp = await listAllPendingDiffs(root);
       if (projectRootRef.current !== root) return; // project switched mid-flight
-      setInboxDiffs(resp.ok ? (resp.all_pending_diffs ?? []) : []);
+      const rows = resp.ok ? (resp.all_pending_diffs ?? []) : [];
+      // Keep the previous reference on content-identical ticks (SQL-ordered
+      // wire, so element-wise compare — same contract as setDiffs): the
+      // memo'd ReviewInbox stays idle between gated refreshes.
+      setInboxDiffs((prev) => (sameDiffInfoExList(prev, rows) ? prev : rows));
     } catch {
       // Stale rows are fine; the next gated refresh retries.
     }
@@ -1760,6 +1775,24 @@ export default function App() {
     const cid = conversationRef.current;
     if (cid != null) void refreshMemoryProposals(cid);
   }, [refreshMemoryProposals]);
+  // Keep-alive panel props (tri-review P2 #5, 2026-08-24): the six panels
+  // are memo()d, so every prop reaching them needs a stable reference
+  // across App's poll ticks — each inline arrow below was a fresh closure
+  // per render and re-reconciled every visited hidden subtree.
+  // DiffViewer's review-comment send, shared by the multi-diff list rows
+  // and the single-diff fallback.
+  const handleSendComments = useCallback(
+    (text: string) => handleSend(text, [], agentRunning),
+    [handleSend, agentRunning],
+  );
+  // ReviewInbox's jump to a row's owning workstream (StatusBar's
+  // onJumpWorkstream inline stays — not panel-scoped).
+  const handleInboxJump = useCallback(
+    (id: number) => {
+      void handleSwitchWorkstream(id);
+    },
+    [handleSwitchWorkstream],
+  );
 
   // Drop the chips' dismiss timers on unmount.
   useEffect(() => {
@@ -2103,14 +2136,14 @@ export default function App() {
                   diff={d}
                   onAccept={handleAccept}
                   onReject={handleReject}
-                  onSendComments={(text) => handleSend(text, [], agentRunning)}
+                  onSendComments={handleSendComments}
                   projectRoot={project?.root_path ?? null}
                   agentRunning={agentRunning}
                   pipelineState={pipelineStateByDiff.get(d.id)}
                 />
               ))
             : diff
-              ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={(text) => handleSend(text, [], agentRunning)} projectRoot={project?.root_path ?? null} agentRunning={agentRunning} pipelineState={pipelineStateByDiff.get(diff.id)} />
+              ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={handleSendComments} projectRoot={project?.root_path ?? null} agentRunning={agentRunning} pipelineState={pipelineStateByDiff.get(diff.id)} />
               : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
           )}
         </div>
@@ -2127,7 +2160,7 @@ export default function App() {
               projectRoot={project?.root_path ?? null}
               agentRunning={agentRunning}
               pipelineStates={pipelineStateByDiff}
-              onJump={(id) => void handleSwitchWorkstream(id)}
+              onJump={handleInboxJump}
             />
           )}
         </div>

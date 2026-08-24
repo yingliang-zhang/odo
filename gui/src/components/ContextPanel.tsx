@@ -69,7 +69,8 @@ export default function ContextPanel({
   // change, (b) ResizeObserver-rendered ‹ › buttons — real <button>s placed
   // in .panel-head's flex flow, OUTSIDE the scroll container and clear of
   // the absolutely positioned .panel-resize grip (head px-2 keeps them off
-  // the grip's 4px strip at the panel's left edge).
+  // the grip's 8px hit strip at the panel's left edge — 4px visible + 4px
+  // invisible `before:` overflow; see the finding-4 note at the grip itself).
   const tabsRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Partial<Record<PanelTab, HTMLButtonElement | null>>>({});
   const [tabsOverflow, setTabsOverflow] = useState(false);
@@ -144,7 +145,21 @@ export default function ContextPanel({
     >
       <div
         className={cn(
-          "panel-resize absolute left-0 top-0 bottom-0 z-0 w-1 shrink-0",
+          "panel-resize absolute left-0 top-0 bottom-0 z-20 w-1 shrink-0",
+          // Review finding 4 (2026-08-24): the grip must receive its own
+          // pointerdown. At stack level 0 Chromium promoted .panel-body's
+          // scrolled contents (overflow-y-auto → composited layer) above
+          // the grip; hit tests delivered pointerdown to .panel-body (and,
+          // where diff content reached, to positioned .diff-line
+          // descendants) and the drag never started. z-20 lifts the grip
+          // above every in-aside sibling — none stacks higher — while the
+          // `before:` adds a 4px invisible hit overflow to the RIGHT ONLY
+          // (the aside is overflow-hidden; left-0 stays so nothing pokes
+          // out the left edge). The VISIBLE strip remains w-1; panel-head's
+          // px-2 (8px) still clears the widened 8px hit zone off the first
+          // tab button's clickable pixels. aria-hidden, MIN/MAX width, and
+          // the pointer-capture handlers are unchanged.
+          "before:absolute before:inset-y-0 before:left-0 before:-right-1 before:content-['']",
           "cursor-col-resize bg-transparent [pointer-events:auto] touch-none",
           "hover:bg-[var(--border)]",
         )}

@@ -691,6 +691,86 @@ func TestExtraEditsBeyondPatch(t *testing.T) {
 	})
 }
 
+// TestIndexEditsBeyondHEAD (tri-review P1, 2026-08-24): the accept gate's
+// index-vs-HEAD probe. Every staged divergence on a queried path is named
+// — an edited blob, a staged new file, a staged deletion — while a clean
+// index and zero-path input stay silent; the probe leaves index, HEAD,
+// and worktree exactly as found.
+func TestIndexEditsBeyondHEAD(t *testing.T) {
+	t.Run("staged edit names the path", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("staged sketch\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, repo, "add", "base.txt")
+		indexBefore := mustRun(t, repo, "ls-files", "-s", "--", "base.txt")
+		staged, err := IndexEditsBeyondHEAD(repo, []string{"base.txt", "tracked.txt"})
+		if err != nil || len(staged) != 1 || staged[0] != "base.txt" {
+			t.Fatalf("IndexEditsBeyondHEAD = (%v, %v), want ([base.txt], nil — tracked.txt stays clean)", staged, err)
+		}
+		// Read-only: the staged entry survives the probe verbatim.
+		if got := mustRun(t, repo, "ls-files", "-s", "--", "base.txt"); got != indexBefore {
+			t.Errorf("index entry after probe = %q, want untouched %q", got, indexBefore)
+		}
+		if got := mustRun(t, repo, "status", "--porcelain"); got != "M  base.txt" {
+			t.Errorf("porcelain after probe = %q, want the staged edit only", got)
+		}
+	})
+
+	t.Run("clean index names nothing", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		staged, err := IndexEditsBeyondHEAD(repo, []string{"base.txt", "tracked.txt"})
+		if err != nil || len(staged) != 0 {
+			t.Fatalf("IndexEditsBeyondHEAD = (%v, %v), want (nil, nil)", staged, err)
+		}
+		// Unstaged worktree dirt is NOT this probe's axis (DirtyPaths
+		// owns it): the index still matches HEAD.
+		if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("unstaged dirt\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		staged, err = IndexEditsBeyondHEAD(repo, []string{"base.txt"})
+		if err != nil || len(staged) != 0 {
+			t.Fatalf("unstaged-only dirt = (%v, %v), want (nil, nil)", staged, err)
+		}
+	})
+
+	t.Run("staged new file not in HEAD is named", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		if err := os.WriteFile(filepath.Join(repo, "brand-new.txt"), []byte("staged new\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, repo, "add", "brand-new.txt")
+		staged, err := IndexEditsBeyondHEAD(repo, []string{"brand-new.txt"})
+		if err != nil || len(staged) != 1 || staged[0] != "brand-new.txt" {
+			t.Fatalf("IndexEditsBeyondHEAD = (%v, %v), want ([brand-new.txt], nil)", staged, err)
+		}
+	})
+
+	t.Run("staged deletion is named", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		// --cached removes only the index entry (worktree survives) —
+		// the pure staged-deletion shape.
+		mustRun(t, repo, "rm", "-q", "--cached", "--", "tracked.txt")
+		staged, err := IndexEditsBeyondHEAD(repo, []string{"tracked.txt"})
+		if err != nil || len(staged) != 1 || staged[0] != "tracked.txt" {
+			t.Fatalf("IndexEditsBeyondHEAD = (%v, %v), want ([tracked.txt], nil)", staged, err)
+		}
+	})
+
+	t.Run("zero paths is a no-op", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		if staged, err := IndexEditsBeyondHEAD(repo, nil); err != nil || staged != nil {
+			t.Fatalf("IndexEditsBeyondHEAD(nil) = (%v, %v), want (nil, nil)", staged, err)
+		}
+	})
+
+	t.Run("not a repo is an error", func(t *testing.T) {
+		if _, err := IndexEditsBeyondHEAD(filepath.Join(t.TempDir(), "no-repo"), []string{"x.txt"}); err == nil {
+			t.Fatal("want an error outside a repo, got nil")
+		}
+	})
+}
+
 // TestPathsDifferFromHEAD (M20): exit-1 quarantine — differences report
 // true (staged OR unstaged), a clean path set reports false, and real
 // errors surface as errors, never as a diff verdict.

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useRef, useState, useCallback } from "react";
 import { BookMarked, Plus, Pencil, Trash2, X } from "lucide-react";
 import { listSkills, readSkill, updateSkill, deleteSkill, errorMessage } from "../api";
 import type { SkillInfo } from "../types";
@@ -16,7 +16,7 @@ interface Props {
   projectRoot?: string | null;
 }
 
-export default function SkillsPanel({ projectRoot }: Props) {
+function SkillsPanel({ projectRoot }: Props) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -357,3 +357,11 @@ export default function SkillsPanel({ projectRoot }: Props) {
     </div>
   );
 }
+
+// Keep-alive panel (tri-review P2 #5, 2026-08-24): App keeps this
+// component mounted under the ContextPanel `hidden` tabs and hands it
+// only referentially stable props (useCallback handlers + diff_stable
+// prev-bails), so the default shallow compare skips re-rendering the
+// hidden subtree on quiet poll ticks. Same convention as
+// memo(ChatSurface) — no custom comparator.
+export default memo(SkillsPanel);

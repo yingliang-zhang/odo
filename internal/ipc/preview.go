@@ -1,43 +1,55 @@
 package ipc
 
-//   - the allowlist holds across the URL's 30x chain (P1, 2026-08-24,
-//     review finding 3): the chain is walked hop-by-hop before capture and
-//     the FINAL URL is what spawns, so a loopback URL 30x-ing to an
-//     external/intranet host is refused at the hop it leaves the allowlist
-//     and the journaled receipts name final_url — screened == captured;
+// /preview: one headless loopback screenshot piped into the vision leg.
+// Boundary posture:
+//   - the URL allowlist (previewAllowedHosts) is checked pre-journal and
+//     holds across the URL's 30x chain (P1, 2026-08-24, review finding 3):
+//     the chain is walked hop-by-hop before capture and the FINAL URL is
+//     what spawns, so a loopback URL 30x-ing to an external/intranet host
+//     is refused at the hop it leaves the allowlist and the journaled
+//     receipts name final_url — screened == captured;
+//   - the capture itself runs behind a per-shot loopback-only filtering
+//     proxy (previewGuard, P1 2026-08-24, review finding 2) injected into
+//     the child BOTH via HTTP(S)_PROXY with an EMPTY no_proxy (no implicit
+//     <-loopback> bypass) AND via playwright's explicit --proxy-server
+//     argv (the channel guaranteed to reach chromium): after the
+//     pre-capture probe the browser must re-fetch the same URL, and every
+//     request the page issues during the capture — additional redirect
+//     hops, JS/meta-refresh navigations, subresources — is
+//     allowlist-checked BEFORE any dial; one blocked host refuses the
+//     whole capture post-hoc (previewBoundaryRefusal);
 //   - per-shot browser lifecycle (spawn → navigate → capture → exit under a
-//     45s cap) — no persistent browser, no profile reuse beyond the npx
-//     cache;
+//     45s cap; the guard dies with it) — no persistent browser, no profile
+//     reuse beyond the npx cache (npx's own registry resolution warms in a
+//     separate unguarded spawn, then runs only-if-cached — tooling traffic
+//     is not capture traffic);
 //   - no auto-anything: no auto-retry, no auto screenshot after errors or
 //     after auto-land.
-// Residual v1 boundary, explicitly NOT closed here: navigations issued
-// AFTER page load (in-page JS, meta-refresh) and sub-resource requests are
-// not chain-checked — per-request browser-level interception lands with
-// the scripted-capture replacement of the playwright CLI, a follow-up
-// item.
-// Explicit non-goals: agent tool channel (MCP server), any visible browser
-// pane, CDP attach to the user's browser, a Process Dock.
-//   - per-shot browser lifecycle (spawn → navigate → capture → exit under a
-//     45s cap) — no persistent browser, no profile reuse beyond the npx
-//     cache;
-//   - no auto-anything: no auto-retry, no auto screenshot after errors or
-//     after auto-land.
+// Residual v1 boundary, honestly remaining after the guard: in-page
+// data:/blob: URLs never fetch (chromium resolves them internally — no
+// request reaches or needs the guard), WebRTC UDP is not proxied (a page's
+// own UDP chatter rides outside the guard but cannot place bytes INTO the
+// capture), and DNS is irrelevant — only the three loopback names of
+// previewAllowedHosts ever pass, and they resolve in-process.
 // Explicit non-goals: agent tool channel (MCP server), any visible browser
 // pane, CDP attach to the user's browser, a Process Dock.
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -244,6 +256,400 @@ func previewChildEnv() []string {
 	return append(env, "PATH="+bin)
 }
 
+// previewBlockedReq records one request the guard refused: the method and
+// the authority it named (host[:port] — usually the CONNECT target).
+type previewBlockedReq struct {
+	Method string
+	Host   string
+}
+
+// previewGuard is the capture-time boundary enforcer (2026-08-24 review
+// finding 2): a loopback-only filtering proxy living for exactly one
+// capture. The pre-capture 30x probe (resolvePreviewFinalURL) screens the
+// chain the DAEMON walks, but the playwright child then re-fetches the
+// final URL in a second request — a page answering the probe with 204 and
+// the browser GET with a 302 to an external/intranet host, or pulling
+// external subresources / JS-driven navigations mid-shot, would otherwise
+// screenshot external bytes straight into the vision leg. The child is
+// spawned with BOTH the proxy env (EMPTY no_proxy — even loopback must
+// detour through the guard) AND playwright's --proxy-server argv pointing
+// here, so EVERY request the capture issues is allowlist-checked before
+// any dial:
+//
+//   - allowed CONNECT: 200 Connection established, then a dumb
+//     bidirectional byte tunnel (TLS bytes flow untouched);
+//   - allowed absolute-URI plain HTTP: the first request is re-serialized
+//     to origin-form, then a dumb byte tunnel — keep-alive follow-up
+//     requests, chunked bodies, and 101 upgrades (ws://) all ride the
+//     tunnel untranslated;
+//   - anything off previewAllowedHosts: recorded in the blocked list,
+//     answered 403, connection closed — the target is never dialed.
+//
+// Lifecycle: the guard starts immediately before the child spawns;
+// close() (deferred by the caller until the capture file is read) shuts
+// the listener AND every tracked connection, so no guard goroutine
+// outlives the capture; accepted conns also carry a previewChildTimeout
+// read deadline as a backstop.
+type previewGuard struct {
+	ln         net.Listener
+	acceptDone chan struct{}
+	wg         sync.WaitGroup
+	mu         sync.Mutex
+	closed     bool
+	conns      map[net.Conn]struct{}
+	blocked    []previewBlockedReq
+	allowed    int
+	dials      int
+}
+
+// previewGuardHook, when non-nil (tests only), receives each freshly
+// started guard BEFORE the child spawns, so tests can pre-seed denials
+// into its record or assert on its observations after the capture. Nil in
+// production.
+var previewGuardHook func(*previewGuard)
+
+// startPreviewGuard listens on an ephemeral loopback port and launches the
+// accept loop. One guard per capture; the caller defers close.
+func startPreviewGuard() (*previewGuard, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	g := &previewGuard{
+		ln:         ln,
+		acceptDone: make(chan struct{}),
+		conns:      make(map[net.Conn]struct{}),
+	}
+	go g.acceptLoop()
+	return g, nil
+}
+
+func (g *previewGuard) acceptLoop() {
+	defer close(g.acceptDone)
+	for {
+		c, err := g.ln.Accept()
+		if err != nil {
+			return // listener closed: shutdown
+		}
+		// Backstop deadline: no guard read may outlive the capture bound
+		// (close() actively kills tracked conns; this covers a conn that
+		// idles between accept and close).
+		_ = c.SetReadDeadline(time.Now().Add(previewChildTimeout))
+		g.track(c)
+		g.wg.Add(1)
+		go func() {
+			defer g.wg.Done()
+			defer g.untrack(c)
+			defer c.Close()
+			g.serve(c)
+		}()
+	}
+}
+
+func (g *previewGuard) track(c net.Conn) {
+	g.mu.Lock()
+	g.conns[c] = struct{}{}
+	g.mu.Unlock()
+}
+
+func (g *previewGuard) untrack(c net.Conn) {
+	g.mu.Lock()
+	delete(g.conns, c)
+	g.mu.Unlock()
+}
+
+// close shuts the guard down in an order that can neither lose nor orphan
+// a connection: the listener first, then the accept loop's exit is
+// observed (every accepted conn is tracked by then), then all tracked
+// conns close (unblocking every read/copy), then the handler wait.
+func (g *previewGuard) close() {
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	g.closed = true
+	g.mu.Unlock()
+	_ = g.ln.Close()
+	<-g.acceptDone
+	g.mu.Lock()
+	for c := range g.conns {
+		_ = c.Close()
+	}
+	g.mu.Unlock()
+	g.wg.Wait()
+}
+
+// addr is the 127.0.0.1:port the child's proxy env points at.
+func (g *previewGuard) addr() string {
+	return g.ln.Addr().String()
+}
+
+// serve handles one client connection: read the first request, police its
+// host against the allowlist, then deny or tunnel.
+func (g *previewGuard) serve(c net.Conn) {
+	br := bufio.NewReader(c)
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		return // pre-request garbage or an idle close: nothing to police
+	}
+	authority := req.URL.Host
+	if req.Method == http.MethodConnect || authority == "" {
+		authority = req.Host
+	}
+	if !previewAllowedHosts[previewAuthorityHost(authority)] {
+		g.recordBlocked(req.Method, authority)
+		g.writePlain(c, http.StatusForbidden,
+			"preview guard: host is outside the loopback boundary\n")
+		return
+	}
+	g.recordAllowed()
+	if req.Method == http.MethodConnect {
+		target, err := g.dial(previewDialAddr(authority, ""))
+		if err != nil {
+			g.writePlain(c, http.StatusBadGateway, "preview guard: dial failed\n")
+			return
+		}
+		if _, err := io.WriteString(c, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
+			_ = target.Close()
+			return
+		}
+		previewGuardTunnel(br, c, target)
+		return
+	}
+	// Absolute-form plain HTTP: re-serialize the first request in
+	// origin-form, then tunnel raw bytes both ways.
+	target, err := g.dial(previewDialAddr(authority, req.URL.Scheme))
+	if err != nil {
+		g.writePlain(c, http.StatusBadGateway, "preview guard: dial failed\n")
+		return
+	}
+	if err := previewGuardForward(target, req); err != nil {
+		_ = target.Close()
+		return
+	}
+	previewGuardTunnel(br, c, target)
+}
+
+// dial bounds each dial attempt and counts guarded dials (a dial count of
+// zero proves a denied request never touched the network).
+func (g *previewGuard) dial(addr string) (net.Conn, error) {
+	g.mu.Lock()
+	g.dials++
+	g.mu.Unlock()
+	return net.DialTimeout("tcp", addr, 10*time.Second)
+}
+
+func (g *previewGuard) recordBlocked(method, host string) {
+	g.mu.Lock()
+	g.blocked = append(g.blocked, previewBlockedReq{Method: method, Host: host})
+	g.mu.Unlock()
+}
+
+func (g *previewGuard) recordAllowed() {
+	g.mu.Lock()
+	g.allowed++
+	g.mu.Unlock()
+}
+
+// blockedHosts returns the distinct denied authorities in first-seen
+// order — the refusal message names these.
+func (g *previewGuard) blockedHosts() []string {
+	seen := map[string]bool{}
+	var hosts []string
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, b := range g.blocked {
+		if !seen[b.Host] {
+			seen[b.Host] = true
+			hosts = append(hosts, b.Host)
+		}
+	}
+	return hosts
+}
+
+// blockedRequests returns a snapshot of the full blocked record (method +
+// host per refusal) for tests and audits.
+func (g *previewGuard) blockedRequests() []previewBlockedReq {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]previewBlockedReq(nil), g.blocked...)
+}
+
+func (g *previewGuard) allowedRequests() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.allowed
+}
+
+func (g *previewGuard) dialCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.dials
+}
+
+// writePlain answers a denied or failed request; the defer closes the
+// conn and (for denials) the target was never dialed.
+func (g *previewGuard) writePlain(c net.Conn, status int, body string) {
+	_, _ = fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s",
+		status, http.StatusText(status), len(body), body)
+}
+
+// previewAuthorityHost extracts the allowlist key from an authority
+// (host[:port]); the same hostname-lower-cased semantics as
+// validatePreviewURL.
+func previewAuthorityHost(authority string) string {
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		return strings.ToLower(h)
+	}
+	// No port (or a bare IPv6 literal): strip any brackets, lowercase.
+	return strings.ToLower(strings.Trim(authority, "[]"))
+}
+
+// previewDialAddr adds the scheme's default port when the authority has
+// none (CONNECT always carries the port in practice; an absolute-form URL
+// may elide it).
+func previewDialAddr(authority, scheme string) string {
+	if _, _, err := net.SplitHostPort(authority); err == nil {
+		return authority
+	}
+	port := "443"
+	if scheme == "http" {
+		port = "80"
+	}
+	return net.JoinHostPort(strings.Trim(authority, "[]"), port)
+}
+
+// previewGuardDropHeaders is the set stripped when the first absolute-form
+// request is re-serialized: the proxy-targeted fields. Framing headers
+// (Content-Length, Transfer-Encoding, Connection, Upgrade) deliberately
+// ride through — after the re-serialized request line the connection is a
+// dumb byte tunnel where only byte-identical framing stays correct, and a
+// ws:// 101 upgrade needs its headers intact to negotiate.
+var previewGuardDropHeaders = map[string]bool{
+	"Proxy-Connection":    true,
+	"Proxy-Authorization": true,
+	"Proxy-Authenticate":  true,
+	"Keep-Alive":          true,
+}
+
+// previewGuardForward writes req to target as an origin-form request line
+// plus the surviving headers — but NEVER the body: the byte tunnel
+// starting right after carries body bytes (and every later request on this
+// keep-alive conn) verbatim. Cloned to Path/RawQuery only, RequestURI
+// gone, Proxy-* fields stripped.
+func previewGuardForward(target net.Conn, req *http.Request) error {
+	path := req.URL.Path
+	if path == "" {
+		path = "/"
+	}
+	if req.URL.RawQuery != "" {
+		path += "?" + req.URL.RawQuery
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\n", req.Method, path)
+	if req.Host != "" {
+		fmt.Fprintf(&b, "Host: %s\r\n", req.Host)
+	}
+	for name, values := range req.Header {
+		if previewGuardDropHeaders[name] {
+			continue
+		}
+		for _, v := range values {
+			fmt.Fprintf(&b, "%s: %s\r\n", name, v)
+		}
+	}
+	b.WriteString("\r\n")
+	_, err := io.WriteString(target, b.String())
+	return err
+}
+
+// previewGuardTunnel dumb-tunnels bytes between the (bufio-wrapped) client
+// conn and target until either direction ends, then closes both. br — not
+// the raw conn — is the client read side: http.ReadRequest may already
+// have buffered bytes beyond the first request's headers. Duplex shutdown
+// is intentionally crude (full close on first EOF): keep-alive, streaming
+// bodies, and upgraded (101) protocols all end by closing, and the guard's
+// close() kills both ends regardless.
+func previewGuardTunnel(br *bufio.Reader, client, target net.Conn) {
+	var once sync.Once
+	kill := func() {
+		once.Do(func() {
+			_ = client.Close()
+			_ = target.Close()
+		})
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		_, _ = io.Copy(target, br)
+		kill()
+		wg.Done()
+	}()
+	go func() {
+		_, _ = io.Copy(client, target)
+		kill()
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// previewGuardEnv builds the capture child's environment: base with
+// managed proxy keys STRIPPED (an operator shell's exported http_proxy
+// must not shadow the guard — duplicate keys in exec environ read
+// ambiguously), then the guard endpoint on all four case variants and an
+// explicitly EMPTY no_proxy/NO_PROXY so no implicit <-loopback> bypass
+// keeps loopback traffic away from the guard (uniform routing: every
+// request incl. loopback hits the guard). npm_config_offline is pinned
+// true: npm honors the generic proxy vars too, and the guard exists to
+// police the CAPTURE (browser traffic) — npx's own registry resolution is
+// daemon-side tooling the warm spawn (warmPreviewCLI) already completed
+// over npm's pre-guard direct path, so the guarded spawn runs cache-only
+// (only-if-cached: zero egress attempts possible, and none can die against
+// the guard as a bogus boundary refusal — ODO_PREVIEW_LIVE caught exactly
+// that, blocked registry.npmjs.org:443 from npx itself, before this
+// split).
+func previewGuardEnv(base []string, proxyURL string) []string {
+	env := make([]string, 0, len(base)+7)
+	for _, e := range base {
+		key := e
+		if i := strings.IndexByte(e, '='); i >= 0 {
+			key = e[:i]
+		}
+		switch strings.ToLower(key) {
+		case "http_proxy", "https_proxy", "no_proxy", "npm_config_offline":
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env,
+		"HTTP_PROXY="+proxyURL,
+		"HTTPS_PROXY="+proxyURL,
+		"http_proxy="+proxyURL,
+		"https_proxy="+proxyURL,
+		"NO_PROXY=",
+		"no_proxy=",
+		"npm_config_offline=true",
+	)
+}
+
+// previewBoundaryRefusal is the post-capture refusal (2026-08-24 review
+// finding 2): the guard blocked at least one request naming a host outside
+// the loopback boundary, so the captured PNG may smear external bytes into
+// the vision leg — the file is dropped and the whole capture refuses.
+// Accept-refusal family shape (dirtyPatchRefusal/extraEditsRefusal): the
+// first 3 hosts are spelled out, the rest summarized "… (+N more)". The
+// refusal surfaces through the same shotErr path as
+// classifyPreviewFailure's classes — the handler journals the attempt
+// without attachments and pairs an agent_error.
+func previewBoundaryRefusal(hosts []string) error {
+	shown := hosts
+	if len(shown) > 3 {
+		shown = append(shown[:3:3], fmt.Sprintf("… (+%d more)", len(hosts)-3))
+	}
+	return fmt.Errorf("preview refused the capture: the page tried to leave the loopback boundary (blocked: %s)", strings.Join(shown, ", "))
+}
+
 // previewShot is one captured screenshot and its receipt facts: the bytes
 // the gateway request will carry (read ONCE — the user_message then
 // journals sha16/bytes of exactly this preimage, ADR-0003) plus the
@@ -256,9 +662,13 @@ type previewShot struct {
 	WaitMs int64
 }
 
-// runPreviewScreenshot performs one per-shot capture: spawn
-// `npx -y playwright@^1 screenshot` → navigate → capture → exit, under
-// previewChildTimeout. Failures map to readable chat errors (missing
+// runPreviewScreenshot performs one per-shot capture under
+// previewChildTimeout, in two spawns (2026-08-24, finding-2 fallout):
+// warmPreviewCLI resolves/warms the playwright CLI over npm's unguarded
+// direct path, then the guarded screenshot spawn runs behind the
+// capture-time previewGuard (argv + env proxy, npm pinned offline) —
+// navigate → capture → exit, and one blocked request refuses the whole
+// capture post-hoc. Failures map to readable chat errors (missing
 // node/npx, missing chromium with the install command, navigation timeout,
 // refused host).
 func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot, error) {
@@ -268,10 +678,35 @@ func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot,
 	}
 	cctx, cancel := context.WithTimeout(ctx, previewChildTimeout)
 	defer cancel()
+	// Phase 1 (of 2): resolve/warm the CLI WITHOUT the guard — npm's
+	// stale-cache registry fetch keeps the direct-network path it had
+	// before the guard existed (tooling traffic is not capture traffic),
+	// so the guarded phase-2 spawn can pin npm offline.
+	if err := warmPreviewCLI(cctx, npx); err != nil {
+		return previewShot{}, err
+	}
+	// Finding 2: the loopback-only capture guard starts BEFORE the capture
+	// child (so its argv can name the address) and dies only after the
+	// output file is read — no guard conn or goroutine outlives the
+	// capture.
+	guard, err := startPreviewGuard()
+	if err != nil {
+		return previewShot{}, fmt.Errorf("preview: start the capture-time guard: %w", err)
+	}
+	defer guard.close()
+	if previewGuardHook != nil { // test-only seam
+		previewGuardHook(guard)
+	}
 	cmd := exec.CommandContext(cctx, npx,
 		"-y", "playwright@^1", "screenshot",
 		"--viewport-size="+previewViewport,
 		"--wait-for-timeout="+previewSettleMs,
+		// Finding 2: the guard rides the argv too, not just the env (the ODO_PREVIEW_LIVE
+		// empirical check, 2026-08-24): env vars reach env-honoring children (and
+		// chromium on Linux), but playwright's explicit --proxy-server flag is the
+		// channel GUARANTEED to reach its chromium on every platform; with no
+		// --proxy-bypass, loopback has no special pass — every request hits the guard.
+		"--proxy-server=http://"+guard.addr(),
 		rawURL, out)
 	// Per-shot lifecycle guarantee (lock item 2): on the deadline, kill the
 	// whole process GROUP, not just npx — npx spawns node, which spawns the
@@ -281,10 +716,20 @@ func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot,
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	cmd.Env = previewChildEnv()
+	cmd.Env = previewGuardEnv(previewChildEnv(), "http://"+guard.addr())
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
 	waitMs := time.Since(start).Milliseconds()
+	// Post-capture refusal (2026-08-24 review finding 2): ≥1 blocked host
+	// means the PNG may smear boundary-external bytes into the vision leg
+	// — drop the file and refuse the whole capture. This outranks the
+	// child's own failure class: a denied main-frame hop usually fails the
+	// child TOO (proxy 403 → navigation error), and the refusal names the
+	// actual cause.
+	if blocked := guard.blockedHosts(); len(blocked) > 0 {
+		_ = os.Remove(out)
+		return previewShot{}, previewBoundaryRefusal(blocked)
+	}
 	if err != nil {
 		return previewShot{}, classifyPreviewFailure(cctx, err, string(output))
 	}
@@ -321,6 +766,35 @@ func classifyPreviewFailure(ctx context.Context, err error, output string) error
 	default:
 		return fmt.Errorf("preview screenshot failed: %s", tail)
 	}
+}
+
+// warmPreviewCLI is phase 1 of the capture's two-spawn shape: a plain
+// `npx -y playwright@^1 --version` with the DAEMON-style child env (no
+// guard proxy vars). It exists so the guarded phase-2 spawn can pin
+// npm_config_offline=true: npm honors generic proxy env vars, and an
+// npm registry fetch routing through the guard would 403-die and read as
+// a bogus loopback-boundary refusal (the guard polices CAPTURE traffic;
+// npx resolution is daemon tooling that went direct before the guard
+// existed). Phase 1 warms/resolves exactly like the pre-guard single
+// spawn did — including the cold first-run download path the timeout
+// class already names — and phase 2 then resolves only-if-cached with
+// zero egress attempts possible (ODO_PREVIEW_LIVE-driven, 2026-08-24).
+// Failures reuse the capture's classify family — the messages (missing
+// node/npx, first-run-download timeout) describe this spawn precisely.
+func warmPreviewCLI(ctx context.Context, npx string) error {
+	cmd := exec.CommandContext(ctx, npx, "-y", "playwright@^1", "--version")
+	// Same per-shot lifecycle guarantee as the capture spawn (finding D3):
+	// kill the whole process GROUP on the deadline.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.Env = previewChildEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return classifyPreviewFailure(ctx, err, string(output))
+	}
+	return nil
 }
 
 // exitCode extracts an *exec.ExitError's code (-1 when the error carries

@@ -7,16 +7,25 @@ package ipc
 // chat errors, and the hermes-Node npx preference. The playwright child is
 // mocked via a PATH-installed npx shell script (the package's standard
 // exec-handler test pattern — cf. omp_usage_test.go); no real browser
-// launches in tests.
+// launches in tests. The capture-time loopback guard (2026-08-24 finding
+// 2) is covered hermetically against httptest targets (CONNECT tunneling,
+// off-boundary denials, absolute-form forwarding, conn reaping), the
+// child's proxy-env contract via a mock-npx env echo, and end-to-end by
+// the opt-in ODO_PREVIEW_LIVE=1 live capture.
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -82,7 +91,11 @@ var previewFixturePNG = []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("odo-preview
 // installMockNpx writes script as `npx` in a temp dir prepended to PATH
 // and returns the PATH dir. The script runs with previewChildEnv
 // (os.Environ + hermes-first PATH), so test env vars set before the send
-// (MOCK_NPX_LOG, MOCK_PNG_FIXTURE) are visible to it.
+// (MOCK_NPX_LOG, MOCK_PNG_FIXTURE) are visible to it. Each capture
+// invokes it TWICE (2026-08-24 finding-2 split): the unguarded
+// `--version` warm probe, then the guarded `screenshot` call whose env
+// additionally carries the guard proxy vars — scripts branch on the
+// final argv element (see mockNpxSuccess).
 func installMockNpx(t *testing.T, script string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -95,10 +108,17 @@ func installMockNpx(t *testing.T, script string) string {
 
 // mockNpxSuccess is a playwright stand-in: it logs the invocation and
 // copies the fixture PNG to the output path (the final argv element).
+// Every mock handles the capture's TWO-call shape (2026-08-24 finding-2
+// split): `--version` is the unguarded warm/resolve probe (succeed, echo
+// nothing else), `screenshot` is the scenario under test.
 const mockNpxSuccess = `#!/bin/sh
 echo "path-npx:$*" >> "$MOCK_NPX_LOG"
 last=""
 for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  echo "Version 1.62.1"
+  exit 0
+fi
 cp "$MOCK_PNG_FIXTURE" "$last"
 `
 
@@ -498,18 +518,38 @@ func TestPreviewFailureClasses(t *testing.T) {
 
 	for _, tc := range []struct{ name, script, wantErr string }{
 		{"chromium missing (Executable)", `#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  exit 0
+fi
 echo "browserType.launch: Executable doesn't exist at /x/chrome" >&2
 exit 1
 `, "npx playwright install chromium"},
 		{"chromium missing (browserType)", `#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  exit 0
+fi
 echo "browserType.launch: Target closed" >&2
 exit 1
 `, "npx playwright install chromium"},
 		{"connection refused", `#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  exit 0
+fi
 echo "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:1420/" >&2
 exit 1
 `, "connection refused"},
 		{"generic failure", `#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  exit 0
+fi
 echo "some playwright explosion" >&2
 exit 1
 `, "preview screenshot failed"},
@@ -589,6 +629,9 @@ func TestPreviewPrefersHermesNpx(t *testing.T) {
 echo "hermes-npx:$*" >> "$MOCK_NPX_LOG"
 last=""
 for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  exit 0
+fi
 cp "$MOCK_PNG_FIXTURE" "$last"
 `
 	if err := os.WriteFile(filepath.Join(hermes, "npx"), []byte(hermesScript), 0o755); err != nil {
@@ -650,6 +693,11 @@ func TestPreviewDeadlineKillsProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv("MOCK_CHILD_PID", pidFile)
 	installMockNpx(t, `#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  exit 0
+fi
 sleep 30 &
 echo $! > "$MOCK_CHILD_PID"
 exec sleep 30
@@ -679,4 +727,532 @@ exec sleep 30
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Capture-time loopback guard (2026-08-24 tri-review P1, review finding 2)
+// ---------------------------------------------------------------------------
+
+// TestPreviewGuardConnectTunnel: an allowed CONNECT names a loopback TLS
+// target and the guard tunnels real bytes both ways (a Go HTTPS client
+// through the guard as proxy, against an httptest TLS server).
+func TestPreviewGuardConnectTunnel(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("tls-through-tunnel:" + r.URL.Path))
+	}))
+	t.Cleanup(target.Close)
+	g, err := startPreviewGuard()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.close)
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(&url.URL{Scheme: "http", Host: g.addr()}),
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec — hermetic httptest cert
+		},
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Get(target.URL + "/secure")
+	if err != nil {
+		t.Fatalf("GET through the CONNECT tunnel: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "tls-through-tunnel:/secure" {
+		t.Errorf("GET = %d %q, want 200 %q", resp.StatusCode, body, "tls-through-tunnel:/secure")
+	}
+	if g.allowedRequests() < 1 || g.dialCount() < 1 {
+		t.Errorf("guard observed allowed=%d dials=%d, want >=1 each", g.allowedRequests(), g.dialCount())
+	}
+	if len(g.blockedRequests()) != 0 {
+		t.Errorf("blocked = %v, want none", g.blockedRequests())
+	}
+}
+
+// TestPreviewGuardBlocksOffBoundary: a denied host — in BOTH wire shapes
+// (CONNECT authority-form and absolute-URI) — is answered 403, recorded
+// with method + host, and NEVER dialed (the TEST-NET targets are
+// unroutable; the dial counter is the programmatic proof, and dedupe keeps
+// the refusal list readable).
+func TestPreviewGuardBlocksOffBoundary(t *testing.T) {
+	g, err := startPreviewGuard()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.close)
+
+	deny := func(request string) int {
+		t.Helper()
+		conn, err := net.Dial("tcp", g.addr())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err := io.WriteString(conn, request); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("reading denial response: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if s := deny("CONNECT 192.0.2.1:1 HTTP/1.1\r\nHost: 192.0.2.1:1\r\n\r\n"); s != http.StatusForbidden {
+		t.Errorf("CONNECT denial = %d, want 403", s)
+	}
+	if s := deny("GET http://198.51.100.7:8080/x.png HTTP/1.1\r\nHost: 198.51.100.7:8080\r\n\r\n"); s != http.StatusForbidden {
+		t.Errorf("absolute-form denial = %d, want 403", s)
+	}
+	// A repeat of the first authority: recorded, but deduped for the
+	// refusal message.
+	if s := deny("CONNECT 192.0.2.1:1 HTTP/1.1\r\nHost: 192.0.2.1:1\r\n\r\n"); s != http.StatusForbidden {
+		t.Errorf("repeat CONNECT denial = %d, want 403", s)
+	}
+
+	blocked := g.blockedRequests()
+	want := []previewBlockedReq{
+		{Method: "CONNECT", Host: "192.0.2.1:1"},
+		{Method: "GET", Host: "198.51.100.7:8080"},
+		{Method: "CONNECT", Host: "192.0.2.1:1"},
+	}
+	if fmt.Sprint(blocked) != fmt.Sprint(want) {
+		t.Errorf("blocked record = %v, want %v", blocked, want)
+	}
+	hosts := g.blockedHosts()
+	if len(hosts) != 2 || hosts[0] != "192.0.2.1:1" || hosts[1] != "198.51.100.7:8080" {
+		t.Errorf("blockedHosts = %v, want [192.0.2.1:1 198.51.100.7:8080] (deduped, first-seen order)", hosts)
+	}
+	if g.dialCount() != 0 || g.allowedRequests() != 0 {
+		t.Errorf("denials dialed (%d) or counted allowed (%d) — the target must never be dialed", g.dialCount(), g.allowedRequests())
+	}
+}
+
+// TestPreviewGuardForwardsAbsoluteForm: an allowed absolute-URI request is
+// re-serialized to origin-form and answered, and the conn then acts as a
+// dumb byte tunnel — a keep-alive second request and a POST body (the
+// Content-Length framing must survive) both land on the target.
+func TestPreviewGuardForwardsAbsoluteForm(t *testing.T) {
+	var hits []string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		hits = append(hits, r.Method+" "+r.URL.RequestURI())
+		fmt.Fprintf(w, "served:%s|body:%s", r.URL.RequestURI(), body)
+	}))
+	t.Cleanup(target.Close)
+	g, err := startPreviewGuard()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.close)
+
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: g.addr()})},
+		Timeout:   10 * time.Second,
+	}
+	get := func(path, want string) {
+		t.Helper()
+		resp, err := client.Get(target.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s via guard: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || string(body) != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", path, resp.StatusCode, body, want)
+		}
+	}
+	get("/one?x=1", "served:/one?x=1|body:")
+	get("/two", "served:/two|body:") // keep-alive reuse through the tunnel
+
+	resp, err := client.Post(target.URL+"/submit", "text/plain", strings.NewReader("payload-body"))
+	if err != nil {
+		t.Fatalf("POST via guard: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "served:/submit|body:payload-body" {
+		t.Errorf("POST = %d %q, want the tunneled body intact", resp.StatusCode, body)
+	}
+
+	want := []string{"GET /one?x=1", "GET /two", "POST /submit"}
+	if fmt.Sprint(hits) != fmt.Sprint(want) {
+		t.Errorf("target hits = %v, want %v", hits, want)
+	}
+	if g.allowedRequests() < 1 {
+		t.Errorf("allowed = %d, want >=1", g.allowedRequests())
+	}
+	if len(g.blockedRequests()) != 0 {
+		t.Errorf("blocked = %v, want none", g.blockedRequests())
+	}
+}
+
+// TestPreviewGuardCloseReapsConns: close() ends the listener AND every
+// tracked connection, so a held-open tunnel dies with the capture instead
+// of leaking past it.
+func TestPreviewGuardCloseReapsConns(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	g, err := startPreviewGuard()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := net.Dial("tcp", g.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := strings.TrimPrefix(target.URL, "https://")
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("CONNECT = %d, want 200 Connection established", resp.StatusCode)
+	}
+
+	g.close()
+
+	// The held tunnel must be dead — prompt read failure, not a hang.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Error("held tunnel still readable after close — a guard conn outlived the capture")
+	}
+	// And the listener is gone.
+	if c2, err := net.Dial("tcp", g.addr()); err == nil {
+		c2.Close()
+		t.Error("listener still accepting after close")
+	}
+}
+
+// TestPreviewGuardEnv pins the child-env contract: pre-existing proxy keys
+// are STRIPPED (an operator shell's exported proxy must not shadow the
+// guard), the guard endpoint lands on all four case variants, and
+// no_proxy/NO_PROXY are present and EMPTY (no loopback bypass).
+func TestPreviewGuardEnv(t *testing.T) {
+	base := []string{
+		"PATH=/bin", "HOME=/h",
+		"http_proxy=http://preexisting:9", "HTTPS_PROXY=http://preexisting:9",
+		"Http_Proxy=http://preexisting:8", "NO_PROXY=.corp", "no_proxy=localhost",
+		"UNRELATED=keep",
+	}
+	out := previewGuardEnv(base, "http://127.0.0.1:5555")
+	counts := map[string]int{}
+	vals := map[string]string{}
+	for _, e := range out {
+		k, v, _ := strings.Cut(e, "=")
+		switch strings.ToLower(k) {
+		case "http_proxy", "https_proxy", "no_proxy":
+			counts[strings.ToLower(k)]++
+			vals[k] = v
+			if v != "" && v != "http://127.0.0.1:5555" {
+				t.Errorf("pre-existing proxy leaked through as %q", e)
+			}
+		}
+	}
+	for _, lk := range []string{"http_proxy", "https_proxy", "no_proxy"} {
+		if counts[lk] != 2 {
+			t.Errorf("%s: %d entries (want exactly upper+lower 2); env=%q", lk, counts[lk], out)
+		}
+	}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if vals[k] != "http://127.0.0.1:5555" {
+			t.Errorf("%s = %q, want the guard endpoint", k, vals[k])
+		}
+	}
+	if v, ok := vals["NO_PROXY"]; !ok || v != "" {
+		t.Errorf("NO_PROXY = %q (present=%v), want present and empty", v, ok)
+	}
+	if v, ok := vals["no_proxy"]; !ok || v != "" {
+		t.Errorf("no_proxy = %q (present=%v), want present and empty", v, ok)
+	}
+	for _, keep := range []string{"PATH=/bin", "HOME=/h", "UNRELATED=keep"} {
+		found := false
+		for _, e := range out {
+			if e == keep {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("non-proxy entry %q was dropped", keep)
+		}
+	}
+}
+
+// TestPreviewBoundaryRefusalShape pins the refusal-family shape: ≤3 hosts
+// spelled out, the rest summarized "… (+N more)".
+func TestPreviewBoundaryRefusalShape(t *testing.T) {
+	msg := previewBoundaryRefusal([]string{"a.test:1", "b.test:2", "c.test:3"}).Error()
+	if !strings.Contains(msg, "preview refused the capture: the page tried to leave the loopback boundary (blocked: a.test:1, b.test:2, c.test:3)") {
+		t.Errorf("3-host refusal = %q", msg)
+	}
+	if strings.Contains(msg, "more") {
+		t.Errorf("3-host refusal wrongly summarizes: %q", msg)
+	}
+	msg5 := previewBoundaryRefusal([]string{"a:1", "b:2", "c:3", "d:4", "e:5"}).Error()
+	if !strings.Contains(msg5, "a:1, b:2, c:3, … (+2 more)") || strings.Contains(msg5, "d:4") {
+		t.Errorf("5-host refusal = %q, want first 3 + \"… (+2 more)\"", msg5)
+	}
+}
+
+// TestPreviewBlockedCaptureDropsFile is the run-level pin of finding 2:
+// the child exits 0 having WRITTEN a capture, but the guard recorded an
+// off-boundary attempt — the file must be REMOVED and the refusal must
+// name the blocked host.
+func TestPreviewBlockedCaptureDropsFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no hermes npx: fall back to the PATH mock
+	fixture := filepath.Join(t.TempDir(), "fixture.png")
+	if err := os.WriteFile(fixture, previewFixturePNG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MOCK_PNG_FIXTURE", fixture)
+	log := filepath.Join(t.TempDir(), "npx.log")
+	t.Setenv("MOCK_NPX_LOG", log)
+	installMockNpx(t, mockNpxSuccess)
+
+	old := previewGuardHook
+	previewGuardHook = func(g *previewGuard) { g.recordBlocked("GET", "192.0.2.1:1") }
+	t.Cleanup(func() { previewGuardHook = old })
+
+	out := filepath.Join(t.TempDir(), "out.png")
+	_, err := runPreviewScreenshot(context.Background(), "http://localhost:1420", out)
+	if err == nil || !strings.Contains(err.Error(), "preview refused the capture") || !strings.Contains(err.Error(), "192.0.2.1:1") {
+		t.Fatalf("err = %v, want the boundary refusal naming 192.0.2.1:1", err)
+	}
+	if _, serr := os.Stat(out); !os.IsNotExist(serr) {
+		t.Errorf("capture file survived the refusal (stat err = %v)", serr)
+	}
+	if b, rerr := os.ReadFile(log); rerr != nil || !strings.Contains(string(b), "path-npx:") {
+		t.Errorf("mock npx never ran (%v, %q) — removal must follow a WRITTEN capture", rerr, b)
+	}
+}
+
+// TestPreviewBlockedAttemptRefusesRoute is the finding-2 route pin: the
+// page attempts an off-boundary CONNECT through the freshly started guard
+// (issued by the test via the hook seam — the mock npx child is a shell
+// script that cannot reach it), the capture "succeeds", and the route
+// refuses with the boundary text, journaled exactly like every shotErr —
+// the attempt's user_message WITHOUT attachments pairs with an
+// agent_error, no preview_captured lands, the gateway stays untouched.
+func TestPreviewBlockedAttemptRefusesRoute(t *testing.T) {
+	rec := &previewMoaRecorder{}
+	rig, convID := seedPreviewRig(t, rec)
+	installMockNpx(t, mockNpxSuccess)
+	srv := previewTargetServer(t)
+
+	old := previewGuardHook
+	previewGuardHook = func(g *previewGuard) {
+		conn, err := net.Dial("tcp", g.addr())
+		if err != nil {
+			t.Errorf("test could not reach the guard: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(conn, "CONNECT 169.254.169.254:80 HTTP/1.1\r\nHost: 169.254.169.254:80\r\n\r\n")
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Errorf("guard denial unreadable: %v", err)
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("guard answered %d to an off-boundary CONNECT, want 403", resp.StatusCode)
+		}
+	}
+	t.Cleanup(func() { previewGuardHook = old })
+
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + srv.URL})
+	if !strings.Contains(resp.Error, "preview refused the capture: the page tried to leave the loopback boundary") ||
+		!strings.Contains(resp.Error, "169.254.169.254:80") {
+		t.Errorf("error = %q, want the boundary refusal naming the blocked host", resp.Error)
+	}
+
+	var userMsgs, agentErrs, captured int
+	for _, ev := range rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events {
+		switch ev.Type {
+		case store.EventUserMessage:
+			var p struct {
+				Text        string   `json:"text"`
+				Attachments []string `json:"attachments"`
+				ImageBytes  *int     `json:"image_bytes"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil && strings.HasPrefix(p.Text, "/preview") {
+				userMsgs++
+				if len(p.Attachments) != 0 || p.ImageBytes != nil {
+					t.Errorf("refused capture journaled an attachment receipt: %s", ev.Payload)
+				}
+			}
+		case store.EventAgentError:
+			var a struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(ev.Payload, &a) == nil && strings.Contains(a.Error, "loopback boundary") {
+				agentErrs++
+			}
+		case store.EventPreviewCaptured:
+			captured++
+		}
+	}
+	if userMsgs != 1 || agentErrs != 1 || captured != 0 {
+		t.Errorf("journaled %d user_message + %d agent_error + %d preview_captured, want 1/1/0", userMsgs, agentErrs, captured)
+	}
+	if rec.Model != "" {
+		t.Error("gateway called after a boundary refusal")
+	}
+}
+
+// TestPreviewChildGetsGuardProxyEnv is the (b) env-contract pin: the
+// capture child's spawn env now carries the guard proxy on all four case
+// variants with NO_PROXY/no_proxy explicitly EMPTY — and a pre-existing
+// proxy config poisoned into the daemon's OWN env must not leak through
+// (strip-then-set). The mock npx echoes its env to the log.
+func TestPreviewChildGetsGuardProxyEnv(t *testing.T) {
+	rec := &previewMoaRecorder{}
+	rig, convID := seedPreviewRig(t, rec)
+	t.Setenv("http_proxy", "http://preexisting-corp:9")
+	t.Setenv("NO_PROXY", "internal.corp")
+	installMockNpx(t, `#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  exit 0
+fi
+{
+  echo "env:HTTP_PROXY=$HTTP_PROXY"
+  echo "env:HTTPS_PROXY=$HTTPS_PROXY"
+  echo "env:http_proxy=$http_proxy"
+  echo "env:https_proxy=$https_proxy"
+  echo "env:NO_PROXY=$NO_PROXY"
+  echo "env:no_proxy=$no_proxy"
+} >> "$MOCK_NPX_LOG"
+cp "$MOCK_PNG_FIXTURE" "$last"
+`)
+
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + previewTargetServer(t).URL})
+	log, err := os.ReadFile(os.Getenv("MOCK_NPX_LOG"))
+	if err != nil {
+		t.Fatalf("npx never ran: %v", err)
+	}
+	proxies := map[string]string{}
+	for _, line := range strings.Split(string(log), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && strings.HasPrefix(k, "env:") {
+			proxies[strings.TrimPrefix(k, "env:")] = v
+		}
+	}
+	proxyRe := regexp.MustCompile(`^http://127\.0\.0\.1:\d+$`)
+	endpoints := map[string]bool{}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		v, ok := proxies[k]
+		if !ok || !proxyRe.MatchString(v) {
+			t.Errorf("child %s = %q, want http://127.0.0.1:<guard port>", k, v)
+			continue
+		}
+		endpoints[v] = true
+	}
+	if len(endpoints) > 1 {
+		t.Errorf("proxy endpoints differ across case variants: %v", proxies)
+	}
+	if proxies["NO_PROXY"] != "" || proxies["no_proxy"] != "" {
+		t.Errorf("child NO_PROXY=%q no_proxy=%q, want both EMPTY (no implicit loopback bypass)",
+			proxies["NO_PROXY"], proxies["no_proxy"])
+	}
+	for k, v := range proxies {
+		if strings.Contains(v, "preexisting-corp") || strings.Contains(v, "internal.corp") {
+			t.Errorf("child %s leaked the daemon's pre-existing proxy config %q", k, v)
+		}
+	}
+}
+
+// TestPreviewLiveGuardedCapture is the load-bearing empirical check
+// (2026-08-24 finding 2): does the *_PROXY env contract truly reach
+// playwright's headless chromium? Both subtests assert the guard OBSERVED
+// traffic — a capture that bypassed the proxy (e.g. chromium's implicit
+// <-loopback> bypass winning over the empty no_proxy) is detected, not
+// misread as success. Offline-safe: the off-boundary target is TEST-NET-1
+// and the guard blocks before any dial. Opt-in: run with
+// ODO_PREVIEW_LIVE=1 (real npx + the ms-playwright chromium cache + the
+// real ~/.hermes node — no HOME isolation here).
+func TestPreviewLiveGuardedCapture(t *testing.T) {
+	if os.Getenv("ODO_PREVIEW_LIVE") != "1" {
+		t.Skip("opt-in live test — set ODO_PREVIEW_LIVE=1 to run the REAL playwright capture through the guard")
+	}
+	var guard *previewGuard
+	old := previewGuardHook
+	previewGuardHook = func(g *previewGuard) { guard = g }
+	t.Cleanup(func() { previewGuardHook = old })
+
+	t.Run("refuses a page reaching off-boundary", func(t *testing.T) {
+		guard = nil
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			// Port 8080, not :1 — chromium refuses :1 LOCALLY as an
+			// "unsafe port" (ERR_UNSAFE_PORT) before anything reaches the
+			// proxy; the guard must see this request to block it.
+			_, _ = io.WriteString(w, `<!doctype html><html><body><h1>guard live test</h1><img src="http://192.0.2.1:8080/x.png"></body></html>`)
+		}))
+		t.Cleanup(srv.Close)
+
+		out := filepath.Join(t.TempDir(), "live-out.png")
+		_, err := runPreviewScreenshot(context.Background(), srv.URL+"/", out)
+		if err == nil || !strings.Contains(err.Error(), "preview refused the capture") {
+			t.Fatalf("err = %v, want the boundary refusal", err)
+		}
+		if !strings.Contains(err.Error(), "192.0.2.1:8080") {
+			t.Errorf("refusal = %q, want the blocked TEST-NET host named", err)
+		}
+		if _, serr := os.Stat(out); !os.IsNotExist(serr) {
+			t.Errorf("capture file survived the refusal (stat err = %v)", serr)
+		}
+		if guard == nil || guard.allowedRequests() == 0 {
+			t.Fatal("guard saw no requests — the *_PROXY env did not reach chromium")
+		}
+		found := false
+		for _, h := range guard.blockedHosts() {
+			if h == "192.0.2.1:8080" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("blockedHosts = %v, want 192.0.2.1:8080 recorded", guard.blockedHosts())
+		}
+	})
+
+	t.Run("loopback control captures through the proxy", func(t *testing.T) {
+		guard = nil
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/x.png" {
+				w.Header().Set("Content-Type", "image/png")
+				_, _ = w.Write(previewFixturePNG)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<!doctype html><html><body><h1>loopback ok</h1><img src="/x.png"></body></html>`)
+		}))
+		t.Cleanup(srv.Close)
+
+		out := filepath.Join(t.TempDir(), "live-ok.png")
+		shot, err := runPreviewScreenshot(context.Background(), srv.URL, out)
+		if err != nil {
+			t.Fatalf("loopback capture failed: %v", err)
+		}
+		if len(shot.Data) < 8 || string(shot.Data[:4]) != "\x89PNG" {
+			t.Errorf("capture bytes look wrong (%d bytes)", len(shot.Data))
+		}
+		if guard == nil || guard.allowedRequests() == 0 {
+			t.Fatal("guard observed no loopback requests — the capture bypassed the proxy")
+		}
+		if b := guard.blockedRequests(); len(b) != 0 {
+			t.Errorf("pure-loopback page recorded blocked requests: %v", b)
+		}
+	})
 }

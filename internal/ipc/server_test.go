@@ -849,19 +849,27 @@ func TestAcceptRefusesDirtyPatchPaths(t *testing.T) {
 		}
 	}))
 
+	// stagedWording: the staged shape diverts to the pre-adjudication
+	// staged-edit refusal (P1, 2026-08-24 — IndexEditsBeyondHEAD names any
+	// index entry diverging from HEAD before the fresh path's porcelain
+	// dirty check runs); the unstaged shape keeps the dirty refusal's
+	// "uncommitted changes" wording. Both stay byte-intact, pending, and
+	// side-effect free — the shared assertions below cover that.
 	refuse := func(stage bool) {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // user work\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		wording := "uncommitted changes"
 		if stage {
 			gitIn(t, root, "add", "src/a.go")
+			wording = "staged changes"
 		}
 		_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
 		if err == nil {
 			t.Fatalf("stage=%v: accept over dirty patch paths: want refusal", stage)
 		}
-		for _, want := range []string{"uncommitted changes", "src/a.go"} {
+		for _, want := range []string{wording, "src/a.go"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("stage=%v: err = %q, want it to name %q", stage, err.Error(), want)
 			}
@@ -945,6 +953,101 @@ func TestAcceptRefreshRefusesDirtyPatchPaths(t *testing.T) {
 	rows := reviewActionRowsFor(t, f, d)
 	if len(rows) != 1 || rows[0]["action"] != "refresh_attempted" || rows[0]["outcome"] != "dirty_refusal" {
 		t.Fatalf("journal rows = %v, want exactly refresh_attempted{dirty_refusal}", rows)
+	}
+}
+
+// TestAcceptRefusesStagedPatchPaths pins the tri-review P1 pre-adjudication
+// refusal (2026-08-24): the patch's own path carries a STAGED index edit
+// diverging from HEAD while the worktree happens to hold the post-image —
+// the shape every worktree-level guard misses (the extra-edits check
+// compares bytes; the porcelain dirty check never runs on the
+// already-landed branch it would land through). The accept's stage+commit
+// pair would then rewrite the index entry wholesale, losing the staged
+// blob. The accept now refuses BEFORE base adjudication, on every accept
+// branch: the error names the path and the unstage remedy, the diff stays
+// pending, nothing is journaled, and the staged entry plus worktree bytes
+// survive byte-exact. Unstaging unblocks the retry — even with an
+// unrelated path left staged, which the gate ignores by construction.
+func TestAcceptRefusesStagedPatchPaths(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // agent edit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	// The finding's exact shape: the patch path holds the post-image in
+	// the worktree while the REAL index entry carries a different staged
+	// blob (the user staged a sketch, then reverted the file on disk
+	// without unstaging).
+	if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // user staged sketch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", "src/a.go")
+	if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // agent edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexBefore := gitOut(t, root, "ls-files", "-s", "--", "src/a.go")
+
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
+	if err == nil {
+		t.Fatal("accept over staged patch paths: want refusal, got nil")
+	}
+	for _, want := range []string{"staged changes", "src/a.go", "unstage"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to name %q", err.Error(), want)
+		}
+	}
+	if errors.Is(err, errBaseStale) {
+		t.Error("err wraps errBaseStale — staged user content must never fire an auto-revise round")
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending", got.Status)
+	}
+	if rows := reviewActionRowsFor(t, f, d); len(rows) != 0 {
+		t.Errorf("journal rows = %v, want none (a refusal is not an outcome)", rows)
+	}
+	// Side-effect free: the staged index entry survives verbatim (the
+	// ls-files fingerprint is unchanged), and the worktree keeps the
+	// post-image bytes the user left there.
+	if got := gitOut(t, root, "ls-files", "-s", "--", "src/a.go"); got != indexBefore {
+		t.Errorf("index entry = %q, want untouched %q (the staged sketch survived)", got, indexBefore)
+	}
+	if got := readFileStr(t, filepath.Join(root, "src", "a.go")); got != "package src // agent edit\n" {
+		t.Errorf("src/a.go = %q, want the worktree bytes exactly as seeded", got)
+	}
+
+	// Retryable by construction: unstaging the sketch unblocks the same
+	// accept, and a staged edit on an UNRELATED path (README.md) neither
+	// trips the gate nor gets swept — the refusal axes are the patch's
+	// own paths, exactly like DirtyPaths'.
+	gitIn(t, root, "reset", "-q", "HEAD", "--", "src/a.go")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# user edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", "README.md")
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", ""); err != nil {
+		t.Fatalf("accept with a clean patch-path index (staged unrelated path): %v", err)
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+	// The retry rode the already-landed branch the finding targets: the
+	// post-image was already sitting in the worktree uncommitted.
+	row := resolutionRow(t, f, d, "accept")
+	if row["already_landed"] != true {
+		t.Errorf("accept row already_landed = %v, want true", row["already_landed"])
+	}
+	if got := gitOut(t, root, "show", "--format=", "--name-only", "HEAD"); got != "src/a.go" {
+		t.Errorf("accept commit files = %q, want exactly src/a.go", got)
+	}
+	if status := gitStatus(t, root); !strings.Contains(status, "M  README.md") {
+		t.Errorf("status = %q, want README.md still staged and untouched by the accept", status)
 	}
 }
 

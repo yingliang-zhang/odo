@@ -705,6 +705,15 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 // verbatim statements). If neither file exists, a minimal default is written.
 // AGENTS.md is regenerated on every bootstrap so it never drifts, but the
 // file is only rewritten when the derived content actually changed.
+//
+// Containment (2026-08-24 tri-review P0): .odo/ is committable, so both
+// rule reads go through readWithinDir — a checked-in symlink escaping
+// .odo/ degrades to "section absent" instead of copying external secret
+// bytes into the prompt bridge (the learner snapshotter's
+// ruleSnapshotTarget.base convention). The write side refuses a symlinked
+// AGENTS.md outright: the daemon owns the file, no legitimate link
+// exists, and os.WriteFile would otherwise follow one onto an external
+// file.
 func (s *Server) generateAgentsMD() {
 	var b strings.Builder
 	b.WriteString("# AGENTS.md\n\n")
@@ -736,23 +745,37 @@ func (s *Server) generateAgentsMD() {
 	b.WriteString("rest of the current epoch. Read-only view of the plan: `odo todo`.\n")
 	b.WriteString("Never quote this block inside explanations (docs, examples, echoes) —\n")
 	b.WriteString("the merge is mechanical; emit it only to change the plan.\n\n")
+	// (2026-08-24 tri-review P0) .odo/ is committable: an implanted symlink
+	// at a rule file pointing outside the project-odo root would copy
+	// external secret bytes straight into the system-prompt bridge. A
+	// planted link degrades to "section absent", exactly like a missing
+	// file; a link pointing deeper inside .odo/ still reads.
+	odoDir := filepath.Join(s.projectRoot, ".odo")
 	// Append project memory if it exists.
-	if data, err := os.ReadFile(filepath.Join(s.projectRoot, ".odo", "memory.md")); err == nil {
+	if data, err := readWithinDir(odoDir, filepath.Join(odoDir, "memory.md")); err == nil {
 		b.WriteString("## Memory\n\n")
 		b.Write(data)
 		b.WriteString("\n\n")
 	}
 	// Append pins if they exist.
-	if data, err := os.ReadFile(filepath.Join(s.projectRoot, ".odo", "pins.md")); err == nil {
+	if data, err := readWithinDir(odoDir, filepath.Join(odoDir, "pins.md")); err == nil {
 		b.WriteString("## Pins\n\n")
 		b.Write(data)
 		b.WriteString("\n\n")
 	}
-	agentsPath := filepath.Join(s.projectRoot, ".odo", "AGENTS.md")
+	agentsPath := filepath.Join(odoDir, "AGENTS.md")
 	// Bootstrap runs on every project/workstream switch; skip the rewrite
 	// (and the mtime churn it triggers in file watchers — OMP included)
 	// when the derived content is identical.
 	out := b.String()
+	// Write-side twin of the read guards (2026-08-24 tri-review P0): the
+	// daemon owns AGENTS.md, so no legitimate symlink exists at the path —
+	// os.WriteFile would follow an implanted one onto an external file.
+	// Refuse every link (no resolution needed) and log only.
+	if fi, lerr := os.Lstat(agentsPath); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		log.Printf("ipc: generate AGENTS.md: refusing to write through symlink %s", agentsPath)
+		return
+	}
 	if existing, err := os.ReadFile(agentsPath); err == nil && string(existing) == out {
 		return
 	}
@@ -2562,6 +2585,25 @@ func dirtyPatchRefusal(dirty []string) error {
 	}
 	return fmt.Errorf("accept_diff: main checkout has uncommitted changes on the patch's own paths (%s); commit or stash them, then retry the accept — the pipeline refuses to apply over them", strings.Join(shown, ", "))
 }
+// stagedEditsRefusal builds the pre-adjudication accept refusal
+// (tri-review P1, 2026-08-24): the patch's own paths carry STAGED index
+// content diverging from HEAD (IndexEditsBeyondHEAD), and the accept's
+// stage+commit pair rewrites index entries wholesale — a staged edit
+// whose worktree matches the post-image, or any staged content under an
+// already-landed or refresh accept, is overwritten with no record. The
+// byte- and porcelain-level guards miss the shape by design: the dirty
+// check runs only on the fresh-apply path, and ExtraEditsBeyondPatch
+// never reads the index. Same refusal family shape as dirtyPatchRefusal
+// at this site — the diff stays pending, the error names the paths,
+// nothing is journaled here, never errBaseStale; unstaging the edits
+// makes the accept retryable.
+func stagedEditsRefusal(staged []string) error {
+	shown := staged
+	if len(staged) > 5 {
+		shown = append(shown[:5:5], fmt.Sprintf("… (+%d more)", len(staged)-5))
+	}
+	return fmt.Errorf("accept_diff: main checkout has staged changes on the patch's own paths (%s) — the accept stages and commits those paths wholesale and would overwrite the staged content; unstage the edits, then retry the accept", strings.Join(shown, ", "))
+}
 // extraEditsRefusal builds the ALREADY-LANDED accept refusal (tri-review
 // P1, 2026-08-24): the M20 reverse-apply probe sees the patch at hunk
 // granularity, so uncommitted user edits on the patch's own paths BEYOND
@@ -2858,6 +2900,24 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 			return Response{}, fmt.Errorf("accept_diff: check index: %w", cerr)
 		} else if conflicts {
 			return Response{}, errors.New("accept_diff: main checkout has unresolved merge conflicts; resolve or reset them, then retry the accept")
+		}
+		// P1 pre-adjudication staged-edit refusal (see stagedEditsRefusal):
+		// index content on the patch's own paths diverging from HEAD can
+		// pass every worktree-level guard below when the worktree happens
+		// to hold the post-image — the already-landed extra-edits check
+		// compares worktree BYTES only, and the porcelain dirty check
+		// runs only on the fresh-apply path — while the stage+commit pair
+		// on every accept branch rewrites those index entries wholesale,
+		// losing the staged bytes. The gate must precede base
+		// adjudication: the refresh path applies and commits too, so
+		// refreshes, fresh applies, and already-landed accepts all share
+		// this one refusal.
+		if gerr == nil {
+			if staged, serr := git.IndexEditsBeyondHEAD(s.projectRoot, patchPaths); serr != nil {
+				return Response{}, fmt.Errorf("accept_diff: check staged patch paths: %w", serr)
+			} else if len(staged) > 0 {
+				return Response{}, stagedEditsRefusal(staged)
+			}
 		}
 		// Final base-freshness adjudication (P0a + M20; see
 		// checkAndRefreshBase): a stale base is adjudicated right here

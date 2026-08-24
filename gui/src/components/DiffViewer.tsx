@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type UIEvent, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type UIEvent, type ReactNode } from "react";
 import { autonomyStatus, errorMessage, reviewDiff, unwrap } from "../api";
 import { languageFromPath, tokenize, type Language } from "../highlight";
 import { pipelineHumanLocked, pipelineLabel } from "../pipeline";
@@ -375,7 +375,7 @@ function autonomyHint(r: AutonomyReport): string {
 }
 
 // Only a `pending` diff is actionable; afterwards this becomes a record card.
-export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, agentRunning, pipelineState }: Props) {
+function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, agentRunning, pipelineState }: Props) {
   const [acting, setActing] = useState(false);
   const [reviews, setReviews] = useState<ReviewResult[] | null>(null);
   const [consensus, setConsensus] = useState<string | null>(null);
@@ -961,3 +961,11 @@ export default function DiffViewer({ diff, onAccept, onReject, projectRoot, onSe
     </section>
   );
 }
+
+// Keep-alive panel (tri-review P2 #5, 2026-08-24): App keeps this
+// component mounted under the ContextPanel `hidden` tabs and hands it
+// only referentially stable props (useCallback handlers + diff_stable
+// prev-bails), so the default shallow compare skips re-rendering the
+// hidden subtree on quiet poll ticks. Same convention as
+// memo(ChatSurface) — no custom comparator.
+export default memo(DiffViewer);

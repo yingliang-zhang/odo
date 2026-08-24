@@ -9,7 +9,7 @@
 // accept_diff/reject_diff IPC the Changes tab uses, which already works
 // cross-workstream by diffID alone. Rows resolve optimistically in App.
 
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { ArrowRight, ChevronDown, ChevronRight, LoaderCircle } from "lucide-react";
 import DiffViewer from "./DiffViewer";
 import { Button } from "./ui/button";
@@ -55,7 +55,7 @@ interface Group {
   rows: DiffInfoEx[];
 }
 
-export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, agentRunning, pipelineStates, onJump }: Props) {
+function ReviewInbox({ rows, onAccept, onReject, projectRoot, agentRunning, pipelineStates, onJump }: Props) {
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const groups = useMemo(() => {
@@ -224,3 +224,11 @@ export default function ReviewInbox({ rows, onAccept, onReject, projectRoot, age
     </section>
   );
 }
+
+// Keep-alive panel (tri-review P2 #5, 2026-08-24): App keeps this
+// component mounted under the ContextPanel `hidden` tabs and hands it
+// only referentially stable props (useCallback handlers + diff_stable
+// prev-bails), so the default shallow compare skips re-rendering the
+// hidden subtree on quiet poll ticks. Same convention as
+// memo(ChatSurface) — no custom comparator.
+export default memo(ReviewInbox);

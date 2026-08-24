@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { errorMessage, ledger } from "../api";
 import type { EventPayload, OdoEvent } from "../types";
 import { cn } from "../lib/utils";
@@ -264,7 +264,7 @@ function ReviewRow({ event }: { event: OdoEvent }) {
   );
 }
 
-export default function LedgerPanel({ projectRoot, events }: Props) {
+function LedgerPanel({ projectRoot, events }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -324,3 +324,11 @@ export default function LedgerPanel({ projectRoot, events }: Props) {
     </div>
   );
 }
+
+// Keep-alive panel (tri-review P2 #5, 2026-08-24): App keeps this
+// component mounted under the ContextPanel `hidden` tabs and hands it
+// only referentially stable props (useCallback handlers + diff_stable
+// prev-bails), so the default shallow compare skips re-rendering the
+// hidden subtree on quiet poll ticks. Same convention as
+// memo(ChatSurface) — no custom comparator.
+export default memo(LedgerPanel);

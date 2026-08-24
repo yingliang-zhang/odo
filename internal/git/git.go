@@ -389,6 +389,81 @@ func diffWorktreeFromIndex(repoPath string, env []string, paths []string) ([]str
 	return extra, nil
 }
 
+// IndexEditsBeyondHEAD returns the subset of paths whose REAL index entry
+// diverges from HEAD's tree entry — staged user content on the patch's own
+// paths (tri-review P1, 2026-08-24). The accept flow's other guards miss
+// this shape: DirtyPaths's porcelain check runs only on the fresh-apply
+// path, and ExtraEditsBeyondPatch compares WORKTREE bytes against the
+// post-image — so a staged edit whose worktree happens to hold the
+// post-image (or any staged content under an already-landed or refresh
+// accept) survives every check, and the stage+commit pair then rewrites
+// the index entry wholesale, losing the staged bytes with no record.
+//
+// The comparison is entry-for-entry over `ls-files -s -z` (the real index)
+// vs `ls-tree -z HEAD` and names any divergence: a staged edit (blob sha
+// or mode differs), a staged new file (index-only entry), a staged
+// deletion (HEAD-only entry), or a non-zero stage (a conflict side
+// HasUnmergedEntries's caller also refuses, pinned here so the helper's
+// contract stands alone). Zero paths is a no-op. Read-only: ls-files and
+// ls-tree never touch index, HEAD, or worktree.
+func IndexEditsBeyondHEAD(repoPath string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	liveIdx, err := run(repoPath, append([]string{"ls-files", "-s", "-z", "--"}, paths...)...)
+	if err != nil {
+		return nil, fmt.Errorf("staged-edits ls-files: %w", err)
+	}
+	headTree, err := run(repoPath, append([]string{"ls-tree", "-z", "HEAD", "--"}, paths...)...)
+	if err != nil {
+		return nil, fmt.Errorf("staged-edits ls-tree: %w", err)
+	}
+	// path → "<mode> <sha>" fingerprints on both sides; a path whose index
+	// entries are ONLY non-zero stages records in unmerged instead.
+	index := make(map[string]string, len(paths))
+	unmerged := make(map[string]bool, len(paths))
+	for _, e := range strings.Split(strings.TrimRight(liveIdx, "\x00"), "\x00") {
+		tab := strings.IndexByte(e, '\t')
+		if tab < 0 { // empty tail after the last NUL
+			continue
+		}
+		f := strings.Fields(e[:tab]) // "<mode> <sha> <stage>"
+		if len(f) < 3 {
+			continue
+		}
+		if f[2] != "0" {
+			unmerged[e[tab+1:]] = true
+			continue
+		}
+		index[e[tab+1:]] = f[0] + " " + f[1]
+	}
+	head := make(map[string]string, len(paths))
+	for _, e := range strings.Split(strings.TrimRight(headTree, "\x00"), "\x00") {
+		tab := strings.IndexByte(e, '\t')
+		if tab < 0 {
+			continue
+		}
+		f := strings.Fields(e[:tab]) // "<mode> <type> <sha>"
+		if len(f) < 3 {
+			continue
+		}
+		head[e[tab+1:]] = f[0] + " " + f[2]
+	}
+	var staged []string
+	for _, p := range paths {
+		if unmerged[p] {
+			staged = append(staged, p)
+			continue
+		}
+		i, inIndex := index[p]
+		h, inHEAD := head[p]
+		if inIndex != inHEAD || i != h {
+			staged = append(staged, p)
+		}
+	}
+	return staged, nil
+}
+
 // ShowHEADFile returns path's content as committed in HEAD, read via the
 // git binary (`git show HEAD:path`) — never the working copy: run
 // worktrees materialize HEAD's tracked content, so decisions about what a

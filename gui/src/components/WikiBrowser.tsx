@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { contradictions, errorMessage, listTopics, listWiki, readWiki } from "../api";
 import type { WikiNoteInfo } from "../types";
 import { cn } from "../lib/utils";
@@ -75,7 +75,7 @@ function relativeTime(iso: string): string {
 // M9 P3: the browser renders inline inside the right panel's Wiki tab; the
 // list and reader stack vertically and scroll independently while the tabs
 // and search stay pinned. Closing is the panel's job (⌘J).
-export default function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
+function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
   const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -450,3 +450,11 @@ function TopicLine({
     </div>
   );
 }
+
+// Keep-alive panel (tri-review P2 #5, 2026-08-24): App keeps this
+// component mounted under the ContextPanel `hidden` tabs and hands it
+// only referentially stable props (useCallback handlers + diff_stable
+// prev-bails), so the default shallow compare skips re-rendering the
+// hidden subtree on quiet poll ticks. Same convention as
+// memo(ChatSurface) — no custom comparator.
+export default memo(WikiBrowser);
