@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Diff #42 Accepted Landed + advisory-slash.spec.ts Robustness (epoch 28)
 
 Session span: odo auto-land pipeline for diff #42 (epoch-28 P0/P1/P2 fix pack, patch `5aa873ebffeeaa9d`), interrupted by user restart mid-panel, accepted manually, then the root-caused test flake was fixed.

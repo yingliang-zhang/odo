@@ -1,0 +1,8 @@
+# Store Schema, Journal Queries, and Memory Pipeline
+
+- Schema v3 adds diffs.goal (anchor fix preventing delayed reviews binding the wrong objective); ADR-0002 appendix documents the v1→v3 delta following the ADR-0003 amendment convention (main-epoch-23)
+- #34's P1 fixes (8 fixes) were orphaned on a deleted worktree's detached HEAD while main stayed at ba68fb5; recovered by clean cherry-pick to 4345f24 then 954ff22; a second ledger correction (seq 8470, corrects_seq 8017) declared the earlier 'manually landed in main: a5c98ca' claim invalid; rejected statuses left as-is per convention (main-epoch-20) (main-epoch-23)
+- Journal/query hardening pack: CommitFold atomicity (epoch bump + marker in ONE transaction), SearchEvents ESCAPE '\' + ORDER BY id DESC (created_at second-resolution can tie), marker LIKE queries dual-form for 'key:"value"' vs 'key: "value"' JSON variants, literalPrefix fast paths (main-epoch-23)
+- Read-path narrowing: LatestFoldBoundary single-row probe switches ListEvents calls to the fold window; no-pin marker falls back to firstSeq=0 full history (bounded because no fold since pin schema) — the naive marker.seq+1 narrowing instantly broke TestDistillSweepSkipsRefusedBatch whose purpose is rescuing pre-pin legacy batches (main-epoch-23)
+- ListEvents loop decode down to one decode per row (was 2–4 per-key decodes); consensusVerdict accept branch delegates to panelAccepts to single-source unanimity; contradiction pass skips notes carrying the supersededBanner prefix (main-epoch-23)
+- Memory pipeline doctrine summary: distill/curate write wiki/ directly and auto-commit via commitWiki; agent diffs carrying wiki hunks are misrouted content that can never land through the diff channel (main-epoch-24)

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Third-party review adjudication: 4 findings verified (3 confirmed, 1 misattributed) and all fixed
 
 ## Context

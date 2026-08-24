@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # #40 Accept Decision and Auto-Land Pipeline Repair
 
 ## Context

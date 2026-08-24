@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo Session: Diff #41 Manual Landing and Workspace Cleanup
 
 ## Decision: Diff #41 recovery via manual land (Path A)
