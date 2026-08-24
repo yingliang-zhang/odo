@@ -184,6 +184,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/git"
@@ -1098,7 +1099,16 @@ func setEnv(env []string, kv string) []string {
 // go binary (non-go project) yields nothing; the verify command itself
 // decides whether that is fatal.
 func goToolchainCacheEnv() []string {
-	out, err := exec.Command("go", "env", "GOCACHE", "GOMODCACHE", "GOPATH").Output()
+	cmd := exec.Command("go", "env", "GOCACHE", "GOMODCACHE", "GOPATH")
+	// Pin the telemetry dir off HOME: go's async telemetry counter init
+	// writes into $HOME/.../go/telemetry AFTER the query exits — under a
+	// test/sandbox scratch HOME that write races TempDir cleanup
+	// (observed as cleanup-failure flakes in the auto-land test group).
+	// An explicitly configured GOTELEMETRYDIR rides through untouched.
+	if os.Getenv("GOTELEMETRYDIR") == "" {
+		cmd.Env = append(os.Environ(), "GOTELEMETRYDIR="+filepath.Join(os.TempDir(), "odo-go-telemetry"))
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
@@ -1205,11 +1215,19 @@ func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reaso
 	}
 }
 
-// capDetail trims a journal detail to a reviewable size.
+// capDetail trims a journal detail to a reviewable size, keeping the
+// TAIL: go-test failure diagnostics (--- FAIL lines, build errors) and
+// error summaries live at the end of the output — head-trimming used to
+// journal the first 4KB of PASS spam while swallowing the actual failure
+// (#40 investigate). The cut is rune-safe at the leading boundary.
 func capDetail(s string) string {
 	const maxDetail = 4 * 1024
 	if len(s) > maxDetail {
-		return s[:maxDetail] + "\n…[truncated]"
+		cut := len(s) - maxDetail
+		for cut < len(s) && !utf8.RuneStart(s[cut]) {
+			cut++
+		}
+		return "…[earlier truncated]\n" + s[cut:]
 	}
 	return s
 }

@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 	"github.com/yingliang-zhang/odo/internal/worktree"
@@ -2167,6 +2168,9 @@ func TestRunVerifyMountsGoToolchainCaches(t *testing.T) {
 		t.Skip("go toolchain not on PATH")
 	}
 	t.Setenv("HOME", t.TempDir())
+	// Same telemetry pin as goToolchainCacheEnv: keep the query's async
+	// counter writes off the TempDir HOME (cleanup-race guard).
+	t.Setenv("GOTELEMETRYDIR", filepath.Join(os.TempDir(), "odo-go-telemetry"))
 	out, err := exec.Command("go", "env", "GOCACHE", "GOMODCACHE", "GOPATH").Output()
 	if err != nil {
 		t.Skipf("go env unusable: %v", err)
@@ -2190,6 +2194,12 @@ func TestRunVerifyMountsGoToolchainCaches(t *testing.T) {
 // the one audited env exception — found when installed, silent when not,
 // env override always honored.
 func TestPlaywrightBrowsersDir(t *testing.T) {
+	// Scrub the daemon-side verify's exported override (P1 #11): on a
+	// machine with the cache installed runVerify ALWAYS exports
+	// PLAYWRIGHT_BROWSERS_PATH, and playwrightBrowsersDir honors it
+	// first — without the scrub the "uninstalled" assertion below reads
+	// the host cache and fails deterministically under verify.
+	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", "")
 	home := t.TempDir()
 	if got := playwrightBrowsersDir(home); got != "" {
 		t.Fatalf("uninstalled browsers = %q, want \"\"", got)
@@ -2209,6 +2219,35 @@ func TestPlaywrightBrowsersDir(t *testing.T) {
 	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", "/custom/browsers")
 	if got := playwrightBrowsersDir(home); got != "/custom/browsers" {
 		t.Errorf("override = %q, want /custom/browsers", got)
+	}
+}
+// TestCapDetailTailBias pins the flipped cap policy (#40 investigate): an
+// oversized detail keeps its TAIL — go-test output carries ---
+// FAIL/ok-summary lines at the end, and head-trimming journaled 4KB of
+// PASS spam while the actual failure vanished from the blocked row.
+func TestCapDetailTailBias(t *testing.T) {
+	if got := capDetail("short"); got != "short" {
+		t.Fatalf("undersized detail = %q, want unchanged", got)
+	}
+	s := strings.Repeat("PASS ok\n", 1024) + "--- FAIL: TestBoom\nexit status 1"
+	got := capDetail(s)
+	if len(got) > 4*1024+len("…[earlier truncated]\n") {
+		t.Errorf("capped len = %d, want ≤ 4KB + marker", len(got))
+	}
+	if !strings.HasPrefix(got, "…[earlier truncated]\n") {
+		t.Errorf("head marker missing from %q…", got[:40])
+	}
+	if !strings.HasSuffix(got, "--- FAIL: TestBoom\nexit status 1") {
+		t.Errorf("failure tail lost: …%q", got[len(got)-60:])
+	}
+	if !utf8.ValidString(got) {
+		t.Error("capped detail is not valid UTF-8")
+	}
+	// Rune-safe boundary: multi-byte runes straddling the cut must not
+	// bleed invalid bytes into the kept tail.
+	cjk := strings.Repeat("中", 4*1024)
+	if got := capDetail(cjk); !utf8.ValidString(got) {
+		t.Error("CJK-straddled cut is not valid UTF-8")
 	}
 }
 

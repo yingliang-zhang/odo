@@ -289,8 +289,8 @@ func TestReviewWithModelJournals(t *testing.T) {
 		t.Setenv("SUDO_CODING_KEY", "test-key")
 		resetSharedMoa(t, s)
 		rr := s.reviewWithModel(context.Background(), m, "prompt")
-		if len(rr.ThinkingMD) > 4*1024+len("\n…[truncated]") || !strings.HasSuffix(rr.ThinkingMD, "…[truncated]") {
-			t.Errorf("thinking_md len = %d, want capped 4KB with truncation marker", len(rr.ThinkingMD))
+		if len(rr.ThinkingMD) > 4*1024+len("…[earlier truncated]\n") || !strings.HasPrefix(rr.ThinkingMD, "…[earlier truncated]") {
+			t.Errorf("thinking_md len = %d, want capped 4KB tail with truncation marker", len(rr.ThinkingMD))
 		}
 	})
 
