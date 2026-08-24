@@ -19,8 +19,16 @@ import (
 // The error includes the stderr tail so IPC callers can surface git's own
 // diagnostics (e.g. "error: patch failed: hello.txt:1").
 func run(dir string, args ...string) (string, error) {
+	return runWithEnv(dir, nil, args...)
+}
+
+// runWithEnv is run with extra environment layered onto the process env —
+// ExtraEditsBeyondPatch points GIT_INDEX_FILE at a temporary index so its
+// read-tree/apply/ls-files pipeline never touches the repo's real index.
+func runWithEnv(dir string, env []string, args ...string) (string, error) {
 	argv := append([]string{"-C", dir}, args...)
 	cmd := exec.Command("git", argv...)
+	cmd.Env = append(os.Environ(), env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -255,6 +263,130 @@ func PathsDifferFromHEAD(repoPath string, paths []string) (bool, error) {
 		tail = err.Error()
 	}
 	return false, fmt.Errorf("git diff --quiet HEAD: %s", tail)
+}
+// ExtraEditsBeyondPatch returns the subset of the patch's own paths whose
+// WORKING-TREE bytes differ from the patch's post-image (tri-review P1,
+// 2026-08-24, the "already-landed sweep"). The accept path's M20
+// reverse-apply probe sees the patch only at hunk granularity: user edits
+// on the same file BEYOND the hunks survive the probe, and CommitPaths
+// records whole working-tree files — without this check the already-
+// landed accept commit sweeps those uncommitted edits in. Byte-exact
+// comparison is sound where hunk context is not.
+//
+// The expected post-image is reconstructed in a TEMPORARY index
+// (GIT_INDEX_FILE pointed at a throwaway file — never the repo's real
+// index, refs, or working tree): `read-tree HEAD` loads the committed
+// pre-image and `git apply --cached` folds the patch in. Two placements
+// of the landed content both reconstruct exactly:
+//   - content UNCOMMITTED (HEAD carries the pre-image): the forward
+//     apply succeeds, the temp index holds the post-image;
+//   - content already COMMITTED (HEAD IS the post-image — a manual
+//     merge/cherry-pick landed it): the reverse --check succeeds, so the
+//     HEAD-seeded temp index is the post-image as-is.
+// Both directions failing means HEAD drifted inside the hunks
+// themselves; the probe then names every patch path whose worktree bytes
+// differ from HEAD — an ambiguous path is refused rather than swept
+// (conservative).
+//
+// Per path, the expected blob sha from `ls-files -s` (absent entry = the
+// post-image deletes the path) must equal `git hash-object` of the
+// working-tree file (or the file must be gone exactly when deleted).
+// Anything else is an extra edit. The repo's own state is untouched:
+// every index operation runs under GIT_INDEX_FILE, --check reads nothing
+// but bytes, and hash-object is content-addressing only.
+func ExtraEditsBeyondPatch(repoPath, diffPath string) ([]string, error) {
+	paths, err := PatchPaths(diffPath)
+	if err != nil {
+		return nil, fmt.Errorf("extra-edits probe paths: %w", err)
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	// The apply runs with -C repoPath — pin the patch absolute, as with
+	// the other probes.
+	abs, err := filepath.Abs(diffPath)
+	if err != nil {
+		return nil, fmt.Errorf("extra-edits probe patch path: %w", err)
+	}
+	// GIT_INDEX_FILE needs a path, not an open handle; a missing file
+	// lets read-tree seed a fresh index.
+	tmpIdx, err := os.CreateTemp("", "odo-extra-index-*")
+	if err != nil {
+		return nil, fmt.Errorf("extra-edits temp index: %w", err)
+	}
+	idx := tmpIdx.Name()
+	_ = tmpIdx.Close()
+	_ = os.Remove(idx)
+	defer func() { _ = os.Remove(idx) }()
+	env := []string{"GIT_INDEX_FILE=" + idx}
+
+	if _, err := runWithEnv(repoPath, env, "read-tree", "HEAD"); err != nil {
+		return nil, fmt.Errorf("extra-edits read-tree HEAD: %w", err)
+	}
+	if _, err := runWithEnv(repoPath, env, "apply", "--cached", abs); err != nil {
+		// The apply is all-or-nothing; re-seed HEAD so the next step's
+		// provenance stays obvious regardless.
+		if _, rerr := runWithEnv(repoPath, env, "read-tree", "HEAD"); rerr != nil {
+			return nil, fmt.Errorf("extra-edits read-tree HEAD (reverse placement): %w", rerr)
+		}
+		if _, cerr := runWithEnv(repoPath, env, "apply", "--cached", "--reverse", "--check", abs); cerr != nil {
+			// Neither direction positions the patch against HEAD — the
+			// hunk regions themselves drifted. Refuse-side: name every
+			// patch path whose worktree bytes differ from the HEAD bytes
+			// (the failed atomic apply left the index exactly HEAD).
+			return diffWorktreeFromIndex(repoPath, env, paths)
+		}
+		// HEAD already IS the post-image (the content arrived committed);
+		// --check wrote nothing, so the HEAD-seeded index is the
+		// expectation as-is.
+	}
+	return diffWorktreeFromIndex(repoPath, env, paths)
+}
+
+// diffWorktreeFromIndex names the subset of paths whose working-tree
+// content differs from the index env selects (GIT_INDEX_FILE): the
+// expected blob sha comes from `ls-files -s` (no entry = the post-image
+// deletes the path); the actual sha from `git hash-object` of the
+// worktree file under the repo's REAL index (hashing is index-agnostic).
+func diffWorktreeFromIndex(repoPath string, env []string, paths []string) ([]string, error) {
+	ls, err := runWithEnv(repoPath, env, append([]string{"ls-files", "-s", "-z", "--"}, paths...)...)
+	if err != nil {
+		return nil, fmt.Errorf("extra-edits ls-files: %w", err)
+	}
+	want := make(map[string]string, len(paths)) // path → expected blob sha; absent = deleted post-image
+	for _, e := range strings.Split(strings.TrimRight(ls, "\x00"), "\x00") {
+		tab := strings.IndexByte(e, '\t')
+		if tab < 0 { // empty tail after the last NUL
+			continue
+		}
+		f := strings.Fields(e[:tab]) // "<mode> <sha> <stage>"
+		if len(f) < 2 {
+			continue
+		}
+		want[e[tab+1:]] = f[1]
+	}
+	var extra []string
+	for _, p := range paths {
+		expect, tracked := want[p]
+		_, statErr := os.Stat(filepath.Join(repoPath, p))
+		switch {
+		case !tracked && errors.Is(statErr, os.ErrNotExist):
+			// Deletion is the expectation and it holds — never an edit.
+		case !tracked:
+			extra = append(extra, p) // post-image deletes; the worktree re-created the file
+		case errors.Is(statErr, os.ErrNotExist):
+			extra = append(extra, p) // post-image has content; the worktree lost the file
+		default:
+			got, herr := run(repoPath, "hash-object", "--", p)
+			if herr != nil {
+				return nil, fmt.Errorf("extra-edits hash-object %s: %w", p, herr)
+			}
+			if strings.TrimSpace(got) != expect {
+				extra = append(extra, p)
+			}
+		}
+	}
+	return extra, nil
 }
 
 // ShowHEADFile returns path's content as committed in HEAD, read via the

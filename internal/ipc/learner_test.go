@@ -1930,3 +1930,56 @@ func TestRunLearnerIgnoresSiblingRegistry(t *testing.T) {
 		}
 	}
 }
+
+// TestSymlinkProjectRuleFilesDegrade (2026-08-24 tri-review P0): the
+// always-injected project-side rule files (memory.md, pins.md,
+// memory-archive.md, wiki/index.md) are committable attack surface —
+// when any of them is an implanted symlink pointing outside the project,
+// its reader degrades to "" exactly like an absent file, and the
+// external bytes appear in NO returned channel (capped layer, uncapped
+// archive, or the readFileWithin write-basis/panel channels).
+func TestSymlinkProjectRuleFilesDegrade(t *testing.T) {
+	root := initRepo(t)
+	external := filepath.Join(t.TempDir(), "secret.md")
+	const secret = "EXTERNAL-SECRET-BYTES"
+	if err := os.WriteFile(external, []byte(secret+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	odoDir := filepath.Join(root, ".odo")
+	if err := os.MkdirAll(odoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "wiki"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(odoDir, memoryFileName),
+		pinsPath(root),
+		filepath.Join(odoDir, archiveFileName),
+		filepath.Join(root, "wiki", "index.md"),
+	} {
+		if err := os.Symlink(external, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, got := range map[string]string{
+		"readProjectMemory":      readProjectMemory(root),
+		"readArchive":            readArchive(root),
+		"readPins":               readPins(root),
+		"readIndex":              readIndex(root),
+		"readFileWithin(pins)":   readFileWithin(odoDir, pinsPath(root)),
+		"readFileWithin(memory)": readFileWithin(odoDir, filepath.Join(odoDir, memoryFileName)),
+	} {
+		if got != "" {
+			t.Errorf("%s = %q (secret leak: %v), want \"\" — escaping symlinks degrade like absent files", name, got, strings.Contains(got, secret))
+		}
+	}
+	// Sanity: a legitimate file beside the symlinks still reads, so the
+	// degrade is escape-targeted, not a blanket refusal.
+	if err := os.WriteFile(filepath.Join(odoDir, "other.md"), []byte("kept\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFileWithin(odoDir, filepath.Join(odoDir, "other.md")); got != "kept\n" {
+		t.Errorf("readFileWithin legit neighbor = %q, want the file verbatim", got)
+	}
+}

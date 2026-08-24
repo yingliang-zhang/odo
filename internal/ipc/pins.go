@@ -3,7 +3,6 @@ package ipc
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -23,11 +22,13 @@ func pinsPath(projectRoot string) string {
 }
 
 // readPins reads <projectRoot>/.odo/pins.md capped at pinsCap with a
-// line-boundary cut (mirrors readUserMemory). "" when absent/empty. Pins are
-// human-owned: the daemon writes them only via the pin IPC command and never
-// truncates at write time.
+// line-boundary cut (mirrors readUserMemory). "" when absent/empty — or
+// when the file is a planted symlink escaping the project .odo tree
+// (2026-08-24 tri-review P0): pins ride the always-injected layer, so the
+// read is contained to .odo. Pins are human-owned: the daemon writes them
+// only via the pin IPC command and never truncates at write time.
 func readPins(projectRoot string) string {
-	b, err := os.ReadFile(pinsPath(projectRoot))
+	b, err := readWithinDir(filepath.Join(projectRoot, ".odo"), pinsPath(projectRoot))
 	if err != nil {
 		return ""
 	}
@@ -59,7 +60,7 @@ func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
 		return Response{}, err
 	}
 
-	old := readFileFull(pinsPath(s.projectRoot))
+	old := readFileWithin(filepath.Join(s.projectRoot, ".odo"), pinsPath(s.projectRoot)) // contained: the write basis feeds the file itself (2026-08-24 tri-review P0)
 	out := strings.TrimRight(old, "\n")
 	join := ""
 	if out != "" {
@@ -90,5 +91,5 @@ func (s *Server) handleReadPins(ctx context.Context, req Request) (Response, err
 	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
 		return Response{}, fmt.Errorf("read_pins: %w", err)
 	}
-	return Response{MemoryContent: readFileFull(pinsPath(s.projectRoot))}, nil
+	return Response{MemoryContent: readFileWithin(filepath.Join(s.projectRoot, ".odo"), pinsPath(s.projectRoot))}, nil // contained to project .odo (2026-08-24 tri-review P0)
 }

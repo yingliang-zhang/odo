@@ -2562,6 +2562,24 @@ func dirtyPatchRefusal(dirty []string) error {
 	}
 	return fmt.Errorf("accept_diff: main checkout has uncommitted changes on the patch's own paths (%s); commit or stash them, then retry the accept — the pipeline refuses to apply over them", strings.Join(shown, ", "))
 }
+// extraEditsRefusal builds the ALREADY-LANDED accept refusal (tri-review
+// P1, 2026-08-24): the M20 reverse-apply probe sees the patch at hunk
+// granularity, so uncommitted user edits on the patch's own paths BEYOND
+// the hunks read as landed — and CommitPaths records whole working-tree
+// files, so the bookkeeping no-op-land commit would sweep them in. Where
+// dirtyPatchRefusal's whole-file porcelain check runs before ANY apply,
+// this runs byte-exact against the patch's reconstructed post-image
+// (ExtraEditsBeyondPatch): identical landed content passes, trailing or
+// inline extras refuse. Same refusal family shape — the diff stays
+// pending named-paths-first and retryable, never errBaseStale (user dirt
+// needs a human, not an auto-revise round).
+func extraEditsRefusal(extra []string) error {
+	shown := extra
+	if len(shown) > 5 {
+		shown = append(shown[:5:5], fmt.Sprintf("… (+%d more)", len(extra)-5))
+	}
+	return fmt.Errorf("accept_diff: already-landed diff's own paths carry uncommitted content beyond the patch bytes (%s) — the accept commit would sweep them in; commit or stash those edits, then retry the accept (or reject the diff)", strings.Join(shown, ", "))
+}
 
 // baseAdjudication is checkAndRefreshBase's tri-state verdict (M20: the
 // already-landed resolution joined fresh/refreshed).
@@ -2789,6 +2807,10 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	// alreadyLanded (M20) marks the content-roundtrip resolution: the
 	// diff's post-image was already in main, so the accept applied nothing
 	// (bookkeeping no-op land, accept row carries already_landed:true).
+	// The probe is hunk-granular — before the bookkeeping commit stages
+	// anything, the P1 extra-edits refusal below (tri-review, 2026-08-24)
+	// byte-compares each patch path against the reconstructed post-image so
+	// user edits beyond the hunks never ride the accept commit.
 	var alreadyLanded bool
 	if action == "accept" {
 		// M6 (§8b): explicit guarded-path check — gitignore is not the
@@ -2963,9 +2985,34 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		// usually match HEAD exactly (content arrived committed) — an
 		// empty path-scoped commit is a git error, skip it. Uncommitted
 		// identical content (the fresh-base rescue) still gets the accept
-		// commit — the landing must be recorded.
+		// commit — the landing must be recorded. That commit records whole
+		// working-tree FILES, so it must only see post-image bytes: the
+		// extra-edits refusal below (tri-review P1, 2026-08-24) guarantees
+		// byte-equality before staging.
 		skipCommit := false
 		if alreadyLanded {
+			// P1 extra-edits refusal (tri-review P1, 2026-08-24): the M20
+			// reverse-apply probe matches hunk context only — uncommitted
+			// user edits on the patch's own paths BEYOND the hunks survive
+			// it, and CommitPaths below records whole files, sweeping
+			// them into the accept commit. ExtraEditsBeyondPatch compares
+			// bytes against the patch's reconstructed post-image instead;
+			// identical landed content stays acceptable, anything diverging
+			// refuses with the diff pending and a journaled agent_error
+			// (same trail shape as the guarded-path refusal above). Runs
+			// BEFORE any staging so the refusal is side-effect free, and
+			// before the !skipCommit determination — a skipCommit (worktree
+			// byte-equal to HEAD) compares clean here by construction.
+			if gerr == nil {
+				if extra, xerr := git.ExtraEditsBeyondPatch(s.projectRoot, d.PathOnDisk); xerr != nil {
+					return Response{}, fmt.Errorf("accept_diff: check already-landed extra edits: %w", xerr)
+				} else if len(extra) > 0 {
+					rerr := extraEditsRefusal(extra)
+					_, _ = s.store.AppendEvent(ctx, d.ConversationID, store.EventAgentError,
+						mustJSON(map[string]interface{}{"error": rerr.Error()}))
+					return Response{}, rerr
+				}
+			}
 			// The rescue applied nothing, so no apply staged the paths —
 			// stage FIRST: an untracked post-image file must form an index
 			// entry before anything downstream, because git-diff-vs-HEAD
@@ -4961,12 +5008,17 @@ func (s *Server) handleReadWiki(_ context.Context, req Request) (Response, error
 		}
 	}
 
-	// Class 1: a file under <projectRoot>/wiki/, no escaping the project.
+	// Class 1: a file under <projectRoot>/wiki/, no escaping the project —
+	// through symlinks included (tri-review P0, 2026-08-24): lexical
+	// Clean+Rel passes for a checked-in wiki/ symlink (or symlinked
+	// parent dir) pointing at ~/.ssh and friends; readWithinDir resolves
+	// and refuses the escape. Class 2 above stays on plain os.ReadFile —
+	// ~/.odo/user.md is outside the repo-committable threat model.
 	clean := filepath.Clean(req.Path)
 	rel, relErr := filepath.Rel(s.projectRoot, clean)
 	if relErr == nil && !strings.HasPrefix(rel, "..") &&
 		(rel == "wiki" || strings.HasPrefix(rel, "wiki"+string(filepath.Separator))) {
-		b, err := os.ReadFile(clean)
+		b, err := readWithinDir(filepath.Join(s.projectRoot, "wiki"), clean)
 		if err != nil {
 			return Response{}, fmt.Errorf("read_wiki: %s: %w", clean, err)
 		}
@@ -5027,49 +5079,37 @@ func (s *Server) handleReadFile(_ context.Context, req Request) (Response, error
 	if !allowed {
 		return Response{}, fmt.Errorf("read_file: path outside project root: %q", req.Path)
 	}
-	// Binary guard: NUL in the first 8 KiB marks it non-previewable.
-	head := make([]byte, 8192)
+	// Binary guard + bounded read on ONE handle (tri-review P2,
+	// 2026-08-24): the old sniff → close → Stat → re-open/ReadFile flow
+	// was a TOCTOU — a file grown between the Stat size gate and
+	// os.ReadFile bypassed the cap entirely (the small-file branch read
+	// unbounded), and a swapped inode mixed sniff and payload. Everything
+	// below runs on the fd opened once here.
 	fh, err := os.Open(canonical)
 	if err != nil {
 		return Response{}, fmt.Errorf("read_file: %w", err)
 	}
+	defer fh.Close()
+	head := make([]byte, 8192)
 	n, rerr := fh.Read(head)
-	fh.Close()
 	if rerr != nil && rerr != io.EOF {
 		return Response{}, fmt.Errorf("read_file: %w", rerr)
 	}
 	if strings.IndexByte(string(head[:n]), 0) >= 0 {
 		return Response{}, fmt.Errorf("read_file: binary file (not previewable): %q", req.Path)
 	}
-	// Cap: read the whole file only when it fits, else truncate at the cap.
-	// The large-file branch STREAMS cap+1 bytes (tri-review P2, 2026-08-24):
-	// os.ReadFile here would pull a multi-GB log/dataset fully into daemon
-	// memory before the slice — the stated cap must bound the read too.
-	info, err := os.Stat(canonical)
+	// The tail continues on the same fd, capped at cap+1 bytes — the read
+	// itself is bounded (a multi-GB log/dataset must never come fully
+	// into memory, tri-review P2: the stated cap must bound the read too),
+	// no Stat size gate remains to race. >cap truncates exactly at the cap.
+	rest, err := io.ReadAll(io.LimitReader(fh, readFileMaxBytes+1))
 	if err != nil {
 		return Response{}, fmt.Errorf("read_file: %w", err)
 	}
-	var content []byte
-	truncated := false
-	if info.Size() > readFileMaxBytes {
-		fh, oerr := os.Open(canonical)
-		if oerr != nil {
-			return Response{}, fmt.Errorf("read_file: %w", oerr)
-		}
-		content, err = io.ReadAll(io.LimitReader(fh, readFileMaxBytes+1))
-		cerr := fh.Close()
-		if err == nil {
-			err = cerr
-		}
-		if err == nil && len(content) > readFileMaxBytes {
-			content = content[:readFileMaxBytes]
-			truncated = true
-		}
-	} else {
-		content, err = os.ReadFile(canonical)
-	}
-	if err != nil {
-		return Response{}, fmt.Errorf("read_file: %w", err)
+	content := append(head[:n], rest...)
+	truncated := len(content) > readFileMaxBytes
+	if truncated {
+		content = content[:readFileMaxBytes]
 	}
 	return Response{
 		FileContent:   string(content),
@@ -6008,18 +6048,23 @@ func (s *Server) handleReadSkill(ctx context.Context, req Request) (Response, er
 	if strings.Contains(name, "..") || filepath.IsAbs(name) {
 		return Response{}, fmt.Errorf("read_skill: invalid path: %s", req.Path)
 	}
-	// Resolve the path: try project skills dir first, then global.
+	// Resolve the path: project skills dir first, then global. The project
+	// candidate is repo-committable, so a checked-in symlink must not read
+	// outside .odo/skills (tri-review P0, 2026-08-24); readWithinDir
+	// resolves and refuses the escape, and any failure other than "missing"
+	// is surfaced instead of being silently shadowed by a same-named
+	// global skill. The global candidate is the user's own tree, outside
+	// that model — plain os.ReadFile.
 	home, _ := os.UserHomeDir()
 	base := filepath.Base(name)
-	candidates := []string{
-		filepath.Join(s.projectRoot, ".odo", "skills", base),
-		filepath.Join(home, ".odo", "skills", base),
+	projectSkills := filepath.Join(s.projectRoot, ".odo", "skills")
+	if b, err := readWithinDir(projectSkills, filepath.Join(projectSkills, base)); err == nil {
+		return Response{OK: true, SkillContent: string(b)}, nil
+	} else if !os.IsNotExist(err) {
+		return Response{}, fmt.Errorf("read_skill: %w", err)
 	}
-	for _, c := range candidates {
-		b, err := os.ReadFile(c)
-		if err == nil {
-			return Response{OK: true, SkillContent: string(b)}, nil
-		}
+	if b, err := os.ReadFile(filepath.Join(home, ".odo", "skills", base)); err == nil {
+		return Response{OK: true, SkillContent: string(b)}, nil
 	}
 	return Response{}, fmt.Errorf("read_skill: skill file not found: %s", req.Path)
 }

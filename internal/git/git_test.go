@@ -568,6 +568,129 @@ func TestProbeAlreadyLanded(t *testing.T) {
 	})
 }
 
+// TestExtraEditsBeyondPatch (tri-review P1, 2026-08-24): the already-
+// landed accept's byte-level guard. The M20 probe is hunk-granular, so
+// the guard reconstructs the post-image in a temp index and compares
+// worktree blob shas: exact post-image (uncommitted OR committed) passes;
+// extra edits beyond the hunks, replaced content on a deleted path, or
+// extra bytes on a patch-created file are named; the repo's real index,
+// HEAD, and working tree stay untouched throughout.
+func TestExtraEditsBeyondPatch(t *testing.T) {
+	write := func(t *testing.T, repo, name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("exact uncommitted post-image passes", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		write(t, repo, "base.txt", "patched\n")
+		if extra, err := ExtraEditsBeyondPatch(repo, patch); err != nil || len(extra) != 0 {
+			t.Fatalf("ExtraEditsBeyondPatch = (%v, %v), want (nil, nil)", extra, err)
+		}
+	})
+
+	t.Run("trailing extra edit beyond the hunks is named", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		writeAndCommit(t, repo, "base.txt", "l1\nl2\nl3\nl4\nl5\n")
+		// The patch rewrites ONE line; the landed probe tolerates the
+		// rest of the file drifting (that tolerance is the finding).
+		patch := generatePatch(t, repo, "l1\nl2\nL3\nl4\nl5\n")
+		write(t, repo, "base.txt", "l1\nl2\nL3\nl4\nl5\nuser tail beyond hunk\n")
+		indexBefore := mustRun(t, repo, "ls-files", "-s", "--", "base.txt")
+		statusBefore := mustRun(t, repo, "status", "--porcelain")
+		extra, err := ExtraEditsBeyondPatch(repo, patch)
+		if err != nil || len(extra) != 1 || extra[0] != "base.txt" {
+			t.Fatalf("ExtraEditsBeyondPatch = (%v, %v), want ([base.txt], nil)", extra, err)
+		}
+		// Read-only against the repo's own state: real index and porcelain
+		// unchanged (the probe ran on a GIT_INDEX_FILE temp index).
+		if got := mustRun(t, repo, "ls-files", "-s", "--", "base.txt"); got != indexBefore {
+			t.Errorf("real index after probe = %q, want untouched %q", got, indexBefore)
+		}
+		if got := mustRun(t, repo, "status", "--porcelain"); got != statusBefore {
+			t.Errorf("porcelain after probe = %q, want pre-existing dirt only %q", got, statusBefore)
+		}
+	})
+
+	t.Run("committed post-image passes", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		writeAndCommit(t, repo, "base.txt", "patched\n") // side-channel landing, worktree clean
+		if extra, err := ExtraEditsBeyondPatch(repo, patch); err != nil || len(extra) != 0 {
+			t.Fatalf("ExtraEditsBeyondPatch = (%v, %v), want (nil, nil)", extra, err)
+		}
+	})
+
+	t.Run("committed post-image plus uncommitted extra is named", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		writeAndCommit(t, repo, "base.txt", "patched\n")
+		write(t, repo, "base.txt", "patched\nuncommitted extra\n")
+		extra, err := ExtraEditsBeyondPatch(repo, patch)
+		if err != nil || len(extra) != 1 || extra[0] != "base.txt" {
+			t.Fatalf("ExtraEditsBeyondPatch = (%v, %v), want ([base.txt], nil)", extra, err)
+		}
+	})
+
+	t.Run("patch-created file: exact passes, extra content named", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := twoFilePatch(t, repo) // rewrites base.txt AND creates new.txt
+		write(t, repo, "base.txt", "patched\n")
+		write(t, repo, "new.txt", "new\n")
+		if extra, err := ExtraEditsBeyondPatch(repo, patch); err != nil || len(extra) != 0 {
+			t.Fatalf("exact untracked post-image = (%v, %v), want (nil, nil)", extra, err)
+		}
+		write(t, repo, "new.txt", "new\nMORE\n") // extra content on the created path
+		extra, err := ExtraEditsBeyondPatch(repo, patch)
+		if err != nil || len(extra) != 1 || extra[0] != "new.txt" {
+			t.Fatalf("ExtraEditsBeyondPatch = (%v, %v), want ([new.txt], nil)", extra, err)
+		}
+	})
+
+	t.Run("deletion patch: gone passes, recreated named", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		// A straight deletion patch, generated like ExtractDiff (add -A
+		// in the worktree, diff --cached, restore).
+		if err := os.Remove(filepath.Join(repo, "tracked.txt")); err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, repo, "add", "-A")
+		patch, err := run(repo, "diff", "--cached", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, repo, "reset", "-q", "--hard", "HEAD")
+		patchPath := filepath.Join(t.TempDir(), "del.diff")
+		if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Post-image = deleted; worktree deletion (uncommitted) passes.
+		if err := os.Remove(filepath.Join(repo, "tracked.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if extra, err := ExtraEditsBeyondPatch(repo, patchPath); err != nil || len(extra) != 0 {
+			t.Fatalf("deleted post-image = (%v, %v), want (nil, nil)", extra, err)
+		}
+		// The user re-created the path with their own bytes — extra edit.
+		write(t, repo, "tracked.txt", "resurrected by user\n")
+		extra, err := ExtraEditsBeyondPatch(repo, patchPath)
+		if err != nil || len(extra) != 1 || extra[0] != "tracked.txt" {
+			t.Fatalf("ExtraEditsBeyondPatch = (%v, %v), want ([tracked.txt], nil)", extra, err)
+		}
+	})
+
+	t.Run("not a repo is an error", func(t *testing.T) {
+		repo := newPatchRepo(t)
+		patch := generatePatch(t, repo, "patched\n")
+		if _, err := ExtraEditsBeyondPatch(filepath.Join(t.TempDir(), "no-repo"), patch); err == nil {
+			t.Fatal("want an error outside a repo, got nil")
+		}
+	})
+}
+
 // TestPathsDifferFromHEAD (M20): exit-1 quarantine — differences report
 // true (staged OR unstaged), a clean path set reports false, and real
 // errors surface as errors, never as a diff verdict.

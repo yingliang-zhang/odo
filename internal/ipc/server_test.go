@@ -3222,6 +3222,116 @@ func TestReadWiki(t *testing.T) {
 			t.Errorf("read_wiki %s: error = %q", p, resp.Error)
 		}
 	}
+
+	// Symlink containment (tri-review P0, 2026-08-24): lexical Clean+Rel
+	// passes for a checked-in wiki/ symlink, so reads resolve and refuse
+	// external targets — committed wiki/ content is implantable.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.md"), []byte("TOP SECRET KEY"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A symlinked NOTE...
+	rigWiki := filepath.Join(root, "wiki")
+	if err := os.Symlink(filepath.Join(outside, "secret.md"), filepath.Join(rigWiki, "leak.md")); err != nil {
+		t.Fatal(err)
+	}
+	resp := rig.callExpectErr(t, Request{Cmd: CmdReadWiki, Path: filepath.Join(rigWiki, "leak.md")})
+	if !strings.Contains(resp.Error, "symlink escapes") {
+		t.Errorf("read_wiki symlink note: error = %q, want the escape refused and named", resp.Error)
+	}
+	if strings.Contains(resp.WikiContent, "TOP SECRET") {
+		t.Error("read_wiki symlink note leaked external content")
+	}
+	// ... and a symlinked parent DIR covering notes beneath it.
+	if err := os.MkdirAll(filepath.Join(rigWiki, "misc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(rigWiki, "misc"), filepath.Join(rigWiki, "misc-real")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(rigWiki, "misc")); err != nil {
+		t.Fatal(err)
+	}
+	resp = rig.callExpectErr(t, Request{Cmd: CmdReadWiki, Path: filepath.Join(rigWiki, "misc", "secret.md")})
+	if !strings.Contains(resp.Error, "symlink escapes") {
+		t.Errorf("read_wiki symlink dir: error = %q, want the escape refused and named", resp.Error)
+	}
+	if strings.Contains(resp.WikiContent, "TOP SECRET") {
+		t.Error("read_wiki symlink dir leaked external content")
+	}
+	// An INTRA-wiki symlink stays readable: the resolved form never leaves
+	// wiki/, so only the smuggling direction locks.
+	if err := os.Symlink(filepath.Join(rigWiki, "main-epoch-1.md"), filepath.Join(rigWiki, "alias.md")); err != nil {
+		t.Fatal(err)
+	}
+	if got = rig.call(t, Request{Cmd: CmdReadWiki, Path: filepath.Join(rigWiki, "alias.md")}); got.WikiContent != content {
+		t.Errorf("read_wiki intra-wiki alias = %q, want %q (containment locks only the smuggling direction)", got.WikiContent, content)
+	}
+}
+
+// TestReadSkill covers the read_skill containment classes (tri-review P0,
+// 2026-08-24): a real project skill rounds back, a project-missing name
+// falls through to the user's global tree, and a checked-in SYMLINK in the
+// project skills dir is refused with the escape named — the repo-committable
+// candidate must not read outside .odo/skills, and a refusal is never
+// silently shadowed by a same-named global skill.
+func TestReadSkill(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	projectSkills := filepath.Join(root, ".odo", "skills")
+	if err := os.MkdirAll(projectSkills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalSkills := filepath.Join(home, ".odo", "skills")
+	if err := os.MkdirAll(globalSkills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Happy path: a real project skill file.
+	body := "# review checklist\n\nverify first\n"
+	if err := os.WriteFile(filepath.Join(projectSkills, "review.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := rig.call(t, Request{Cmd: CmdReadSkill, Path: "review.md"})
+	if got.SkillContent != body {
+		t.Errorf("read_skill project = %q, want %q", got.SkillContent, body)
+	}
+
+	// Project-missing names fall through to the global tree.
+	globalBody := "# global habit\n"
+	if err := os.WriteFile(filepath.Join(globalSkills, "habit.md"), []byte(globalBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got = rig.call(t, Request{Cmd: CmdReadSkill, Path: "habit.md"}); got.SkillContent != globalBody {
+		t.Errorf("read_skill global fallback = %q, want %q", got.SkillContent, globalBody)
+	}
+
+	// A project candidate symlinked OUTSIDE the project is refused, escape
+	// named, nothing leaked — even with a same-named global skill present.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.md"), []byte("TOP SECRET KEY"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.md"), filepath.Join(projectSkills, "leak.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalSkills, "leak.md"), []byte("# legit global leak.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := rig.callExpectErr(t, Request{Cmd: CmdReadSkill, Path: "leak.md"})
+	if !strings.Contains(resp.Error, "symlink escapes") {
+		t.Errorf("read_skill symlink: error = %q, want the escape refused and named", resp.Error)
+	}
+	if strings.Contains(resp.SkillContent, "TOP SECRET") {
+		t.Error("read_skill leaked the external secret")
+	}
+	if strings.Contains(resp.SkillContent, "legit global") {
+		t.Error("read_skill refusal was shadowed by the same-named global skill")
+	}
 }
 
 // TestReadFile covers the inline file preview IPC (tri-model right sidebar

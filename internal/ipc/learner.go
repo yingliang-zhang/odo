@@ -54,11 +54,14 @@ func sha16(b []byte) string {
 }
 
 // readProjectMemory reads <projectRoot>/.odo/memory.md capped at memoryCap
-// with a line-boundary cut (mirrors readUserMemory). "" when absent/empty.
+// with a line-boundary cut (mirrors readUserMemory). "" when absent/empty —
+// or when the file is a planted symlink escaping the project .odo tree
+// (2026-08-24 tri-review P0): project-side rule files are committable
+// attack surface, so the always-injected read is contained to .odo.
 // Injection-only: the apply write path reads the file in FULL instead
 // (ADR-0003 inv 3, no silent truncation).
 func readProjectMemory(projectRoot string) string {
-	b, err := os.ReadFile(filepath.Join(projectRoot, ".odo", memoryFileName))
+	b, err := readWithinDir(filepath.Join(projectRoot, ".odo"), filepath.Join(projectRoot, ".odo", memoryFileName))
 	if err != nil {
 		return ""
 	}
@@ -66,9 +69,11 @@ func readProjectMemory(projectRoot string) string {
 }
 
 // readArchive reads <projectRoot>/.odo/memory-archive.md (append-only, never
-// injected, returned uncapped). "" when absent.
+// injected, returned uncapped). "" when absent — or when a planted symlink
+// escapes the project .odo tree (2026-08-24 tri-review P0, same guard as
+// readProjectMemory: the archive is committable project-side surface).
 func readArchive(projectRoot string) string {
-	b, err := os.ReadFile(filepath.Join(projectRoot, ".odo", archiveFileName))
+	b, err := readWithinDir(filepath.Join(projectRoot, ".odo"), filepath.Join(projectRoot, ".odo", archiveFileName))
 	if err != nil {
 		return ""
 	}
@@ -88,10 +93,14 @@ func readFileFull(path string) string {
 // ruleSnapshotTarget is one human-editable rule file the snapshotter
 // materializes into the journal: the memory_update layer key, the source
 // key the send path's injection receipt uses for the same file, the
-// absolute fs path, and the injection cap the layer reader applies (the
-// truncation detector for the capped flag).
+// absolute fs path, the containment root for project-side (committable)
+// paths, and the injection cap the layer reader applies (the truncation
+// detector for the capped flag). base is empty for global ~/.odo paths,
+// which the 2026-08-24 tri-review P0 threat model excludes: those keep a
+// plain os.ReadFile while project-side targets refuse escaping symlinks.
 type ruleSnapshotTarget struct {
 	layer, source, path string
+	base                string // non-empty ⇒ readWithinDir(base, path)
 	cap                 int
 }
 
@@ -122,8 +131,8 @@ type ruleSnapshotTarget struct {
 // previous content is derivable from the layer's previous snapshot row.
 func (s *Server) journalRuleSnapshots(ctx context.Context, convID int64, events []store.Event) {
 	targets := []ruleSnapshotTarget{
-		{layer: "memory", source: ".odo/memory.md", path: filepath.Join(s.projectRoot, ".odo", memoryFileName), cap: memoryCap},
-		{layer: "pins", source: ".odo/pins.md", path: pinsPath(s.projectRoot), cap: pinsCap},
+		{layer: "memory", source: ".odo/memory.md", path: filepath.Join(s.projectRoot, ".odo", memoryFileName), base: filepath.Join(s.projectRoot, ".odo"), cap: memoryCap},
+		{layer: "pins", source: ".odo/pins.md", path: pinsPath(s.projectRoot), base: filepath.Join(s.projectRoot, ".odo"), cap: pinsCap},
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		targets = append(targets, ruleSnapshotTarget{layer: "user", source: "~/.odo/user.md", path: filepath.Join(home, ".odo", "user.md"), cap: userMemoryCap})
@@ -151,7 +160,14 @@ func (s *Server) journalRuleSnapshots(ctx context.Context, convID int64, events 
 		}
 	}
 	for _, tg := range targets {
+		// (2026-08-24 tri-review P0) project-side targets are contained to
+		// their .odo root; an escaping planted symlink reads as absent, so
+		// the journaled snapshot degrades to "" rather than pinning
+		// external bytes into the journal.
 		raw, err := os.ReadFile(tg.path)
+		if tg.base != "" {
+			raw, err = readWithinDir(tg.base, tg.path)
+		}
 		content, capped := "", false
 		if err == nil {
 			capped = len(raw) > tg.cap

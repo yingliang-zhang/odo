@@ -30,8 +30,14 @@ import { cn } from "../lib/utils";
 interface Props {
   conversationId: number;
   workstreamName?: string | null;
-  // Initial sub-tab: "proposals" (default) or "files" (toast click-through).
-  initialTab?: "proposals" | "files";
+  // Sub-tab deep link (toast click-through → "files", bare memory badge →
+  // "proposals"), shaped like WikiBrowser's focus ({tab, n}): the counter
+  // re-fires identical requests. It was an initialTab string when App
+  // remounted this panel on every activation; with the panel's keep-alive
+  // tabs (App mounts once, then CSS-hides) a constructor-time initial
+  // value could never apply a later deep link, so this is a request
+  // object consumed by the effect below, not just initial state.
+  focus?: { tab: "proposals" | "files"; n: number } | null;
   // Fired after a successful apply so App can re-read the pending count.
   onApplied?: () => void;
   // M11 P1: all reads/writes route to this project's daemon; null = bridge
@@ -194,8 +200,17 @@ function SkillProposalRow({
   );
 }
 
-export default function MemoryPanel({ conversationId, workstreamName, initialTab, onApplied, projectRoot }: Props) {
-  const [tab, setTab] = useState<"proposals" | "files">(initialTab ?? "proposals");
+export default function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot }: Props) {
+  const [tab, setTab] = useState<"proposals" | "files">(focus?.tab ?? "proposals");
+  // External sub-tab requests. This effect is what keeps deep links
+  // working under the panel's keep-alive tabs: the panel now survives
+  // tab switches, so a request arriving after first mount could never
+  // reach the useState initial value — the effect (and the n nonce,
+  // which re-fires repeated same-target requests) applies it instead.
+  // WikiBrowser's focus is the same pattern.
+  useEffect(() => {
+    if (focus) setTab(focus.tab);
+  }, [focus]);
   const [batch, setBatch] = useState<PendingMemoryBatch | null>(null);
   const [batchLoading, setBatchLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

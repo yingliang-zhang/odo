@@ -102,13 +102,17 @@ func allEpochNotes(projectRoot string) ([]epochNote, error) {
 		return cands[i].mtime.After(cands[j].mtime)
 	})
 	var notes []epochNote
+	// (2026-08-24 tri-review P0) wiki/ is committable: a planted symlink
+	// among the epoch notes must not read external bytes into the curate
+	// prompt — the guard skips it like a vanished note.
+	wikiDir := filepath.Join(projectRoot, "wiki")
 	for _, cn := range cands {
 		if len(notes) >= curatorNoteCap {
 			break
 		}
-		content, err := os.ReadFile(filepath.Join(projectRoot, "wiki", cn.note.name+".md"))
+		content, err := readWithinDir(wikiDir, filepath.Join(wikiDir, cn.note.name+".md"))
 		if err != nil {
-			continue // vanished between stat and read: skip it
+			continue // vanished between stat and read — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): skip it
 		}
 		cn.note.content = string(content)
 		notes = append(notes, cn.note)
@@ -467,8 +471,11 @@ func writeIndex(projectRoot string, topics []topic) (string, error) {
 
 // readIndex reads <projectRoot>/wiki/index.md capped at indexCap with a
 // line-boundary cut. "" when absent/empty. M5: always-injected (ADR-0003).
+// Always-injected means a planted symlink here lands straight in the
+// prompt, so the read is contained to wiki/ (2026-08-24 tri-review P0);
+// an escaping link degrades to "" exactly like an absent file.
 func readIndex(projectRoot string) string {
-	b, err := os.ReadFile(filepath.Join(projectRoot, "wiki", "index.md"))
+	b, err := readWithinDir(filepath.Join(projectRoot, "wiki"), filepath.Join(projectRoot, "wiki", "index.md"))
 	if err != nil {
 		return ""
 	}
@@ -667,7 +674,7 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 
 	// before_sha covers the pre-curate index ("" when absent) — the M4
 	// before/after convention for injected layers.
-	oldIndex := readFileFull(filepath.Join(s.projectRoot, "wiki", "index.md"))
+	oldIndex := readFileWithin(filepath.Join(s.projectRoot, "wiki"), filepath.Join(s.projectRoot, "wiki", "index.md")) // injected layer: contained to wiki/ (2026-08-24 tri-review P0)
 	if _, err := writeTopicPages(s.projectRoot, topics); err != nil {
 		return fail(fmt.Errorf("curate: %w", err), "write error: "+err.Error())
 	}
@@ -745,6 +752,7 @@ func (s *Server) handleListTopics(ctx context.Context, req Request) (Response, e
 	if err != nil {
 		return Response{}, fmt.Errorf("list_topics: %w", err)
 	}
+	wikiDir := filepath.Join(s.projectRoot, "wiki")
 	var topics []WikiNoteInfo
 	for _, m := range matches {
 		fi, err := os.Stat(m)
@@ -753,7 +761,7 @@ func (s *Server) handleListTopics(ctx context.Context, req Request) (Response, e
 		}
 		topics = append(topics, WikiNoteInfo{
 			Path:       m,
-			Name:       topicTitle(m, strings.TrimSuffix(filepath.Base(m), ".md")),
+			Name:       topicTitle(wikiDir, m, strings.TrimSuffix(filepath.Base(m), ".md")),
 			Epoch:      0,
 			ModifiedAt: fi.ModTime().UTC().Format(time.RFC3339),
 		})
@@ -798,15 +806,19 @@ func stampSupersededNotes(projectRoot string, topics []topic, claims []string, n
 	}
 	var stamped []string
 	seen := map[string]bool{}
+	// (2026-08-24 tri-review P0) a stamped banner is injected back into
+	// the note it rewrites, so a planted symlink's external bytes would
+	// persist into every later prompt — contain the read to wiki/.
+	wikiDir := filepath.Join(projectRoot, "wiki")
 	for _, name := range claims {
 		if seen[name] || !read[name] || !cited[name] {
 			continue
 		}
 		seen[name] = true
-		path := filepath.Join(projectRoot, "wiki", name+".md")
-		content, err := os.ReadFile(path)
+		path := filepath.Join(wikiDir, name+".md")
+		content, err := readWithinDir(wikiDir, path)
 		if err != nil {
-			continue // vanished between read and stamp: keeps being injected
+			continue // vanished between read and stamp — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): keeps being injected
 		}
 		if strings.HasPrefix(string(content), supersededBanner) {
 			stamped = append(stamped, name) // already stamped: reaffirm
@@ -822,9 +834,11 @@ func stampSupersededNotes(projectRoot string, topics []topic, claims []string, n
 }
 
 // topicTitle reads the first "# "-prefixed line of a topic page, falling
-// back to the slug when the page has no title line.
-func topicTitle(path, slug string) string {
-	b, err := os.ReadFile(path)
+// back to the slug when the page has no title line — or when the page is a
+// planted symlink escaping wikiDir (2026-08-24 tri-review P0): the tab's
+// page listing must never read bytes from outside the committable tree.
+func topicTitle(wikiDir, path, slug string) string {
+	b, err := readWithinDir(wikiDir, path)
 	if err != nil {
 		return slug
 	}

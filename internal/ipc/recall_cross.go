@@ -97,6 +97,10 @@ func recallTopicPages(projectRoot, query string) (body string, items []recallIte
 	if err != nil {
 		return "", nil, nil
 	}
+	// (2026-08-24 tri-review P0) a planted symlink inside the committable
+	// topics/ tree must never inject bytes from outside it: the guard
+	// treats an escaping link exactly like a vanished page.
+	topicsDir := filepath.Join(projectRoot, "wiki", "topics")
 	type page struct {
 		path    string
 		name    string // topics/<basename>
@@ -110,9 +114,9 @@ func recallTopicPages(projectRoot, query string) (body string, items []recallIte
 		if base == "index.md" {
 			continue // wiki/index.md rides its own always-injected layer
 		}
-		content, err := os.ReadFile(m)
+		content, err := readWithinDir(topicsDir, m)
 		if err != nil {
-			continue // page vanished between glob and read: skip it
+			continue // page vanished between glob and read — or a planted symlink escaping wiki/topics (2026-08-24 tri-review P0): skip it
 		}
 		matched := noteMatches(string(content), base, terms)
 		if len(matched) == 0 {
@@ -271,6 +275,10 @@ func recallSiblingNote(ctx context.Context, st *store.Store, projectRoot, curren
 	if err != nil {
 		return "", recallItem{}, false
 	}
+	// (2026-08-24 tri-review P0) the glob root is the committable wiki/
+	// tree — a planted symlink escaping it is skipped like a vanished note
+	// so external bytes never ride the sibling push into a prompt.
+	wikiDir := filepath.Join(projectRoot, "wiki")
 	terms := tokenizeQuery(query)
 	ownPrefix := currentWsName + "-epoch-"
 	gate := siblingRetractionGate{ctx: ctx, st: st, projectRoot: projectRoot}
@@ -293,9 +301,9 @@ func recallSiblingNote(ctx context.Context, st *store.Store, projectRoot, curren
 		if !okEpoch {
 			continue
 		}
-		content, err := os.ReadFile(m)
+		content, err := readWithinDir(wikiDir, m)
 		if err != nil {
-			continue // note vanished between glob and read: skip it
+			continue // note vanished between glob and read — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): skip it
 		}
 		if strings.HasPrefix(string(content), supersededBanner) {
 			continue // merged into topics: the topic-layer push already covers its facts

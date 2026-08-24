@@ -3,7 +3,6 @@ package ipc
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -311,7 +310,11 @@ func buildResumeCard(projectRoot, wsName string, events []store.Event) (block, n
 	if newest == "" {
 		return "", ""
 	}
-	raw, err := os.ReadFile(newest)
+	// (2026-08-24 tri-review P0) the glob root is the committable wiki/
+	// tree and the loops below are injected as the resume card — a planted
+	// symlink escaping wiki/ must degrade to no card, never inject
+	// external bytes.
+	raw, err := readWithinDir(filepath.Join(projectRoot, "wiki"), newest)
 	if err != nil {
 		return "", ""
 	}

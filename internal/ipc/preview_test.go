@@ -102,6 +102,19 @@ for a in "$@"; do last="$a"; done
 cp "$MOCK_PNG_FIXTURE" "$last"
 `
 
+// previewTargetServer is the probe-reachable loopback target (P1,
+// 2026-08-24: resolvePreviewFinalURL must reach the URL BEFORE capture
+// spawns, so tests can no longer point at dead ports like :1420). It
+// answers 204 to every method, HEAD included.
+func previewTargetServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // seedPreviewRig is the slash-test rig for /preview: repo, isolated HOME,
 // stub agent wrapper, memory fixture, mocked gateway, mocked npx.
 func seedPreviewRig(t *testing.T, rec *previewMoaRecorder) (*testRig, int64) {
@@ -185,8 +198,9 @@ func TestPreviewRouteFlow(t *testing.T) {
 	rec := &previewMoaRecorder{}
 	rig, convID := seedPreviewRig(t, rec)
 	installMockNpx(t, mockNpxSuccess)
+	srv := previewTargetServer(t)
 
-	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview http://localhost:1420 check the header layout"})
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + srv.URL + " check the header layout"})
 	var p struct {
 		Attachments []string `json:"attachments"`
 		ImageSha16  []string `json:"image_sha16"`
@@ -228,18 +242,19 @@ func TestPreviewRouteFlow(t *testing.T) {
 		t.Errorf("preview_captured seq %d must follow the user_message seq %d", capEv.Seq, sent.Event.Seq)
 	}
 	var cp struct {
-		URL    string `json:"url"`
-		Bytes  int    `json:"bytes"`
-		Sha256 string `json:"sha256"`
-		WaitMs int64  `json:"wait_ms"`
+		URL      string `json:"url"`
+		FinalURL string `json:"final_url"`
+		Bytes    int    `json:"bytes"`
+		Sha256   string `json:"sha256"`
+		WaitMs   int64  `json:"wait_ms"`
 	}
 	if err := json.Unmarshal(capEv.Payload, &cp); err != nil {
 		t.Fatalf("preview_captured payload: %v", err)
 	}
 	sum := sha256.Sum256(previewFixturePNG)
-	if cp.URL != "http://localhost:1420" || cp.Bytes != len(previewFixturePNG) || cp.Sha256 != hex.EncodeToString(sum[:]) || cp.WaitMs < 0 {
-		t.Errorf("preview_captured = %+v, want url=http://localhost:1420 bytes=%d sha256=%s wait_ms>=0",
-			cp, len(previewFixturePNG), hex.EncodeToString(sum[:]))
+	if cp.URL != srv.URL || cp.FinalURL != "" || cp.Bytes != len(previewFixturePNG) || cp.Sha256 != hex.EncodeToString(sum[:]) || cp.WaitMs < 0 {
+		t.Errorf("preview_captured = %+v, want url=%s final_url absent (no redirect) bytes=%d sha256=%s wait_ms>=0",
+			cp, srv.URL, len(previewFixturePNG), hex.EncodeToString(sum[:]))
 	}
 
 	// Wire end: one K3 call, the user's prompt as text, one PNG image
@@ -292,7 +307,7 @@ func TestPreviewDefaultPrompt(t *testing.T) {
 	rig, convID := seedPreviewRig(t, rec)
 	installMockNpx(t, mockNpxSuccess)
 
-	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview http://127.0.0.1:1420"})
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + previewTargetServer(t).URL})
 	if !strings.Contains(rec.Text, "Analyze this screenshot as a UI reviewer") {
 		t.Errorf("wire text = %q, want the default UI-reviewer prompt", rec.Text)
 	}
@@ -330,6 +345,148 @@ func TestPreviewRejectsBeforeSpawn(t *testing.T) {
 	}
 }
 
+// TestPreviewRedirectToExternalRefused is the P1 (2026-08-24, finding 3)
+// regression: a loopback URL whose 30x chain leaves the allowlist (cloud
+// metadata host stand-in) is refused at the hop it escapes — pre-journal,
+// exactly like the initial-URL check: no npx spawn, no events, no gateway
+// call.
+func TestPreviewRedirectToExternalRefused(t *testing.T) {
+	rec := &previewMoaRecorder{}
+	rig, convID := seedPreviewRig(t, rec)
+	installMockNpx(t, mockNpxSuccess)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + srv.URL})
+	if !strings.Contains(resp.Error, "redirect hop 1") || !strings.Contains(resp.Error, "restricted to localhost") {
+		t.Errorf("error = %q, want the refused redirect hop 1 naming the allowlist", resp.Error)
+	}
+	if info, err := os.Stat(os.Getenv("MOCK_NPX_LOG")); err == nil && info.Size() > 0 {
+		t.Errorf("npx spawned for a redirect-refused URL: %s", os.Getenv("MOCK_NPX_LOG"))
+	}
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	for _, ev := range events {
+		if ev.Type == store.EventPreviewCaptured || strings.Contains(string(ev.Payload), "/preview") {
+			t.Errorf("refused /preview journaled event %s %s", ev.Type, ev.Payload)
+		}
+	}
+	if rec.Model != "" {
+		t.Error("gateway called for a redirect-refused URL")
+	}
+}
+
+// TestPreviewRedirectSelfCapturesFinalURL: a 30x chain that STAYS on the
+// allowlist clears the probe; the mock npx argv carries the resolved FINAL
+// URL (not the typed one) and both receipts journal final_url.
+func TestPreviewRedirectSelfCapturesFinalURL(t *testing.T) {
+	rec := &previewMoaRecorder{}
+	rig, convID := seedPreviewRig(t, rec)
+	installMockNpx(t, mockNpxSuccess)
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, srv.URL+"/login", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	final := srv.URL + "/login"
+
+	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + srv.URL + " review the login page"})
+
+	// Capture argv: `… --wait-for-timeout=3000 <url> <out>` — the navigated
+	// target is the resolved final hop, not the typed URL.
+	log, err := os.ReadFile(os.Getenv("MOCK_NPX_LOG"))
+	if err != nil {
+		t.Fatalf("npx never ran: %v", err)
+	}
+	if !strings.Contains(string(log), " "+final+" ") {
+		t.Errorf("npx argv = %q, want the resolved final URL %q as the capture target", log, final)
+	}
+
+	// The user_message receipt names both the typed and the final URL.
+	var p struct {
+		FinalURL string `json:"final_url"`
+	}
+	if err := json.Unmarshal(sent.Event.Payload, &p); err != nil {
+		t.Fatalf("user_message payload: %v", err)
+	}
+	if p.FinalURL != final {
+		t.Errorf("user_message final_url = %q, want %q", p.FinalURL, final)
+	}
+
+	// preview_captured: url stays the typed one, final_url the redirect
+	// target — the audit trail shows exactly what was screened and shot.
+	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
+	var capEv *store.Event
+	for i := range events {
+		if events[i].Type == store.EventPreviewCaptured {
+			capEv = &events[i]
+		}
+	}
+	if capEv == nil {
+		t.Fatal("no preview_captured event journaled")
+	}
+	var cp struct {
+		URL      string `json:"url"`
+		FinalURL string `json:"final_url"`
+	}
+	if err := json.Unmarshal(capEv.Payload, &cp); err != nil {
+		t.Fatalf("preview_captured payload: %v", err)
+	}
+	if cp.URL != srv.URL || cp.FinalURL != final {
+		t.Errorf("preview_captured = %+v, want url=%s final_url=%s", cp, srv.URL, final)
+	}
+	if rec.Model == "" {
+		t.Error("no gateway call — the redirected capture chain broke")
+	}
+}
+
+// TestPreviewRedirectLoop: a chain that never terminates trips the hop
+// limit with a readable error — pre-journal, nothing spawns.
+func TestPreviewRedirectLoop(t *testing.T) {
+	rec := &previewMoaRecorder{}
+	rig, convID := seedPreviewRig(t, rec)
+	installMockNpx(t, mockNpxSuccess)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + srv.URL + "/loop"})
+	if !strings.Contains(resp.Error, "redirect chain exceeded 10 hops") {
+		t.Errorf("error = %q, want the redirect-chain hop-limit refusal", resp.Error)
+	}
+	if info, err := os.Stat(os.Getenv("MOCK_NPX_LOG")); err == nil && info.Size() > 0 {
+		t.Errorf("npx spawned for a redirect loop: %s", os.Getenv("MOCK_NPX_LOG"))
+	}
+}
+
+// TestPreviewResolveHead405FallsBackToGet pins the probe's method fallback:
+// a GET-only endpoint (HEAD → 405) still resolves to its final URL via the
+// bounded GET re-probe.
+func TestPreviewResolveHead405FallsBackToGet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	finalURL, err := resolvePreviewFinalURL(context.Background(), srv.URL)
+	if err != nil || finalURL != srv.URL {
+		t.Errorf("resolve = %q, err=%v; want %q", finalURL, err, srv.URL)
+	}
+}
+
 // TestPreviewFailureClasses: playwright child failures journal the attempt
 // (user_message WITHOUT attachment receipt — no bytes, no claim) and then
 // refuse with a paired agent_error carrying the readable class text, never
@@ -337,6 +494,7 @@ func TestPreviewRejectsBeforeSpawn(t *testing.T) {
 func TestPreviewFailureClasses(t *testing.T) {
 	rec := &previewMoaRecorder{}
 	rig, convID := seedPreviewRig(t, rec)
+	srv := previewTargetServer(t)
 
 	for _, tc := range []struct{ name, script, wantErr string }{
 		{"chromium missing (Executable)", `#!/bin/sh
@@ -358,7 +516,7 @@ exit 1
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			installMockNpx(t, tc.script)
-			resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview http://localhost:1420"})
+			resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + srv.URL})
 			if !strings.Contains(resp.Error, tc.wantErr) {
 				t.Errorf("error = %q, want substring %q", resp.Error, tc.wantErr)
 			}
@@ -408,7 +566,7 @@ func TestPreviewNpxMissing(t *testing.T) {
 	// handler must fail readable before any spawn.
 	t.Setenv("PATH", t.TempDir())
 
-	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview http://localhost:1420"})
+	resp := rig.callExpectErr(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + previewTargetServer(t).URL})
 	if !strings.Contains(resp.Error, "node/npx") {
 		t.Errorf("error = %q, want the missing node/npx hint", resp.Error)
 	}
@@ -438,7 +596,7 @@ cp "$MOCK_PNG_FIXTURE" "$last"
 	}
 	installMockNpx(t, mockNpxSuccess) // PATH fallback — must NOT run
 
-	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview http://localhost:1420"})
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + previewTargetServer(t).URL})
 	log, err := os.ReadFile(os.Getenv("MOCK_NPX_LOG"))
 	if err != nil {
 		t.Fatalf("npx never ran: %v", err)

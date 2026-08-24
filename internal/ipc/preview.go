@@ -1,11 +1,22 @@
 package ipc
 
-// /preview slash command (tri-model DESIGN LOCK): a headless-chromium
-// screenshot of a localhost URL, analyzed by the SAME /vision pipeline
-// (K3 direct API with ADR-0003 receipts — image_sha16/image_bytes on the
-// slash user_message, exact-injection preimage). v1 locked boundaries:
-//   - localhost-only URL allowlist; external hosts are refused pre-journal
-//     (nothing spawns);
+//   - the allowlist holds across the URL's 30x chain (P1, 2026-08-24,
+//     review finding 3): the chain is walked hop-by-hop before capture and
+//     the FINAL URL is what spawns, so a loopback URL 30x-ing to an
+//     external/intranet host is refused at the hop it leaves the allowlist
+//     and the journaled receipts name final_url — screened == captured;
+//   - per-shot browser lifecycle (spawn → navigate → capture → exit under a
+//     45s cap) — no persistent browser, no profile reuse beyond the npx
+//     cache;
+//   - no auto-anything: no auto-retry, no auto screenshot after errors or
+//     after auto-land.
+// Residual v1 boundary, explicitly NOT closed here: navigations issued
+// AFTER page load (in-page JS, meta-refresh) and sub-resource requests are
+// not chain-checked — per-request browser-level interception lands with
+// the scripted-capture replacement of the playwright CLI, a follow-up
+// item.
+// Explicit non-goals: agent tool channel (MCP server), any visible browser
+// pane, CDP attach to the user's browser, a Process Dock.
 //   - per-shot browser lifecycle (spawn → navigate → capture → exit under a
 //     45s cap) — no persistent browser, no profile reuse beyond the npx
 //     cache;
@@ -20,6 +31,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -51,6 +64,24 @@ const (
 // browser launch, navigation, capture). A var (not const) so the timeout
 // test can shrink it — never touched in production paths.
 var previewChildTimeout = 45 * time.Second
+
+const (
+	// previewResolveTimeout bounds the whole redirect-chain probe (P1,
+	// 2026-08-24) — separate from and shorter than the 45s per-shot
+	// capture cap, so a slow redirector surfaces its own error before a
+	// browser spawns.
+	previewResolveTimeout = 10 * time.Second
+
+	// previewRedirectLimit caps the 30x hops the probe will follow (the
+	// Go client's own default is also 10; pinned so the refusal text and
+	// the loop test name one number).
+	previewRedirectLimit = 10
+
+	// previewDiscardProbeBytes bounds how much of a probe body is drained
+	// on its way to io.Discard — a redirect probe must never become a
+	// download.
+	previewDiscardProbeBytes = 4096
+)
 
 // previewAllowedHosts is the v1 URL allowlist (url.Hostname() values,
 // compared lower-cased): loopback only.
@@ -96,6 +127,60 @@ func redactPreviewURL(raw string) string {
 		return raw
 	}
 	return u.Redacted()
+}
+
+// resolvePreviewFinalURL walks rawURL's 30x chain and returns the final URL
+// the capture must request. Every hop re-runs validatePreviewURL, so a
+// redirect off the loopback allowlist (or to a non-http(s) scheme) is
+// refused at the hop that leaves the boundary — the playwright CLI follows
+// main-frame redirects silently and would otherwise smuggle an external
+// host's screenshot into the vision leg past the initial check (security
+// review 2026-08-24 finding 3). The probe is HEAD first (no body), GET on
+// a 405 (servers that route GET-only); response bodies close after a
+// bounded discard, never read in full. The caller treats any probe failure
+// as a pre-journal refusal, same as validatePreviewURL.
+func resolvePreviewFinalURL(ctx context.Context, rawURL string) (string, error) {
+	client := &http.Client{
+		Timeout: previewResolveTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= previewRedirectLimit {
+				return fmt.Errorf("preview: URL redirect chain exceeded %d hops (redirect loop?)", previewRedirectLimit)
+			}
+			if err := validatePreviewURL(req.URL.String()); err != nil {
+				return fmt.Errorf("preview: redirect hop %d leaves the boundary (%s): %w", len(via), redactPreviewURL(req.URL.String()), err)
+			}
+			return nil
+		},
+	}
+	probe := func(method string) (string, bool, error) {
+		req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+		if err != nil {
+			return "", false, fmt.Errorf("preview: invalid URL %q: %w", rawURL, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			// Drop the url.Error wrapper (method + echoed probe URL); the
+			// cause — a refused hop, the chain limit, dial/timeout —
+			// reads cleaner as the chat error on its own.
+			var uerr *url.Error
+			if errors.As(err, &uerr) {
+				err = uerr.Err
+			}
+			return "", false, err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, previewDiscardProbeBytes))
+		return resp.Request.URL.String(), resp.StatusCode == http.StatusMethodNotAllowed, nil
+	}
+	finalURL, methodNotAllowed, err := probe(http.MethodHead)
+	if err == nil && methodNotAllowed {
+		// The endpoint won't answer HEAD: re-probe with GET, same bounds.
+		finalURL, _, err = probe(http.MethodGet)
+	}
+	if err != nil {
+		return "", err
+	}
+	return finalURL, nil
 }
 
 // attachmentDir returns <root>/.odo/attachments, creating it — the
@@ -284,6 +369,14 @@ func (s *Server) handlePreviewQuery(ctx context.Context, c *store.Conversation, 
 	if err := validatePreviewURL(rawURL); err != nil {
 		return Response{}, err
 	}
+	// Locked boundary 1b (P1, 2026-08-24): the initial check alone was
+	// bypassable — the playwright CLI follows main-frame 30x redirects to
+	// ANY host. Walk the chain (each hop revalidated) and capture the
+	// FINAL URL, keeping screened == captured.
+	finalURL, err := resolvePreviewFinalURL(ctx, rawURL)
+	if err != nil {
+		return Response{}, err
+	}
 	if prompt == "" {
 		prompt = previewDefaultPrompt
 	}
@@ -337,9 +430,14 @@ func (s *Server) handlePreviewQuery(ctx context.Context, c *store.Conversation, 
 	}
 	urlSum := sha256.Sum256([]byte(rawURL))
 	out := filepath.Join(attachDir, fmt.Sprintf("preview-%d-%s.png", time.Now().Unix(), hex.EncodeToString(urlSum[:4])))
-	shot, shotErr := runPreviewScreenshot(ctx, rawURL, out)
+	shot, shotErr := runPreviewScreenshot(ctx, finalURL, out)
 
 	msgPayload := slashUserMessagePayload("/preview", text, receipt, scope, len(system)+len(prompt), conv)
+	// P1 (2026-08-24): when the 30x chain moved, the wire URL differs from
+	// the typed one — the receipts name both (passwords redacted like url).
+	if finalURL != rawURL {
+		msgPayload["final_url"] = redactPreviewURL(finalURL)
+	}
 	if shotErr == nil {
 		msgPayload["attachments"] = []string{shot.Path}
 		msgPayload["image_sha16"] = []string{shot.Sha16}
@@ -357,12 +455,16 @@ func (s *Server) handlePreviewQuery(ctx context.Context, c *store.Conversation, 
 	// sha16 covers the wire bytes), size, and the per-shot wall time. The
 	// URL is journaled redacted — a loopback BASIC-auth password must not
 	// persist verbatim (review finding: userinfo leaks into the journal).
-	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventPreviewCaptured, mustJSON(map[string]interface{}{
+	capReceipt := map[string]interface{}{
 		"url":     redactPreviewURL(rawURL),
 		"bytes":   len(shot.Data),
 		"sha256":  shot.Sha256,
 		"wait_ms": shot.WaitMs,
-	})); err != nil {
+	}
+	if finalURL != rawURL {
+		capReceipt["final_url"] = redactPreviewURL(finalURL)
+	}
+	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventPreviewCaptured, mustJSON(capReceipt)); err != nil {
 		return Response{}, err
 	}
 

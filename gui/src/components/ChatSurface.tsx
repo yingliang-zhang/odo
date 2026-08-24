@@ -5,6 +5,7 @@ import {
   FormEvent,
   Fragment,
   KeyboardEvent as ReactKeyboardEvent,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -469,7 +470,7 @@ const SLASH_COMMANDS = [
   { cmd: "/loop resume", desc: "Clear a suspend and re-tick (optional budget=T)", args: "" },
 ];
 
-export default function ChatSurface({
+function ChatSurface({
   events,
   agentRunning,
   preview,
@@ -1841,3 +1842,19 @@ export default function ChatSurface({
     </section>
   );
 }
+
+// (tri-review P1 #4, 2026-08-24) React.memo so the 350 ms poll loop stops
+// re-rendering the whole message tree on ticks where nothing here
+// changed. This only pays off because App keeps every prop referentially
+// stable: events/preview/panelProgress/diffs keep their previous
+// reference on content-equal ticks (diff_stable comparators + the
+// setPreview/setPanelProgress pattern); onTodoChanged / onTodoError /
+// onLoopChanged / onLoopError / onModelChanged / onSearchClose were
+// previously inline arrows — a fresh reference every render — and are now
+// frozen useCallbacks; autoDistill/autoDistillBlocked are useMemo'd
+// finds. handleResumeParked/handleDropParked/handleDropSteer rebuild only
+// on conversation/project switches; the rest are primitives.
+// NOT done (follow-up, deliberately out of scope): windowing or
+// virtualizing the runGroups list itself — when `events` does change, a
+// long conversation still re-maps its full history.
+export default memo(ChatSurface);

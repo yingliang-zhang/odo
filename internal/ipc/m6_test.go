@@ -1293,3 +1293,40 @@ func TestDeployStaleness(t *testing.T) {
 		t.Errorf("binary newer than HEAD = %v, want 0 (deploys are not stale)", d)
 	}
 }
+
+// TestRecallSkipsEscapingSymlink (2026-08-24 tri-review P0): wiki/ is
+// committable — an implanted main-epoch-99.md symlink pointing at an
+// external secret must be skipped like a vanished note: the recall block
+// carries the legitimate note and NEVER the external bytes.
+func TestRecallSkipsEscapingSymlink(t *testing.T) {
+	root := initRepo(t)
+	writeEpochNote(t, root, "main-epoch-1", "legit recall content\n")
+	external := filepath.Join(t.TempDir(), "secret.md")
+	const secret = "EXTERNAL-SECRET-BYTES"
+	if err := os.WriteFile(external, []byte(secret+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(root, "wiki", "main-epoch-99.md")); err != nil {
+		t.Fatal(err)
+	}
+	memory, items, noteBytes := recallWikiNotes(root, "main", "", nil)
+	if !strings.Contains(memory, "legit recall content") {
+		t.Errorf("memory block lost the legitimate note:\n%s", memory)
+	}
+	for _, s := range append([]string{memory}, func() []string {
+		out := make([]string, 0, len(noteBytes))
+		for _, nb := range noteBytes {
+			out = append(out, string(nb))
+		}
+		return out
+	}()...) {
+		if strings.Contains(s, secret) {
+			t.Errorf("external secret bytes were injected:\n%s", s)
+		}
+	}
+	for _, it := range items {
+		if strings.HasSuffix(it.path, "main-epoch-99.md") {
+			t.Errorf("escaping symlink entered the recall items: %+v", it)
+		}
+	}
+}

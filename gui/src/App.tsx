@@ -53,6 +53,7 @@ import {
   SwitchCache,
 } from "./switch_cache";
 import { deriveLoopStates, loopMode } from "./loop";
+import { sameDiff, sameDiffList } from "./diff_stable";
 import { derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
@@ -168,8 +169,32 @@ export default function App() {
     const VALID: PanelTab[] = ["changes", "review", "wiki", "memory", "ledger", "skills"];
     return stored && (VALID as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
   });
-  // M9 P3: memory sub-tab for toast click-throughs (files vs proposals).
-  const [memorySubTab, setMemorySubTab] = useState<"proposals" | "files">("proposals");
+
+  // Keep-alive panel tabs (tri-review P1 #5, 2026-08-24): the panel used
+  // to mount content conditionally (`panelTab === "x" && …`), so every
+  // switch unmounted the previous panel — local draft state, scroll
+  // positions, and fetched caches were dropped and refetched on return,
+  // despite ContextPanel's Props comment claiming keep-alive semantics.
+  // Tabs now mount lazily on first activation and stay mounted (hidden
+  // with the `hidden` attribute while inactive). mountedTabs records
+  // which tabs have ever been active; the seed is the restored tab.
+  const [mountedTabs, setMountedTabs] = useState<ReadonlySet<PanelTab>>(
+    () => new Set([panelTab]),
+  );
+  // The single activation path for a panel tab: tab clicks, badge jumps,
+  // toast click-throughs, and the poll loop's auto-open all go through
+  // here so the keep-alive mount set can never diverge from the visible
+  // tab (no second convention beside setPanelTab).
+  const openTab = useCallback((tab: PanelTab) => {
+    setPanelTab(tab);
+    setMountedTabs((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
+  }, []);
+  // M9 P3: memory sub-tab deep links (toast click-throughs). Shaped like
+  // WikiBrowser's focus ({tab, n}) — the counter re-fires identical
+  // requests. (tri-review P1 #5): with the panel keep-alive, MemoryPanel
+  // stays mounted across switches, so a bare initialTab string would only
+  // ever apply at first mount; the nonce makes later deep links apply too.
+  const [memoryFocus, setMemoryFocus] = useState<{ tab: "proposals" | "files"; n: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Belt B: chat search (⌘F) and the command palette (⌘K).
   const [searchOpen, setSearchOpen] = useState(false);
@@ -753,6 +778,15 @@ export default function App() {
           await pollEvents(cid, lastSeqRef.current, root ?? undefined),
         );
         if (conversationRef.current !== cid || projectRootRef.current !== root) return; // switched mid-flight
+        // Re-render audit of this 350 ms tick handler (tri-review P1 #4,
+        // 2026-08-24): on a quiet tick NOTHING below may produce a new
+        // state reference, so React's bailouts skip the whole re-render.
+        // - recordEvents early-returns on an empty batch, and mergeEvents
+        //   returns `prev` unchanged when every row was already seen — no
+        //   new events reference on quiet ticks.
+        // - setAgentRunning / setError(null→null) / setDaemonDown /
+        //   setPollFailures write primitives; React's Object.is bailout
+        //   absorbs same-value writes without re-rendering. Left as-is.
         recordEvents(resp.events ?? []);
         setAgentRunning(resp.agent_running ?? false);
         // Seed only on the false→true transition — re-seeding on every
@@ -792,10 +826,20 @@ export default function App() {
           return nextPanelProgress;
         });
         // The daemon always reports the latest diff (any status); only a
-        // pending one is actionable in the UI.
-        if (resp.diff) setDiff(resp.diff);
+        // pending one is actionable in the UI. (tri-review P1 #4,
+        // 2026-08-24): resp.diff/resp.diffs arrive as FRESH JSON
+        // references on every tick (an empty [] included — the hottest
+        // path), so a blind setState re-rendered the entire subtree
+        // 2.86×/s while the agent ran. Compare content and keep the
+        // previous reference when nothing changed — the setPreview /
+        // setPanelProgress stabilization pattern above, via the
+        // diff_stable comparators.
+        if (resp.diff) {
+          const nextDiff = resp.diff;
+          setDiff((prev) => (sameDiff(prev, nextDiff) ? prev : nextDiff));
+        }
         const newDiffs = resp.diffs ?? [];
-        setDiffs(newDiffs);
+        setDiffs((prev) => (sameDiffList(prev, newDiffs) ? prev : newDiffs));
         // M9 P2: auto-open the panel on a genuine 0→1 pending-diff
         // transition (not level-based), only when closed, and only after
         // the first real poll (not bootstrap replay).
@@ -809,8 +853,9 @@ export default function App() {
           prevDiffsCountRef.current === 0 &&
           newDiffs.length > 0
         ) {
+
           setPanelOpen(true);
-          setPanelTab("changes");
+          openTab("changes");
         }
         prevDiffsCountRef.current = newDiffs.length;
         // M3 (spec §3c) + M12 (D-auto disclosure): project-wide visibility
@@ -889,8 +934,45 @@ export default function App() {
       void tick().then(() => { if (alive) schedule(); });
     };
     schedule();
+
     return () => { alive = false; window.clearTimeout(timer); };
-  }, [booted, recordEvents, agentRunning, refreshPendingCounts, refreshInbox]);
+  }, [booted, recordEvents, agentRunning, refreshPendingCounts, refreshInbox, openTab]);
+
+  // ChatSurface is wrapped in React.memo — every prop below must keep a
+  // stable reference across renders or the memo is defeated (tri-review
+  // P1 #4, 2026-08-24). onTodoChanged / onTodoError / onLoopChanged /
+  // onLoopError / onModelChanged / onSearchClose were INLINE ARROWS in the
+  // JSX (a fresh reference every render); pollNowRef keeps the re-poll
+  // callbacks dependency-free so useCallback([]) can freeze them.
+  // handleSend/handleCancel/handleOpenFoldNote were already frozen
+  // useCallbacks; handleResumeParked/handleDropParked/handleDropSteer
+  // only rebuild on conversation/project switches (never per poll tick),
+  // events/preview/panelProgress/loops are stabilized at their setters or
+  // by useMemo; the remaining props are primitives.
+  const handlePollNow = useCallback(() => pollNowRef.current(), []);
+  const handleSurfaceError = useCallback((m: string) => setError(m), []);
+  const handleSearchClose = useCallback(() => setSearchOpen(false), []);
+  const handleModelChanged = useCallback(() => {
+    void refreshSettings();
+  }, [refreshSettings]);
+  // The .find() results were derived INLINE per render; they happen to
+  // return the same element reference between counts refreshes, but a
+  // memo makes that identity explicit and skips the scan on unrelated
+  // renders.
+  const activeAutoDistill = useMemo(
+    () =>
+      conversation
+        ? autoDistill.find((a) => a.conversation_id === conversation.id && !a.blocked_reason)
+        : undefined,
+    [autoDistill, conversation],
+  );
+  const activeAutoDistillBlocked = useMemo(
+    () =>
+      conversation
+        ? autoDistill.find((a) => a.conversation_id === conversation.id && a.blocked_reason != null)
+        : undefined,
+    [autoDistill, conversation],
+  );
 
   // P4: wake nudge — a tab becoming visible or the network returning polls
   // immediately instead of waiting out the current (possibly backed-off)
@@ -1462,10 +1544,17 @@ export default function App() {
   // by the TopBar buttons, the palette, and the toast click-throughs.
   const openPanelTab = useCallback((tab: PanelTab, memSubTab?: "proposals" | "files") => {
     setPanelOpen(true);
-    setPanelTab(tab);
-    // Toast click-throughs pass memSubTab="files"; default reset to "proposals".
-    setMemorySubTab(memSubTab ?? "proposals");
-  }, []);
+    openTab(tab);
+    // Deep-link the memory sub-tab only when the target IS the memory tab:
+    // toast click-throughs pass memSubTab="files", a bare memory badge
+    // click wants "proposals". With keep-alive panels the old blanket
+    // reset-to-"proposals" on EVERY pivot would now yank the sub-tab out
+    // from under the user on unrelated clicks (previously it applied
+    // silently on the next remount, which no longer happens).
+    if (tab === "memory") {
+      setMemoryFocus((prev) => ({ tab: memSubTab ?? "proposals", n: (prev?.n ?? 0) + 1 }));
+    }
+  }, [openTab]);
 
   // Fold chip's "Open note": pivot to the wiki tab and focus the folded
   // epoch's note there.
@@ -1955,30 +2044,28 @@ export default function App() {
           searchOpen={searchOpen}
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
-          onSearchClose={() => setSearchOpen(false)}
+          onSearchClose={handleSearchClose}
           // M12: the composer chip discloses the daemon's auto-distill
           // state for the active conversation; the lock covers MANUAL
           // distill only — an auto distill is send-cancelled, it never
           // blocks typing.
-          autoDistill={conversation ? autoDistill.find((a) => a.conversation_id === conversation.id && !a.blocked_reason) : undefined}
-          autoDistillBlocked={conversation ? autoDistill.find((a) => a.conversation_id === conversation.id && a.blocked_reason != null) : undefined}
+          autoDistill={activeAutoDistill}
+          autoDistillBlocked={activeAutoDistillBlocked}
           distillInFlight={conversation != null && distillingConvs.includes(conversation.id)}
           onDisarmAutoDistill={handleDisarmAutoDistill}
           distillLocked={distillBusy}
           // M12 (D-todo): the Plan chip reads the journaled events and its
           // ops re-poll promptly through the normal path.
           projectRoot={project?.root_path ?? null}
-          onTodoChanged={() => pollNowRef.current()}
-          onTodoError={(m) => setError(m)}
+          onTodoChanged={handlePollNow}
+          onTodoError={handleSurfaceError}
           // M19 (/loop) V1: the chip folds from `events` (already passed
           // above); stop/resume nudge the same prompt-repoll path.
           loops={loopStates}
-          onLoopChanged={() => pollNowRef.current()}
-          onLoopError={(m) => setError(m)}
+          onLoopChanged={handlePollNow}
+          onLoopError={handleSurfaceError}
           codingModel={appSettings?.coding_model ?? null}
-          onModelChanged={() => {
-            void refreshSettings();
-          }}
+          onModelChanged={handleModelChanged}
           loading={chatLoading}
           // W6 (goal queue): the composer park toggle and the QueueDock's
           // Resume/Drop; rows derive from `events` (already passed above).
@@ -1992,88 +2079,110 @@ export default function App() {
       <ContextPanel
         open={panelOpen}
         activeTab={panelTab}
-        onTabChange={setPanelTab}
+        onTabChange={openTab}
         changesBadge={diffs.length > 0 ? diffs.length : undefined}
         reviewBadge={pendingTotal > 0 ? pendingTotal : undefined}
         wikiBadge={wikiNoteCount ?? undefined}
         memoryBadge={pendingMemoryProposals > 0 ? pendingMemoryProposals : undefined}
       >
-        {panelTab === "changes" && (diffs.length > 0
-          ? diffs.map((d) => (
-              <DiffViewer
-                key={`${projectRootRef.current ?? ""}:${d.id}`}
-                diff={d}
-                onAccept={handleAccept}
-                onReject={handleReject}
-                onSendComments={(text) => handleSend(text, [], agentRunning)}
-                projectRoot={project?.root_path ?? null}
-                agentRunning={agentRunning}
-                pipelineState={pipelineStateByDiff.get(d.id)}
-              />
-            ))
-          : diff
-            ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={(text) => handleSend(text, [], agentRunning)} projectRoot={project?.root_path ?? null} agentRunning={agentRunning} pipelineState={pipelineStateByDiff.get(diff.id)} />
-            : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
-        )}
-        {panelTab === "review" && (
-          // P1a: cross-workstream inbox. Rows are project-scoped, so the
-          // key remounts on project switch — never render another
-          // project's inbox against this one's handlers.
-          <ReviewInbox
-            key={project?.root_path ?? "default"}
-            rows={inboxDiffs}
-            onAccept={handleAccept}
-            onReject={handleReject}
-            projectRoot={project?.root_path ?? null}
-            agentRunning={agentRunning}
-            pipelineStates={pipelineStateByDiff}
-            onJump={(id) => void handleSwitchWorkstream(id)}
-          />
-        )}
-        {panelTab === "wiki" && (conversation?.id != null ? (
-          // M11 P1: the key remounts the panel on project switch so no
-          // cross-project state (lists, reader cache, selection) survives;
-          // conversation ids can collide across projects (both are
-          // per-project SQLite sequences).
-          <WikiBrowser
-            key={`${project?.root_path ?? "default"}:${conversation.id}`}
-            conversationId={conversation.id}
-            projectRoot={project?.root_path ?? null}
-            focus={wikiFocus}
-          />
-        ) : (
-          <div className="panel-empty">No active conversation.</div>
-        ))}
-        {panelTab === "memory" && (conversation?.id != null ? (
-          <MemoryPanel
-            key={`${project?.root_path ?? "default"}:${conversation.id}`}
-            conversationId={conversation.id}
-            workstreamName={workstream?.name}
-            initialTab={memorySubTab}
-            onApplied={handleMemoryReviewClosed}
-            projectRoot={project?.root_path ?? null}
-          />
-        ) : (
-          <div className="panel-empty">No active conversation.</div>
-        ))}
-        {panelTab === "ledger" && (conversation?.id != null ? (
-          <LedgerPanel
-            key={`${project?.root_path ?? "default"}:${conversation.id}`}
-            conversationId={conversation.id}
-            projectRoot={project?.root_path ?? null}
-            // A-P0 #1: the review-action cells read the same journaled
-            // events ChatSurface renders — live, no extra IPC.
-            events={events}
-          />
-        ) : (
-          <div className="panel-empty">No active conversation.</div>
-        ))}
-        {panelTab === "skills" && (
-          <SkillsPanel
-            key={project?.root_path ?? "default"}
-            projectRoot={project?.root_path ?? null}
-          />
-        )}
+        {/* Keep-alive (tri-review P1 #5, 2026-08-24): each tab mounts on
+            first activation (mountedTabs) and stays mounted afterwards,
+            hidden with the `hidden` attribute — draft state, scroll
+            position, and fetched caches survive tab switches. The wrapper
+            carries no classes: ContextPanel's .panel-body is a block
+            scroll container (not flex), so a plain block div is
+            layout-neutral for the one visible wrapper and `hidden`
+            collapses the inactive ones. Existing keys/comments on the
+            panels are unchanged. RunGroupBoundary in ContextPanel still
+            scopes an error to its tab's subtree. */}
+        <div hidden={panelTab !== "changes"}>
+          {mountedTabs.has("changes") && (diffs.length > 0
+            ? diffs.map((d) => (
+                <DiffViewer
+                  key={`${projectRootRef.current ?? ""}:${d.id}`}
+                  diff={d}
+                  onAccept={handleAccept}
+                  onReject={handleReject}
+                  onSendComments={(text) => handleSend(text, [], agentRunning)}
+                  projectRoot={project?.root_path ?? null}
+                  agentRunning={agentRunning}
+                  pipelineState={pipelineStateByDiff.get(d.id)}
+                />
+              ))
+            : diff
+              ? <DiffViewer diff={diff} onAccept={handleAccept} onReject={handleReject} onSendComments={(text) => handleSend(text, [], agentRunning)} projectRoot={project?.root_path ?? null} agentRunning={agentRunning} pipelineState={pipelineStateByDiff.get(diff.id)} />
+              : <div className="panel-empty">No pending diffs — the next run's changes land here.</div>
+          )}
+        </div>
+        <div hidden={panelTab !== "review"}>
+          {mountedTabs.has("review") && (
+            // P1a: cross-workstream inbox. Rows are project-scoped, so the
+            // key remounts on project switch — never render another
+            // project's inbox against this one's handlers.
+            <ReviewInbox
+              key={project?.root_path ?? "default"}
+              rows={inboxDiffs}
+              onAccept={handleAccept}
+              onReject={handleReject}
+              projectRoot={project?.root_path ?? null}
+              agentRunning={agentRunning}
+              pipelineStates={pipelineStateByDiff}
+              onJump={(id) => void handleSwitchWorkstream(id)}
+            />
+          )}
+        </div>
+        <div hidden={panelTab !== "wiki"}>
+          {mountedTabs.has("wiki") && (conversation?.id != null ? (
+            // M11 P1: the key remounts the panel on project switch so no
+            // cross-project state (lists, reader cache, selection) survives;
+            // conversation ids can collide across projects (both are
+            // per-project SQLite sequences).
+            <WikiBrowser
+              key={`${project?.root_path ?? "default"}:${conversation.id}`}
+              conversationId={conversation.id}
+              projectRoot={project?.root_path ?? null}
+              focus={wikiFocus}
+            />
+          ) : (
+            <div className="panel-empty">No active conversation.</div>
+          ))}
+        </div>
+        <div hidden={panelTab !== "memory"}>
+          {mountedTabs.has("memory") && (conversation?.id != null ? (
+            <MemoryPanel
+              key={`${project?.root_path ?? "default"}:${conversation.id}`}
+              conversationId={conversation.id}
+              workstreamName={workstream?.name}
+              focus={memoryFocus}
+              onApplied={handleMemoryReviewClosed}
+              projectRoot={project?.root_path ?? null}
+            />
+          ) : (
+            <div className="panel-empty">No active conversation.</div>
+          ))}
+        </div>
+        <div hidden={panelTab !== "ledger"}>
+          {mountedTabs.has("ledger") && (conversation?.id != null ? (
+            <LedgerPanel
+              key={`${project?.root_path ?? "default"}:${conversation.id}`}
+              conversationId={conversation.id}
+              projectRoot={project?.root_path ?? null}
+              // A-P0 #1: the review-action cells read the same journaled
+              // events ChatSurface renders — live, no extra IPC.
+              events={events}
+            />
+          ) : (
+            <div className="panel-empty">No active conversation.</div>
+          ))}
+        </div>
+        <div hidden={panelTab !== "skills"}>
+          {mountedTabs.has("skills") && (
+            <SkillsPanel
+              key={project?.root_path ?? "default"}
+              projectRoot={project?.root_path ?? null}
+            />
+          )}
+        </div>
       </ContextPanel>
       </div>
       <StatusBar

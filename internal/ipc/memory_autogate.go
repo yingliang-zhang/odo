@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -83,8 +82,12 @@ func (s *Server) sweepPendingBatch(ctx context.Context, c store.Conversation, w 
 	} else {
 		// Pre-panel batch: gate fresh. Receipt discipline — the verdicts
 		// this decision acts on must land in the journal BEFORE the apply.
+		// (2026-08-24 tri-review P0) the note text below builds the panel
+		// review prompt; a planted symlink in the committable wiki/ tree
+		// pointing at external bytes must degrade to "" like an unreadable
+		// note, never inject them.
 		noteText := ""
-		if data, rerr := os.ReadFile(filepath.Join(s.projectRoot, "wiki",
+		if data, rerr := readWithinDir(filepath.Join(s.projectRoot, "wiki"), filepath.Join(s.projectRoot, "wiki",
 			fmt.Sprintf("%s-epoch-%d.md", w.Name, batch.epoch))); rerr == nil {
 			noteText = string(data)
 		}

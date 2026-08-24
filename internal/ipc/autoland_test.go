@@ -1494,6 +1494,195 @@ func TestAcceptAlreadyLandedFreshBase(t *testing.T) {
 	}
 }
 
+// TestAcceptAlreadyLandedExtraEdits pins the tri-review P1 guard
+// (2026-08-24): the fresh-base M20 rescue sees the patch at hunk
+// granularity, so an identical uncommitted landing with EXTRA user bytes
+// beyond the hunks still reads as already-landed — and the bookkeeping
+// accept commit records whole files, sweeping the extras in. The accept
+// now refuses byte-divergent worktrees (ExtraEditsBeyondPatch): diff
+// pending, agent_error journaled naming the path, nothing staged or
+// committed, user bytes intact. Making the file byte-exact unblock it.
+func TestAcceptAlreadyLandedExtraEdits(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	// A multi-line file with content AROUND the patched line: the reverse
+	// --check probe tolerates trailing drift beyond the hunk's context —
+	// unlike a whole-file hunk, where extra bytes fail the probe outright
+	// and the dirty-paths refusal catches them instead
+	// (TestAcceptNewFileExtraContentRefused).
+	writeCommitted := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, root, "add", rel)
+		gitIn(t, root, "commit", "-m", "add "+rel)
+	}
+	writeCommitted("src/multi.go", "package src\n\nfunc one() {}\nfunc two() {}\nfunc three() {}\n")
+	patch := realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "multi.go"), []byte("package src\n\nfunc one() {}\nfunc TWO() {}\nfunc three() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	d := baseBoundDiff(t, f, root, "p.diff", patch)
+	headBefore := gitOut(t, root, "rev-parse", "HEAD")
+	// The identical landing PLUS an extra user edit beyond the patch's
+	// hunks — the sweep the guard exists to refuse.
+	extraContent := "package src\n\nfunc one() {}\nfunc TWO() {}\nfunc three() {}\n\n// user note beyond the patch\n"
+	if err := os.WriteFile(filepath.Join(root, "src", "multi.go"), []byte(extraContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
+	if err == nil {
+		t.Fatal("accept with extra edits: want refusal, got nil")
+	}
+	for _, want := range []string{"beyond the patch bytes", "src/multi.go"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to name %q", err.Error(), want)
+		}
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending", got.Status)
+	}
+	// Refusal trail: an agent_error row naming the path (same shape as the
+	// guarded-path refusal), and no accept outcome row.
+	events, lerr := f.st.ListEvents(context.Background(), f.c.ID, 0)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	trailed := false
+	for _, e := range events {
+		if e.Type == store.EventAgentError &&
+			strings.Contains(string(e.Payload), "beyond the patch bytes") &&
+			strings.Contains(string(e.Payload), "src/multi.go") {
+			trailed = true
+		}
+	}
+	if !trailed {
+		t.Errorf("agent_error journal missing the extra-edits refusal (events: %d)", len(events))
+	}
+	if rows := reviewActionRowsFor(t, f, d); len(rows) != 0 {
+		t.Errorf("review_action rows = %v, want none (a refusal is not an outcome)", rows)
+	}
+	// Side-effect free: HEAD unmoved, index unstaged (the guard ran before
+	// any staging), the user's bytes exactly as written.
+	if head := gitOut(t, root, "rev-parse", "HEAD"); head != headBefore {
+		t.Errorf("HEAD = %s, want %s (no sweep commit)", head, headBefore)
+	}
+	if status := gitStatus(t, root); status != " M src/multi.go\n" {
+		t.Errorf("status = %q, want only the unstaged user edit on src/multi.go", status)
+	}
+	if got := readFileStr(t, filepath.Join(root, "src", "multi.go")); got != extraContent {
+		t.Errorf("src/multi.go = %q, want the user's full content intact", got)
+	}
+
+	// Retryable: byte-exact post-image makes the same accept land the
+	// bookkeeping commit (the M20 fresh-base contract is unchanged).
+	if err := os.WriteFile(filepath.Join(root, "src", "multi.go"), []byte("package src\n\nfunc one() {}\nfunc TWO() {}\nfunc three() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", ""); err != nil {
+		t.Fatalf("accept on byte-exact post-image: %v", err)
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+}
+
+// TestAcceptAlreadyLandedCommittedClean pins the skipCommit end of the M20
+// family under the extra-edits guard: the post-image arrived COMMITTED
+// out-of-band (stale base), the worktree is byte-clean, and the accept
+// creates NOTHING — HEAD stays the manual landing commit, the row rides
+// already_landed, and no refusal fires (byte-exact worktrees pass the
+// tier-2 placement where HEAD IS the post-image).
+func TestAcceptAlreadyLandedCommittedClean(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	patch := realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src // landed by hand\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	d := baseBoundDiff(t, f, root, "p.diff", patch)
+	// Side-channel landing: identical content, committed by hand — the
+	// diff's stored base is meanwhile stale.
+	if err := os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("package src // landed by hand\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", "src/a.go")
+	gitIn(t, root, "commit", "-m", "manual identical landing")
+	landedHEAD := gitOut(t, root, "rev-parse", "HEAD")
+
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", ""); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	row := resolutionRow(t, f, d, "accept")
+	if row["already_landed"] != true {
+		t.Errorf("accept row already_landed = %v, want true", row["already_landed"])
+	}
+	if head := gitOut(t, root, "rev-parse", "HEAD"); head != landedHEAD {
+		t.Errorf("HEAD = %s, want %s (an already-committed landing earns no commit)", head, landedHEAD)
+	}
+	if status := gitOut(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("main status = %q, want clean", status)
+	}
+}
+
+// TestAcceptNewFileExtraContentRefused pins the new-file sibling of the
+// sweep class (tri-review P1, 2026-08-24): the M20 probe does not
+// tolerate extra content on file-creation hunks (a reverse delete must
+// remove exactly the added bytes), so an untracked post-image file with
+// extra user content reaches the P0 dirty-paths refusal instead — the
+// refusing outcome, never a commit sweeping the extra bytes. The
+// already-landed guard's own byte-exact views of this shape (exact
+// passes, extra named) are covered in git_test's ExtraEditsBeyondPatch.
+func TestAcceptNewFileExtraContentRefused(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	patch := realPatch(t, root, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "src", "new.go"), []byte("package src // new helper\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	d := baseBoundDiff(t, f, root, "p.diff", patch)
+	headBefore := gitOut(t, root, "rev-parse", "HEAD")
+	// Untracked post-image PLUS extra user content (the sweep shape).
+	if err := os.WriteFile(filepath.Join(root, "src", "new.go"), []byte("package src // new helper\n// extra user content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", "")
+	if err == nil {
+		t.Fatal("accept: want refusal, got nil")
+	}
+	if !strings.Contains(err.Error(), "src/new.go") {
+		t.Errorf("err = %q, want it to name src/new.go", err.Error())
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending", got.Status)
+	}
+	if head := gitOut(t, root, "rev-parse", "HEAD"); head != headBefore {
+		t.Errorf("HEAD = %s, want %s (no commit over the extra content)", head, headBefore)
+	}
+	if got := readFileStr(t, filepath.Join(root, "src", "new.go")); got != "package src // new helper\n// extra user content\n" {
+		t.Errorf("src/new.go = %q, want the user's full content intact", got)
+	}
+}
+
 // TestAutoLandParallelPipelines (P2): with autoLandMu gone, two pipelines
 // run concurrently — the panel stub's in-flight counter proves both legs
 // are live at once (serialization would cap it at 1). Both panels accept;

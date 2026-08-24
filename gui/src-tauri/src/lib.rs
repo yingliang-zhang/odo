@@ -120,15 +120,19 @@ fn daemon_binary(project_root: &str) -> PathBuf {
 }
 
 /// A failed round trip, tagged by side-effect safety for the recovery
-/// retry in send_to_daemon. Only failures BEFORE the daemon could hold a
-/// complete request — connect refused (daemon down / stale socket) or a
-/// broken write (partial line + EOF on its read side — never parsed) — may
-/// be retried. Once the daemon accepted the request, a read timeout means
-/// "still working", and retrying re-executes a non-idempotent command:
-/// send_message journals a second user_message and (for /panel) doubles
-/// the API spend — observed 2026-08-11 as a duplicated /panel answer when
-/// a 393s run exceeded the 330s bridge timeout and the retry fired at
-/// exactly timeout time.
+/// retry in send_to_daemon. Only `connect` failures are retryable: the
+/// request never left this process, so a (re)started daemon has provably
+/// not seen it. Write- and read-stage failures are terminal — the Go
+/// json.Decoder may already have consumed the complete request body and
+/// begun executing when the trailing-newline write fails, so a write
+/// error says nothing about side effects; a read failure likewise means
+/// "daemon may still be working". Retrying either re-executes a
+/// non-idempotent command: send_message journals a second user_message
+/// and (for /panel) doubles the API spend — observed 2026-08-11 as a
+/// duplicated /panel answer when a 393s run exceeded the 330s bridge
+/// timeout and the retry fired at exactly timeout time. The write stage
+/// was made terminal on 2026-08-24 (security/performance review, finding
+/// 7): the same duplicate-side-effect family as that read-stage incident.
 struct RoundTripError {
     retryable: bool,
     message: String,
@@ -165,7 +169,7 @@ fn round_trip(
     stream
         .write_all(req.to_string().as_bytes())
         .and_then(|()| stream.write_all(b"\n"))
-        .map_err(|e| RoundTripError::retryable(format!("write {}: {e}", socket.display())))?;
+        .map_err(|e| RoundTripError::terminal(format!("write {}: {e}", socket.display())))?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -321,11 +325,12 @@ fn ensure_daemon_running(project_root: &str) -> Result<(), String> {
     ))
 }
 
-/// Round trip with one recovery retry — only when the request never
-/// reached the daemon (connect/write failure: it died or was never
-/// started, so ensure it's up and try once). Read-stage failures are
-/// returned as-is: the daemon may still be executing, and re-dispatching
-/// non-idempotent commands duplicates their side effects.
+/// Round trip with one recovery retry — only when the request provably
+/// never reached the daemon (connect failure: it died or was never
+/// started, so ensure it's up and try once). Write- and read-stage
+/// failures are returned as-is: the daemon may have consumed the request
+/// and begun executing, and re-dispatching non-idempotent commands
+/// duplicates their side effects.
 fn send_to_daemon(
     project_root: &str,
     req: &Value,

@@ -200,6 +200,10 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 	if err != nil {
 		return "", nil, nil, 0
 	}
+	// (2026-08-24 tri-review P0) wiki/ is committable: an implanted symlink
+	// whose target escapes it must never be read into the prompt — the
+	// guard below skips it exactly like a vanished note.
+	wikiDir := filepath.Join(projectRoot, "wiki")
 	type note struct {
 		path    string
 		name    string // <ws>-epoch-<N> (basename without .md)
@@ -218,9 +222,9 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 		if retracted[name] {
 			continue // journaled cause:"retract" (curated/human paths only — candidates never filter): record stays, injection stops
 		}
-		content, err := os.ReadFile(m)
+		content, err := readWithinDir(wikiDir, m)
 		if err != nil {
-			continue // note vanished between glob and read: skip it
+			continue // note vanished between glob and read — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): skip it
 		}
 		if strings.HasPrefix(string(content), supersededBanner) {
 			continue // fully merged into topics by a curate pass: facts now ride the topic layer, injection would double-count them

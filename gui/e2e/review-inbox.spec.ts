@@ -10,6 +10,15 @@ import { test, expect, type Page } from "@playwright/test";
 // so pill/badge assertions use the same REFRESH window as background-runs.
 const REFRESH = { timeout: 12_000 };
 
+// Row-removal assertions MUST be scoped to .review-inbox: under the
+// keep-alive panel tabs (tri-review P1 #5) the hidden Changes tab stays
+// mounted, and per daemon semantics (store.ListDiffs has no status filter)
+// it keeps rendering resolved diffs as record cards titled "Diff #N".
+// A page-global getByText("Diff #N") therefore matches the hidden record
+// card forever and toHaveCount(0) can never pass — deterministic, not
+// load (verify block journal seq 11484: locator stuck at 1 for the full
+// 5s after the inbox row was already gone).
+
 async function openReviewTab(page: Page) {
   await page.keyboard.press("Meta+j");
   await expect(page.locator(".context-panel")).toBeVisible();
@@ -54,7 +63,7 @@ test("accept a non-active workstream's diff without switching", async ({ page })
   await page.getByRole("button", { name: "Accept diff 2" }).click();
 
   // Row resolves optimistically; the other workstream's row is untouched.
-  await expect(page.getByText("Diff #2")).toHaveCount(0);
+  await expect(page.locator(".review-inbox").getByText("Diff #2")).toHaveCount(0);
   await expect(page.locator(".review-inbox").getByText("Diff #1")).toBeVisible();
 
   // The sidebar pill on feat-sidebar-tree decrements 1 → hidden.
@@ -74,7 +83,7 @@ test("reject path mirrors accept: row removed, pill decrements", async ({ page }
   await page.getByRole("button", { name: "Reject diff 1" }).click();
 
   // main's row is gone; feat-sidebar-tree's row survives.
-  await expect(page.getByText("Diff #1")).toHaveCount(0);
+  await expect(page.locator(".review-inbox").getByText("Diff #1")).toHaveCount(0);
   await expect(page.locator(".review-inbox").getByText("Diff #2")).toBeVisible();
   await expect(mainRow.locator(".ws-pending-pill")).toHaveCount(0, REFRESH);
   // The review badge is now the surviving row alone.
