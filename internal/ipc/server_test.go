@@ -442,6 +442,112 @@ func TestNoDiffRunRetiresWorktree(t *testing.T) {
 	}
 }
 
+// wikiStubWrapper mimics an agent that does real work (hello.txt) AND
+// writes into daemon-owned memory — the diff carries a memory-path hunk.
+const wikiStubWrapper = `#!/bin/sh
+output_file="$3"
+sleep 1
+printf 'real work\n' > hello.txt
+mkdir -p wiki
+printf '# agent note\n' > wiki/agent-note.md
+printf 'Did the work.\n' > "$output_file"
+exit 0
+`
+
+const odoMemStubWrapper = `#!/bin/sh
+output_file="$3"
+sleep 1
+printf 'real work\n' > hello.txt
+mkdir -p .odo
+printf 'agent memory\n' > .odo/memory.md
+printf 'Did the work.\n' > "$output_file"
+exit 0
+`
+
+// TestMemoryDiffRefusedAtRegistration pins the 2026-08-24 fail-fast: a run
+// whose diff touches daemon-owned memory (.odo/, wiki/) is refused at
+// REGISTRATION — no diff row is ever inserted (pre-panel's protected_path
+// block and the executor's every-actor refusal made any such row a
+// permanent pending wedge), the run retires like a no-diff outcome, the
+// transcript gets an advisory naming the path and the correct route
+// (distill/wiki-commit), and the extracted .diff stays in .odo/diffs/ as
+// the salvage record. The accept-time rejectMemoryPaths stays the
+// backstop (m6 guard tests cover it).
+func TestMemoryDiffRefusedAtRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		script   string
+		wantPath string
+	}{
+		{"wiki hunk", wikiStubWrapper, "wiki/agent-note.md"},
+		{"odo hunk", odoMemStubWrapper, ".odo/memory.md"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := initRepo(t)
+			t.Setenv("ODO_OMP_WRAPPER", writeStub(t, tc.script))
+			rig := startRig(t, root)
+			defer rig.stop(t)
+
+			boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+			convID := boot.Conversation.ID
+			rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "do work + remember"})
+			runID := rig.server.byConv[convID]
+			if runID == "" {
+				t.Fatal("run did not register in byConv")
+			}
+			wtPath := rig.server.runs[runID].worktreePath
+
+			done := rig.pollUntilDone(t, convID)
+			if done.Diff != nil || len(done.Diffs) != 0 {
+				t.Errorf("refused run surfaced a diff: %+v / %+v", done.Diff, done.Diffs)
+			}
+			// The review channel never holds unlandable bytes.
+			if diffs, err := rig.store.ListDiffs(context.Background(), convID); err != nil || len(diffs) != 0 {
+				t.Errorf("ListDiffs = %d rows (err %v), want none", len(diffs), err)
+			}
+			// Transcript advisory: names the protected path + the distill route.
+			events, err := rig.store.ListEvents(context.Background(), convID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			advisory := ""
+			for _, ev := range events {
+				if ev.Type == store.EventAgentError && strings.Contains(string(ev.Payload), `"odo":true`) {
+					advisory = string(ev.Payload)
+				}
+			}
+			for _, sub := range []string{"NOT registered", tc.wantPath, "distill/wiki-commit"} {
+				if !strings.Contains(advisory, sub) {
+					t.Errorf("advisory %q missing %q", advisory, sub)
+				}
+			}
+			// Salvage: exactly one patch stays archived in .odo/diffs/ (the
+			// daemon names it by runDirID, not the byConv run id), carrying
+			// both the real work and the refused memory hunk.
+			matches, err := filepath.Glob(filepath.Join(root, ".odo", "diffs", "*.diff"))
+			if err != nil || len(matches) != 1 {
+				t.Fatalf("salvage patches = %v (err %v), want exactly 1", matches, err)
+			}
+			data, err := os.ReadFile(matches[0])
+			if err != nil {
+				t.Fatalf("read salvage patch: %v", err)
+			}
+			for _, sub := range []string{"hello.txt", tc.wantPath} {
+				if !strings.Contains(string(data), sub) {
+					t.Errorf("salvage patch missing hunk for %q", sub)
+				}
+			}
+			// Retired immediately like a no-diff run.
+			if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+				t.Errorf("worktree %s still on disk after refusal", wtPath)
+			}
+			if n := len(rig.server.runs); n != 0 {
+				t.Errorf("server still tracks %d runs after refusal", n)
+			}
+		})
+	}
+}
+
 // TestReviewDuringLiveRunKeepsLiveRun pins the live-run guard in retireRun:
 // the diff under review is the product of an EARLIER finished run, but
 // byConv now binds a new in-flight run on the same conversation. Reviewing

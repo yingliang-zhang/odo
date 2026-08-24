@@ -688,6 +688,12 @@ func (s *Server) loopNoDiffAfterRun(ctx context.Context, meta *runMeta, verdict 
 			detail = "the run's verdict is " + verdict + " (no reliable output)"
 		}
 	}
+	// A refusal at registration carries the most specific truth (the
+	// diff existed but is structurally unlandable): it wins over both
+	// default branches.
+	if meta.refusalDetail != "" {
+		cause, detail = "run_tainted", meta.refusalDetail
+	}
 	s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, mode, loopKindSuspended, map[string]interface{}{
 		"cause":  cause,
 		"detail": detail,

@@ -124,6 +124,13 @@ type runMeta struct {
 	loopKind  string
 	loopRound int
 	loopTask  int
+	// refusalDetail: drainRun's registration fail-fast records WHY the
+	// run's diff was refused instead of registered (today only: protected
+	// memory paths). loopNoDiffAfterRun upgrades its cause/detail to
+	// run_tainted carrying this reason, so the suspension is actionable
+	// (unlike the legacy "land manually" advice, which the executor's
+	// every-actor refusal makes impossible).
+	refusalDetail string
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -2300,6 +2307,44 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		// M12: the run ended — the window grew, so evaluate auto-distill too.
 		s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
 		return nil
+	}
+	// Registration-time memory-path fail-fast (2026-08-24): a diff touching
+	// daemon-owned memory (.odo/, wiki/) can NEVER land — pre-panel blocks
+	// it as protected_path and the executor's rejectMemoryPaths refuses
+	// those bytes for EVERY actor, human Accept included — so registering
+	// the row only burns a verify+panel cycle on its way to a terminal
+	// block, wedging pending forever. Refuse here instead, shaped exactly
+	// like the no-diff outcome (retire now; loops get the failure matrix),
+	// and say so in the transcript with the correct route: wiki/ notes land
+	// through the daemon's own distill/wiki-commit pipeline, so the
+	// producer strips the memory hunk and resends the rest. The extracted
+	// .diff stays in .odo/diffs/ as the salvage record. An unparseable
+	// patch passes through (the accept-time guard is the backstop there).
+	if diffPath != "" {
+		if paths, perr := git.PatchPaths(diffPath); perr != nil {
+			log.Printf("ipc: drainRun: memory-path guard: parse %s: %v (leaving to accept-time backstop)", diffPath, perr)
+		} else if merr := rejectMemoryPaths(paths); merr != nil {
+			reason := merr.Error() + "; wiki/ notes land through the daemon's own distill/wiki-commit pipeline — strip the memory-path hunk and resend the remaining work"
+			meta.refusalDetail = "the fix run's diff was refused at registration (" + reason + ") — /loop resume after the hunk is stripped"
+			s.journalRunAdvisory(ctx, meta.conversationID,
+				"this run's diff was NOT registered: "+reason+fmt.Sprintf(" (full patch kept at %s; the run's worktree was retired)", diffPath))
+			if verdict != verdictNone {
+				s.journalRunVerdict(ctx, meta, verdict, false)
+			}
+			meta.finished = true
+			s.retireRun(ctx, meta.conversationID, "")
+			if meta.loopID != 0 {
+				s.loopNoDiffAfterRun(ctx, meta, verdict)
+				s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
+				s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+				return nil
+			}
+			s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
+			if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
+				s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+			}
+			return nil
+		}
 	}
 	if diffPath == "" {
 		meta.finished = true // agent changed nothing; run is complete

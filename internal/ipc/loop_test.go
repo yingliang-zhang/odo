@@ -974,12 +974,18 @@ func TestLoopDrainSkipsInactiveFold(t *testing.T) {
 // NEVER lands (zero auto_loop accepts).
 func TestLoopRiskGateSuspends(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		action    string
-		wantCause string
+		name          string
+		action        string
+		wantCause     string
+		wantDetailSub []string
 	}{
-		{"protected path", "protect", "risk:protected_path"},
-		{"supply chain", "supply", "risk:supply_chain"},
+		// wiki/ is memory content: since 2026-08-24 the run's diff is
+		// refused at REGISTRATION (no diff row ever exists) and the loop
+		// suspends run_tainted with the refusal reason — the legacy
+		// risk:protected_path wedge advised "land manually", a dead end
+		// the executor's every-actor refusal made impossible.
+		{"protected memory path", "protect", "run_tainted", []string{"refused at registration", "wiki/x.md"}},
+		{"supply chain", "supply", "risk:supply_chain", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var ctrl string
@@ -1008,6 +1014,15 @@ func TestLoopRiskGateSuspends(t *testing.T) {
 			})
 			if got := sc.causes()[0]; got != tc.wantCause {
 				t.Errorf("cause = %q, want %q", got, tc.wantCause)
+			}
+			susp := sc.ofKind(loopKindSuspended)
+			if len(susp) != 1 {
+				t.Fatalf("suspended rows = %d, want 1", len(susp))
+			}
+			for _, sub := range tc.wantDetailSub {
+				if d := fmt.Sprint(susp[0]["detail"]); !strings.Contains(d, sub) {
+					t.Errorf("suspension detail = %q, want substring %q", d, sub)
+				}
 			}
 			if sc.acceptsWithActor(loopActor) != 0 {
 				t.Error("a risk-gated fix must NEVER land (auto_loop accept found)")
