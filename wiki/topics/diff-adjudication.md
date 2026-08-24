@@ -1,0 +1,10 @@
+# Diff Adjudication & Journal Operations
+
+- #37 was accepted manually after its patch file was regenerated per drain semantics (`git add -A && git diff --cached HEAD`) to include the ledger.spec.ts fix — safe because the diff never reached the panel, so no `patch_sha16` attestation binding was broken (main-epoch-22)
+- `.odo/diffs/` is an append-only archive, not a live queue (77+ patches retained, accepted ones included) — no queue-clearing is needed after accepts (main-epoch-22)
+- Orphaned commits (#34 P1 fixes + anchor fix) sat on a deleted worktree's detached HEAD and were cherry-picked onto main (`ba68fb5 -> 4345f24 -> 954ff22`); journal correction seq 8470 (`corrects_seq: 8017`) retracted the false "manually landed" claim (main-epoch-20)
+- Schema v3 (`diffs.goal`) plus objective anchoring (954ff22) fixed the wrongful-rejection class exemplified by #34's false "objective mismatch"; truncation already forces needs_fixes at construction (server.go:3251), and the cap loop gained an explicit truncated-abstention as local self-proof (main-epoch-20)
+- Review remediation status: P0 4/4 (gate-source majority valve removal, liveness drain, contradiction advisory-only, memory auto-gate journal) and P1 10/10 landed; 7 review-adjudicated "won't do" items (embedding recall, memory review queue, etc.) remain deliberate non-goals (main-epoch-23)
+- P2 quick-fix pack completed as one 20-file diff (+683/-204): fold atomicity, LIKE/colon-space marker fixes, windowed reads, unanimity dedup, risk-classifier hardening, CJK margin, escalation ledger, ADR-0002 amendment, stuck-definition doc (main-epoch-23)
+- Lost-work recovery: the auto-land doctrine change was rebuilt by replaying 24 write/edit payloads verbatim from the journal (UI session seq 3933-4204) after the transcript was pruned — journal replay is the canonical recovery path (UI-epoch-11)
+- Deploy-order verification for doctrine: file mtime before daemon start, live `journal.sqlite` at `schema_version=3` with `diffs.goal` present — closing the epoch-22 staleness restart-timing item (main-epoch-23)

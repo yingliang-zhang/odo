@@ -1,0 +1,9 @@
+# Memory-Path Protection & Wiki Routing
+
+- Invariant: agents never write memory — `rejectMemoryPaths` (server.go:2743) refuses `.odo/`/`wiki/` paths for every actor including a human Accept click; pre-panel `autoLandCheck` hard-blocks them as `protected_path`, terminal (main-epoch-24)
+- `wiki/` is the daemon memory pipeline's own content area: distill/curate write it directly and auto-commit via `commitWiki`; an agent diff carrying a wiki hunk is misrouted content that can never land through the diff channel (main-epoch-24)
+- Do not narrow `autoLandCheck`: the remaining hard blocks (`.odo/`/`wiki/`, supply-chain manifests/lockfiles) are the minimal set; downgrading only the pre-panel layer wastes panel spend, and opening both layers deletes invariant 1 and reopens prompt-injection to 3-leg correlated persistent memory pollution (main-epoch-24)
+- Registration-time refusal (diff #39): `drainRun` guard after ExtractDiff/before InsertDiff reuses the same SSOT predicate with zero permission change — transcript advisory names paths and points to the distill/wiki-commit route, salvage patch kept in `.odo/diffs/`, worktree retired immediately (main-epoch-24)
+- Memory-path loop failures surface as `run_tainted` + refusal detail, replacing the previously unsolvable "land it manually" advice (main-epoch-24)
+- Diff #38 was structurally unlandable (wiki hunk + 4 gate files: pre-panel block plus accept-time backstop) and was rejected for ledger cleanup; the archive is append-only so the patch is not lost (main-epoch-24)
+- Registration-refusal takes effect only after #39 lands and the daemon restarts; until then the P2 re-registration (19 files, wiki hunk stripped) must strip manually or the #38 deadlock repeats, and the gui-visibility stuck-definition content routes via distill/`commitWiki` (main-epoch-25)

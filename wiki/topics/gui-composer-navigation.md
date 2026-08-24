@@ -1,0 +1,10 @@
+# GUI Composer, Streaming & Navigation
+
+- Composer is uncontrolled for React 19 IME safety: programmatic writes are gated on `!composing`, and all send paths synchronously clear the value and composition state because WKWebView can drop Enter keys mid-composition (the stuck blue marked-text bug) (UI-epoch-2)
+- Advisory slash submits detach from the composer await: the box clears and unlocks immediately while the background promise drives the spinner, with guarded draft restore only when the composer is untouched on rejection; daemon routes slash commands before steer/park so the park arm survives (bug-fix-epoch-3)
+- `panelThinking` is a counter, not a boolean, so concurrent advisories share the spinner correctly (last one out turns it off) (bug-fix-epoch-4)
+- Auto-follow: un-stick only on explicit user gestures (wheel-up, touch pull-down, scrollbar drag), never on scroll events — browser scroll anchoring and `content-visibility` resolution move scrollTop passively; a ResizeObserver re-pins invisible growth (UI-epoch-2)
+- Workstream switching uses stale-while-revalidate: a per-conversation LRU journal cache renders instantly and the arriving bootstrap merges by seq (lossless, journal is append-only); daemon honors `afterSeq` and runs SQL/file I/O outside `s.mu` (UI-epoch-8)
+- Steer queue is journal-derived (`user_message{steer:true}` minus consumed `steer_seqs` and `steer_dropped` closures), survives restarts without new polling; Drop uses two-stage confirm that survives poll-tick re-derivation, and `recoverOpenSteers` closes dangling steers at boot (UI-epoch-5)
+- Popover transparency bug: twMerge treats any `bg-*` class as the background-color group, so the e2e marker class `bg-runs-menu` discarded the real background from all 5 StatusBar popovers; marker classes must never carry `bg-` prefixes (UI-epoch-7)
+- Tailwind preflight `svg{display:block}` stacks icons above text in non-flex chips; affected chips need `inline-flex items-center` wrappers with text in a `min-w-0 truncate` child to preserve ellipsis (UI-epoch-3)

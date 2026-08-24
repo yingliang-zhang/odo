@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # odo Review Remediation — P2 Quick-Fix Pack Completed (2026-08-24)
 
 ## Context

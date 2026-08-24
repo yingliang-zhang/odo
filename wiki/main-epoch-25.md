@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # #39 Block Investigation: Latent Test Defect on Main, Fixed
 
 ## Summary

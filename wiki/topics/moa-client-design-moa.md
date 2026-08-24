@@ -1,0 +1,11 @@
+# MoA Client, Receipts & Design-MoA
+
+- moa client resilience: bounded retry (429/5xx/network/timeout, max 3 attempts, jittered 200ms x 2^n backoff, Retry-After honored capped at 30s), never on caller cancel; typed `Error.Class`; Result ledger InputTokens/WallSeconds/TokPerSec follows the final-request convention (moa-chain-epoch-1)
+- Wire receipts `request_sha16`/`request_bytes` are computed at `post()`'s marshal point: a retry chain shares one receipt (byte-identical body), escalation and tool-loop receipts point to the final body, and error returns carry none — purely additive omitempty keys, ADR-0002-immune (daemon-misc-epoch-2)
+- sha16 is dual-implemented in moa and ipc (import cycle) under a "convention is the contract" comment, same sha256-prefix scheme (daemon-misc-epoch-2)
+- Design-MoA (`design_via: moa`, fail-closed otherwise): 3 blind legs fan out with the same goal+context and repo-root-scoped FS executor, then one consolidator synthesizes labeled leg inputs; dropped legs are named in the prompt but their text is excluded (moa-chain-epoch-2)
+- Truncation semantics: a truncated leg is a failed leg — its text is dropped but its receipts are kept; the pipeline degrades on surviving legs and dies only when every leg fails; a truncated consolidator fails closed with no `design_lock` row (moa-chain-epoch-2)
+- Wire-key adjudication: `design_proposals` kept over the spec-literal `proposals` because encoding/json's dominant-field rule would silently drop same-named sibling fields and corrupt every memory_proposals response (moa-chain-epoch-3)
+- All four design failure sites attach `proposals` + `consolidator` receipt blocks to the `design/failed` marker via the shared `designConsolidatorReceipt` helper, with wire-exact sha16 recompute pins (moa-chain-epoch-3)
+- `/panel` has no consolidator by design (N legs concatenated verbatim); the "no 4th model call" rule applies only to review-verdict vote counting, so panel Q&A synthesis is allowed — default-on vs pref-gated awaits user decision (UI-epoch-2)
+- Learner/curator routing: shared `resolveVia` + `runMoaOneShot` behind opt-in `learner_via`/`curator_via` prefs (default omp); GUI read timeouts (distill 3300s, curate 1560s) derive from the 1446s worst-case moa chain (moa-chain-epoch-1)

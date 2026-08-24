@@ -1,10 +1,10 @@
-# Daemon Binary Deployment & Recovery
+# Deployment & Daemon Lifecycle
 
-- Deploy rule: atomic cp-to-temp+mv of `<project>/odo` AND `~/.odo/bin/odo` first, THEN kill daemon — killing first makes the app relaunch the old binary (main-epoch-21, UI-epoch-6, UI-epoch-10)
-- Prove new code is live behaviorally: `go version -m` on the running process (vcs.revision) + DB checks (schema_version=3, `diffs.goal` column) — epoch-20's 'new binary =954ff22' claim was false; live daemon was 5ec522bd+dirty until the explicit rebuild (main-epoch-21, main-epoch-20)
-- Orphaned commit recovery: #34 (`a5c98ca`, 8 P1 fixes) and schema-v3 anchor fix `abca6f1` sat on a deleted session worktree's detached HEAD; cherry-picked into main (→4345f24→954ff22), journal correction seq 8470 corrects seq 8017's false manual-land claim (main-epoch-20)
-- Installed-app verification method: SHA-256 of `/Applications/Odo.app` vs bundle artifact + running pid's `txt` mapping + main HEAD — definitively answers 'is the app latest?' without rebuild (UI-epoch-3)
-- App→daemon handover: `ensure_daemon_running` is idempotent — kill daemon and app auto-relaunches from `<project>/odo`; flock single-instance; daemon survives app exit (UI-epoch-5, UI-epoch-6)
-- Mach-O binary grep is unreliable for GUI markers (Tauri compresses embedded resources); verify via `gui/dist` source markers + SHA parity instead (UI-epoch-6, UI-epoch-5)
-- Manual dev worktrees must live outside `.odo/worktrees/` — the daemon sweeper reclaims unbound directories (UI-epoch-1)
-- Sweepers auto-reclaim stale worktrees/prompts at boot; hermes-agent's pending-diff store is decoupled from odo binary swaps and daemon lifecycle (UI-epoch-11, UI-epoch-6)
+- Deploy rule: replace binaries first (atomic cp-to-temp + mv of both `<project>/odo` and `~/.odo/bin/odo`), then kill the daemon — killing first relaunches the old binary; the Tauri app auto-respawns the daemon from `<project>/odo` (UI-epoch-6)
+- Stale-binary forensics: `go version -m` vcs.revision against main HEAD plus behavioral proof (`schema_version=3`, `diffs.goal` column); epoch-21 proved a live daemon believed rebuilt was actually #27-era code with schema v2, causing #36's wrongful one-vote-veto rejection (main-epoch-21)
+- Auto-reject under the abolished one-vote-veto rule showed a stale binary silently mis-adjudicates; after any rule change, restart verification (new PID, socket, schema) is the acceptance gate (main-epoch-21)
+- Boot recovery sequence: orphan sweep runs first (unanswered non-control user_messages get `agent_error{cause:daemon_restart}` closure, idempotent on next fold), then pending-diff recovery; SIGQUIT is discarded via `signal.Notify` because graceful TERM-on-QUIT would hang shutdown on in-flight panels up to ~24 min (bug-fix-epoch-4)
+- modernc.org/sqlite WAL-recovery SIGBUS is a recurring low-frequency daemon kill; first remedy is one-line `_pragma mmap_size=0`, upgrade the dependency only if that fails (UI-epoch-11)
+- "daemon restarted while this request was in flight" bubbles are orphan markers stamped on in-flight requests at daemon death; they persist in history and do not indicate current failure (UI-epoch-10)
+- Bare `odo` CLI runs can spawn unintended daemons inside worktrees; external `/bin/kill` may be needed where the shell builtin refuses PIDs (UI-epoch-6)
+- The hermes-agent project daemon (~/.odo/bin/odo, its own store) is decoupled from odo's daemon lifecycle; restarting it kills its sessions and remains a pending user decision (main-epoch-23)
