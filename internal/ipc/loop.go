@@ -18,7 +18,7 @@ package ipc
 //
 // Mode B (tasks): per task, design = runDesignMoa (human design gate
 // unless loop_design_gate: auto), implement run, review = s.autoLand
-// VERBATIM (verify → panel → revise ladder ≤3 → majority valve →
+// VERBATIM (verify → panel → revise ladder ≤2 → majority valve →
 // suspension — inherit, never fork, C8). The loop journals task-boundary
 // rows and folds settle's terminal rows to learn outcomes. The drained
 // task list flips to a final Mode A audit over the accumulated diff.

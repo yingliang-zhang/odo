@@ -15,7 +15,7 @@
 
 ### Fix 1: 2/3 Majority Accept at Round Cap (fixes Pattern 4 + most Pattern 1)
 
-**Rule**: After 3 rounds of revise, if ≥2/3 models say "accept" AND zero rejects AND zero infra legs → auto-land with `consensus_verdict:"majority_accept"`.
+**Rule**: At the revise-round cap, if ≥2/3 models say "accept" AND zero rejects AND zero infra legs → auto-land with `consensus_verdict:"majority_accept"`. **2026-08-23 amendment**: the cap is 2 revise spawns — the panel reviews three evaluations total (1–2 fail closed on unanimity; the third converges by this majority valve), moved down from 3 spawns / a 4th evaluation.
 
 **Code path**: `settle.go:settleRevise`, at `len(st.rounds) >= settleMaxReviseRounds`, before the suspension journal:
 ```

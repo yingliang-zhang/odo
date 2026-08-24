@@ -104,9 +104,12 @@ package ipc
 //	                 errored leg stays blocked-pending {panel_infra}
 //	                 (infra is not a verdict — recover-pending-diffs
 //	                 re-fires on restart); zero rejects + ≥1 needs_fixes
-//	                 enters the auto-revise ladder (≤3 fresh repair
-//	                 rounds, no-progress stop, journal-derived
-//	                 suspension resumed by ANY landing).
+//	                 enters the auto-revise ladder (≤2 fresh repair
+//	                 rounds — the third evaluation is terminal: the
+//	                 majority-accept valve (≥2/3, zero rejects/infra/
+//	                 truncated) fires or the ladder suspends;
+//	                 no-progress stop; journal-derived suspension
+//	                 resumed by ANY landing).
 //	land            handleDiffAction's original path — memory-path
 //	                 refusal (every actor), the gate-source evidence
 //	                 gate (a non-human actor lands gate files only

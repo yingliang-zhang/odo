@@ -320,8 +320,8 @@ func TestSettleRepairPromptUnit(t *testing.T) {
 	}
 
 	// The locked boundaries, pinned exactly.
-	if settleMaxReviseRounds != 3 || settleDiffCapBytes != 64*1024 || settleCommentsCapBytes != 16*1024 {
-		t.Errorf("caps drifted: rounds=%d diff=%d comments=%d (locked at 3 / 64K / 16K)",
+	if settleMaxReviseRounds != 2 || settleDiffCapBytes != 64*1024 || settleCommentsCapBytes != 16*1024 {
+		t.Errorf("caps drifted: rounds=%d diff=%d comments=%d (locked at 2 / 64K / 16K)",
 			settleMaxReviseRounds, settleDiffCapBytes, settleCommentsCapBytes)
 	}
 }
@@ -722,17 +722,15 @@ func TestReviseUserMessageCarriesReceipt(t *testing.T) {
 	}
 }
 
-// TestSettleRoundCapSuspendsAndResumes (test 2): two consecutive revise
-// rounds ending needs_fixes suspend the conversation's ladder (journaled
-// transition, no in-memory state); the third evaluation spawns NOTHING; a
-// human accept resumes it; the next needs_fixes starts a fresh round-1 —
-// which, failing again at round 2, suspends a second time.
+// TestSettleRoundCapSuspendsAndResumes (test 2; 2026-08-23 doctrine:
+// evaluations 1–2 fail closed on unanimity, the third is terminal):
+// two consecutive revise rounds ending needs_fixes make the THIRD
+// evaluation hit the round cap — under a 1/3-accept panel the
+// majority-accept valve cannot fire, so the conversation's ladder
+// suspends (journaled transition, no in-memory state) and spawns
+// NOTHING; a human accept resumes it; the next needs_fixes starts a
+// fresh round-1 — which, failing again, suspends a second time.
 func TestSettleRoundCapSuspendsAndResumes(t *testing.T) {
-	t.Skip("pending rewrite for 3-round cap")
-	testSettleRoundCapSuspendsAndResumes(t)
-}
-
-func testSettleRoundCapSuspendsAndResumes(t *testing.T) {
 	rig := settleRig(t, func(call int64, model string) (int, string) {
 		// Every round: direction endorsed, work incomplete — with per-call
 		// unique comments so the no-progress stop never fires for the WRONG
@@ -756,60 +754,61 @@ func testSettleRoundCapSuspendsAndResumes(t *testing.T) {
 	waitSettle(t, rig.store, convID, "round 1 spawn", func(sc settleScan) bool { return len(sc.markers) == 1 })
 	pollDone(t, rig, convID)
 	waitSettle(t, rig.store, convID, "round 2 spawn", func(sc settleScan) bool { return len(sc.markers) == 2 })
-	pollDone(t, rig, convID)
-	waitSettle(t, rig.store, convID, "round 3 spawn", func(sc settleScan) bool { return len(sc.markers) == 3 })
-	done5 := pollDone(t, rig, convID)
-	d4 := done5.Diff.ID
+	done3 := pollDone(t, rig, convID)
+	d2 := done3.Diff.ID
 
-	// The fourth needs_fixes-zone evaluation hits the round cap: suspend
-	// (ledger transition + blocked row), and spawn NOTHING.
+	// The THIRD needs_fixes-zone evaluation hits the round cap: with 1/3
+	// accept the valve fails, so the ladder suspends (ledger transition +
+	// blocked row, journaled in that order in the same goroutine — the
+	// compound wait keeps evidence ahead of the assertions) and spawns
+	// NOTHING.
 	sc := waitSettle(t, rig.store, convID, "ladder suspension", func(sc settleScan) bool {
-		return len(sc.memory) == 1 && sc.memory[0]["cause"] == "ladder_suspended"
+		return len(sc.memory) == 1 && sc.memory[0]["cause"] == "ladder_suspended" && len(sc.blocked) == 1
 	})
-	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "ladder_suspended" {
+	if got := sc.blockedReasons(); got[0] != "ladder_suspended" {
 		t.Fatalf("blocked reasons = %v, want [ladder_suspended]", got)
 	}
-	if len(sc.rounds) != 3 || sc.rounds[0]["round"] != float64(1) || sc.rounds[1]["round"] != float64(2) || sc.rounds[2]["round"] != float64(3) {
-		t.Fatalf("rounds = %v, want exactly rounds 1, 2 and 3", sc.rounds)
+	if len(sc.rounds) != 2 || sc.rounds[0]["round"] != float64(1) || sc.rounds[1]["round"] != float64(2) {
+		t.Fatalf("rounds = %v, want exactly rounds 1 and 2", sc.rounds)
 	}
 	for _, r := range sc.rounds {
 		if r["origin_diff_id"] != float64(d0) {
 			t.Errorf("round %v origin = %v, want chain root %d", r["round"], r["origin_diff_id"], d0)
 		}
 	}
-	settleQuiet(t, rig.store, convID, 2*time.Second, "a fourth revise spawn", func(sc settleScan) bool {
-		return len(sc.markers) > 3 || len(sc.rounds) > 3
+	settleQuiet(t, rig.store, convID, 2*time.Second, "a third revise spawn", func(sc settleScan) bool {
+		return len(sc.markers) > 2 || len(sc.rounds) > 2
 	})
 	diffs, err := rig.store.ListDiffs(context.Background(), convID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(diffs) != 4 {
-		t.Errorf("diff count = %d, want 4 (no fourth repair run produced work)", len(diffs))
+	if len(diffs) != 3 {
+		t.Errorf("diff count = %d, want 3 (no third repair run produced work)", len(diffs))
 	}
 
-	// A FOURTH needs_fixes evaluation (after the ledger row exists) hits
-	// the st.suspended branch itself — blocked, journaled, no spawn
+	// A THIRD-zone evaluation (after the ledger row exists) hits the
+	// st.suspended branch itself — blocked, journaled, no spawn
 	// (P0 review DSF: the suspended-branch was previously unexercised —
 	// every test suspension ended at the round-cap branch).
-	d4Rec, err := rig.store.GetDiff(context.Background(), d4)
+	d2Rec, err := rig.store.GetDiff(context.Background(), d2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rig.server.settleRevise(context.Background(), d4Rec, "patch text", []ReviewResult{
+	rig.server.settleRevise(context.Background(), d2Rec, "patch text", []ReviewResult{
 		{Model: "rm1@t", Verdict: "accept"},
 		{Model: "rm2@t", Verdict: "needs_fixes", Comments: "still"},
 		{Model: "rm3@t", Verdict: "needs_fixes", Comments: "more"},
 	})
 	if sc := scanSettle(t, rig.store, convID); len(sc.blocked) != 2 || fmt.Sprint(sc.blocked[1]["reason"]) != "ladder_suspended" {
 		t.Errorf("post-suspension evaluation = %v blocked rows, want [ladder_suspended] again", len(sc.blocked))
-	} else if len(sc.markers) != 3 {
+	} else if len(sc.markers) != 2 {
 		t.Errorf("a marker spawned while suspended: %v markers", len(sc.markers))
 	}
 
-	// A HUMAN accept is the only resume: D2 lands by click, the ledger
+	// A HUMAN accept lands the round-2 product by click, the ledger
 	// journals ladder_resumed, and the next needs_fixes starts fresh.
-	rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: d4})
+	rig.call(t, Request{Cmd: CmdAcceptDiff, DiffID: d2})
 	sc = waitSettle(t, rig.store, convID, "ladder resume", func(sc settleScan) bool {
 		return len(sc.memory) == 2 && sc.memory[1]["cause"] == "ladder_resumed"
 	})
@@ -820,28 +819,27 @@ func testSettleRoundCapSuspendsAndResumes(t *testing.T) {
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "second task after the resume"})
 	done6 := pollDone(t, rig, convID)
 	sc = waitSettle(t, rig.store, convID, "fresh round 1 after resume", func(sc settleScan) bool {
-		return len(sc.markers) == 4
+		return len(sc.markers) == 3
 	})
 	d5 := done6.Diff.ID
-	// markers are 0-indexed: markers[3] is the 4th marker (fresh round 1)
-	if sc.markers[3].m.Round != 1 || sc.markers[3].m.OriginDiffID != d5 {
-		t.Errorf("post-resume marker = %+v, want round 1 with origin %d (a FRESH chain)", sc.markers[3].m, d5)
+	// markers are 0-indexed: markers[2] is the 3rd marker (fresh round 1)
+	if sc.markers[2].m.Round != 1 || sc.markers[2].m.OriginDiffID != d5 {
+		t.Errorf("post-resume marker = %+v, want round 1 with origin %d (a FRESH chain)", sc.markers[2].m, d5)
 	}
 
-	// Let the fresh chain also exhaust rounds 1+2+3 → second suspension;
+	// Let the fresh chain also exhaust rounds 1+2 → second suspension;
 	// the test ends with zero in-flight runs and a fully settled ledger.
 	pollDone(t, rig, convID)
-	waitSettle(t, rig.store, convID, "fresh round 2", func(sc settleScan) bool { return len(sc.markers) == 5 })
+	waitSettle(t, rig.store, convID, "fresh round 2", func(sc settleScan) bool { return len(sc.markers) == 4 })
 	pollDone(t, rig, convID)
-	waitSettle(t, rig.store, convID, "fresh round 3", func(sc settleScan) bool { return len(sc.markers) == 6 })
 	sc = waitSettle(t, rig.store, convID, "second suspension", func(sc settleScan) bool {
 		return len(sc.memory) == 3 && sc.memory[2]["cause"] == "ladder_suspended"
 	})
 	if got := sc.memoryCauses(); !reflect.DeepEqual(got, []string{"ladder_suspended", "ladder_resumed", "ladder_suspended"}) {
 		t.Errorf("full demotion ledger = %v", got)
 	}
-	if len(sc.rounds) != 6 || sc.rounds[3]["round"] != float64(1) || sc.rounds[3]["origin_diff_id"] != float64(d5) {
-		t.Errorf("fresh chain rounds = %v, want a fresh round-1 chain rooted at %d", sc.rounds[3:], d5)
+	if len(sc.rounds) != 4 || sc.rounds[2]["round"] != float64(1) || sc.rounds[2]["origin_diff_id"] != float64(d5) {
+		t.Errorf("fresh chain rounds = %v, want a fresh round-1 chain rooted at %d", sc.rounds[2:], d5)
 	}
 }
 
@@ -891,32 +889,31 @@ func TestSettleMajorityValveExcludesGateSource(t *testing.T) {
 	done1 := pollDone(t, rig, convID)
 	d0 := done1.Diff.ID
 
-	// Three revise rounds spawn and complete; the FOURTH needs_fixes-zone
+	// Two revise rounds spawn and complete; the THIRD needs_fixes-zone
 	// evaluation (rounds == cap) is where the valve would have fired.
 	waitSettle(t, rig.store, convID, "round 1 spawn", func(sc settleScan) bool { return len(sc.markers) == 1 })
 	pollDone(t, rig, convID)
 	waitSettle(t, rig.store, convID, "round 2 spawn", func(sc settleScan) bool { return len(sc.markers) == 2 })
 	pollDone(t, rig, convID)
-	waitSettle(t, rig.store, convID, "round 3 spawn", func(sc settleScan) bool { return len(sc.markers) == 3 })
-	pollDone(t, rig, convID)
 
 	// The gate exclusion: the round-cap evaluation suspends the ladder
 	// instead of majority-landing — BOTH the ledger transition and the
-	// blocked row name the gate-source valve exclusion.
+	// blocked row name the gate-source valve exclusion (compound wait:
+	// the blocked echo follows the ledger row in the same goroutine).
 	sc := waitSettle(t, rig.store, convID, "gate-source ladder suspension", func(sc settleScan) bool {
-		return len(sc.memory) == 1 && sc.memory[0]["cause"] == "ladder_suspended"
+		return len(sc.memory) == 1 && sc.memory[0]["cause"] == "ladder_suspended" && len(sc.blocked) == 1
 	})
 	if detail := fmt.Sprint(sc.memory[0]["detail"]); !strings.Contains(detail, "gate source diff: the majority-accept valve does not apply") {
 		t.Errorf("suspension ledger detail = %q, want the gate-source valve exclusion named", detail)
 	}
-	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "ladder_suspended" {
+	if got := sc.blockedReasons(); got[0] != "ladder_suspended" {
 		t.Fatalf("blocked reasons = %v, want [ladder_suspended]", got)
 	}
 	if detail := fmt.Sprint(sc.blocked[0]["detail"]); !strings.Contains(detail, "gate source diff: majority-accept valve inapplicable") {
 		t.Errorf("blocked detail = %q, want the gate-source valve exclusion named", detail)
 	}
-	if len(sc.rounds) != 3 || sc.rounds[0]["round"] != float64(1) || sc.rounds[1]["round"] != float64(2) || sc.rounds[2]["round"] != float64(3) {
-		t.Fatalf("rounds = %v, want exactly rounds 1, 2 and 3", sc.rounds)
+	if len(sc.rounds) != 2 || sc.rounds[0]["round"] != float64(1) || sc.rounds[1]["round"] != float64(2) {
+		t.Fatalf("rounds = %v, want exactly rounds 1 and 2", sc.rounds)
 	}
 	for _, r := range sc.rounds {
 		if r["origin_diff_id"] != float64(d0) {
@@ -939,8 +936,8 @@ func TestSettleMajorityValveExcludesGateSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(diffs) != 4 {
-		t.Errorf("diff count = %d, want 4 (origin + 3 repair products)", len(diffs))
+	if len(diffs) != 3 {
+		t.Errorf("diff count = %d, want 3 (origin + 2 repair products)", len(diffs))
 	}
 	for _, d := range diffs {
 		if d.Status != store.DiffPending {
@@ -950,8 +947,81 @@ func TestSettleMajorityValveExcludesGateSource(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(rig.root, "internal", "ipc", "settle.go")); !os.IsNotExist(err) {
 		t.Error("internal/ipc/settle.go exists in main — the gate diff applied despite the exclusion")
 	}
-	settleQuiet(t, rig.store, convID, 2*time.Second, "a fourth revise spawn", func(sc settleScan) bool {
-		return len(sc.markers) > 3 || len(sc.rounds) > 3
+	settleQuiet(t, rig.store, convID, 2*time.Second, "a third revise spawn", func(sc settleScan) bool {
+		return len(sc.markers) > 2 || len(sc.rounds) > 2
+	})
+}
+
+// TestSettleMajorityValveLandsAtCap (2026-08-23 doctrine: evaluations 1–2
+// fail closed on unanimity, the third converges by majority): a NON-gate
+// diff whose every evaluation returns 2/3 accept + 1 needs_fixes spawns
+// exactly 2 repair rounds, then takes the majority-accept valve at the
+// third (terminal) evaluation — moa_review{consensus_verdict:
+// "majority_accept"} journals BEFORE the land (evidence before action),
+// the round-2 product lands with actor:auto_panel, the chain's older
+// pending diffs supersede, and the ladder never suspends.
+func TestSettleMajorityValveLandsAtCap(t *testing.T) {
+	rig := settleRig(t, func(call int64, model string) (int, string) {
+		// 2/3 accept + 1 dissent every round — exactly the valve shape,
+		// with per-call unique comments so the no-progress stop never
+		// fires for the WRONG reason.
+		switch model {
+		case "rm1":
+			return 200, fmt.Sprintf("ACCEPT\nplausible %d", call)
+		case "rm2":
+			return 200, fmt.Sprintf("ACCEPT\nsound %d", call)
+		default:
+			return 200, fmt.Sprintf("NEEDS_FIXES\nfix issue %d", call)
+		}
+	})
+
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: rig.root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "first attempt at the task"})
+	done1 := pollDone(t, rig, convID)
+	d0 := done1.Diff.ID
+
+	// Evaluations 1–2: 2/3 accept is NOT unanimous → fail closed into the
+	// ladder; exactly rounds 1 and 2 spawn.
+	waitSettle(t, rig.store, convID, "round 1 spawn", func(sc settleScan) bool { return len(sc.markers) == 1 })
+	pollDone(t, rig, convID)
+	waitSettle(t, rig.store, convID, "round 2 spawn", func(sc settleScan) bool { return len(sc.markers) == 2 })
+	done3 := pollDone(t, rig, convID)
+	d2 := done3.Diff.ID
+
+	// The THIRD evaluation hits the cap: 2/3 accept + zero rejects/infra/
+	// truncated satisfies the valve — majority_accept journals, then the
+	// round-2 product lands (compound wait: the accept row follows the
+	// moa row in the same goroutine).
+	sc := waitSettle(t, rig.store, convID, "majority-accept valve land", func(sc settleScan) bool {
+		return len(sc.moaRows) == 1 && len(sc.accepts) == 1
+	})
+	if got := sc.moaRows[0]["consensus_verdict"]; got != "majority_accept" {
+		t.Errorf("consensus_verdict = %v, want majority_accept (the valve's audit marker)", got)
+	}
+	if got := sc.moaRows[0]["actor"]; got != autoActor {
+		t.Errorf("moa actor = %v, want %s", got, autoActor)
+	}
+	if got := sc.accepts[0]["diff_id"]; got != float64(d2) {
+		t.Errorf("landed diff = %v, want the round-2 product %d", got, d2)
+	}
+	if len(sc.memory) != 0 {
+		t.Errorf("memory ledger = %v, want empty — a valve land never suspends the ladder", sc.memoryCauses())
+	}
+	if len(sc.rounds) != 2 {
+		t.Fatalf("rounds = %v, want exactly rounds 1 and 2 (the third evaluation is terminal)", sc.rounds)
+	}
+
+	// The land cleans the chain: the round-2 product is accepted and the
+	// older pending diffs (origin, round-1 product) supersede.
+	waitSettle(t, rig.store, convID, "chain superseded after the valve land", func(_ settleScan) bool {
+		d0Rec, err0 := rig.store.GetDiff(context.Background(), d0)
+		d2Rec, err2 := rig.store.GetDiff(context.Background(), d2)
+		return err0 == nil && err2 == nil &&
+			d0Rec.Status == store.DiffSuperseded && d2Rec.Status == store.DiffAccepted
+	})
+	settleQuiet(t, rig.store, convID, 2*time.Second, "a third revise spawn", func(sc settleScan) bool {
+		return len(sc.markers) > 2 || len(sc.rounds) > 2
 	})
 }
 
@@ -1321,14 +1391,15 @@ func TestSettleAutoAcceptResumes(t *testing.T) {
 	waitSettle(t, rig.store, convID, "round 1 spawn", func(sc settleScan) bool { return len(sc.markers) == 1 })
 	pollDone(t, rig, convID)
 	waitSettle(t, rig.store, convID, "round 2 spawn", func(sc settleScan) bool { return len(sc.markers) == 2 })
-	pollDone(t, rig, convID)
-	waitSettle(t, rig.store, convID, "round 3 spawn", func(sc settleScan) bool { return len(sc.markers) == 3 })
-	done4 := pollDone(t, rig, convID)
-	d3 := done4.Diff.ID
+	done3 := pollDone(t, rig, convID)
+	d3 := done3.Diff.ID
+	// The round-2 product's evaluation is the terminal (third) one: 1/3
+	// accept fails the valve → suspension (compound wait — the blocked
+	// echo follows the ledger row in the same goroutine).
 	waitSettle(t, rig.store, convID, "ladder suspension", func(sc settleScan) bool {
 		for _, m := range sc.memory {
 			if m["cause"] == "ladder_suspended" {
-				return true
+				return len(sc.blocked) == 1
 			}
 		}
 		return false

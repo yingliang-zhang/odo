@@ -35,14 +35,18 @@ package ipc
 // re-enters the full pipeline: every mechanical gate, fresh verify, full
 // 3-model panel. Boundaries (journal-derived, no in-memory state):
 //
-//	round cap 3     at most 3 revise spawns between landings (the
-//	                original run is round 0); a 4th needs_fixes-zone
-//	                evaluation SUSPENDS the ladder for the conversation.
+//	round cap 2     at most 2 revise spawns between landings (the
+//	                original run is round 0); the THIRD needs_fixes-zone
+//	                evaluation is terminal (2026-08-23 user doctrine: the
+//	                panel reviews three times total — evaluations 1–2
+//	                fail closed on unanimity, the third converges by
+//	                majority): the majority-accept valve below fires, or
+//	                the ladder SUSPENDS for the conversation.
 //	no-progress     the round's patch sha16 equals the previous round's,
 //	                or the panel's comment-set sha16 repeats → blocked
 //	                {revise_no_progress} → human.
 //	infra           above — never a verdict, never a ladder tick.
-//	suspension      3 consecutive revise rounds ending needs_fixes (or
+//	suspension      2 consecutive revise rounds ending needs_fixes (or
 //	                no_progress) without an intervening landing: journal
 //	                memory_update{layer:auto_land, cause:ladder_suspended}
 //	                at the transition; every later needs_fixes evaluation
@@ -110,11 +114,14 @@ import (
 
 const (
 	// settleMaxReviseRounds caps revise spawns between landings. The
-	// original run is round 0; rounds 1–3 may spawn; a fourth
-	// needs_fixes-zone evaluation suspends the ladder. Raised from 2
-	// to 3 (2026-08-15) at user request — some diffs need an extra
-	// repair pass for the panel to converge.
-	settleMaxReviseRounds = 3
+	// original run is round 0; rounds 1–2 may spawn; the third
+	// needs_fixes-zone evaluation is terminal — the majority-accept
+	// valve fires or the ladder suspends. History: raised 2→3
+	// (2026-08-15, an extra repair pass to converge), back to 2
+	// (2026-08-23, user doctrine) — with the valve as the convergence
+	// terminus of a three-evaluation review, a fourth evaluation is
+	// spend without new evidence.
+	settleMaxReviseRounds = 2
 
 	// Repair-prompt content caps (locked numbers — do not tune): the
 	// previous diff rides the prompt verbatim only under 64KB, the
@@ -489,12 +496,13 @@ func (s *Server) settleDraft(ctx context.Context, d store.Diff, diffText string,
 				"gate source diff: majority-accept valve inapplicable; unanimous verdict or human Accept required", reviews, cv)
 			return
 		}
-		// 3 consecutive revise rounds ended without a landing.
+		// 2 consecutive revise rounds ended without a landing.
 		// Majority-accept valve (2026-08-16, tri-model 3/3; gate-source
-		// diffs excluded above since 2026-08-22): if ≥2/3 models accept
-		// AND zero rejects AND zero infra/truncated legs, auto-land with
-		// a majority_accept marker instead of suspending.
-		// The dissent was given 3 repair rounds to converge; if 2/3
+		// diffs excluded above since 2026-08-22; moved from the 4th to
+		// the 3rd, terminal evaluation 2026-08-23): if ≥2/3 models
+		// accept AND zero rejects AND zero infra/truncated legs,
+		// auto-land with a majority_accept marker instead of suspending.
+		// The dissent was given 2 repair rounds to converge; if 2/3
 		// still accept after that, the remaining needs_fixes is most
 		// likely a false positive or a style nit, not a latent defect.
 		// Panel evidence only: a base_stale round has no reviews to
@@ -544,7 +552,7 @@ func (s *Server) settleDraft(ctx context.Context, d store.Diff, diffText string,
 			}
 			return
 		}
-		// 3 consecutive revise rounds ended without a landing — demote.
+		// 2 consecutive revise rounds ended without a landing — demote.
 		// The transition journals BOTH the ledger marker (the durable
 		// suspension every later evaluation consults) and the blocked row
 		// for this diff; later evaluations hit the suspended branch above

@@ -198,7 +198,7 @@ test("ladder suspension overrides every tracked per-diff state", async ({ page }
   // Suspension markers are conversation-scoped (settle.go journalLadder):
   // newest marker wins uniformly — including over a blocked row.
   await journal(page, [
-    { type: "memory_update", payload: { layer: "auto_land", cause: "ladder_suspended", detail: "3 consecutive revise rounds ended without landing" } },
+    { type: "memory_update", payload: { layer: "auto_land", cause: "ladder_suspended", detail: "2 consecutive revise rounds ended without landing" } },
   ]);
   await expect(chip(page)).toContainText("auto-land suspended", PIPE_POLL);
   await expect(chip(page)).toHaveClass(/is-suspended/);

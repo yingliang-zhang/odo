@@ -319,12 +319,12 @@ export const events: OdoEvent[] = [
   // Daemon-true chain shape (settle.go): EACH round row names the diff it
   // just evaluated; round 1 carries diff_id == origin_diff_id (chain
   // start), later rounds the product id with the SAME origin. A fresh id
-  // family (8-11) keeps the chain disjoint from the earlier diff 1-4
-  // story. The 4th evaluation (diff 11) hits needs_fixes at the round cap:
-  // the ladder journals its suspension marker FIRST (memory_update —
-  // conversation-scoped, not a Ledger review row) and then the
-  // blocked{ladder_suspended} echo on the evaluated diff (blocked rows
-  // carry only that diff — no origin).
+  // family (8-10) keeps the chain disjoint from the earlier diff 1-4
+  // story. Cap 2 (2026-08-23): the 3rd evaluation (diff 10, the round-2
+  // product) is terminal — the ladder journals its suspension marker
+  // FIRST (memory_update — conversation-scoped, not a Ledger review row)
+  // and then the blocked{ladder_suspended} echo on the evaluated diff
+  // (blocked rows carry only that diff — no origin).
   ev("review_action", {
     action: "auto_revise_round",
     diff_id: 8,
@@ -347,25 +347,14 @@ export const events: OdoEvent[] = [
     risk_class: ["none"],
     risk_classifier: "mechanical",
   }, 3),
-  ev("review_action", {
-    action: "auto_revise_round",
-    diff_id: 10,
-    origin_diff_id: 8,
-    actor: "auto_panel",
-    round: 3,
-    patch_sha16: "0123abcdef012345",
-    comments_sha16: "cdef012345679abc",
-    risk_class: ["none"],
-    risk_classifier: "mechanical",
-  }, 3),
   ev("memory_update", {
     layer: "auto_land",
     cause: "ladder_suspended",
-    detail: "3 consecutive revise rounds ended without landing; ladder suspended until a human accept (diff 11 pending)",
+    detail: "2 consecutive revise rounds ended without landing; ladder suspended until a landing (diff 10 pending)",
   }, 3),
   ev("review_action", {
     action: "auto_land_blocked",
-    diff_id: 11,
+    diff_id: 10,
     actor: "auto_panel",
     reason: "ladder_suspended",
     risk_class: ["none"],
