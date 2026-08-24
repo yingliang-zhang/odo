@@ -786,6 +786,12 @@ func TestAutoLandStartedRowsPinStageBoundaries(t *testing.T) {
 // ZERO started rows — the chip's honest transition is queued → blocked,
 // never queued → running → blocked for a pipeline that spent nothing.
 func TestAutoLandStartedRowsAbsentBeforeSpend(t *testing.T) {
+	// M20 arming gate runs FIRST (file convention, L352): without an
+	// isolated+armed HOME the case depends on ambient prefs — green on a
+	// configured dev box, zero blocked rows under verify's scratch HOME.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "review: rm1@test, rm2@test\n")
 	f := newAutonomyFixture(t)
 	root, sha := autolandRepo(t)
 	s := &Server{store: f.st, projectRoot: root}
