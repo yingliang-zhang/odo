@@ -264,7 +264,11 @@ type Server struct {
 	// under s.mu via guardLiveWorkstreamLocked, so a start racing the
 	// commit either already registered (the delete refuses busy) or hits
 	// the flag (the start refuses). Deleted-after-commit starts refuse on
-	// the status half of that guard.
+	// the status half of that guard. Conversation-less lanes rise the
+	// flag too (unconditionally — no idle proof exists to fold it into):
+	// handleBootstrap's create runs its own guard+INSERT under one s.mu
+	// hold, and a create that already beat the flag is caught by the
+	// delete's commit-time re-read instead of stranding.
 	deletingWs map[int64]struct{}
 
 	// Test seams (zero in production): autoIdle overrides the prefs-resolved
@@ -341,6 +345,19 @@ type Server struct {
 	// receipt. Both let the heal paths be drilled end to end.
 	failApplyAfterMarker error
 	failPinAfterReceipt  error
+	// bootstrapPreCreateGateForTest parks handleBootstrap after its
+	// resolve reads and before the guarded create, so a drill can run a
+	// REAL delete through the guard-passed-but-create-pending window
+	// (send = arrival, receive = release). Nil in production — the
+	// failApplyAfterMarker seam precedent.
+	bootstrapPreCreateGateForTest chan struct{}
+	// deleteIdleProofGateForTest parks handleDeleteWorkstream with its
+	// idle-proof read done (conversation state captured, possibly stale)
+	// and BEFORE s.mu is taken, so a drill can commit a bootstrap's
+	// conversation inside that exact sliver — the bootstrap-wins half
+	// of the ordering argument the commit-time re-read closes. Same
+	// handshake convention, nil in production.
+	deleteIdleProofGateForTest chan struct{}
 }
 
 // NewServer builds a Server bound to one project root. ad becomes the default
@@ -734,9 +751,37 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 	c, err := s.store.GetActiveConversation(ctx, w.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Base SHA anchors stale-diff detection later; a repo with zero
-		// commits simply stores NULL.
+		// commits simply stores NULL. The spawn runs BEFORE the critical
+		// section: once s.mu is taken, nothing slow may sit between the
+		// guard and the INSERT.
 		baseSHA, _ := git.CurrentSHA(s.projectRoot)
-		c, err = s.store.CreateConversation(ctx, w.ID, baseSHA)
+		if ch := s.bootstrapPreCreateGateForTest; ch != nil {
+			// Test seam (nil in production): park inside the exact
+			// guard-passed-but-create-pending window so a drill can
+			// slide a real delete through it.
+			ch <- struct{}{}
+			<-ch
+		}
+		// Guarded create (2026-08-25 panel finding): every read above is
+		// stale the instant it returns — a delete can raise its flag,
+		// commit, and clear while this goroutine spawns git. So the lane
+		// is re-read and re-proven against deletingWs under the SAME
+		// s.mu hold as the INSERT: either the delete won first (its
+		// flag/status refuses below) or this conversation commits first
+		// and the delete's commit-time re-read loses to it. The hold
+		// carries one store read plus the INSERT — sub-ms SQLite, the
+		// guardLiveConversationLocked precedent.
+		s.mu.Lock()
+		live, lerr := s.store.GetWorkstream(ctx, w.ID)
+		if lerr == nil {
+			lerr = s.guardLiveWorkstreamLocked(live)
+		}
+		if lerr != nil {
+			s.mu.Unlock()
+			return Response{}, fmt.Errorf("bootstrap: %w", lerr)
+		}
+		c, err = s.store.CreateConversation(ctx, live.ID, baseSHA)
+		s.mu.Unlock()
 	}
 	if err != nil {
 		return Response{}, err
@@ -920,9 +965,19 @@ func (s *Server) handleDeleteWorkstream(ctx context.Context, req Request) (Respo
 	// has a live run/distill/panel/loop strands the NEXT produced diff on
 	// a soft-deleted workstream the Review inbox (active-only listing)
 	// never shows. Conversation liveness is daemon memory, so it is
-	// checked here, before the SQL layer gets a say.
-	if c, cerr := s.store.GetActiveConversation(ctx, req.WorkstreamID); cerr == nil {
-		s.mu.Lock()
+	// checked here, before the SQL layer gets a say. A store ERROR from
+	// GetActiveConversation behaves as "no active conversation" — the
+	// lane just gets no busy proof.
+	c, cerr := s.store.GetActiveConversation(ctx, req.WorkstreamID)
+	if ch := s.deleteIdleProofGateForTest; ch != nil {
+		// Test seam (nil in production): park with the idle proof in
+		// hand so a drill can slide a bootstrap commit between this
+		// read and the flag raise below.
+		ch <- struct{}{}
+		<-ch
+	}
+	s.mu.Lock()
+	if cerr == nil {
 		busy := ""
 		if runID, ok := s.byConv[c.ID]; ok {
 			if meta := s.runs[runID]; meta != nil && !meta.finished {
@@ -951,28 +1006,51 @@ func (s *Server) handleDeleteWorkstream(ctx context.Context, req Request) (Respo
 			s.mu.Unlock()
 			return Response{}, fmt.Errorf("delete_workstream: workstream %d has %s in flight — let it finish or cancel it first", req.WorkstreamID, busy)
 		}
-		// Atomic bar on NEW starts (2026-08-25 review follow-up): the old
-		// code dropped the lock here and ran the SQL delete unlocked — a
-		// start sliding into that gap keyed live work onto a lane the SQL
-		// then soft-deleted, and its diff stranded off the active-only
-		// Review inbox. The flag rises under the SAME hold that proved
-		// the lane idle, so start sites (guardLiveWorkstreamLocked) see
-		// either their own registration (busy wins) or this flag.
-		if _, ok := s.deletingWs[req.WorkstreamID]; ok {
-			s.mu.Unlock()
-			return Response{}, fmt.Errorf("delete_workstream: workstream %d delete already in flight", req.WorkstreamID)
-		}
-		s.deletingWs[req.WorkstreamID] = struct{}{}
+	}
+	// Atomic bar on NEW starts (2026-08-25 review follow-up): the old code
+	// dropped the lock here and ran the SQL delete unlocked — a start
+	// sliding into that gap keyed live work onto a lane the SQL then
+	// soft-deleted, and its diff stranded off the active-only Review
+	// inbox. The flag rises under the SAME hold that proved the lane idle
+	// (or, for a conversation-less lane, unconditionally — there is no
+	// idle proof to fold it into), so start sites
+	// (guardLiveWorkstreamLocked, handleBootstrap's guarded create) see
+	// either their own registration (busy wins) or this flag.
+	if _, ok := s.deletingWs[req.WorkstreamID]; ok {
 		s.mu.Unlock()
-		defer func() {
-			s.mu.Lock()
-			delete(s.deletingWs, req.WorkstreamID)
-			s.mu.Unlock()
-		}()
+		return Response{}, fmt.Errorf("delete_workstream: workstream %d delete already in flight", req.WorkstreamID)
+	}
+	s.deletingWs[req.WorkstreamID] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.deletingWs, req.WorkstreamID)
+		s.mu.Unlock()
+	}()
+	if cerr == nil {
 		// Journal-derived loop liveness: a daemon restart drops the
 		// in-memory liveness bit, but the journal's fold still knows.
 		if st, _, lerr := s.loopActiveState(ctx, c.ID); lerr == nil && st != nil {
 			return Response{}, fmt.Errorf("delete_workstream: workstream %d has an active loop — stop it first", req.WorkstreamID)
+		}
+	} else {
+		// Conversation-less lane, commit-time re-read (structurally
+		// REQUIRED, not a behavior flip): the idle proof above was read
+		// OUTSIDE s.mu, so a bootstrap can commit its conversation
+		// between that read and the flag raise — a create the flag can
+		// never refuse because it already landed. Without this re-read
+		// the delete would soft-delete a lane under a live, just-born
+		// conversation: the exact strand the bootstrap-side critical
+		// section exists to prevent. The re-read hands the win to the
+		// bootstrap and loses the DELETE instead. Parity holds
+		// everywhere outside that sliver: the refusal fires only when a
+		// conversation materialized mid-delete, a clean retry deletes
+		// the lane exactly as before (drilled by
+		// TestDeleteRetriesWhenBootstrapCommitsFirst), and a store
+		// ERROR here degrades to "no conversation" — the same parity
+		// the outer read keeps.
+		if _, rerr := s.store.GetActiveConversation(ctx, req.WorkstreamID); rerr == nil {
+			return Response{}, fmt.Errorf("delete_workstream: workstream %d gained an active conversation mid-delete — retry", req.WorkstreamID)
 		}
 	}
 	if err := s.store.DeleteWorkstream(ctx, req.WorkstreamID); err != nil {

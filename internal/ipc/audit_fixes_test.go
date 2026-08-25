@@ -4,6 +4,7 @@ package ipc
 // test names the audit finding it covers; the fix sites cite the same date.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yingliang-zhang/odo/internal/store"
 )
 
 // raceResp ferries one concurrent RPC outcome back to the test goroutine.
@@ -746,5 +749,161 @@ func TestDeleteWorkstreamBarsRacingStarts(t *testing.T) {
 	}
 	if resp := rig.callExpectErr(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: wsID}); !strings.Contains(resp.Error, "deleted") {
 		t.Errorf("bootstrap of deleted lane: error = %q, want the deleted refusal", resp.Error)
+	}
+}
+
+// TestConversationlessDeleteBootstrapRace drills the REAL
+// guard-passed-but-create-pending window the delete atomicity fix closes
+// (2026-08-25 panel direction): hand-staging deletingWs can never reach
+// it — a bootstrap whose create carries no critical section would PASS a
+// staged-flag test — so the bootstrapPreCreateGateForTest seam parks a
+// REAL bootstrap between its resolve reads and its guarded create, a
+// REAL delete runs start to finish inside that window, and the released
+// bootstrap must refuse on the deleted status with SQL showing NO active
+// conversation stranded on the lane.
+func TestConversationlessDeleteBootstrapRace(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	bootstrapConv(t, rig, root) // registers the project resolveProject needs
+
+	created := rig.call(t, Request{Cmd: CmdCreateWorkstream, ProjectRoot: root, Name: "doomed"})
+	wsID := created.Workstream.ID
+
+	gate := make(chan struct{})
+	rig.server.bootstrapPreCreateGateForTest = gate
+	done := callRace(rig, Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: wsID})
+	// The bootstrap must BE parked in the window before the delete
+	// starts, or the drill tests nothing.
+	select {
+	case <-gate:
+	case <-time.After(10 * time.Second):
+		t.Fatal("bootstrap never reached the pre-create gate")
+	}
+	defer func() {
+		// Free a still-parked bootstrap on any failure exit so teardown
+		// never waits on it.
+		select {
+		case gate <- struct{}{}:
+		default:
+		}
+	}()
+
+	// The ENTIRE delete (flag raise → SQL commit → flag clear) inside
+	// the window the parked bootstrap is holding open.
+	if del := rig.call(t, Request{Cmd: CmdDeleteWorkstream, ProjectRoot: root, WorkstreamID: wsID}); !del.OK {
+		t.Fatalf("delete during parked bootstrap: %+v", del)
+	}
+
+	gate <- struct{}{} // release the bootstrap into its critical section
+	select {
+	case out := <-done:
+		if out.err != nil {
+			t.Fatalf("bootstrap transport: %v", out.err)
+		}
+		if out.resp.OK {
+			t.Errorf("bootstrap succeeded on a deleted lane: %+v", out.resp)
+		} else if !strings.Contains(out.resp.Error, "deleted") {
+			t.Errorf("bootstrap error = %q, want the being-deleted/deleted refusal", out.resp.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("bootstrap never returned after the gate released")
+	}
+
+	// SQL truth: no active conversation may exist under the deleted lane.
+	if _, err := rig.store.GetActiveConversation(context.Background(), wsID); err == nil {
+		t.Error("active conversation stranded on the deleted workstream")
+	}
+	// And every later bootstrap refuses at the door (deleted status).
+	if resp := rig.callExpectErr(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: wsID}); !strings.Contains(resp.Error, "deleted") {
+		t.Errorf("post-delete bootstrap: error = %q, want the deleted refusal", resp.Error)
+	}
+}
+// TestDeleteRetriesWhenBootstrapCommitsFirst drills the OTHER half of
+// the ordering argument (2026-08-25 panel follow-up): the bootstrap
+// wins the race — its conversation commits between the delete's
+// idle-proof read (taken OUTSIDE s.mu, hence stale) and the delete's
+// flag raise. The flag can never refuse a create that already
+// committed, so the delete's commit-time re-read must make the DELETE
+// lose: refuse mid-delete, leave the lane active, keep the
+// bootstrap's conversation, and behave byte-identical to baseline on
+// a clean retry. The deleteIdleProofGateForTest seam parks a REAL
+// delete inside that exact sliver; omitting the re-read fails this
+// test on its first assertion.
+func TestDeleteRetriesWhenBootstrapCommitsFirst(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	bootstrapConv(t, rig, root) // registers the project resolveProject needs
+
+	created := rig.call(t, Request{Cmd: CmdCreateWorkstream, ProjectRoot: root, Name: "raced"})
+	wsID := created.Workstream.ID
+
+	gate := make(chan struct{})
+	rig.server.deleteIdleProofGateForTest = gate
+	done := callRace(rig, Request{Cmd: CmdDeleteWorkstream, ProjectRoot: root, WorkstreamID: wsID})
+	// The delete's idle-proof read must be COMPLETE (stale: no
+	// conversation) before the bootstrap commits, or the drill tests
+	// nothing.
+	select {
+	case <-gate:
+	case <-time.After(10 * time.Second):
+		t.Fatal("delete never reached the idle-proof gate")
+	}
+	defer func() {
+		// Free a still-parked delete on any failure exit so teardown
+		// never waits on it.
+		select {
+		case gate <- struct{}{}:
+		default:
+		}
+	}()
+
+	// The bootstrap wins: its guarded create commits while the delete
+	// is parked between its stale read and its flag raise.
+	if boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: wsID}); !boot.OK {
+		t.Fatalf("bootstrap: %+v", boot)
+	}
+
+	gate <- struct{}{} // release the delete into its flag raise + re-read
+	select {
+	case out := <-done:
+		if out.err != nil {
+			t.Fatalf("delete transport: %v", out.err)
+		}
+		if out.resp.OK {
+			t.Errorf("delete succeeded over a conversation committed mid-delete: %+v", out.resp)
+		} else if !strings.Contains(out.resp.Error, "mid-delete") {
+			t.Errorf("delete error = %q, want the mid-delete retry refusal", out.resp.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("delete never returned after the gate released")
+	}
+	// One-shot seam: disarm before the parity retry below, or its
+	// delete re-parks at the gate nobody is left to release.
+	rig.server.deleteIdleProofGateForTest = nil
+
+	// The delete lost, so the lane must be fully live (SQL truth):
+	// active status, and the bootstrap's conversation present on it.
+	ws, err := rig.store.GetWorkstream(context.Background(), wsID)
+	if err != nil {
+		t.Fatalf("GetWorkstream: %v", err)
+	}
+	if ws.Status != store.WorkstreamActive {
+		t.Errorf("workstream status = %q, want active — the losing delete still committed", ws.Status)
+	}
+	if _, err := rig.store.GetActiveConversation(context.Background(), wsID); err != nil {
+		t.Errorf("bootstrap's conversation missing after winning the race: %v", err)
+	}
+
+	// Parity proof: the mid-delete refusal is race-scoped, not a
+	// behavior flip — a clean retry deletes the idle
+	// conversation-bearing lane exactly as before the fix.
+	if retry := rig.call(t, Request{Cmd: CmdDeleteWorkstream, ProjectRoot: root, WorkstreamID: wsID}); !retry.OK {
+		t.Errorf("clean retry delete: %+v", retry)
 	}
 }
