@@ -192,7 +192,7 @@ func TestRunVerify(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if out != "hello" {
+		if string(out) != "hello" {
 			t.Errorf("out = %q, want hello", out)
 		}
 	})
@@ -201,20 +201,28 @@ func TestRunVerify(t *testing.T) {
 		if err == nil {
 			t.Fatal("exit 3: want error")
 		}
-		if !strings.Contains(out, "doomed") {
+		if !strings.Contains(string(out), "doomed") {
 			t.Errorf("out = %q, want it to carry the failing output", out)
 		}
 	})
-	t.Run("output truncated to the tail", func(t *testing.T) {
+	t.Run("full output returned — tail-capping is the gate's job (#49)", func(t *testing.T) {
 		out, err := runVerify(ctx, t.TempDir(), "i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(out) > autoLandVerifyTailBytes {
-			t.Errorf("out len = %d, want <= %d", len(out), autoLandVerifyTailBytes)
+		if len(out) <= autoLandVerifyTailBytes {
+			t.Errorf("out len = %d, want the UNCAPPED record (> %d) — only the journal tail is cut", len(out), autoLandVerifyTailBytes)
 		}
-		if !strings.HasSuffix(out, "line2999\n") {
+		if !strings.HasSuffix(string(out), "line2999\n") {
 			t.Errorf("out tail = %q, want the END of the output (diagnostics sit at the end)", out[len(out)-40:])
+		}
+		if !strings.Contains(string(out), "line0\n") {
+			t.Error("full record lost its head — the .odo/verify log needs every byte")
+		}
+		// The gate-side tail still cuts at the old budget, rune-safe.
+		if tail := keepTail(string(out), autoLandVerifyTailBytes); len(tail) > autoLandVerifyTailBytes ||
+			!strings.HasSuffix(tail, "line2999\n") {
+			t.Errorf("gate tail = %dB/%q, want ≤ %dB ending at line2999", len(tail), tail[len(tail)-20:], autoLandVerifyTailBytes)
 		}
 	})
 }
@@ -239,7 +247,7 @@ func TestRunVerifyGateProvisionsGuiDeps(t *testing.T) {
 	}
 	t.Run("gui diff symlinks the project install", func(t *testing.T) {
 		root, wt := setup(t)
-		if gate := runVerifyGate(ctx, root, wt, []string{"gui/src/App.tsx"}); !gate.ok {
+		if gate := runVerifyGate(ctx, root, wt, []string{"gui/src/App.tsx"}, "test-gui"); !gate.ok {
 			t.Fatalf("gate = %+v", gate)
 		}
 		fi, err := os.Lstat(filepath.Join(wt, "gui", "node_modules"))
@@ -249,7 +257,7 @@ func TestRunVerifyGateProvisionsGuiDeps(t *testing.T) {
 	})
 	t.Run("go-only diff provisions nothing", func(t *testing.T) {
 		root, wt := setup(t)
-		if gate := runVerifyGate(ctx, root, wt, []string{"internal/ipc/server.go"}); !gate.ok {
+		if gate := runVerifyGate(ctx, root, wt, []string{"internal/ipc/server.go"}, "test-go"); !gate.ok {
 			t.Fatalf("gate = %+v", gate)
 		}
 		if _, err := os.Lstat(filepath.Join(wt, "gui", "node_modules")); !os.IsNotExist(err) {
@@ -261,7 +269,7 @@ func TestRunVerifyGateProvisionsGuiDeps(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(wt, "gui", "node_modules", "sentinel"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if gate := runVerifyGate(ctx, root, wt, []string{"gui/src/App.tsx"}); !gate.ok {
+		if gate := runVerifyGate(ctx, root, wt, []string{"gui/src/App.tsx"}, "test-preexisting"); !gate.ok {
 			t.Fatalf("gate = %+v", gate)
 		}
 		fi, err := os.Lstat(filepath.Join(wt, "gui", "node_modules"))
@@ -269,6 +277,98 @@ func TestRunVerifyGateProvisionsGuiDeps(t *testing.T) {
 			t.Fatalf("pre-existing real dir must not be replaced by a symlink, fi=%v err=%v", fi, err)
 		}
 	})
+}
+// TestRunVerifyGatePersistsLog pins the #47/#48 diagnosis failures: the
+// journaled 4KB tail swallowed the very --- FAIL line a human needed
+// (twice), forcing blind same-bytes reproductions. The gate now persists
+// the FULL output to .odo/verify/ and the journaled detail points at it —
+// the pointer appended AFTER capDetail so truncation can never eat it.
+func TestRunVerifyGatePersistsLog(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T, script string) (root, wt string) {
+		t.Helper()
+		root, wt = t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(wt, verifyCmdFile), []byte(script), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return root, wt
+	}
+	t.Run("failure keeps every byte on disk and the pointer in the journal", func(t *testing.T) {
+		root, wt := setup(t,
+			"i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done; echo '--- FAIL:TestBoom'; exit 1")
+		gate := runVerifyGate(ctx, root, wt, nil, "diff-7")
+		if gate.ok || gate.reason != "verify_failed" {
+			t.Fatalf("gate = %+v, want verify_failed", gate)
+		}
+		if gate.logPath == "" || !strings.HasPrefix(gate.logPath, filepath.Join(".odo", "verify", "diff-7-")) {
+			t.Fatalf("logPath = %q, want a .odo/verify/diff-7-*.log reference", gate.logPath)
+		}
+		if !strings.HasSuffix(gate.detail, "[full verify output: "+gate.logPath+"]") {
+			t.Errorf("capped detail lost its post-cap pointer; detail tail = %q", gate.detail[len(gate.detail)-80:])
+		}
+		data, err := os.ReadFile(filepath.Join(root, gate.logPath))
+		if err != nil {
+			t.Fatalf("persisted log unreadable: %v", err)
+		}
+		body := string(data) // lone ': ' avoided in the script — .odo-verify's own scoped-line parser consumes it
+		if !strings.Contains(body, "line0\n") || !strings.Contains(body, "--- FAIL:TestBoom") {
+			t.Errorf("persisted log must span head (%dB, has line0: %v) to diagnostics (has FAIL: %v)",
+				len(body), strings.Contains(body, "line0\n"), strings.Contains(body, "--- FAIL:TestBoom"))
+		}
+		// The journal tail alone could NOT have diagnosed #47/#48 —
+		// that's the whole point of the file.
+		if strings.Contains(gate.detail, "line0\n") {
+			t.Error("capped journal detail unexpectedly holds the head — the regression is unproven")
+		}
+	})
+	t.Run("success persists an auditable record too", func(t *testing.T) {
+		root, wt := setup(t, "echo PASS-verify-ok")
+		gate := runVerifyGate(ctx, root, wt, nil, "diff-8")
+		if !gate.ok {
+			t.Fatalf("gate = %+v, want ok", gate)
+		}
+		if gate.logPath == "" {
+			t.Fatal("success paths persist the same record — post-land audits need it")
+		}
+		if _, err := os.Stat(filepath.Join(root, gate.logPath)); err != nil {
+			t.Errorf("success log missing: %v", err)
+		}
+	})
+}
+
+// TestWriteVerifyLogPrune bounds the audit directory: retention keeps the
+// newest verifyLogKeepCount logs, oldest age out.
+func TestWriteVerifyLogPrune(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < verifyLogKeepCount+3; i++ {
+		if p := writeVerifyLog(root, "prune", []byte("payload")); p == "" {
+			t.Fatalf("write %d returned no path", i)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".odo", "verify"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != verifyLogKeepCount {
+		t.Errorf("verify dir holds %d logs, want retention at %d", len(entries), verifyLogKeepCount)
+	}
+}
+
+// TestKeepTail pins the shared tail cutter: byte budget, suffix fidelity
+// (diagnostics live at the end), rune-safe leading cut.
+func TestKeepTail(t *testing.T) {
+	if got := keepTail("short", 8); got != "short" {
+		t.Errorf("undersized input = %q, want unchanged", got)
+	}
+	s := strings.Repeat("PASS ok\n", 2048) + "exit status 1\n"
+	got := keepTail(s, 100)
+	if len(got) > 100 || !strings.HasSuffix(got, "exit status 1\n") {
+		t.Errorf("tail = %dB/%q, want ≤100B ending at the diagnostics", len(got), got)
+	}
+	cjk := strings.Repeat("中", 4096)
+	if got := keepTail(cjk, 100); !utf8.ValidString(got) {
+		t.Error("CJK-straddled cut is not valid UTF-8")
+	}
 }
 
 // TestVerifyEnviron pins the allowlist contract: the verify child sees
@@ -2332,14 +2432,14 @@ func TestRunVerifyScratchHomeShieldsFileCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify errored: %v (tail %q)", err, tail)
 	}
-	if !strings.Contains(tail, "SHIELDED") || !strings.Contains(tail, "PLAINTEXT-MISS") || !strings.Contains(tail, "PASS") {
+	if !strings.Contains(string(tail), "SHIELDED") || !strings.Contains(string(tail), "PLAINTEXT-MISS") || !strings.Contains(string(tail), "PASS") {
 		t.Errorf("shielding markers missing from tail %q", tail)
 	}
-	if strings.Contains(tail, "DECOY-KEY") || strings.Contains(tail, home) {
+	if strings.Contains(string(tail), "DECOY-KEY") || strings.Contains(string(tail), home) {
 		t.Errorf("real HOME or its credentials leaked into the verify child: %q", tail)
 	}
 	// Sandbox lifecycle: the scratch dir the child saw must be gone.
-	scratch := strings.TrimPrefix(strings.SplitN(strings.TrimSpace(tail), "\n", 2)[0], "HOME=")
+	scratch := strings.TrimPrefix(strings.SplitN(strings.TrimSpace(string(tail)), "\n", 2)[0], "HOME=")
 	if scratch == home || scratch == "" || scratch == os.Getenv("HOME") {
 		t.Fatalf("child HOME = %q, want a scratch dir (real home %q)", scratch, home)
 	}
@@ -2373,7 +2473,7 @@ func TestRunVerifyMountsGoToolchainCaches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify errored: %v (tail %q)", err, tail)
 	}
-	got := strings.Split(strings.TrimSpace(tail), "\n")
+	got := strings.Split(strings.TrimSpace(string(tail)), "\n")
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Errorf("child caches = %q, want %q", got, want)
 	}

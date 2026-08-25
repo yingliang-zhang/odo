@@ -49,7 +49,12 @@ package ipc
 //	.odo/diffs — a diff file is the ONLY copy of reviewable work, and
 //	             epoch-8 empirical evidence proved a lingering diff
 //	             rescued unsubmitted work; the journal governs lifecycle,
-//	             never the diff bytes.
+//	             never the diff bytes. Includes the -rescue sibling a
+//	             reject/accept archives when the doomed worktree held
+//	             bytes newer than the judged patch (#49, the #47 incident).
+//	.odo/verify — full verify-gate output the journaled blocked/moa rows
+//	             reference (#49); retention-bounded by the writer's
+//	             keep-count, never swept here.
 //	.odo/archive — human journal rotations (odo journal rotate) are
 //	             deliberate records, kept forever by definition.
 //

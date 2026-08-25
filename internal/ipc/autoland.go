@@ -172,6 +172,7 @@ package ipc
 // keep auto_accept deferred — the O-1 no-auto-apply posture lifts for
 // DIFF LANDING ONLY — and every land remains reversible (git).
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -180,6 +181,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -214,6 +216,10 @@ const (
 	// (~2 min) fits comfortably; a hanging build must not wedge the
 	// serialization mutex.
 	autoLandVerifyTimeout = 10 * time.Minute
+	// verifyLogKeepBytes caps one persisted .odo/verify log (tail-biased:
+	// diagnostics sit at the end); verifyLogKeepCount bounds the directory.
+	verifyLogKeepBytes = 1 << 20
+	verifyLogKeepCount = 32
 
 	// verifyCmdFile names the per-project verification command file at the
 	// repo root. Committed, so a run's worktree carries it too; a diff
@@ -429,7 +435,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// M19: the gate itself is extracted as runVerifyGate (the /loop
 	// Mode A fix pipeline calls it verbatim).
 	verifyPaths, _ := git.PatchPaths(d.PathOnDisk)
-	gate := runVerifyGate(ctx, s.projectRoot, worktreePath, verifyPaths)
+	gate := runVerifyGate(ctx, s.projectRoot, worktreePath, verifyPaths, "diff-"+strconv.FormatInt(d.ID, 10))
 	if !gate.ok {
 		s.journalAutoLandBlocked(ctx, d, gate.reason, gate.detail, nil, "")
 		if gate.reason == "verify_unconfigured" {
@@ -534,6 +540,9 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		// details) so the landed row carries its own run output.
 		"verify_cmd":  verifyCmd,
 		"verify_tail": capDetail(verifyTail),
+	}
+	if gate.logPath != "" {
+		moaPayload["verify_log"] = gate.logPath
 	}
 	// W5: the risk receipt for exactly the bytes the panel judged.
 	mountRiskReceipt(moaPayload, riskReceiptKeys(diffText))
@@ -823,6 +832,11 @@ type verifyGateOutcome struct {
 	tail   string
 	reason string
 	detail string
+	// logPath is the project-relative .odo/verify log holding the gate's
+	// FULL output ("" when nothing ran or the best-effort write failed).
+	// The journaled tail stays the quick-read record; this ends the
+	// capDetail-eats-the----FAIL-line blind reproductions (#47/#48).
+	logPath string
 }
 
 // provisionVerifyDeps gives a GUI diff's verify command its node toolchain.
@@ -866,19 +880,39 @@ func provisionVerifyDeps(projectRoot, worktreePath string, diffPaths []string) {
 // the M18 pass-evidence rule. Unconfigured, failed, and evidence-less
 // outcomes are failures with exactly the reasons/details autoLand
 // journaled inline before the extraction.
-func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPaths []string) verifyGateOutcome {
+func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPaths []string, logLabel string) verifyGateOutcome {
 	provisionVerifyDeps(projectRoot, worktreePath, diffPaths)
 	verifyCmds, err := verifyCommands(worktreePath, diffPaths)
 	if err != nil {
 		return verifyGateOutcome{reason: "verify_unconfigured",
 			detail: "no usable " + verifyCmdFile + " at the repo root — the verify gate is mandatory for auto-land"}
 	}
+	// Full-output persistence (#49): every terminal outcome below writes
+	// the UNCAPPED combined output to <project>/.odo/verify/; the journal
+	// keeps the capped tail plus a pointer to that file. capDetail's 4KB
+	// tail swallowed the actual --- FAIL line twice (#47, #48), forcing a
+	// blind same-bytes reproduction — the on-disk log is the diagnosis.
+	// Best-effort: a failed write just reverts to the capped-tail-only
+	// record. The pointer is appended AFTER capDetail so the truncation
+	// can never eat it.
+	var out strings.Builder // capped tails for prompt/journal (unchanged contract)
+	var full bytes.Buffer   // uncapped record for the .odo/verify log
+	writeLog := func(o verifyGateOutcome) verifyGateOutcome {
+		if full.Len() > 0 {
+			o.logPath = writeVerifyLog(projectRoot, logLabel, full.Bytes())
+		}
+		if !o.ok && o.logPath != "" {
+			o.detail += "\n[full verify output: " + o.logPath + "]"
+		}
+		return o
+	}
 	// Scope-union execution: a mixed-scope diff (go+gui, diff #9) resolves
 	// to several commands — every one must pass, first failure blocks.
 	verifyCmd := strings.Join(verifyCmds, " && ")
-	var out strings.Builder
 	for _, cmd := range verifyCmds {
-		tail, err := runVerify(ctx, worktreePath, cmd)
+		raw, err := runVerify(ctx, worktreePath, cmd)
+		fmt.Fprintf(&full, "$ %s\n%s\n", cmd, raw)
+		tail := keepTail(string(raw), autoLandVerifyTailBytes)
 		if tail != "" {
 			if out.Len() > 0 {
 				out.WriteString("\n")
@@ -886,14 +920,11 @@ func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPa
 			out.WriteString(tail)
 		}
 		if err != nil {
-			return verifyGateOutcome{reason: "verify_failed",
-				detail: capDetail(cmd + " → " + err.Error() + "\n" + out.String())}
+			return writeLog(verifyGateOutcome{reason: "verify_failed",
+				detail: capDetail(cmd + " → " + err.Error() + "\n" + out.String())})
 		}
 	}
-	verifyTail := out.String()
-	if len(verifyTail) > autoLandVerifyTailBytes {
-		verifyTail = verifyTail[len(verifyTail)-autoLandVerifyTailBytes:]
-	}
+	verifyTail := keepTail(out.String(), autoLandVerifyTailBytes)
 	// Verify-evidence gate (M18 batch B): exit 0 that proves nothing. A
 	// verify whose output tail carries ZERO test evidence (no PASS token,
 	// no go "ok" line, no non-zero N-passed count — the conservative
@@ -901,10 +932,10 @@ func runVerifyGate(ctx context.Context, projectRoot, worktreePath string, diffPa
 	// verify used to give false release confidence. A build-only
 	// .odo-verify can never satisfy this, by design (m16 gate 7).
 	if !verifyHasPassEvidence(verifyTail) {
-		return verifyGateOutcome{reason: "verify_no_evidence",
-			detail: capDetail("verify exit 0 (`" + verifyCmd + "`) but the output tail carries zero test evidence (no PASS token, no ok line, no N-passed count) — a verify that ran no tests proves nothing\n\n" + verifyTail)}
+		return writeLog(verifyGateOutcome{reason: "verify_no_evidence",
+			detail: capDetail("verify exit 0 (`" + verifyCmd + "`) but the output tail carries zero test evidence (no PASS token, no ok line, no N-passed count) — a verify that ran no tests proves nothing\n\n" + verifyTail)})
 	}
-	return verifyGateOutcome{ok: true, cmd: verifyCmd, tail: verifyTail}
+	return writeLog(verifyGateOutcome{ok: true, cmd: verifyCmd, tail: verifyTail})
 }
 
 // verifyCommands reads the worktree's .odo-verify and resolves the command
@@ -1014,12 +1045,13 @@ func pathMatch(p, glob string) bool {
 }
 
 // runVerify executes cmd via sh -c at the worktree root under a hard
-// timeout, returning the trailing autoLandVerifyTailBytes of combined
-// output either way (the prompt tail on pass, the journal detail on fail).
+// timeout, returning the FULL combined
+// output either way — the gate tail-caps for prompt/journal and persists
+// the uncapped record to .odo/verify (runVerifyGate).
 // The command comes from the worktree's own committed .odo-verify — never
 // from the diff under review (the supply-chain gate blocks that), so this
 // runs no content the panel is judging.
-func runVerify(ctx context.Context, worktreePath, cmd string) (string, error) {
+func runVerify(ctx context.Context, worktreePath, cmd string) ([]byte, error) {
 	vctx, cancel := context.WithTimeout(ctx, autoLandVerifyTimeout)
 	defer cancel()
 	proc := exec.CommandContext(vctx, "sh", "-c", cmd)
@@ -1040,7 +1072,7 @@ func runVerify(ctx context.Context, worktreePath, cmd string) (string, error) {
 	// the gate cannot hold its posture: fail closed.
 	scratch, err := os.MkdirTemp("", "odo-verify-home-")
 	if err != nil {
-		return "", fmt.Errorf("verify sandbox: %w (refusing to run unreviewed code against a credential-filled HOME)", err)
+		return nil, fmt.Errorf("verify sandbox: %w (refusing to run unreviewed code against a credential-filled HOME)", err)
 	}
 	defer os.RemoveAll(scratch)
 	if home := os.Getenv("HOME"); home != "" {
@@ -1052,13 +1084,10 @@ func runVerify(ctx context.Context, worktreePath, cmd string) (string, error) {
 	env = setEnv(env, "HOME="+scratch)
 	proc.Env = env
 	out, err := proc.CombinedOutput()
-	if len(out) > autoLandVerifyTailBytes {
-		out = out[len(out)-autoLandVerifyTailBytes:]
-	}
 	if vctx.Err() == context.DeadlineExceeded {
-		return string(out), fmt.Errorf("verify timed out after %s", autoLandVerifyTimeout)
+		return out, fmt.Errorf("verify timed out after %s", autoLandVerifyTimeout)
 	}
-	return string(out), err
+	return out, err
 }
 
 // verifyEnviron allowlists the child environment for the verify command:
@@ -1215,6 +1244,24 @@ func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reaso
 	}
 }
 
+// truncMarker prefixes every trimmed record (journal details, verify
+// logs) so a reader knows bytes were dropped at the head.
+const truncMarker = "…[earlier truncated]\n"
+
+// keepTail returns the trailing max bytes of s, rune-safe at the leading
+// cut. THE tail cutter: prompt tails, capped journal details, and
+// .odo/verify logs all cut identically.
+func keepTail(s string, max int) string {
+	if len(s) > max {
+		cut := len(s) - max
+		for cut < len(s) && !utf8.RuneStart(s[cut]) {
+			cut++
+		}
+		return s[cut:]
+	}
+	return s
+}
+
 // capDetail trims a journal detail to a reviewable size, keeping the
 // TAIL: go-test failure diagnostics (--- FAIL lines, build errors) and
 // error summaries live at the end of the output — head-trimming used to
@@ -1223,13 +1270,62 @@ func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reaso
 func capDetail(s string) string {
 	const maxDetail = 4 * 1024
 	if len(s) > maxDetail {
-		cut := len(s) - maxDetail
-		for cut < len(s) && !utf8.RuneStart(s[cut]) {
-			cut++
-		}
-		return "…[earlier truncated]\n" + s[cut:]
+		return truncMarker + keepTail(s, maxDetail)
 	}
 	return s
+}
+
+// writeVerifyLog persists the gate's FULL combined output to
+// <project>/.odo/verify/<label>-<unixms>.log (per-log tail cap guards
+// against pathological spam) and returns the project-relative path the
+// journal references. Best-effort: "" on failure — the capped journal
+// tail remains as the pre-#49 record.
+func writeVerifyLog(projectRoot, label string, full []byte) string {
+	dir := filepath.Join(projectRoot, ".odo", "verify")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("auto-land: verify log dir: %v", err)
+		return ""
+	}
+	name := fmt.Sprintf("%s-%d.log", label, time.Now().UnixNano())
+	content := string(full)
+	if len(content) > verifyLogKeepBytes {
+		content = truncMarker + keepTail(content, verifyLogKeepBytes)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		log.Printf("auto-land: verify log %s: %v", name, err)
+		return ""
+	}
+	pruneVerifyLogs(dir)
+	return filepath.Join(".odo", "verify", name)
+}
+
+// pruneVerifyLogs bounds .odo/verify to the newest verifyLogKeepCount
+// logs — bounded audit retention; the oldest age out first. Best-effort.
+func pruneVerifyLogs(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) <= verifyLogKeepCount {
+		return
+	}
+	type aged struct {
+		name string
+		mod  time.Time
+	}
+	files := make([]aged, 0, len(entries))
+	for _, e := range entries {
+		info, ierr := e.Info()
+		if ierr == nil && !e.IsDir() {
+			files = append(files, aged{e.Name(), info.ModTime()})
+		}
+	}
+	if len(files) <= verifyLogKeepCount {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	for _, f := range files[:len(files)-verifyLogKeepCount] {
+		if err := os.Remove(filepath.Join(dir, f.name)); err != nil {
+			log.Printf("auto-land: verify log prune %s: %v", f.name, err)
+		}
+	}
 }
 
 // reviewFanout sends prompt to every model in parallel, collecting

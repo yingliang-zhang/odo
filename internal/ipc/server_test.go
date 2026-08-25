@@ -686,6 +686,127 @@ func TestReviewOfOlderDiffRetiresItsOwnRun(t *testing.T) {
 	}
 }
 
+// TestRejectArchivesWorktreeRescue pins the #47 incident (epoch-35; #49
+// fix): reviewing a diff retires its worktree, destroying bytes newer
+// than the archived patch — a reject left the fix's only copy in a stale
+// backup. The resolution must archive the divergent delta to
+// .odo/diffs/<run>-rescue.diff first and receipt it on the reject row,
+// while the judged patch file stays untouched (patch_sha16 lineage).
+func TestRejectArchivesWorktreeRescue(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir()) // memory-layer reads must not see the real HOME
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	ctx := context.Background()
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "run one"})
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+	d, err := rig.store.GetDiff(ctx, done.Diff.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := rig.server.byConv[convID]
+	wt := rig.server.runs[runID].worktreePath
+	// Post-drain bytes living ONLY in the worktree — the incident shape:
+	// edits made after the drain snapshot archived the patch.
+	if err := os.WriteFile(filepath.Join(wt, "fix.txt"), []byte("post-drain line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rej := rig.call(t, Request{Cmd: CmdRejectDiff, DiffID: done.Diff.ID})
+	if rej.Applied {
+		t.Error("reject_diff: applied must be false")
+	}
+
+	// The rescue archived the post-drain bytes; the worktree still retired.
+	rescuePath := filepath.Join(root, ".odo", "diffs",
+		strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")+"-rescue.diff")
+	data, err := os.ReadFile(rescuePath)
+	if err != nil {
+		t.Fatalf("rescue archive: %v", err)
+	}
+	if !strings.Contains(string(data), "fix.txt") || !strings.Contains(string(data), "post-drain line") {
+		t.Errorf("rescue archive must carry the post-drain bytes:\n%s", data)
+	}
+	// The judged patch is NEVER mutated — the rescue is a sibling.
+	if archived, err := os.ReadFile(d.PathOnDisk); err != nil || strings.Contains(string(archived), "post-drain line") {
+		t.Errorf("judged patch mutated (err=%v) — patch_sha16 lineage broken", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree must still retire on reject, stat err = %v", err)
+	}
+	// The reject row carries the receipt.
+	events, err := rig.store.ListEvents(ctx, convID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectRow := ""
+	for _, e := range events {
+		if e.Type == store.EventReviewAction && strings.Contains(string(e.Payload), `"action":"reject"`) {
+			rejectRow = string(e.Payload)
+		}
+	}
+	if rejectRow == "" {
+		t.Fatal("no reject row journaled")
+	}
+	if !strings.Contains(rejectRow, `"rescue":"archived"`) || !strings.Contains(rejectRow, "-rescue.diff") {
+		t.Errorf("reject row lacks the rescue receipt: %s", rejectRow)
+	}
+}
+
+// TestRejectMatchesArchivedSkipsRescue pins the common case: an untouched
+// worktree re-snapshots byte-identical to the judged patch, so reject
+// writes NO duplicate file and receipts matches_archived.
+func TestRejectMatchesArchivedSkipsRescue(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+
+	ctx := context.Background()
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "run one"})
+	done := rig.pollUntilDone(t, convID)
+	if done.Diff == nil {
+		t.Fatal("no diff")
+	}
+	d, err := rig.store.GetDiff(ctx, done.Diff.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rej := rig.call(t, Request{Cmd: CmdRejectDiff, DiffID: done.Diff.ID})
+	if rej.Applied {
+		t.Error("reject_diff: applied must be false")
+	}
+	rescuePath := filepath.Join(root, ".odo", "diffs",
+		strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff")+"-rescue.diff")
+	if _, err := os.Stat(rescuePath); !os.IsNotExist(err) {
+		t.Errorf("identical delta must not duplicate (stat err = %v)", err)
+	}
+	events, err := rig.store.ListEvents(ctx, convID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type == store.EventReviewAction && strings.Contains(string(e.Payload), `"action":"reject"`) {
+			found = strings.Contains(string(e.Payload), `"rescue":"matches_archived"`)
+		}
+	}
+	if !found {
+		t.Error("reject row must receipt matches_archived")
+	}
+}
+
 // TestAcceptDoesNotSweepMainCheckout pins P0 end to end through the socket:
 // accept commits only the diff's own files. Dirt the user left in the main
 // checkout — a modified tracked file and an untracked scratch file — is

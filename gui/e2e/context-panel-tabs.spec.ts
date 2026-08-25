@@ -33,16 +33,24 @@ function scrollLeft(page: Page): Promise<number> {
 }
 
 // The active tab's box must lie inside the tab strip's visible viewport.
+// Poll (not a single-shot read): scrollIntoView runs in a post-commit
+// effect, so the first frame after a click can lag the assertion under
+// machine load — the epoch-34 strip-scroll flake. The contract is "the
+// strip settles with the active tab visible", not "by this microtask".
 async function expectActiveTabInStrip(page: Page) {
-  const inside = await page.evaluate(() => {
-    const tabs = document.querySelector(".panel-tabs")?.getBoundingClientRect();
-    const active = document
-      .querySelector('.panel-tab[aria-selected="true"]')
-      ?.getBoundingClientRect();
-    if (!tabs || !active) return { ok: false, reason: "missing nodes" as const };
-    return { ok: active.left >= tabs.left - 1 && active.right <= tabs.right + 1 };
-  });
-  expect(inside.ok).toBe(true);
+  await expect
+    .poll(async () => {
+      const inside = await page.evaluate(() => {
+        const tabs = document.querySelector(".panel-tabs")?.getBoundingClientRect();
+        const active = document
+          .querySelector('.panel-tab[aria-selected="true"]')
+          ?.getBoundingClientRect();
+        if (!tabs || !active) return { ok: false, reason: "missing nodes" as const };
+        return { ok: active.left >= tabs.left - 1 && active.right <= tabs.right + 1 };
+      });
+      return inside.ok;
+    })
+    .toBe(true);
 }
 
 test("‹ › controls appear at 280px and move the strip; active tab stays in view", async ({ page }) => {
@@ -67,10 +75,10 @@ test("‹ › controls appear at 280px and move the strip; active tab stays in v
 
   // ‹ moves the strip back (scrollBy clamps at the right end, so › at the
   // right end is a no-op — exercise the reverse direction instead).
+  await expect.poll(() => scrollLeft(page)).toBeGreaterThan(0);
   const sl0 = await scrollLeft(page);
-  expect(sl0).toBeGreaterThan(0);
   await navLeft.click();
-  expect(await scrollLeft(page)).toBeLessThan(sl0);
+  await expect.poll(() => scrollLeft(page)).toBeLessThan(sl0);
 
   // Leftmost tab: real click → scrollIntoView pulls it back into view.
   await page.getByRole("tab", { name: /^Changes/ }).click();

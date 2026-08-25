@@ -3116,6 +3116,15 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	if err := s.store.UpdateDiffStatus(ctx, diffID, status); err != nil {
 		return Response{}, err
 	}
+	// Rescue archive (#49, the #47 incident): retireRunForDiff below
+	// deletes the reviewed diff's worktree, destroying any bytes newer
+	// than the archived .diff — rejecting #47 left the fix's only copy in
+	// a stale backup, recoverable solely by hand-applying it. Snapshot
+	// the worktree's current full delta FIRST; divergent bytes land in
+	// .odo/diffs/<run>-rescue.diff (sweeper-exempt like every diff
+	// archive) and their receipt rides the resolution row. Best-effort:
+	// a failed snapshot never delays the resolution.
+	rescue := s.rescueResolvedWorktree(d)
 	// Supersede older pending diffs in the same revise chain (Fix 2,
 	// zero-manual-accept): when this diff lands, mark all older pending
 	// diffs in the same chain as superseded so they stop blocking the
@@ -3163,6 +3172,9 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	// all three). The ratchet wave reads these via ComputeAutonomy's risk
 	// table; today's consumers ignore them (ADR-0002).
 	mountRiskReceipt(payload, riskReceipt(d.PathOnDisk))
+	for k, v := range rescue {
+		payload[k] = v
+	}
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); err != nil {
 		return Response{}, err
 	}
@@ -3184,6 +3196,46 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 	}
 
 	return Response{DiffID: diffID, Applied: applied}, nil
+}
+
+// rescueResolvedWorktree archives the RESOLVED diff's worktree's current
+// full delta vs its HEAD, before retireRun deletes the dir (see the call
+// site in handleDiffAction for the incident). The judged archive
+// (d.PathOnDisk) is NEVER mutated — patch_sha16 lineage stays intact;
+// divergent bytes get a -rescue sibling. Receipt values on the row:
+//
+//	matches_archived  worktree delta == archived patch (nothing newer)
+//	clean             worktree matches its HEAD (delta is empty)
+//	archived          rescue_path/rescue_sha16 name the divergent bytes
+//	unavailable       worktree gone or snapshot failed — the archived
+//	                  patch stays the sole record (the pre-#49 contract)
+//	no_worktree       legacy pre-v2 row with no bound worktree
+func (s *Server) rescueResolvedWorktree(d store.Diff) map[string]interface{} {
+	if d.WorktreePath == nil || *d.WorktreePath == "" {
+		return map[string]interface{}{"rescue": "no_worktree"}
+	}
+	diff, err := git.ExtractDiff(*d.WorktreePath)
+	if err != nil {
+		log.Printf("review: rescue snapshot for diff %d: %v (archived patch stays the record)", d.ID, err)
+		return map[string]interface{}{"rescue": "unavailable"}
+	}
+	if diff == "" {
+		return map[string]interface{}{"rescue": "clean"}
+	}
+	if archived, rerr := os.ReadFile(d.PathOnDisk); rerr == nil && string(archived) == diff {
+		return map[string]interface{}{"rescue": "matches_archived"}
+	}
+	path := s.mgr.DiffPath(strings.TrimSuffix(filepath.Base(d.PathOnDisk), ".diff") + "-rescue")
+	if err := os.WriteFile(path, []byte(diff), 0o644); err != nil {
+		log.Printf("review: rescue write for diff %d: %v", d.ID, err)
+		return map[string]interface{}{"rescue": "unavailable"}
+	}
+	log.Printf("review: rescue archived for diff %d: %s", d.ID, path)
+	return map[string]interface{}{
+		"rescue":       "archived",
+		"rescue_path":  path,
+		"rescue_sha16": sha16([]byte(diff)),
+	}
 }
 
 // retireRunForDiff releases resources after a diff review: the worktree
