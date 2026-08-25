@@ -1,0 +1,10 @@
+# Worktree & Accept-Path Safety
+
+- Accept rollback dirty-path guards: git.DirtyPaths refuses accept when patch-own paths carry staged/unstaged/untracked content, naming paths and keeping the diff pending; the refusal is deliberately NOT wrapped as errBaseStale because that would burn ~8.5min auto-revise verify cycles regenerating a patch that hits the same refusal (main-epoch-28)
+- ProbeAlreadyLanded runs before the dirty-path refusal so unstaged identical edits land via bookkeeping instead of being killed by the dirty check (main-epoch-28)
+- Reject deletes the candidate worktree, leaving the archived .diff as sole survivor (recovery incident: fix existed only in the diff backup, restored via clean apply of 26 files) (main-epoch-35)
+- rescueResolvedWorktree now snapshots the full pre-retirement delta and writes .odo/diffs/<run>-rescue.diff only when it differs from the archived patch; reviewed patch bytes are never rewritten and the .odo/diffs sweeper exemption guarantees survival; accept and reject share the retirement path (main-epoch-36)
+- retireRun selects its target by matching the diff's own worktreePath against s.runs, using byConv only when no worktree match — previously reviewing an older diff could close a newer run's worktree and kill an in-progress verify, causing spurious verify_failed (main-epoch-28)
+- Staged-only edits silently overwritten: new git.IndexEditsBeyondHEAD does a real index-vs-HEAD stage-0 compare and refuses before adjudication, since git add would clobber a divergent index (main-epoch-32)
+- alreadyLanded stray-edit prevention: build post-image via temp index and compare per-file against worktree hash-object, because whole-file CommitPaths would otherwise absorb stray edits into the accept commit (main-epoch-30)
+- Regenerating the patch (git add -A && git diff --cached HEAD) before manual accept is safe only when the diff never reached the panel — no patch_sha16 attestation binding is broken (main-epoch-22) (main-epoch-31) (main-epoch-33)

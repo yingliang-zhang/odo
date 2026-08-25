@@ -1,0 +1,11 @@
+# Symlink & Path Containment Security
+
+- Threat model: only project-side committable paths are containment-constrained; global ~/.odo files (user.md, pins) are outside scope to preserve legitimate dotfiles symlinks; wiki/ is in scope as a git-committable surface (main-epoch-30)
+- Unified three-arg guard with canonical projectRoot as final trust anchor: verifies resolved dir stays inside the project and rejects symlinks at the root nodes themselves (.odo, wiki, wiki/topics); the write side gets the same guard, not just reads (main-epoch-34)
+- Containment violations degrade to vanished/absent semantics rather than introducing new error faces (main-epoch-30)
+- Containment call sites migrated: curator ×3/×6, recall_cross ×2, memory_autogate, learner ×4, readArchive, AGENTS.md generation/write, distill note writes, apply_memory skill writes, preview attachmentDir, ledger/read-memory display surfaces; writeTopicPages stale-file os.Remove was pre-guarded because it previously bypassed checks (main-epoch-30) (main-epoch-34)
+- Explicitly unguarded by decision: diff PathOnDisk (adapter/test-generated, legitimately outside the project) and vision attachments (user-supplied explicit paths) (main-epoch-34)
+- Lstat-checks-only-the-leaf concern adjudicated as non-threat: git ls-files .odo is empty, and a locally planted .odo symlink means journal/db/socket already escaped — full compromise, leaf refusal adds nothing (main-epoch-33)
+- A stale test asserting the old guard rejection text ("refusing to write through symlink") caused a deterministic verify_failed after the unified guard changed the log line; the assertion was realigned to the new "symlinked component" text (main-epoch-35)
+- /preview anti-redirect: Go-side per-hop redirect validation plus final-URL capture with a final_url audit field, and a loopback-only filtering proxy env-injected into the Playwright child denying off-loopback requests before dial; JS/meta-refresh redirects remain an accepted, documented v1 boundary (main-epoch-30) (main-epoch-32)
+- /preview remote code pinned to playwright@1.62.1 from the project lockfile with an explicit setup phase and offline resolution verified against the npx cache, replacing floating playwright@^1 (main-epoch-34) (main-epoch-35)

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo: Diff #49 Block Misdiagnosis & #50 Spec Root-Cause Fix
 
 ## Context

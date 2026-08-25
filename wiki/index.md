@@ -1,13 +1,13 @@
 # Project Wiki Index
 
 ## Topics
-- Auto-Land Pipeline & Diff Lifecycle → topics/auto-land-pipeline.md
-- Panel Review Governance → topics/panel-governance.md
-- Path Protection & Memory Guard → topics/path-protection.md
-- Security Hardening → topics/security-hardening.md
-- Deployment & Daemon Operations → topics/daemon-operations.md
-- GUI Performance & Switching → topics/gui-performance.md
-- Composer, IME & Advisory Commands → topics/composer-ime.md
-- E2E & Test Infrastructure → topics/e2e-test-infrastructure.md
-- Chat UI Features → topics/chat-ui-features.md
-- MoA Client & Design Pipeline → topics/moa-pipeline.md
+- Auto-Land Pipeline & Panel Governance → topics/auto-land-governance.md
+- Verify Gate Diagnosis & Test Flake Triage → topics/verify-gate-flake-triage.md
+- Worktree & Accept-Path Safety → topics/worktree-accept-safety.md
+- Symlink & Path Containment Security → topics/path-containment-security.md
+- Daemon Deployment & Binary Currency → topics/daemon-deployment.md
+- Daemon Resilience & Crash Recovery → topics/daemon-resilience.md
+- GUI Keep-Alive, Switching & Render Performance → topics/gui-performance.md
+- Steer Queue, Advisory Slashes & Composer → topics/steer-queue-advisories.md
+- GUI Chrome Defects & Wave Features → topics/gui-chrome.md
+- MoA Request Receipts & Design-MoA → topics/moa-receipts-design.md

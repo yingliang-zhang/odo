@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # odo: fixes for 4 deep-review findings (symlink guard, tab staleness, /preview pinning, hidden-panel recompute)
 
 Follow-up to the deep review of commit `ab20b62`, which left 4 residual findings after the deterministic-path round. All 4 were addressed in this session.

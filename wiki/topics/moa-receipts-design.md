@@ -1,0 +1,10 @@
+# MoA Request Receipts & Design-MoA
+
+- Request receipts follow the final-request convention: sha16 computed at post()'s marshal point (the only place seeing wire bytes); a retry chain re-sending the same body shares one receipt; budget escalation rebuilding the body points the receipt at the final request (superseded bodies visible via the Escalations ledger); errors carry no receipt (daemon-misc-epoch-2)
+- Receipt fields are additive JSON keys with omitempty on moa Result, ReviewResult, and PanelResult — all three journal sites serialize the struct directly so receipts propagate to every row; no ADR-0002 schema impact (daemon-misc-epoch-2)
+- sha16 is dual-implemented with a 4-line moa-local helper (moa cannot import ipc due to an import cycle) under a "convention is the contract" comment (daemon-misc-epoch-2)
+- A task premise that receipts already existed from R-W1 was disproven via git show + repo grep before building — R-W1 added only retries, typed errors, and the usage ledger; premise verification is required before claiming wiring-only work (daemon-misc-epoch-2)
+- Design-MoA kept the design_proposals wire key over the instruction's literal proposals: Response.Proposals is already claimed by memory_proposals and encoding/json's dominant-field rule would silently drop both same-named fields; the deviation is documented in protocol.go (moa-chain-epoch-3)
+- Design-MoA is fail-closed everywhere: symlink escape in the context block (EvalSymlinks root once, avoiding macOS /var→/private/var false positives), empty consolidator lock, and receipt loss are refusal paths with failure markers carrying proposals + consolidator receipt blocks, never silent degradation (moa-chain-epoch-3)
+- Leg labels derive from prefs index 'A'+i so a dropped mid leg doesn't cause label drift/collision; single-leg truncation degrades-and-continues per the constraint clause (only all-legs truncation fails the pipeline) (moa-chain-epoch-3)
+- Escalation.InputTokens records the re-paid prompt cost of abandoned requests on each budget bump (main-epoch-23)

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Diff #47 Block: Stale Symlink-Guard Assertion — Rejected, Recovered, #48 Pending
 
 ## Root cause

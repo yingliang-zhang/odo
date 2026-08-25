@@ -1,9 +1,0 @@
-# MoA Client & Design Pipeline
-
-- Request receipts follow the final-request convention: computed at post()'s marshal point (the only location seeing wire bytes), one receipt per retry chain since the body is byte-identical, escalation receipts point to the final rebuilt body, and errors carry no receipt — wire-exact pins recompute sha16 from stub-captured HTTP bodies (daemon-misc-epoch-2)
-- sha16 is dual-implemented because moa cannot import ipc (import cycle) — a 4-line helper with a "convention is the contract" comment; all journal keys are additive with omitempty, so ADR-0002 is immune (daemon-misc-epoch-2)
-- Design-MoA runs 3 blind legs (`QueryWithTools`, models from prefs `review:`) feeding a single consolidator `moa.Query` synthesis; `design_via: moa` gates entry and absent/garbage values fail closed before any moa call; the `designing` single-flight mirrors the `curating` precedent (moa-chain-epoch-2)
-- Truncation semantics are stricter than the spec text: a truncated leg is a failed leg — partial text dropped, receipts kept, pipeline degrades on surviving legs; a truncated consolidator fails closed with no design_lock row (moa-chain-epoch-2) (moa-chain-epoch-3)
-- The wire key stays `design_proposals` rather than spec-literal `proposals`: `Response.Proposals` is claimed by memory_proposals and encoding/json's dominant-field rule would silently corrupt both — the deviation is documented in protocol.go (moa-chain-epoch-3)
-- Design-MoA is fail-closed everywhere: pre-fanout symlink escape (EvalSymlinks root + per-file check), whitespace-only consolidator lock, and all four failure sites attach proposals + consolidator receipt to the `design/failed` marker via a shared helper (moa-chain-epoch-3)
-- Leg labels are by prefs index ('A'+i) so gaps persist when a mid leg drops — preventing relabel collisions with the dropped leg's cross-reference (moa-chain-epoch-3)
