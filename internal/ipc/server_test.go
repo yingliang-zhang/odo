@@ -180,14 +180,17 @@ func (r *testRig) stop(t *testing.T) {
 	// a live tick, and a tick journals under s.mu; it must not outlive the
 	// store close below (idempotent with the Wait path).
 	r.server.stopLiveness()
-	// M12: disarm pending auto-distill timers before closing the store —
-	// a 120s timer firing into a closed journal outlives its test.
-	r.server.mu.Lock()
-	for id, entry := range r.server.autoPending {
-		entry.timer.Stop()
-		delete(r.server.autoPending, id)
-	}
-	r.server.mu.Unlock()
+	// M12+P1: close the auto-distill subsystem (stop pending timers, bar
+	// re-arms) and JOIN already-fired distills before closing the store —
+	// the M12 disarm alone could not reach a timer that had already
+	// fired, and its distillCore (journal/wiki/git writes) outlived
+	// TempDir cleanup. This bypasses Wait() because rigs never stop
+	// Serve — the two teardowns share stopAutoDistill as the one
+	// subsystem-close path.
+	r.server.stopAutoDistill()
+	r.server.distillWG.Wait()
+	// P1: join the boot-time stranded-diff recovery — it reads the store.
+	r.server.recoverWG.Wait()
 	// M17: drain detached auto-curates before closing the store — F3's
 	// fail-open evaluation goroutine would otherwise journal into a
 	// closed journal (or hold journal files open past TempDir cleanup).

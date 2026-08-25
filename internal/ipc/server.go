@@ -170,6 +170,15 @@ type Server struct {
 	designing  bool               // a design_moa pass is in flight (R-W4; the curating precedent)
 	wg         sync.WaitGroup     // active handleConn goroutines (M11 P0)
 	curateWG   sync.WaitGroup     // detached auto-curates (M17: drained at Wait/teardown)
+	// P1 (2026-08-25): fired auto-distill goroutines drove distillCore
+	// (journal/wiki/git writes, multi-minute) with zero lifecycle
+	// registration — a timer-fired distill outlived shutdown and kept
+	// writing into a closing store. distillWG joins them in Wait
+	// against an OPEN store; recoverWG joins the boot-time
+	// recoverPendingDiffs read/fan-out. Both follow the curateWG drain
+	// precedent (Add-before-go, joined at Wait/teardown).
+	distillWG sync.WaitGroup
+	recoverWG sync.WaitGroup
 	// M19 (/loop): loops is the liveness-only claim that a tick chain or
 	// driver goroutine is driving a conversation's loop (the designing
 	// precedent; the journal fold is the state). loopWG keeps blocking
@@ -231,6 +240,12 @@ type Server struct {
 	distillKind  map[int64]string            // conversationID -> kind of in-flight distill
 	autoPending  map[int64]*autoPendingEntry // conversationID -> scheduled (not yet fired) auto-distill
 	autoInFlight map[int64]*autoInFlight     // conversationID -> firing/fired auto-distill cancel handle
+	// autoStopped closes the auto subsystem against NEW arms once
+	// shutdown begins (stopAutoDistill, called from Wait/rig teardown):
+	// armAutoLocked turns them away so no fresh timer can outlive the
+	// drain. In-flight distills are NOT aborted — they complete and
+	// drain via distillWG (joining is the fix, not cancelling).
+	autoStopped bool
 	slashing     map[int64]int               // conversationID -> live /panel+//vision queries (fold-integrity gate)
 	// Live /panel leg tally per conversation: one slice entry per
 	// IN-FLIGHT consult (2026-08-25 audit P2 — a shared tally let a
@@ -393,12 +408,16 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// mid-pipeline). Diffs whose outcomes are already journaled are NOT
 	// re-fired — the dedup filter lives with the pipeline (autoland.go,
 	// recoverPendingDiffs/strandedPendingDiffs).
-	go s.recoverPendingDiffs(context.Background())
+	s.recoverWG.Add(1)
+	go func() {
+		defer s.recoverWG.Done()
+		s.recoverPendingDiffs(context.Background())
+	}()
 	// C11 ("GUI-closed loops continue"): the daemon-side counterpart of
 	// the GUI's 350ms poll loop — with zero GUI traffic, runs must still
 	// drain to their terminal event or /loop wedged permanently (2026-08
-	// panel P0). Same fire-and-forget shape as recoverPendingDiffs; the
-	// goroutine is joined by stopLiveness (Wait) at shutdown.
+	// panel P0). The goroutine is joined by stopLiveness (Wait) at
+	// shutdown.
 	s.livenessWG.Add(1)
 	go s.runLivenessDrain()
 	return s
@@ -509,6 +528,8 @@ func (s *Server) Serve(listener net.Listener) error {
 // outcome. Call after Serve returns (the listener is closed) to drain
 // in-flight requests — e.g. a distill still inside its 10-minute agent run —
 // before shutdown cleanup kills agents and closes the journal.
+// Also drains (P1): the boot-time stranded-diff recovery and every fired
+// auto-distill, after closing the auto subsystem against new fires/arms.
 func (s *Server) Wait() {
 	// C11: stop the liveness drain FIRST — its tick takes s.mu and
 	// journals; joined here (bounded by one in-flight tick) so no tick is
@@ -518,6 +539,17 @@ func (s *Server) Wait() {
 	s.curateWG.Wait()
 	// M19: loop driver goroutines (audit/design MoA fan-outs) drain too.
 	s.loopWG.Wait()
+	// P1: join the boot-time stranded-diff recovery — it reads the store
+	// (and spawns the pipeline per-diff); it must not outlive the close.
+	s.recoverWG.Wait()
+	// P1: close the auto-distill SUBSYSTEM first — no new fires/arms can
+	// land after this (armAutoLocked turns away re-arms from in-flight
+	// runs; pending timers are stopped) — then join every FIRED distill.
+	// Placed last, before the caller's store teardown, so a multi-minute
+	// distill still completes against an OPEN store: joining is the fix,
+	// never aborting (a send/steer/slash cancel keeps current semantics).
+	s.stopAutoDistill()
+	s.distillWG.Wait()
 }
 
 // handleConn processes requests on a connection until EOF. Requests and
@@ -2325,6 +2357,25 @@ func (s *Server) drainActiveRuns() {
 func (s *Server) stopLiveness() {
 	s.livenessOnce.Do(func() { close(s.livenessStop) })
 	s.livenessWG.Wait()
+}
+// stopAutoDistill closes the auto-distill subsystem against further
+// fires and arms (P1, the stopLiveness mirror): every pending timer is
+// stopped and forgotten — an already-fired callback's identity check
+// no-ops against the cleared slot — and autoStopped bars armAutoLocked
+// re-arms (backoff/supersession) by in-flight distills themselves.
+// Idempotent; Wait calls it before distillWG.Wait, rig teardown calls
+// it before joining distillWG and closing the store. In-flight runs
+// are joined, never cancelled.
+func (s *Server) stopAutoDistill() {
+	s.mu.Lock()
+	if !s.autoStopped {
+		s.autoStopped = true
+		for id, entry := range s.autoPending {
+			entry.timer.Stop()
+			delete(s.autoPending, id)
+		}
+	}
+	s.mu.Unlock()
 }
 
 // drainRun pulls new adapter events into the journal once. When the terminal

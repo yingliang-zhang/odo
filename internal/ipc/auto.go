@@ -352,6 +352,12 @@ func (s *Server) maybeAutoAfterActivityLocked(ctx context.Context, convID int64)
 // supersession: disarm + journaled skip + fresh arm, not a retag). Caller
 // holds s.mu.
 func (s *Server) armAutoLocked(ctx context.Context, convID int64, trigger string, delay time.Duration, stats windowStats) {
+	if s.autoStopped {
+		// Shutdown began (Wait/rig teardown): a new timer would outlive
+		// the drain. In-flight distills' backoff/supersession re-arms
+		// land here too — they die quietly; the run itself completes.
+		return
+	}
 	if s.autoPending[convID] != nil {
 		return // belt: maybeAutoAfterActivityLocked already checked
 	}
@@ -382,8 +388,16 @@ func (s *Server) armAutoLocked(ctx context.Context, convID int64, trigger string
 			s.mu.Unlock()
 			return // superseded between arm and fire: the fresh entry owns the slot
 		}
+		// P1: register the distill goroutine BEFORE releasing s.mu —
+		// the identity check can pass only while holding mu, so this Add
+		// is serialized against stopAutoDistill's clear: any fire that
+		// passed the check is counted before distillWG.Wait can return.
+		s.distillWG.Add(1)
 		s.mu.Unlock()
-		go s.runAutoDistill(convID, trigger)
+		go func() {
+			defer s.distillWG.Done()
+			s.runAutoDistill(convID, trigger)
+		}()
 	})
 	s.autoPending[convID] = entry
 	s.journalAuto(ctx, convID, "scheduled", fmt.Sprintf(
