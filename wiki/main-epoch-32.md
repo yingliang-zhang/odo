@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Epoch-31 Rollout & Post-Review Fixes (odo)
 
 ## Rollout completed (diff #45 incident fix)

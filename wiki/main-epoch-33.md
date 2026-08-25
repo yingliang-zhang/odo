@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # diff #46: Repair-Chain Block, Panel Review Triage, Manual Accept, and Deployment Verification
 
 ## Structural block diagnosis

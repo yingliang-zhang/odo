@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # ODO Review Rounds: E2E spec revision + 8-finding security/perf fix batch
 
 ## Round 1 — Panel review of `gui/e2e/advisory-slash.spec.ts`
