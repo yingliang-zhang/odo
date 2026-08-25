@@ -379,6 +379,38 @@ func TestReadLoopTaskFileContainment(t *testing.T) {
 	}
 }
 
+// A file measured UNDER the cap by the stat pre-check but grown past it
+// before the read lands (2026-08-26 audit P2 TOCTOU window) must hit the
+// same "over the cap" refusal — via the capped read, with the grown
+// bytes never allocated. The cappedReadPreOpenHook seam fires between
+// the loop's stat and the read, deterministically (no sleeps).
+func TestReadLoopTaskFileGrowthPastCap(t *testing.T) {
+	root := t.TempDir()
+	s := &Server{projectRoot: root}
+	tasks := filepath.Join(root, "tasks.md")
+	if err := os.WriteFile(tasks, []byte("1. small\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	armed := true
+	cappedReadPreOpenHook = func(path string) {
+		if !armed || path != tasks {
+			return
+		}
+		armed = false // one-shot: fires exactly inside this read's window
+		if err := os.WriteFile(tasks, []byte(strings.Repeat("x", 2*settleDiffCapBytes)), 0o644); err != nil {
+			t.Errorf("grow fixture: %v", err)
+		}
+	}
+	defer func() { cappedReadPreOpenHook = nil }()
+
+	if _, err := s.readLoopTaskFile("tasks.md"); err == nil || !strings.Contains(err.Error(), "over the") {
+		t.Errorf("grew-past-stat tasks file: err = %v, want the cap refusal identical to the stat gate", err)
+	}
+	if armed {
+		t.Error("seam never fired — the drill tested nothing")
+	}
+}
+
 // --- P2: loop spill integrity ----------------------------------------------
 
 // A spilled artifact (findings union, design lock) is journaled as

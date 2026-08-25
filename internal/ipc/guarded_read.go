@@ -1,7 +1,9 @@
 package ipc
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,13 +73,27 @@ func guardedBase(projectRoot, dir string) (string, error) {
 // os.ReadFile. The check is resolution-time, not open-time: a static
 // planted link is caught; an active TOCTOU swap race is out of model.
 func readWithinDir(projectRoot, dir, path string) ([]byte, error) {
+	if err := resolveWithinDir(projectRoot, dir, path); err != nil {
+		return nil, err
+	}
+	// Read the caller's path, not the resolved one: containment is the
+	// only new behavior, everything else (permissions, races, empty
+	// files) behaves exactly as the os.ReadFile it replaces.
+	return os.ReadFile(path)
+}
+
+// resolveWithinDir is the containment prologue shared by readWithinDir
+// and its capped twin (2026-08-26 audit P2): base proof via guardedBase,
+// then symlink resolution with the escape refusal. Missing/unresolvable
+// paths return the raw os error so callers keep IsNotExist discrimination.
+func resolveWithinDir(projectRoot, dir, path string) error {
 	base, err := guardedBase(projectRoot, dir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return nil, err // absent/unresolvable: raw os error — os.IsNotExist keeps discriminating
+		return err // absent/unresolvable: raw os error — os.IsNotExist keeps discriminating
 	}
 	// resolved differs from the textual path only when a symlink (or a
 	// symlinked ancestor) pulled it elsewhere; that is the only case that
@@ -85,13 +101,55 @@ func readWithinDir(projectRoot, dir, path string) ([]byte, error) {
 	// os.ReadFile fast path untouched.
 	if resolved != filepath.Clean(path) {
 		if resolved != base && !strings.HasPrefix(resolved, base+string(filepath.Separator)) {
-			return nil, fmt.Errorf("read %s: symlink escapes %s (resolves to %s)", path, base, resolved)
+			return fmt.Errorf("read %s: symlink escapes %s (resolves to %s)", path, base, resolved)
 		}
 	}
-	// Read the caller's path, not the resolved one: containment is the
-	// only new behavior, everything else (permissions, races, empty
-	// files) behaves exactly as the os.ReadFile it replaces.
-	return os.ReadFile(path)
+	return nil
+}
+
+// errFileTooLarge is the sentinel inside readWithinDirCapped's over-cap
+// refusal, so callers map it with errors.Is instead of string matching.
+var errFileTooLarge = errors.New("file too large")
+
+// cappedReadPreOpenHook, when non-nil (tests only), fires inside
+// readWithinDirCapped after the containment proof and BEFORE the open —
+// the exact window in which a growing file defeats a caller's stat
+// pre-check (2026-08-26 audit P2 growth drill). Nil in production
+// (previewGuardHook precedent).
+var cappedReadPreOpenHook func(path string)
+
+// readWithinDirCapped is readWithinDir's bounded twin (2026-08-26 audit
+// P2): the same containment proof, then open + LimitReader(max+1) so a
+// file that grows PAST max between a caller's size pre-check and this
+// read is refused with errFileTooLarge instead of being allocated whole
+// — readWithinDir's bare os.ReadFile made that growth window a gate
+// bypass into an unbounded allocation. max+1 distinguishes "exactly at
+// cap" (kept byte-identical) from "over cap" (refused): no silent
+// truncation, ever. The error names the path, the bytes actually read
+// (always max+1 — proof the growth beyond never entered memory), and
+// the cap.
+func readWithinDirCapped(projectRoot, dir, path string, max int64) ([]byte, error) {
+	if err := resolveWithinDir(projectRoot, dir, path); err != nil {
+		return nil, err
+	}
+	if cappedReadPreOpenHook != nil {
+		// Test seam (nil in production): grows the file inside the exact
+		// stat→read window deterministically — no sleeps.
+		cappedReadPreOpenHook(path)
+	}
+	f, err := os.Open(path) // the caller's path, like readWithinDir
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("read %s: %w: %dB read exceeds the %dB cap", path, errFileTooLarge, len(data), max)
+	}
+	return data, nil
 }
 
 // readFileWithin is the readFileFull-shaped twin of readWithinDir for

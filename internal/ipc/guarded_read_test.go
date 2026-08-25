@@ -10,8 +10,13 @@ package ipc
 // walk refuses any symlinked component from the first under-root node to
 // the file itself. Site-level symlink regressions live next to the recall
 // and learner rigs (m6_test.go / learner_test.go).
+// The capped twin (2026-08-26 audit P2) pins the stat→read growth window:
+// at-cap reads stay byte-identical, a file grown past the cap refuses
+// with the errFileTooLarge sentinel after reading only max+1 bytes, and
+// every escape shape refuses identically through the shared prologue.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -343,5 +348,82 @@ func TestGuardedWritePath(t *testing.T) {
 	}
 	if err := guardProjectWritePath(linkRoot, filepath.Join(linkRoot, ".odo", "memory.md")); err != nil {
 		t.Errorf("write beneath symlinked registration root: %v", err)
+	}
+}
+
+// --- readWithinDirCapped (2026-08-26 audit P2) --------------------------
+
+// TestGuardedReadCappedPlainFile: the capped twin reads an in-cap file
+// byte-identically — AT the cap included, since max+1 reads classify
+// only "over", never truncate "exactly at".
+func TestGuardedReadCappedPlainFile(t *testing.T) {
+	root, dir, plain, _, _ := guardedFixture(t)
+	const body = "plain body\n"
+	b, err := readWithinDirCapped(root, dir, plain, int64(len(body)))
+	if err != nil {
+		t.Fatalf("at-cap read: %v — exactly-at-cap must succeed", err)
+	}
+	if string(b) != body {
+		t.Errorf("content = %q, want the file verbatim", b)
+	}
+	// One byte past the cap: refused with the sentinel, file named.
+	if _, err := readWithinDirCapped(root, dir, plain, int64(len(body))-1); err == nil || !errors.Is(err, errFileTooLarge) {
+		t.Errorf("one-over-cap read: err = %v, want the errFileTooLarge sentinel", err)
+	}
+}
+
+// TestGuardedReadCappedGrowthRace is the audit P2 drill: a file under
+// the cap at a caller's stat pre-check that keeps growing lands in the
+// read as an unbounded allocation unless the read itself is bounded.
+// The cappedReadPreOpenHook seam grows the file after the containment
+// proof and before the open — the exact stat→read window,
+// deterministically (no sleeps); the twin must refuse with the sentinel
+// having read only max+1 bytes: the megabyte beyond never allocates.
+func TestGuardedReadCappedGrowthRace(t *testing.T) {
+	root, dir, _, _, _ := guardedFixture(t)
+	grower := filepath.Join(dir, "grow.md")
+	if err := os.WriteFile(grower, []byte("small"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const maxB = 16
+	armed := true
+	cappedReadPreOpenHook = func(path string) {
+		if !armed || path != grower {
+			return
+		}
+		armed = false // one-shot: fires exactly inside this read's window
+		if err := os.WriteFile(grower, []byte(strings.Repeat("x", 1<<20)), 0o644); err != nil {
+			t.Errorf("grow fixture: %v", err)
+		}
+	}
+	defer func() { cappedReadPreOpenHook = nil }()
+
+	_, err := readWithinDirCapped(root, dir, grower, maxB)
+	if err == nil || !errors.Is(err, errFileTooLarge) {
+		t.Fatalf("grew-past-stat read: err = %v, want the errFileTooLarge sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "17B read exceeds the 16B cap") {
+		t.Errorf("err = %q, want the bounded byte count (17B read, cap 16B) proving the megabyte growth never allocated", err)
+	}
+	if armed {
+		t.Error("seam never fired — the drill tested nothing")
+	}
+}
+
+// TestGuardedReadCappedEscape: the capped twin shares resolveWithinDir
+// with readWithinDir, so the escape refusal and the raw missing-file
+// error land identically (the full escape matrix above already guards
+// the shared prologue).
+func TestGuardedReadCappedEscape(t *testing.T) {
+	root, dir, _, external, _ := guardedFixture(t)
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(external, link); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	if _, err := readWithinDirCapped(root, dir, link, 64); err == nil || !strings.Contains(err.Error(), "symlink escapes") {
+		t.Errorf("escaping symlink via capped read: err = %v, want the containment refusal", err)
+	}
+	if _, err := readWithinDirCapped(root, dir, filepath.Join(dir, "absent.md"), 64); err == nil || !os.IsNotExist(err) {
+		t.Errorf("missing file via capped read: err = %v, want the raw not-exist os error", err)
 	}
 }

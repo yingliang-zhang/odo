@@ -29,6 +29,7 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -401,27 +402,33 @@ func (s *Server) readLoopTaskFile(rel string) (string, error) {
 	}
 	// Size pre-check (2026-08-25 audit P1): os.Stat follows links, so the
 	// measured bytes are the ones the read below would pull — a multi-GB
-	// tasks file is refused BEFORE it lands in memory whole. Swap-after-
-	// stat stays outside the model (the resolution-time convention);
-	// the post-read check remains the authority.
+	// tasks file is refused BEFORE it lands in memory whole. It is only
+	// the cheap first refusal for HONEST large files (no open): the
+	// capped read below is the authority, since a file growing past the
+	// cap inside the stat→read window used to sail through this gate
+	// into an unbounded os.ReadFile (2026-08-26 audit P2).
 	if fi, err := os.Stat(abs); err == nil && fi.Size() > settleDiffCapBytes {
 		return "", fmt.Errorf("file %q over the %dB cap", rel, settleDiffCapBytes)
 	}
-	// Contained read (same audit P1): the old bare os.ReadFile followed a
+	// Contained, bounded read (containment: same audit P1; bound: the
+	// P2 growth window above): the old bare os.ReadFile followed a
 	// checked-in symlink (tasks.md -> ~/.ssh/config) straight out of the
 	// project despite the textual escape rule above — the gap class the
 	// read guard closes for .odo/wiki. Anchored at resolvedRoot (canon
-	// anchor inside readWithinDir), matching handleReadFile's semantics.
+	// anchor inside readWithinDirCapped), matching handleReadFile's
+	// semantics.
 	anchor := s.resolvedRoot
 	if anchor == "" {
 		anchor = s.projectRoot
 	}
-	data, err := readWithinDir(s.projectRoot, anchor, abs)
+	data, err := readWithinDirCapped(s.projectRoot, anchor, abs, settleDiffCapBytes)
 	if err != nil {
+		if errors.Is(err, errFileTooLarge) {
+			// Same refusal shape as the stat gate: the actor sees "file
+			// too large" however the cap tripped — never a truncation.
+			return "", fmt.Errorf("file %q over the %dB cap", rel, settleDiffCapBytes)
+		}
 		return "", fmt.Errorf("file %q: %w", rel, err)
-	}
-	if len(data) > settleDiffCapBytes {
-		return "", fmt.Errorf("file %q over the %dB cap", rel, settleDiffCapBytes)
 	}
 	return string(data), nil
 }
