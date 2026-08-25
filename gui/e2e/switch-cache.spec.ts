@@ -85,9 +85,16 @@ test("failed repeat switch restores the pre-flip view and stays retryable", asyn
   await expect.poll(mainLandings, { timeout: 8_000 }).toBe(landedBefore + 1);
 
   // Daemon unreachable for the target: the optimistic flip renders……
-  await setBootstrapCtl(page, { fail: true });
+  // The delay pins a window the reject cannot land inside (the mock
+  // consults it before the fail knob), so the synchronous sample below is
+  // as race-free as test 1's. Without it the immediate reject can roll the
+  // flip back before the sample lands under load.
+  await setBootstrapCtl(page, { delayMs: 2500, fail: true });
   await feat.click();
   expect(await page.locator(FEAT_MARKER).count()).toBeGreaterThan(0);
+  // Release the delay for later bootstraps; the already-held one still
+  // fails when its timer fires (the web-first banner wait covers that).
+  await setBootstrapCtl(page, { delayMs: 0 });
 
   // …then the failure rolls the whole view back — pre-flip journal,
   // workstream attribution, error explained in the banner. The banner is

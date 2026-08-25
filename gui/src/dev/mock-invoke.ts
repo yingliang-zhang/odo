@@ -26,13 +26,16 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
   switch (cmd) {
     // ---------- Lifecycle ----------
     case "bootstrap": {
-      if (fx.bootstrapCtl.fail) {
-        throw new Error("bootstrap: connection refused (knob)");
-      }
+      // Delay BEFORE fail: a failure armed WITH a delay still holds for the
+      // delay — tests pin a deterministic sampling window around a pending
+      // failure instead of racing an immediate reject (switch-cache test 2).
       if (fx.bootstrapCtl.delayMs > 0) {
         const { promise, resolve } = Promise.withResolvers<void>();
         setTimeout(resolve, fx.bootstrapCtl.delayMs);
         await promise;
+      }
+      if (fx.bootstrapCtl.fail) {
+        throw new Error("bootstrap: connection refused (knob)");
       }
       const payload = fx.makeBootstrap(args?.projectRoot ?? undefined, args?.workstreamId ?? undefined);
       // Serve-time landing signal: the fail/delay knobs were already
