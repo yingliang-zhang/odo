@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo Deep Audit #2 — 10 Findings Fixed (post-diff-#50)
 
 ## Session context

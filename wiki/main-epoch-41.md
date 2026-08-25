@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo Diff #51/#52 Resolution and Daemon Restart
 
 Session span: journal seq 14603–14838. Context: two pending diffs in the odo governance queue; diff 52 produced by auto-revision of diff 51.

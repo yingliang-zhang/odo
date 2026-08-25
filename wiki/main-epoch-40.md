@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Diff52 Verify Block: Idempotent-Retry Contract Regression in `server.go` Heal Path
 
 ## Context

@@ -1,9 +1,0 @@
-# GUI Keep-Alive, Switching & Render Performance
-
-- Keep-alive panels: six panels converted to export default memo, stay mounted across tab switches (state preserved), and refetch on inactive→active transition with uncommitted-draft protection; App threads an active prop into Wiki, Memory, Ledger, Skills panels (main-epoch-32) (main-epoch-34)
-- Pipeline memo stabilized by keying on the last relevant review/memory event seq, so hidden Ledger no longer re-derives on every events-array replacement (main-epoch-34)
-- Keep-alive side effect that broke a spec: hidden Changes panels stay in the DOM and ListDiffs has no status filter, so resolved diffs still render as record cards — page-global getByText assertions can never reach count 0 and must be scoped to the .review-inbox container (main-epoch-31)
-- Switch-perf root causes fixed: full journal replay per switch replaced by per-conversation LRU cache (stale-while-revalidate) plus afterSeq incremental bootstrap (seq-merge lossless because the journal is append-only); daemon handlePollEvents/handlePendingCounts restructured to snapshot under s.mu and run SQL/file I/O outside the lock; generateAgentsMD skips writing when content is identical (UI-epoch-8)
-- Optimistic workstream flip with real rollback: restores workstream/name refs via a rootFlipped boolean computed at flip time, guards in-flight handleSend responses by captured (cid, root), and avoids ref mutation inside state updaters (UI-epoch-8)
-- Quiet-tick zero re-render: diffs semantic equality check, memo'd ChatSurface, frozen unstable props, and prev-bail setState comparators on App aggregate writes (main-epoch-30) (main-epoch-33)
-- sameAutoDistillList fixed to consume semantics (each a-item matched at most once, mirroring sameIdList) — a real contract hole with duplicate ids, though unreachable in production because snapshotBadgeState builds from a Go map with unique keys (main-epoch-33)

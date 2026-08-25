@@ -1,0 +1,10 @@
+# Memory Distill Reliability
+
+- applyResolvedBatch journals an intent marker before performing writes (marker-first), closing the crash window where a batch is applied but never marked consumed; the window had earlier been deemed benign via replay-idempotent dedupe but was closed properly (main-epoch-39) (main-epoch-38)
+- Heal walks all stranded markers with per-layer newest-wins claims and runs both on the consumed-refusal path and in the auto-gate sweep — otherwise a distill right after a crash retires the stranded marker unhealed (main-epoch-39)
+- Reconciled retry contract in the consumed branch: a heal that actually completes the epoch's work this call returns Applied: true (legacy idempotency test); a heal no-op (bootstrap already healed, already persisted, foreign state) keeps rejecting (crash-window pin) (main-epoch-40)
+- memMu is a single-writer leaf lock (untouching s.mu/acceptMu): applyResolvedBatch re-folds the journal under lock for pending/consumed recheck, closing double-consumption and cross-workstream last-rename-wins for batches and pins (main-epoch-38)
+- AGENTS.md carries only the stable protocol (Project Rules + odo-todo contract); dynamic memory/pins copy blocks were removed so the model sees exactly one receipted copy (main-epoch-38)
+- Invariant 1: agents never write memory — rejectMemoryPaths refuses memory paths for every actor including a human Accept click; wiki content lands via distill/commitWiki instead of agent diffs (main-epoch-24)
+- Prompt-token estimation is ASCII/4 + 1 per non-ASCII rune after CJK was underestimated ~3x; the 87K breaker margin is pinned by an 85K-pass/110K-block e2e test, and Escalation.InputTokens records re-paid prompt cost of abandoned requests on each bump (main-epoch-23)
+- Fold commit is atomic (epoch bump + marker in one transaction via store.CommitFold); the contradiction pass skips supersededBanner-prefixed notes; ListEvents narrowing falls back to full history for no-pin markers so pre-pin legacy batches stay rescuable (main-epoch-23)

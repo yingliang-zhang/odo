@@ -1,0 +1,10 @@
+# E2E Testing & Flake Control
+
+- Mock failure windows must be deterministic: delayMs is evaluated before the fail branch in mock-invoke so fail+delay holds then rejects; specs arm {delayMs, fail: true} to pin the window instead of single-shot sampling (main-epoch-37)
+- Specs wait for a landing signal (the per-workstream bootstrapLandings counter proving fail/delay knobs were consulted) before arming failures — arming raced the mock's fixed invoke delay and produced a misattributed app-bug report (main-epoch-28)
+- Timeout conventions are single-family: poll-loop-dependent assertions get 12s (POLL/REFRESH), RPC-local assertions keep the 5s default; introducing a second convention (e.g. test.setTimeout) was refused across five sibling specs (main-epoch-30) (main-epoch-29)
+- The load-flake mechanism: POLL_INTERVAL_IDLE_MS 1500 + 5s expect window under 117-test post-restart load crushes a single poll tick; fixes are window extension or expect.poll for eventually-stable contracts like scroll-into-view (main-epoch-29) (main-epoch-36)
+- Fix-one-audit-all is standard practice: every flake fix sweeps same-class sites repo-wide (arm-fail-then-immediate-sample sites, stale assertion sites after guard-text change, assertion coupling after the cap 3->2 change) (main-epoch-37) (main-epoch-28) (main-epoch-35)
+- Verify environment isolation: scratch HOME plus t.Setenv scrubbing of PLAYWRIGHT_BROWSERS_PATH and GOTELEMETRYDIR pinned under TMPDIR; one missing isolation (TestAutoLandStartedRowsAbsentBeforeSpend had no HOME arming, 23/24 neighbors did) caused a terminal verify block (main-epoch-26) (main-epoch-25)
+- runVerifyGate auto-provisions gui/node_modules by symlinking from the main checkout into worktrees (worktrees contain only tracked files), covering both autoLand and loop call sites — codifying the agents' manual workaround (UI-epoch-4)
+- Repo-wide gofmt drift (new gofmt flagging blank-line-after-top-level-decl across untouched files) is deliberately deferred; the project gate is build+vet only, and residual flags were proven pre-existing rather than diff-introduced (main-epoch-36) (main-epoch-40)

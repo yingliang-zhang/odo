@@ -1,0 +1,9 @@
+# Blocked-Diff Triage & Recovery
+
+- Triage procedure for a verify_failed block: verify archive identity (sha16 across journal rows and disk recompute), attribute patch paths, then same-bytes reproduction; if identical bytes pass, rerunning verify+panel has zero information gain — manual Accept (main-epoch-36) (main-epoch-29) (main-epoch-26)
+- verify_failed false-positive taxonomy: load flake (verify concurrent with idle distill log-flood), environmental defects (unscrubbed PLAYWRIGHT_BROWSERS_PATH; worktree missing gui/node_modules), stale assertion after behavior change, and deterministic spec design flaws — deterministic failures reproduce in same-bytes reruns, flakes do not (main-epoch-36) (main-epoch-26) (UI-epoch-4) (main-epoch-37)
+- Terminal blocked states (reason not panel_infra) are never auto-retried by the daemon; manual Accept is the only unlock, exercised for diffs #37, 40, 41, 42, 45, 46, 48, 49, 52 (main-epoch-22) (main-epoch-26) (main-epoch-41)
+- Diffs with no terminal verdict re-fire panel on every daemon restart via recover-pending-diffs; reject a superseded diff (e.g. #51 superseded by its auto-revise product #52) before accepting the replacement so a restart cannot re-fire it (main-epoch-41)
+- Reject deletes the candidate worktree — the .diff archive was the sole survivor until rescueResolvedWorktree began snapshotting the pre-retire delta whenever it differs from the archived patch (rejected bytes are never rewritten) (main-epoch-35) (main-epoch-36)
+- .odo/diffs/ is an append-only, sweeper-exempt archive (accepted patches included), not a live queue needing cleanup (main-epoch-22) (main-epoch-36)
+- Ledger corrections are journal-native: review_action ledger_correction rows carrying corrects_seq document overturned decisions, while store statuses are deliberately left unchanged per append-only convention (main-epoch-27) (main-epoch-20)

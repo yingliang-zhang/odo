@@ -1,13 +1,13 @@
 # Project Wiki Index
 
 ## Topics
-- Auto-Land Pipeline & Panel Governance → topics/auto-land-governance.md
-- Verify Gate Diagnosis & Test Flake Triage → topics/verify-gate-flake-triage.md
-- Worktree & Accept-Path Safety → topics/worktree-accept-safety.md
-- Symlink & Path Containment Security → topics/path-containment-security.md
-- Daemon Deployment & Binary Currency → topics/daemon-deployment.md
-- Daemon Resilience & Crash Recovery → topics/daemon-resilience.md
-- GUI Keep-Alive, Switching & Render Performance → topics/gui-performance.md
-- Steer Queue, Advisory Slashes & Composer → topics/steer-queue-advisories.md
-- GUI Chrome Defects & Wave Features → topics/gui-chrome.md
-- MoA Request Receipts & Design-MoA → topics/moa-receipts-design.md
+- Auto-Land Gate Doctrine → topics/auto-land-gate.md
+- Panel Voting & Adjudication → topics/panel-adjudication.md
+- Blocked-Diff Triage & Recovery → topics/blocked-diff-triage.md
+- Deployment & Daemon Lifecycle → topics/deployment.md
+- Memory Distill Reliability → topics/memory-distill.md
+- Path & Symlink Containment → topics/path-containment.md
+- Run & Workstream Lifecycle → topics/run-lifecycle.md
+- GUI Rendering & State → topics/gui-architecture.md
+- E2E Testing & Flake Control → topics/e2e-testing.md
+- Verify Observability & Hardening → topics/verify-hardening.md
