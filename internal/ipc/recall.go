@@ -222,7 +222,7 @@ func recallWikiNotesCapped(projectRoot, workstreamName, query string, retracted 
 		if retracted[name] {
 			continue // journaled cause:"retract" (curated/human paths only — candidates never filter): record stays, injection stops
 		}
-		content, err := readWithinDir(wikiDir, m)
+		content, err := readWithinDir(projectRoot, wikiDir, m)
 		if err != nil {
 			continue // note vanished between glob and read — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): skip it
 		}

@@ -354,7 +354,7 @@ func TestAgentsMDRefusesSymlinkWrite(t *testing.T) {
 	if got, err := os.ReadFile(external); err != nil || string(got) != sentinel {
 		t.Errorf("external AGENTS.md target = %q, %v, want the sentinel bytes untouched", got, err)
 	}
-	if !strings.Contains(buf.String(), "refusing to write through symlink") {
+	if !strings.Contains(buf.String(), "symlinked component") {
 		t.Errorf("log = %q, want the skipped write logged", buf.String())
 	}
 }

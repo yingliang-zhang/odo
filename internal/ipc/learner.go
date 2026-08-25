@@ -61,7 +61,7 @@ func sha16(b []byte) string {
 // Injection-only: the apply write path reads the file in FULL instead
 // (ADR-0003 inv 3, no silent truncation).
 func readProjectMemory(projectRoot string) string {
-	b, err := readWithinDir(filepath.Join(projectRoot, ".odo"), filepath.Join(projectRoot, ".odo", memoryFileName))
+	b, err := readWithinDir(projectRoot, filepath.Join(projectRoot, ".odo"), filepath.Join(projectRoot, ".odo", memoryFileName))
 	if err != nil {
 		return ""
 	}
@@ -73,7 +73,7 @@ func readProjectMemory(projectRoot string) string {
 // escapes the project .odo tree (2026-08-24 tri-review P0, same guard as
 // readProjectMemory: the archive is committable project-side surface).
 func readArchive(projectRoot string) string {
-	b, err := readWithinDir(filepath.Join(projectRoot, ".odo"), filepath.Join(projectRoot, ".odo", archiveFileName))
+	b, err := readWithinDir(projectRoot, filepath.Join(projectRoot, ".odo"), filepath.Join(projectRoot, ".odo", archiveFileName))
 	if err != nil {
 		return ""
 	}
@@ -100,7 +100,7 @@ func readFileFull(path string) string {
 // plain os.ReadFile while project-side targets refuse escaping symlinks.
 type ruleSnapshotTarget struct {
 	layer, source, path string
-	base                string // non-empty ⇒ readWithinDir(base, path)
+	base                string // non-empty ⇒ readWithinDir(s.projectRoot, base, path)
 	cap                 int
 }
 
@@ -166,7 +166,7 @@ func (s *Server) journalRuleSnapshots(ctx context.Context, convID int64, events 
 		// external bytes into the journal.
 		raw, err := os.ReadFile(tg.path)
 		if tg.base != "" {
-			raw, err = readWithinDir(tg.base, tg.path)
+			raw, err = readWithinDir(s.projectRoot, tg.base, tg.path)
 		}
 		content, capped := "", false
 		if err == nil {

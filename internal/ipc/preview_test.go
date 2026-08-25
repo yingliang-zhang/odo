@@ -15,6 +15,7 @@ package ipc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -221,6 +222,22 @@ func TestPreviewRouteFlow(t *testing.T) {
 	srv := previewTargetServer(t)
 
 	sent := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/preview " + srv.URL + " check the header layout"})
+
+	// 2026-08-25 review P1: BOTH spawn legs name the pinned exact-version
+	// spec — a mutable range here would auto-install new registry code
+	// with daemon privileges on every screenshot.
+	if log, err := os.ReadFile(os.Getenv("MOCK_NPX_LOG")); err != nil {
+		t.Fatalf("npx never ran: %v", err)
+	} else {
+		for _, want := range []string{
+			"-y " + previewPlaywrightSpec + " --version",
+			"-y " + previewPlaywrightSpec + " screenshot",
+		} {
+			if !strings.Contains(string(log), want) {
+				t.Errorf("npx log = %q, want %q", log, want)
+			}
+		}
+	}
 	var p struct {
 		Attachments []string `json:"attachments"`
 		ImageSha16  []string `json:"image_sha16"`
@@ -525,7 +542,7 @@ if [ "$last" = "--version" ]; then
 fi
 echo "browserType.launch: Executable doesn't exist at /x/chrome" >&2
 exit 1
-`, "npx playwright install chromium"},
+`, "odo preview-setup"},
 		{"chromium missing (browserType)", `#!/bin/sh
 last=""
 for a in "$@"; do last="$a"; done
@@ -534,7 +551,18 @@ if [ "$last" = "--version" ]; then
 fi
 echo "browserType.launch: Target closed" >&2
 exit 1
-`, "npx playwright install chromium"},
+`, "odo preview-setup"},
+		{"cli not provisioned (ENOTCACHED at the offline provision check)", `#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--version" ]; then
+  echo "npm error code ENOTCACHED" >&2
+  echo "npm error Can't find a cached version of playwright" >&2
+  exit 1
+fi
+echo "the capture spawn must never run unprovisioned" >&2
+exit 1
+`, "not provisioned"},
 		{"connection refused", `#!/bin/sh
 last=""
 for a in "$@"; do last="$a"; done
@@ -589,8 +617,8 @@ exit 1
 			}
 		}
 	}
-	if userMsgs != 4 || agentErrs != 4 {
-		t.Errorf("journaled %d user_message + %d agent_error, want 4 each (attempt + refusal pair)", userMsgs, agentErrs)
+	if userMsgs != 5 || agentErrs != 5 {
+		t.Errorf("journaled %d user_message + %d agent_error, want 5 each (attempt + refusal pair)", userMsgs, agentErrs)
 	}
 	if rec.Model != "" {
 		t.Error("gateway called after a capture failure")
@@ -652,6 +680,55 @@ cp "$MOCK_PNG_FIXTURE" "$last"
 	}
 }
 
+// TestPreviewSetup: the explicit provisioning phase (2026-08-25 review
+// P1) resolves the PINNED CLI and installs chromium in two npx calls with
+// the network ALLOWED (no offline pin — the capture legs carry that), and
+// propagates a failing step as a non-zero exit.
+func TestPreviewSetup(t *testing.T) {
+	t.Run("provisions the pinned CLI plus chromium", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir()) // hermes npx must not win over the mock
+		log := filepath.Join(t.TempDir(), "npx.log")
+		t.Setenv("MOCK_NPX_LOG", log)
+		installMockNpx(t, `#!/bin/sh
+echo "setup-npx:$*" >> "$MOCK_NPX_LOG"
+if [ "$npm_config_offline" = "true" ]; then
+  echo "offline pin leaked into the network-allowed phase" >> "$MOCK_NPX_LOG"
+fi
+exit 0
+`)
+		var out, errb bytes.Buffer
+		if code := PreviewSetup(&out, &errb); code != 0 {
+			t.Fatalf("PreviewSetup = %d (%s)", code, errb.String())
+		}
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatalf("npx never ran: %v", err)
+		}
+		text := string(raw)
+		if strings.Contains(text, "offline pin leaked") {
+			t.Errorf("setup env must stay network-allowed (explicit install phase): %q", text)
+		}
+		for _, want := range []string{
+			"-y " + previewPlaywrightSpec + " --version",
+			previewPlaywrightSpec + " install chromium",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("setup log = %q, want %q", text, want)
+			}
+		}
+	})
+
+	t.Run("a failing step fails the command", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("MOCK_NPX_LOG", filepath.Join(t.TempDir(), "npx.log"))
+		installMockNpx(t, "#!/bin/sh\nexit 3\n")
+		var out, errb bytes.Buffer
+		if code := PreviewSetup(&out, &errb); code == 0 {
+			t.Error("failing npx exited 0 — provisioning failure must propagate")
+		}
+	})
+}
+
 // TestPreviewShotReceiptFields is the unit-level guard of the receipt
 // naming the journalled wire-load: sha16 vs full-sha256 of the same bytes.
 func TestPreviewShotReceiptFields(t *testing.T) {
@@ -703,7 +780,7 @@ echo $! > "$MOCK_CHILD_PID"
 exec sleep 30
 `)
 	ctx := context.Background()
-	_, err := runPreviewScreenshot(ctx, "http://localhost:1420", filepath.Join(t.TempDir(), "out.png"))
+	_, err := runPreviewScreenshot(ctx, t.TempDir(), "http://localhost:1420", filepath.Join(t.TempDir(), "out.png"))
 	if err == nil || !strings.Contains(err.Error(), "timed out after") {
 		t.Fatalf("err = %v, want the deadline-class error", err)
 	}
@@ -1025,7 +1102,7 @@ func TestPreviewBlockedCaptureDropsFile(t *testing.T) {
 	t.Cleanup(func() { previewGuardHook = old })
 
 	out := filepath.Join(t.TempDir(), "out.png")
-	_, err := runPreviewScreenshot(context.Background(), "http://localhost:1420", out)
+	_, err := runPreviewScreenshot(context.Background(), t.TempDir(), "http://localhost:1420", out)
 	if err == nil || !strings.Contains(err.Error(), "preview refused the capture") || !strings.Contains(err.Error(), "192.0.2.1:1") {
 		t.Fatalf("err = %v, want the boundary refusal naming 192.0.2.1:1", err)
 	}
@@ -1203,7 +1280,7 @@ func TestPreviewLiveGuardedCapture(t *testing.T) {
 		t.Cleanup(srv.Close)
 
 		out := filepath.Join(t.TempDir(), "live-out.png")
-		_, err := runPreviewScreenshot(context.Background(), srv.URL+"/", out)
+		_, err := runPreviewScreenshot(context.Background(), t.TempDir(), srv.URL+"/", out)
 		if err == nil || !strings.Contains(err.Error(), "preview refused the capture") {
 			t.Fatalf("err = %v, want the boundary refusal", err)
 		}
@@ -1240,8 +1317,11 @@ func TestPreviewLiveGuardedCapture(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 
-		out := filepath.Join(t.TempDir(), "live-ok.png")
-		shot, err := runPreviewScreenshot(context.Background(), srv.URL, out)
+		// The read-back is containment-checked against the passed root —
+		// point it at the tempdir holding the capture.
+		root := t.TempDir()
+		out := filepath.Join(root, "live-ok.png")
+		shot, err := runPreviewScreenshot(context.Background(), root, srv.URL, out)
 		if err != nil {
 			t.Fatalf("loopback capture failed: %v", err)
 		}

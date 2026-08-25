@@ -752,13 +752,13 @@ func (s *Server) generateAgentsMD() {
 	// file; a link pointing deeper inside .odo/ still reads.
 	odoDir := filepath.Join(s.projectRoot, ".odo")
 	// Append project memory if it exists.
-	if data, err := readWithinDir(odoDir, filepath.Join(odoDir, "memory.md")); err == nil {
+	if data, err := readWithinDir(s.projectRoot, odoDir, filepath.Join(odoDir, "memory.md")); err == nil {
 		b.WriteString("## Memory\n\n")
 		b.Write(data)
 		b.WriteString("\n\n")
 	}
 	// Append pins if they exist.
-	if data, err := readWithinDir(odoDir, filepath.Join(odoDir, "pins.md")); err == nil {
+	if data, err := readWithinDir(s.projectRoot, odoDir, filepath.Join(odoDir, "pins.md")); err == nil {
 		b.WriteString("## Pins\n\n")
 		b.Write(data)
 		b.WriteString("\n\n")
@@ -768,12 +768,14 @@ func (s *Server) generateAgentsMD() {
 	// (and the mtime churn it triggers in file watchers — OMP included)
 	// when the derived content is identical.
 	out := b.String()
-	// Write-side twin of the read guards (2026-08-24 tri-review P0): the
-	// daemon owns AGENTS.md, so no legitimate symlink exists at the path —
-	// os.WriteFile would follow an implanted one onto an external file.
-	// Refuse every link (no resolution needed) and log only.
-	if fi, lerr := os.Lstat(agentsPath); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
-		log.Printf("ipc: generate AGENTS.md: refusing to write through symlink %s", agentsPath)
+	// Write-side twin of the read guards (2026-08-24 tri-review P0; walk
+	// extended 2026-08-25 review P0): the daemon owns AGENTS.md, so no
+	// legitimate symlink exists at the path — and none at any component
+	// below the project root either, or a checked-in .odo -> /external
+	// link would have os.WriteFile follow it onto an external file.
+	// Refuse and log only.
+	if gerr := guardProjectWritePath(s.projectRoot, agentsPath); gerr != nil {
+		log.Printf("ipc: generate AGENTS.md: %v", gerr)
 		return
 	}
 	if existing, err := os.ReadFile(agentsPath); err == nil && string(existing) == out {
@@ -4139,7 +4141,7 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// tool-output fragments before the actual summary. The prompt now
 	// forbids this, but the strip is defense-in-depth.
 	note = stripPreamble(note)
-	if err := os.WriteFile(wikiPath, []byte(note), 0o644); err != nil {
+	if err := writeFileWithin(s.projectRoot, wikiPath, note, 0o644); err != nil {
 		return Response{}, fmt.Errorf("distill: write wiki note: %w", err)
 	}
 
@@ -4729,7 +4731,9 @@ func (s *Server) handleLedger(ctx context.Context, req Request) (Response, error
 	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
 		return Response{}, fmt.Errorf("ledger: %w", err)
 	}
-	return Response{MemoryContent: readFileFull(ledgerPath(s.projectRoot))}, nil
+	// Contained (2026-08-25 review P0): .odo is committable — a planted
+	// symlink must not render external bytes as the daemon's ledger.
+	return Response{MemoryContent: readFileWithin(s.projectRoot, filepath.Join(s.projectRoot, ".odo"), ledgerPath(s.projectRoot))}, nil
 }
 
 // handleContradictions returns the conversation's note-retraction events
@@ -5078,7 +5082,7 @@ func (s *Server) handleReadWiki(_ context.Context, req Request) (Response, error
 	rel, relErr := filepath.Rel(s.projectRoot, clean)
 	if relErr == nil && !strings.HasPrefix(rel, "..") &&
 		(rel == "wiki" || strings.HasPrefix(rel, "wiki"+string(filepath.Separator))) {
-		b, err := readWithinDir(filepath.Join(s.projectRoot, "wiki"), clean)
+		b, err := readWithinDir(s.projectRoot, filepath.Join(s.projectRoot, "wiki"), clean)
 		if err != nil {
 			return Response{}, fmt.Errorf("read_wiki: %s: %w", clean, err)
 		}
@@ -5189,7 +5193,10 @@ func (s *Server) handleReadMemory(ctx context.Context, req Request) (Response, e
 		return Response{}, fmt.Errorf("read_memory: %w", err)
 	}
 	resp := Response{
-		MemoryContent:  readFileFull(filepath.Join(s.projectRoot, ".odo", memoryFileName)),
+		// Contained (2026-08-25 review P0): same planted-symlink model as
+		// the prompt-side readers — the panel must never render external
+		// bytes as the project's rules.
+		MemoryContent:  readFileWithin(s.projectRoot, filepath.Join(s.projectRoot, ".odo"), filepath.Join(s.projectRoot, ".odo", memoryFileName)),
 		ArchiveContent: readArchive(s.projectRoot),
 	}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -5365,7 +5372,7 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 	// harmless duplicate append-only line, never a loss).
 	if memChanged && memPlan.archiveAppend != "" {
 		arcPath := filepath.Join(s.projectRoot, ".odo", archiveFileName)
-		if err := writeFileAtomic(arcPath, readArchive(s.projectRoot)+memPlan.archiveAppend, 0o644); err != nil {
+		if err := writeFileWithin(s.projectRoot, arcPath, readArchive(s.projectRoot)+memPlan.archiveAppend, 0o644); err != nil {
 			return Response{}, fmt.Errorf("apply_memory: append archive: %w", err)
 		}
 	}
@@ -5378,12 +5385,12 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 	// convergence). Skill writes are idempotent by overwrite (atomic rename,
 	// same content = no-op).
 	for _, sw := range skillWrites {
-		if err := writeFileAtomic(sw.path, sw.content, 0o644); err != nil {
+		if err := writeFileWithin(s.projectRoot, sw.path, sw.content, 0o644); err != nil {
 			return Response{}, fmt.Errorf("apply_memory: write skill %s: %w", sw.path, err)
 		}
 	}
 	if memChanged {
-		if err := writeFileAtomic(memPath, memPlan.content, 0o644); err != nil {
+		if err := writeFileWithin(s.projectRoot, memPath, memPlan.content, 0o644); err != nil {
 			return Response{}, fmt.Errorf("apply_memory: write memory.md: %w", err)
 		}
 	}
@@ -6118,7 +6125,7 @@ func (s *Server) handleReadSkill(ctx context.Context, req Request) (Response, er
 	home, _ := os.UserHomeDir()
 	base := filepath.Base(name)
 	projectSkills := filepath.Join(s.projectRoot, ".odo", "skills")
-	if b, err := readWithinDir(projectSkills, filepath.Join(projectSkills, base)); err == nil {
+	if b, err := readWithinDir(s.projectRoot, projectSkills, filepath.Join(projectSkills, base)); err == nil {
 		return Response{OK: true, SkillContent: string(b)}, nil
 	} else if !os.IsNotExist(err) {
 		return Response{}, fmt.Errorf("read_skill: %w", err)
@@ -6145,12 +6152,20 @@ func (s *Server) handleUpdateSkill(ctx context.Context, req Request) (Response, 
 		return Response{}, fmt.Errorf("update_skill: content is required")
 	}
 	// Determine target dir by explicit scope (not path inference).
+	projectScope := req.Scope != "global"
 	var dir string
-	if req.Scope == "global" {
+	if projectScope {
+		dir = filepath.Join(s.projectRoot, ".odo", "skills")
+		// Guard BEFORE MkdirAll: a symlinked .odo or skills dir would pull
+		// the mkdir and the write outside the committable tree
+		// (2026-08-25 review P0). Global ~/.odo/skills stays unguarded —
+		// outside the threat model, dotfiles links legitimate.
+		if err := guardProjectWritePath(s.projectRoot, filepath.Join(dir, "skill.md")); err != nil {
+			return Response{}, fmt.Errorf("update_skill: %w", err)
+		}
+	} else {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".odo", "skills")
-	} else {
-		dir = filepath.Join(s.projectRoot, ".odo", "skills")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Response{}, fmt.Errorf("update_skill: mkdir: %w", err)
@@ -6164,7 +6179,11 @@ func (s *Server) handleUpdateSkill(ctx context.Context, req Request) (Response, 
 		return Response{}, fmt.Errorf("update_skill: invalid name: %s", req.Name)
 	}
 	target := filepath.Join(dir, fname)
-	if err := writeFileAtomic(target, req.Text, 0o644); err != nil {
+	if projectScope {
+		if err := writeFileWithin(s.projectRoot, target, req.Text, 0o644); err != nil {
+			return Response{}, fmt.Errorf("update_skill: write: %w", err)
+		}
+	} else if err := writeFileAtomic(target, req.Text, 0o644); err != nil {
 		return Response{}, fmt.Errorf("update_skill: write: %w", err)
 	}
 	return Response{OK: true}, nil
@@ -6225,6 +6244,12 @@ func (s *Server) handleSaveAttachment(ctx context.Context, req Request) (Respons
 	data, err := base64.StdEncoding.DecodeString(req.Data)
 	if err != nil {
 		return Response{}, fmt.Errorf("save_attachment: base64 decode: %w", err)
+	}
+	// Contained write (2026-08-25 review P0): the clipboard bytes land
+	// under the committable .odo tree — a planted symlink must not pull
+	// them onto an external path.
+	if err := guardProjectWritePath(s.projectRoot, dest); err != nil {
+		return Response{}, fmt.Errorf("save_attachment: %w", err)
 	}
 	if err := os.WriteFile(dest, data, 0o644); err != nil {
 		return Response{}, fmt.Errorf("save_attachment: write: %w", err)

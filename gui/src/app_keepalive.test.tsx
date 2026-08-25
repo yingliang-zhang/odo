@@ -100,20 +100,23 @@ describe("keep-alive panel tabs (tri-review P1 #5, 2026-08-24)", () => {
     expect(input).toHaveValue("keepme");
 
     // Switching to Changes renders it for the first time (lazy mount)…
-    fireEvent.click(screen.getByRole("tab", { name: /^changes$/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^changes/i }));
     await screen.findByText(/No pending diffs/i);
     // …while the wiki panel is hidden, NOT unmounted: the very same DOM
     // node stays connected under a hidden wrapper, draft text intact.
     expect(input.isConnected).toBe(true);
     expect(input.closest("[hidden]")).not.toBeNull();
 
-    // Switching back re-shows the same instance — no refetch, no state loss.
+    // Switching back re-shows the same instance — draft intact — and (the
+    // one contract change of 2026-08-25 review P1) re-reads the selection
+    // exactly ONCE on the activation edge: hidden keep-alive panels used
+    // to serve stale bytes forever; state survives, bytes refresh.
     const readWikiCallsBefore = stubApi("readWiki").mock.calls.length;
-    fireEvent.click(screen.getByRole("tab", { name: /^wiki$/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
     const again = screen.getByLabelText("Search wiki") as HTMLInputElement;
     expect(again).toBe(input);
     expect(again).toHaveValue("keepme");
-    expect(stubApi("readWiki").mock.calls.length).toBe(readWikiCallsBefore);
+    expect(stubApi("readWiki").mock.calls.length).toBe(readWikiCallsBefore + 1);
   });
 
   it("first switch to a tab mounts it exactly once (no eager mounting)", async () => {
@@ -123,13 +126,121 @@ describe("keep-alive panel tabs (tri-review P1 #5, 2026-08-24)", () => {
     // before that, no memory proposals fetch for the panel body (the
     // badge refresh is a separate App-level call) and no files read.
     expect(stubApi("readMemory").mock.calls.length).toBe(0);
-    fireEvent.click(screen.getByRole("tab", { name: /^memory$/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^memory/i }));
     await screen.findByText(/No pending memory proposals/i);
-    // Back and forth: still one mount's worth of proposal batch fetches
-    // (one from the panel, plus App's badge read).
+    // Back and forth: the second activation re-fetches the batch exactly
+    // once (2026-08-25 review P1 activation refresh) — never zero, the
+    // old stale-forever behavior, and never a remount's reload.
     const batchCalls = stubApi("memoryProposals").mock.calls.length;
-    fireEvent.click(screen.getByRole("tab", { name: /^wiki$/i }));
-    fireEvent.click(screen.getByRole("tab", { name: /^memory$/i }));
-    expect(stubApi("memoryProposals").mock.calls.length).toBe(batchCalls);
+    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^memory/i }));
+    expect(stubApi("memoryProposals").mock.calls.length).toBe(batchCalls + 1);
+  });
+});
+
+describe("panel activation refresh (2026-08-25 review P1)", () => {
+  // Every keep-alive panel used to freeze at first-mount bytes: a daemon
+  // distill adding an epoch note, a new memory batch, a ledger append, or
+  // an externally added skill never surfaced because nothing refetched.
+  // On the inactive→active edge each panel re-pulls its surface — these
+  // cases pin the four contracts down on the real App.
+
+  const note = (n: number) => ({
+    path: `/tmp/proj/wiki/main-epoch-${n}.md`,
+    name: `main-epoch-${n}`,
+    epoch: n,
+    modified_at: "2026-01-01T00:00:00Z",
+  });
+
+  it("wiki: notes added while hidden surface on re-activation", async () => {
+    stubApi("listWiki").mockResolvedValue({ ok: true, wiki_notes: [note(1)] });
+    render(<App />);
+    await screen.findByLabelText("Search wiki"); // bootstrap settled
+    await screen.findByText("main-epoch-1");
+    expect(screen.queryByText("main-epoch-2")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: /^changes/i }));
+    await screen.findByText(/No pending diffs/i);
+    // The daemon writes a new epoch note while the tab is hidden…
+    stubApi("listWiki").mockResolvedValue({ ok: true, wiki_notes: [note(1), note(2)] });
+    const listCalls = stubApi("listWiki").mock.calls.length;
+    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
+    await screen.findByText("main-epoch-2");
+    expect(stubApi("listWiki").mock.calls.length).toBe(listCalls + 1);
+  });
+
+  it("memory: an unchanged batch keeps un-applied Accept/Reject decisions", async () => {
+    stubApi("memoryProposals").mockResolvedValue({
+      ok: true,
+      epoch: 2,
+      seq: 5,
+      consumed: false,
+      proposals: [{ target: "memory.md", rule: "Always test before done." }],
+    });
+    render(<App />);
+    await screen.findByLabelText("Search wiki");
+    fireEvent.click(screen.getByRole("tab", { name: /^memory/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^reject$/i }));
+    expect((await screen.findByRole("button", { name: /^reject$/i })).className).toContain("selected");
+
+    // Hidden, then re-activated against the SAME batch identity: the
+    // refresh must not wipe the in-flight decision.
+    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^memory/i }));
+    await screen.findByText("Always test before done.");
+    expect((await screen.findByRole("button", { name: /^reject$/i })).className).toContain("selected");
+  });
+
+  it("memory: a NEW batch identity resets decisions to the default", async () => {
+    const batch = (epoch: number) => ({
+      ok: true as const,
+      epoch,
+      seq: 5,
+      consumed: false,
+      proposals: [{ target: "memory.md", rule: "Always test before done." }],
+    });
+    stubApi("memoryProposals").mockResolvedValue(batch(2));
+    render(<App />);
+    await screen.findByLabelText("Search wiki");
+    fireEvent.click(screen.getByRole("tab", { name: /^memory/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^reject$/i }));
+    expect((await screen.findByRole("button", { name: /^reject$/i })).className).toContain("selected");
+
+    // The NEXT distill epoch proposes a fresh batch while hidden:
+    // decisions for the old one are stale news — default wins.
+    stubApi("memoryProposals").mockResolvedValue(batch(3));
+    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^memory/i }));
+    await screen.findByText("Always test before done.");
+    expect((await screen.findByRole("button", { name: /^reject$/i })).className).not.toContain("selected");
+  });
+
+  it("ledger: ledger.md appended while hidden re-reads on re-activation", async () => {
+    stubApi("ledger").mockResolvedValue({ ok: true, memory_content: "LEDGER-V1" });
+    render(<App />);
+    await screen.findByLabelText("Search wiki");
+    fireEvent.click(screen.getByRole("tab", { name: /^ledger/i }));
+    await screen.findByText("LEDGER-V1");
+
+    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
+    stubApi("ledger").mockResolvedValue({ ok: true, memory_content: "LEDGER-V2" });
+    fireEvent.click(screen.getByRole("tab", { name: /^ledger/i }));
+    await screen.findByText("LEDGER-V2");
+  });
+
+  it("skills: skills added while hidden re-list on re-activation", async () => {
+    stubApi("listSkills").mockResolvedValue({ ok: true, skills: [] });
+    render(<App />);
+    await screen.findByLabelText("Search wiki");
+    fireEvent.click(screen.getByRole("tab", { name: /^skills/i }));
+    await screen.findByText(/No skills yet/i);
+
+    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
+    stubApi("listSkills").mockResolvedValue({
+      ok: true,
+      skills: [{ name: "fresh-skill", scope: "project", path: "/tmp/proj/.odo/skills/fresh-skill.md" }],
+    });
+    fireEvent.click(screen.getByRole("tab", { name: /^skills/i }));
+    await screen.findByText("fresh-skill");
   });
 });

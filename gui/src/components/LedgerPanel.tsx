@@ -1,19 +1,26 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { errorMessage, ledger } from "../api";
 import type { EventPayload, OdoEvent } from "../types";
 import { cn } from "../lib/utils";
 import LoadingInline from "./LoadingInline";
 
 // M9 P3: the ledger view, lifted out of the memory review modal into the
-// right panel's Ledger tab. The panel remounts on each tab visit, so every
-// visit re-reads .odo/ledger.md (the daemon is the only writer) — same
-// cadence as the modal's tab-activation refetch. conversationId is part of
-// the panel-tab wiring contract; the ledger itself is project-global.
+// right panel's Ledger tab. The panel stays mounted under App's keep-alive
+// tabs; the activation edge (below) re-reads .odo/ledger.md (the daemon is
+// the only writer) on every re-visit — same cadence the pre-keep-alive
+// remount gave it. conversationId is part of the panel-tab wiring
+// contract; the ledger itself is project-global.
 interface Props {
   conversationId: number;
   // M11 P1: the ledger read routes to this project's daemon; null =
   // bridge default. App remounts the panel on project switch.
   projectRoot?: string | null;
+  // Keep-alive activation edge (2026-08-25 review P1): App mounts the
+  // panel once and CSS-hides it; ledger.md (daemon-written at distill,
+  // curate, apply, loop receipts) keeps appending while hidden. On
+  // inactive→active the file re-reads. App also FREEZES the events prop
+  // while hidden, so this memo'd subtree renders zero times off-tab.
+  active: boolean;
   // A-P0 #1 (Guardian risk taxonomy): the conversation's journaled events —
   // App's bootstrap replay + poll appends are the ONLY source (no new IPC);
   // the review_action rows are rendered below as decision cells (codex
@@ -264,10 +271,14 @@ function ReviewRow({ event }: { event: OdoEvent }) {
   );
 }
 
-function LedgerPanel({ projectRoot, events }: Props) {
+function LedgerPanel({ projectRoot, events, active }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // fetchNonce bumps re-run the read; the activation edge is the only
+  // producer besides "never" (the read is silent — the old content stays
+  // until the fresh one lands).
+  const [fetchNonce, setFetchNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,7 +297,14 @@ function LedgerPanel({ projectRoot, events }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [projectRoot]);
+  }, [projectRoot, fetchNonce]);
+
+  // Activation edge (the Props contract).
+  const wasActiveRef = useRef(active);
+  useEffect(() => {
+    if (!wasActiveRef.current && active) setFetchNonce((n) => n + 1);
+    wasActiveRef.current = active;
+  }, [active]);
 
   // Newest first — the same scan ComputeAutonomy does, rendered.
   const reviewRows = useMemo(

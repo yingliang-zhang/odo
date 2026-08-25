@@ -1967,8 +1967,8 @@ func TestSymlinkProjectRuleFilesDegrade(t *testing.T) {
 		"readArchive":            readArchive(root),
 		"readPins":               readPins(root),
 		"readIndex":              readIndex(root),
-		"readFileWithin(pins)":   readFileWithin(odoDir, pinsPath(root)),
-		"readFileWithin(memory)": readFileWithin(odoDir, filepath.Join(odoDir, memoryFileName)),
+		"readFileWithin(pins)":   readFileWithin(root, odoDir, pinsPath(root)),
+		"readFileWithin(memory)": readFileWithin(root, odoDir, filepath.Join(odoDir, memoryFileName)),
 	} {
 		if got != "" {
 			t.Errorf("%s = %q (secret leak: %v), want \"\" — escaping symlinks degrade like absent files", name, got, strings.Contains(got, secret))
@@ -1979,7 +1979,7 @@ func TestSymlinkProjectRuleFilesDegrade(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(odoDir, "other.md"), []byte("kept\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := readFileWithin(odoDir, filepath.Join(odoDir, "other.md")); got != "kept\n" {
+	if got := readFileWithin(root, odoDir, filepath.Join(odoDir, "other.md")); got != "kept\n" {
 		t.Errorf("readFileWithin legit neighbor = %q, want the file verbatim", got)
 	}
 }

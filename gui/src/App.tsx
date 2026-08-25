@@ -502,9 +502,27 @@ export default function App() {
   // daemon's poll/bootstrap contract — pipeline.ts documents it) + the
   // pending-diff list. No latch: the memo's inputs are exactly the two
   // surfaces those facts arrive on.
+  // 2026-08-25 review P2: the memo used to re-derive on EVERY events
+  // array — each 350ms streaming batch rescanned the full journal and
+  // produced a fresh pipelineStateByDiff Map, defeating memo() on the
+  // hidden keep-alive ReviewInbox. The derivation reads only
+  // review_action / memory_update rows, so fingerprint the stream by
+  // conversation + last relevant seq: unrelated streaming events (text,
+  // tool calls) reuse the previous result reference, zero waste.
+  const pipelineScan = useMemo(() => {
+    let last = 0;
+    for (const e of events) {
+      if (e.type === "review_action" || e.type === "memory_update") last = e.seq;
+    }
+    return `${conversation?.id ?? 0}:${last}`;
+  }, [events, conversation?.id]);
   const pipelineStates = useMemo(
     () => derivePipelineStates(events, diffs.map((d) => d.id), appSettings?.auto_apply === "main"),
-    [events, diffs, appSettings],
+    // `events` is consumed through its pipelineScan fingerprint: an
+    // identical (conversation, last relevant seq) pair derives identical
+    // states because the derivation ignores every other event type.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pipelineScan, diffs, appSettings],
   );
   // Per-diff lookup for the review surfaces: the Changes card and the
   // Review inbox lock their human-action buttons while the auto-land
@@ -548,6 +566,20 @@ export default function App() {
       }
     }
   }, [loopStates, appSettings, conversation?.id]);
+
+  // 2026-08-25 review P2 (keep-alive Ledger): `events` is a fresh array
+  // on every poll and streaming batch; handing it straight to the
+  // CSS-hidden keep-alive LedgerPanel would bust its memo each tick —
+  // filter+sort over the full journal for a surface nobody sees. While
+  // the ledger tab is hidden, freeze the prop at the array from its last
+  // active commit (the ref only follows active-tab commits); the subtree
+  // renders ZERO times while hidden and re-syncs in the activation
+  // render, where the panel's own activation edge also refetches
+  // ledger.md.
+  const ledgerEventsRef = useRef(events);
+  useEffect(() => {
+    if (panelTab === "ledger") ledgerEventsRef.current = events;
+  });
 
   // Background runs: daemon-reported running workstreams minus the one in
   // view. Invisible from the chat surface (panel sessions, other ws) — the
@@ -2175,6 +2207,7 @@ export default function App() {
               conversationId={conversation.id}
               projectRoot={project?.root_path ?? null}
               focus={wikiFocus}
+              active={panelTab === "wiki"}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>
@@ -2189,6 +2222,7 @@ export default function App() {
               focus={memoryFocus}
               onApplied={handleMemoryReviewClosed}
               projectRoot={project?.root_path ?? null}
+              active={panelTab === "memory"}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>
@@ -2200,9 +2234,11 @@ export default function App() {
               key={`${project?.root_path ?? "default"}:${conversation.id}`}
               conversationId={conversation.id}
               projectRoot={project?.root_path ?? null}
+              active={panelTab === "ledger"}
               // A-P0 #1: the review-action cells read the same journaled
-              // events ChatSurface renders — live, no extra IPC.
-              events={events}
+              // events ChatSurface renders — live, no extra IPC. Frozen
+              // while hidden (2026-08-25 review P2, ledgerEventsRef).
+              events={panelTab === "ledger" ? events : ledgerEventsRef.current}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>
@@ -2213,6 +2249,7 @@ export default function App() {
             <SkillsPanel
               key={project?.root_path ?? "default"}
               projectRoot={project?.root_path ?? null}
+              active={panelTab === "skills"}
             />
           )}
         </div>

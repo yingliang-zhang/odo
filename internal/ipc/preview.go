@@ -20,9 +20,12 @@ package ipc
 //     whole capture post-hoc (previewBoundaryRefusal);
 //   - per-shot browser lifecycle (spawn → navigate → capture → exit under a
 //     45s cap; the guard dies with it) — no persistent browser, no profile
-//     reuse beyond the npx cache (npx's own registry resolution warms in a
-//     separate unguarded spawn, then runs only-if-cached — tooling traffic
-//     is not capture traffic);
+//     reuse beyond the npx cache. The CLI is pinned to an exact npm
+//     version and BOTH capture spawns (provision check + shot) run with
+//     npm_config_offline=true: no daemon code path ever fetches,
+//     resolves, or executes a registry artifact (2026-08-25 review P1).
+//     Provisioning the pinned CLI + chromium into the cache is a human
+//     action: `odo preview-setup`;
 //   - no auto-anything: no auto-retry, no auto screenshot after errors or
 //     after auto-land.
 // Residual v1 boundary, honestly remaining after the guard: in-page
@@ -67,9 +70,23 @@ const (
 	// previewDefaultPrompt is the analysis prompt when the user gives none.
 	previewDefaultPrompt = "Analyze this screenshot as a UI reviewer: list layout issues, style inconsistencies, overflow/misalignment. Be specific with locations."
 
-	// previewInstallHint is the exact first-run prerequisite command shown
-	// on a missing-browser failure.
-	previewInstallHint = "PATH=~/.hermes/node/bin:$PATH npx playwright install chromium"
+	// previewPlaywrightVersion pins the exact CLI every capture runs
+	// (2026-08-25 review P1): npm versions are immutable once published,
+	// so a full-version spec can never resolve to new code — unlike the
+	// old ^1 range, which executed whatever the registry's newest 1.x
+	// was, with daemon privileges, on EVERY screenshot. Must match
+	// gui/package-lock.json's playwright (the e2e suite pins the same
+	// build); bump the two together, after reviewing the CLI's own
+	// changelog.
+	previewPlaywrightVersion = "1.62.1"
+
+	// previewPlaywrightSpec is the npx spec form of the pin.
+	previewPlaywrightSpec = "playwright@" + previewPlaywrightVersion
+
+	// previewSetupHint is the remediation named by provisioning failures:
+	// the EXPLICIT, network-allowed setup phase (2026-08-25 review P1) —
+	// capture spawns themselves pin npm offline and never fetch.
+	previewSetupHint = "odo preview-setup"
 )
 
 // previewChildTimeout bounds the whole per-shot subprocess (npx resolution,
@@ -202,6 +219,12 @@ func resolvePreviewFinalURL(ctx context.Context, rawURL string) (string, error) 
 // the extraction and stays).
 func attachmentDir(root string) (string, error) {
 	dir := filepath.Join(root, ".odo", "attachments")
+	// Guard BEFORE MkdirAll (2026-08-25 review P0): a symlinked .odo or
+	// attachments dir would pull the mkdir outside the project and make
+	// the store resolve external paths as captures.
+	if err := guardProjectWritePath(root, filepath.Join(dir, "probe.png")); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -663,15 +686,15 @@ type previewShot struct {
 }
 
 // runPreviewScreenshot performs one per-shot capture under
-// previewChildTimeout, in two spawns (2026-08-24, finding-2 fallout):
-// warmPreviewCLI resolves/warms the playwright CLI over npm's unguarded
-// direct path, then the guarded screenshot spawn runs behind the
-// capture-time previewGuard (argv + env proxy, npm pinned offline) —
-// navigate → capture → exit, and one blocked request refuses the whole
-// capture post-hoc. Failures map to readable chat errors (missing
-// node/npx, missing chromium with the install command, navigation timeout,
-// refused host).
-func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot, error) {
+// previewChildTimeout, in two spawns: checkPreviewCLIProvisioned verifies
+// the pinned CLI resolves from cache only (offline, no fetch — 2026-08-25
+// review P1), then the guarded screenshot spawn runs behind the
+// capture-time previewGuard (argv + env proxy, npm likewise pinned
+// offline) — navigate → capture → exit, and one blocked request refuses
+// the whole capture post-hoc. Failures map to readable chat errors
+// (missing node/npx, unprovisioned CLI, missing chromium, navigation
+// timeout, refused host).
+func runPreviewScreenshot(ctx context.Context, projectRoot, rawURL, out string) (previewShot, error) {
 	npx, err := resolvePreviewNpx()
 	if err != nil {
 		return previewShot{}, err
@@ -682,7 +705,7 @@ func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot,
 	// stale-cache registry fetch keeps the direct-network path it had
 	// before the guard existed (tooling traffic is not capture traffic),
 	// so the guarded phase-2 spawn can pin npm offline.
-	if err := warmPreviewCLI(cctx, npx); err != nil {
+	if err := checkPreviewCLIProvisioned(cctx, npx); err != nil {
 		return previewShot{}, err
 	}
 	// Finding 2: the loopback-only capture guard starts BEFORE the capture
@@ -698,7 +721,7 @@ func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot,
 		previewGuardHook(guard)
 	}
 	cmd := exec.CommandContext(cctx, npx,
-		"-y", "playwright@^1", "screenshot",
+		"-y", previewPlaywrightSpec, "screenshot",
 		"--viewport-size="+previewViewport,
 		"--wait-for-timeout="+previewSettleMs,
 		// Finding 2: the guard rides the argv too, not just the env (the ODO_PREVIEW_LIVE
@@ -733,7 +756,10 @@ func runPreviewScreenshot(ctx context.Context, rawURL, out string) (previewShot,
 	if err != nil {
 		return previewShot{}, classifyPreviewFailure(cctx, err, string(output))
 	}
-	data, rerr := os.ReadFile(out)
+	// Contained read-back (2026-08-25 review P0): the capture lands under
+	// the committable .odo/attachments — a planted symlink must not swap
+	// external bytes into the vision leg between capture and read.
+	data, rerr := readWithinDir(projectRoot, filepath.Dir(out), out)
 	if rerr != nil {
 		return previewShot{}, fmt.Errorf("preview: read captured screenshot: %w", rerr)
 	}
@@ -754,9 +780,14 @@ func classifyPreviewFailure(ctx context.Context, err error, output string) error
 	tail := lastLines(output, 3)
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
-		return fmt.Errorf("preview screenshot timed out after %ds (navigation timeout, hung page, or the first run still downloading playwright — a warm-cache retry usually succeeds) — is the dev server serving and responsive?", int(previewChildTimeout/time.Second))
+		return fmt.Errorf("preview screenshot timed out after %ds (navigation timeout or a hung page) — is the dev server serving and responsive?", int(previewChildTimeout/time.Second))
+	case strings.Contains(output, "ENOTCACHED"):
+		// npm offline cache miss: the pinned CLI was never provisioned on
+		// this machine. The daemon refuses to fetch (2026-08-25 review
+		// P1) — provisioning is the explicit setup phase.
+		return fmt.Errorf("preview's pinned CLI (%s) is not provisioned and captures run offline — run: %s", previewPlaywrightSpec, previewSetupHint)
 	case strings.Contains(output, "Executable doesn't exist") || strings.Contains(output, "browserType.launch"):
-		return fmt.Errorf("preview's headless chromium is not installed — run: %s", previewInstallHint)
+		return fmt.Errorf("preview's headless chromium is not installed — run: %s", previewSetupHint)
 	case strings.Contains(output, "net::ERR_CONNECTION_REFUSED"):
 		return fmt.Errorf("preview could not reach the URL (connection refused) — is the dev server running?")
 	case strings.Contains(output, "net::ERR_NAME_NOT_RESOLVED"):
@@ -768,33 +799,76 @@ func classifyPreviewFailure(ctx context.Context, err error, output string) error
 	}
 }
 
-// warmPreviewCLI is phase 1 of the capture's two-spawn shape: a plain
-// `npx -y playwright@^1 --version` with the DAEMON-style child env (no
-// guard proxy vars). It exists so the guarded phase-2 spawn can pin
-// npm_config_offline=true: npm honors generic proxy env vars, and an
-// npm registry fetch routing through the guard would 403-die and read as
-// a bogus loopback-boundary refusal (the guard polices CAPTURE traffic;
-// npx resolution is daemon tooling that went direct before the guard
-// existed). Phase 1 warms/resolves exactly like the pre-guard single
-// spawn did — including the cold first-run download path the timeout
-// class already names — and phase 2 then resolves only-if-cached with
-// zero egress attempts possible (ODO_PREVIEW_LIVE-driven, 2026-08-24).
-// Failures reuse the capture's classify family — the messages (missing
-// node/npx, first-run-download timeout) describe this spawn precisely.
-func warmPreviewCLI(ctx context.Context, npx string) error {
-	cmd := exec.CommandContext(ctx, npx, "-y", "playwright@^1", "--version")
-	// Same per-shot lifecycle guarantee as the capture spawn (finding D3):
-	// kill the whole process GROUP on the deadline.
+// checkPreviewCLIProvisioned is phase 1 of the capture's two-spawn shape:
+// `npx -y <pinned> --version` with npm pinned OFFLINE (2026-08-25 review
+// P1). The old form ran `playwright@^1` unguarded — every screenshot
+// resolved the mutable range against the registry and auto-installed the
+// newest 1.x with daemon privileges; the cold path even shared the 45s
+// capture budget. Now the spec is an exact immutable version and the
+// spawn can only reuse the cache: a warm cache answers in milliseconds;
+// a cold one fails fast with ENOTCACHED, which classifyPreviewFailure
+// maps to the explicit, network-allowed setup phase (`odo preview-setup`)
+// instead of a daemon-side fetch. Same per-shot lifecycle guarantee as
+// the capture spawn (finding D3): kill the whole process GROUP on the
+// deadline.
+func checkPreviewCLIProvisioned(ctx context.Context, npx string) error {
+	cmd := exec.CommandContext(ctx, npx, "-y", previewPlaywrightSpec, "--version")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	cmd.Env = previewChildEnv()
+	cmd.Env = previewOfflineToolingEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return classifyPreviewFailure(ctx, err, string(output))
 	}
 	return nil
+}
+
+// previewOfflineToolingEnv is previewChildEnv with npm pinned offline:
+// every /preview spawn (provision check AND guarded shot) runs
+// only-if-cached, so the daemon holds zero network-fetch paths for its
+// own tooling (2026-08-25 review P1). The setup command is the single
+// network-allowed leg — see PreviewSetup.
+func previewOfflineToolingEnv() []string {
+	base := previewChildEnv()
+	env := make([]string, 0, len(base)+1)
+	for _, e := range base {
+		if strings.HasPrefix(strings.ToLower(e), "npm_config_offline=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env, "npm_config_offline=true")
+}
+
+// PreviewSetup is the explicit, network-allowed provisioning phase for
+// /preview (2026-08-25 review P1): resolve the PINNED playwright CLI into
+// the npx cache, then install its chromium. Captures never do either —
+// they run the pinned spec only-if-cached — so a cold environment comes
+// here with human intent. Output streams live; returns the CLI-style
+// exit code (0 OK, 1 setup failure, 2 usage).
+func PreviewSetup(stdout, stderr io.Writer) int {
+	npx, err := resolvePreviewNpx()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	for _, args := range [][]string{
+		{"-y", previewPlaywrightSpec, "--version"},
+		{previewPlaywrightSpec, "install", "chromium"},
+	} {
+		fmt.Fprintf(stdout, "+ npx %s\n", strings.Join(args, " "))
+		cmd := exec.Command(npx, args...)
+		cmd.Env = previewChildEnv()
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(stderr, "preview-setup: npx %s: %v\n", strings.Join(args, " "), err)
+			return 1
+		}
+	}
+	fmt.Fprintln(stdout, "preview setup complete — /preview now runs fully offline against the pinned CLI")
+	return 0
 }
 
 // exitCode extracts an *exec.ExitError's code (-1 when the error carries
@@ -904,7 +978,7 @@ func (s *Server) handlePreviewQuery(ctx context.Context, c *store.Conversation, 
 	}
 	urlSum := sha256.Sum256([]byte(rawURL))
 	out := filepath.Join(attachDir, fmt.Sprintf("preview-%d-%s.png", time.Now().Unix(), hex.EncodeToString(urlSum[:4])))
-	shot, shotErr := runPreviewScreenshot(ctx, finalURL, out)
+	shot, shotErr := runPreviewScreenshot(ctx, s.projectRoot, finalURL, out)
 
 	msgPayload := slashUserMessagePayload("/preview", text, receipt, scope, len(system)+len(prompt), conv)
 	// P1 (2026-08-24): when the 30x chain moved, the wire URL differs from

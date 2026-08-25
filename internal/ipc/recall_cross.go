@@ -114,7 +114,7 @@ func recallTopicPages(projectRoot, query string) (body string, items []recallIte
 		if base == "index.md" {
 			continue // wiki/index.md rides its own always-injected layer
 		}
-		content, err := readWithinDir(topicsDir, m)
+		content, err := readWithinDir(projectRoot, topicsDir, m)
 		if err != nil {
 			continue // page vanished between glob and read — or a planted symlink escaping wiki/topics (2026-08-24 tri-review P0): skip it
 		}
@@ -301,7 +301,7 @@ func recallSiblingNote(ctx context.Context, st *store.Store, projectRoot, curren
 		if !okEpoch {
 			continue
 		}
-		content, err := readWithinDir(wikiDir, m)
+		content, err := readWithinDir(projectRoot, wikiDir, m)
 		if err != nil {
 			continue // note vanished between glob and read — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): skip it
 		}

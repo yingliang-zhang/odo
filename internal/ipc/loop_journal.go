@@ -307,11 +307,17 @@ func loopRowSpend(payload map[string]interface{}) int {
 // at/under the cap return ("", "", false) and ride the journal inline.
 func (s *Server) loopSpillBody(loopID int64, name, body string) (relPath, sha string, err error) {
 	dir := filepath.Join(s.projectRoot, ".odo", "loop", strconv.FormatInt(loopID, 10))
+	relPath = filepath.Join(".odo", "loop", strconv.FormatInt(loopID, 10), name)
+	abs := filepath.Join(s.projectRoot, relPath)
+	// Contained spill (2026-08-25 review P0): the loop artifact tree lives
+	// under the committable .odo/ — a planted symlink must not pull the
+	// mkdir or the raw os.WriteFile (follows links) outside the project.
+	if err := guardProjectWritePath(s.projectRoot, abs); err != nil {
+		return "", "", err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", err
 	}
-	relPath = filepath.Join(".odo", "loop", strconv.FormatInt(loopID, 10), name)
-	abs := filepath.Join(s.projectRoot, relPath)
 	if err := os.WriteFile(abs, []byte(body), 0o600); err != nil {
 		return "", "", err
 	}

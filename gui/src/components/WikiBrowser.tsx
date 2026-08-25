@@ -51,6 +51,13 @@ interface Props {
   // repeated request for the same path re-select it even when the browser
   // stayed mounted (object identity changes per request).
   focus?: { path: string; n: number } | null;
+  // Keep-alive activation edge (2026-08-25 review P1): App mounts the
+  // browser once and CSS-hides it afterwards; the daemon-side surfaces it
+  // renders (epoch notes, retractions, topic pages) keep changing while
+  // hidden. On the inactive→active edge the panel re-fetches every list
+  // and drops cached page bodies; the search query and the selected path
+  // deliberately survive (draft state), only bytes are refreshed.
+  active: boolean;
 }
 
 // Compact relative timestamp for the note list ("45s ago", "3h ago", …).
@@ -75,7 +82,7 @@ function relativeTime(iso: string): string {
 // M9 P3: the browser renders inline inside the right panel's Wiki tab; the
 // list and reader stack vertically and scroll independently while the tabs
 // and search stay pinned. Closing is the panel's job (⌘J).
-function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
+function WikiBrowser({ conversationId, projectRoot, focus, active }: Props) {
   const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -101,6 +108,11 @@ function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
     return cache.current.get(path)?.toLowerCase().includes(lower) ?? false;
   };
 
+  // listNonce bumps re-run the list fetch wave; readerNonce forces the
+  // reader past its cache hit. Both are bumped by the activation edge
+  // below (the ONLY producers besides "never").
+  const [listNonce, setListNonce] = useState(0);
+  const [readerNonce, setReaderNonce] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -129,7 +141,7 @@ function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [conversationId, projectRoot]);
+  }, [conversationId, projectRoot, listNonce]);
 
   // M5: topics are project-wide (not per-workstream) — fetched lazily on
   // the first switch to the Topics tab.
@@ -148,6 +160,25 @@ function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
       cancelled = true;
     };
   }, [tab, topics, topicsError, projectRoot]);
+
+  // Activation edge (the Props contract): the panel renders from
+  // daemon-side files that keep changing while it is hidden — a fresh
+  // distill adds epoch notes, a curate rewrites topic pages, the learner
+  // edits memory. On inactive→active, re-fetch the lists, drop EVERY
+  // cached page body (stale bytes are worse than a re-pull), force the
+  // reader to re-fetch its selection, and clear the topics cache so the
+  // lazy Topics effect re-pulls on demand. Selection + query stay.
+  const wasActiveRef = useRef(active);
+  useEffect(() => {
+    if (!wasActiveRef.current && active) {
+      cache.current.clear();
+      setListNonce((n) => n + 1);
+      setReaderNonce((n) => n + 1);
+      setTopics(null);
+      setTopicsError(null);
+    }
+    wasActiveRef.current = active;
+  }, [active]);
 
   // External focus requests (the fold chip's "Open note") select the note
   // directly — the reader below picks the selection up through `selected`.
@@ -185,7 +216,7 @@ function WikiBrowser({ conversationId, projectRoot, focus }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [selected, projectRoot]);
+  }, [selected, projectRoot, readerNonce]);
 
   // M12: a qualified citation names its note exactly — the click jumps to
   // it, cross-workstream included. A bare legacy citation jumps to the

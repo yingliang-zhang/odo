@@ -43,6 +43,13 @@ interface Props {
   // M11 P1: all reads/writes route to this project's daemon; null = bridge
   // default. App remounts the panel on project switch.
   projectRoot?: string | null;
+  // Keep-alive activation edge (2026-08-25 review P1): App mounts the
+  // panel once and CSS-hides it; new distill epochs propose new batches,
+  // the panel-gated auto-apply consumes them, and memory.md/pins.md move
+  // — all while hidden. On inactive→active the batch and (when open) the
+  // files re-fetch. Draft protection: an unchanged batch identity keeps
+  // the user's in-flight Accept/Reject decisions (see refreshBatch).
+  active: boolean;
 }
 
 // Split the mixed proposals array into per-target sections while keeping
@@ -200,7 +207,7 @@ function SkillProposalRow({
   );
 }
 
-function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot }: Props) {
+function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active }: Props) {
   const [tab, setTab] = useState<"proposals" | "files">(focus?.tab ?? "proposals");
   // External sub-tab requests. This effect is what keeps deep links
   // working under the panel's keep-alive tabs: the panel now survives
@@ -235,6 +242,10 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
     return () => { mountedRef.current = false; };
   }, []);
 
+  // Mirror of the batch state for refresh-time identity comparison (the
+  // async callback below can't read the closure's stale `batch`).
+  const batchRef = useRef<PendingMemoryBatch | null>(null);
+
   // (Re-)load the latest batch: actionable when unconsumed (the human
   // fallback), read-only outcome view once consumed (the panel-gated path
   // decides inside the distill; a human apply counts too). No batch for
@@ -245,7 +256,7 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
       if (!mountedRef.current) return;
       if ((resp.epoch ?? 0) > 0 && (resp.proposals?.length ?? 0) > 0) {
         const consumed = resp.consumed ?? false;
-        setBatch({
+        const next = {
           epoch: resp.epoch ?? 0,
           seq: resp.seq ?? 0,
           proposals: resp.proposals ?? [],
@@ -254,7 +265,20 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
           applyActor: resp.apply_actor,
           accepted: resp.accepted ?? [],
           rejected: resp.rejected ?? [],
-        });
+        };
+        // Draft protection (2026-08-25 review P1): an activation-driven
+        // refresh that returns the SAME batch identity must not wipe the
+        // user's in-flight Accept/Reject toggles — only a genuinely new
+        // or newly-consumed batch resets decisions to the default.
+        const prev = batchRef.current;
+        const sameBatch =
+          prev != null &&
+          prev.epoch === next.epoch &&
+          prev.seq === next.seq &&
+          prev.consumed === next.consumed &&
+          prev.proposals.length === next.proposals.length;
+        batchRef.current = next;
+        setBatch(next);
         // M9: reject-by-default for skills — stricter trust posture because
         // skills inject into every prompt. User must actively accept. A
         // consumed batch is read-only; the decision set is irrelevant.
@@ -264,8 +288,9 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
             if (p.target === "skills") skillRejects.add(i);
           });
         }
-        setRejects(skillRejects);
+        setRejects((cur) => (sameBatch ? cur : skillRejects));
       } else {
+        batchRef.current = null;
         setBatch(null);
         setRejects(new Set());
       }
@@ -307,6 +332,18 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
   useEffect(() => {
     if (tab === "files") void loadFiles();
   }, [tab, loadFiles]);
+
+  // Activation edge (the Props contract): refetch the batch, and the
+  // files when that sub-tab is open. refreshBatch keeps in-flight
+  // decisions for an unchanged batch identity.
+  const wasActiveRef = useRef(active);
+  useEffect(() => {
+    if (!wasActiveRef.current && active) {
+      void refreshBatch();
+      if (tab === "files") void loadFiles();
+    }
+    wasActiveRef.current = active;
+  }, [active, refreshBatch, loadFiles, tab]);
 
   const handleDecision = (index: number, accept: boolean) => {
     setRejects((prev) => {

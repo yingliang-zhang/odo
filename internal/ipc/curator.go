@@ -110,7 +110,7 @@ func allEpochNotes(projectRoot string) ([]epochNote, error) {
 		if len(notes) >= curatorNoteCap {
 			break
 		}
-		content, err := readWithinDir(wikiDir, filepath.Join(wikiDir, cn.note.name+".md"))
+		content, err := readWithinDir(projectRoot, wikiDir, filepath.Join(wikiDir, cn.note.name+".md"))
 		if err != nil {
 			continue // vanished between stat and read — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): skip it
 		}
@@ -422,6 +422,13 @@ func renderTopicPage(title string, bullets []string) string {
 // generations.
 func writeTopicPages(projectRoot string, topics []topic) ([]string, error) {
 	dir := filepath.Join(projectRoot, "wiki", "topics")
+	// Guard BEFORE MkdirAll/Glob/Remove: a symlinked wiki/ or topics/
+	// would otherwise have the stale sweep deleting the target's *.md
+	// files and MkdirAll creating real dirs outside the project
+	// (2026-08-25 review P0).
+	if err := guardProjectWritePath(projectRoot, filepath.Join(dir, "page.md")); err != nil {
+		return nil, fmt.Errorf("create topics dir: %w", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create topics dir: %w", err)
 	}
@@ -437,7 +444,7 @@ func writeTopicPages(projectRoot string, topics []topic) ([]string, error) {
 	var paths []string
 	for _, t := range topics {
 		path := filepath.Join(dir, t.Slug+".md")
-		if err := writeFileAtomic(path, renderTopicPage(t.Title, t.Bullets), 0o644); err != nil {
+		if err := writeFileWithin(projectRoot, path, renderTopicPage(t.Title, t.Bullets), 0o644); err != nil {
 			return paths, fmt.Errorf("write topic %s: %w", t.Slug, err)
 		}
 		paths = append(paths, path)
@@ -463,7 +470,7 @@ func writeIndex(projectRoot string, topics []topic) (string, error) {
 			content = cut + "\n"
 		}
 	}
-	if err := writeFileAtomic(filepath.Join(projectRoot, "wiki", "index.md"), content, 0o644); err != nil {
+	if err := writeFileWithin(projectRoot, filepath.Join(projectRoot, "wiki", "index.md"), content, 0o644); err != nil {
 		return "", fmt.Errorf("write index: %w", err)
 	}
 	return content, nil
@@ -475,7 +482,7 @@ func writeIndex(projectRoot string, topics []topic) (string, error) {
 // prompt, so the read is contained to wiki/ (2026-08-24 tri-review P0);
 // an escaping link degrades to "" exactly like an absent file.
 func readIndex(projectRoot string) string {
-	b, err := readWithinDir(filepath.Join(projectRoot, "wiki"), filepath.Join(projectRoot, "wiki", "index.md"))
+	b, err := readWithinDir(projectRoot, filepath.Join(projectRoot, "wiki"), filepath.Join(projectRoot, "wiki", "index.md"))
 	if err != nil {
 		return ""
 	}
@@ -674,7 +681,7 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 
 	// before_sha covers the pre-curate index ("" when absent) — the M4
 	// before/after convention for injected layers.
-	oldIndex := readFileWithin(filepath.Join(s.projectRoot, "wiki"), filepath.Join(s.projectRoot, "wiki", "index.md")) // injected layer: contained to wiki/ (2026-08-24 tri-review P0)
+	oldIndex := readFileWithin(s.projectRoot, filepath.Join(s.projectRoot, "wiki"), filepath.Join(s.projectRoot, "wiki", "index.md")) // injected layer: contained to wiki/ (2026-08-24 tri-review P0)
 	if _, err := writeTopicPages(s.projectRoot, topics); err != nil {
 		return fail(fmt.Errorf("curate: %w", err), "write error: "+err.Error())
 	}
@@ -761,7 +768,7 @@ func (s *Server) handleListTopics(ctx context.Context, req Request) (Response, e
 		}
 		topics = append(topics, WikiNoteInfo{
 			Path:       m,
-			Name:       topicTitle(wikiDir, m, strings.TrimSuffix(filepath.Base(m), ".md")),
+			Name:       topicTitle(s.projectRoot, wikiDir, m, strings.TrimSuffix(filepath.Base(m), ".md")),
 			Epoch:      0,
 			ModifiedAt: fi.ModTime().UTC().Format(time.RFC3339),
 		})
@@ -816,7 +823,7 @@ func stampSupersededNotes(projectRoot string, topics []topic, claims []string, n
 		}
 		seen[name] = true
 		path := filepath.Join(wikiDir, name+".md")
-		content, err := readWithinDir(wikiDir, path)
+		content, err := readWithinDir(projectRoot, wikiDir, path)
 		if err != nil {
 			continue // vanished between read and stamp — or a planted symlink escaping wiki/ (2026-08-24 tri-review P0): keeps being injected
 		}
@@ -824,7 +831,7 @@ func stampSupersededNotes(projectRoot string, topics []topic, claims []string, n
 			stamped = append(stamped, name) // already stamped: reaffirm
 			continue
 		}
-		if err := writeFileAtomic(path, supersededBanner+string(content), 0o644); err != nil {
+		if err := writeFileWithin(projectRoot, path, supersededBanner+string(content), 0o644); err != nil {
 			log.Printf("curate: stamp superseded %s: %v", name, err)
 			continue
 		}
@@ -837,8 +844,8 @@ func stampSupersededNotes(projectRoot string, topics []topic, claims []string, n
 // back to the slug when the page has no title line — or when the page is a
 // planted symlink escaping wikiDir (2026-08-24 tri-review P0): the tab's
 // page listing must never read bytes from outside the committable tree.
-func topicTitle(wikiDir, path, slug string) string {
-	b, err := readWithinDir(wikiDir, path)
+func topicTitle(projectRoot, wikiDir, path, slug string) string {
+	b, err := readWithinDir(projectRoot, wikiDir, path)
 	if err != nil {
 		return slug
 	}

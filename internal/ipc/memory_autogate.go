@@ -87,7 +87,7 @@ func (s *Server) sweepPendingBatch(ctx context.Context, c store.Conversation, w 
 		// pointing at external bytes must degrade to "" like an unreadable
 		// note, never inject them.
 		noteText := ""
-		if data, rerr := readWithinDir(filepath.Join(s.projectRoot, "wiki"), filepath.Join(s.projectRoot, "wiki",
+		if data, rerr := readWithinDir(s.projectRoot, filepath.Join(s.projectRoot, "wiki"), filepath.Join(s.projectRoot, "wiki",
 			fmt.Sprintf("%s-epoch-%d.md", w.Name, batch.epoch))); rerr == nil {
 			noteText = string(data)
 		}

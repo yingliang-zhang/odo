@@ -56,6 +56,12 @@ func appendLedger(projectRoot, header string, metrics []ledgerMetric) error {
 		}
 	}
 	path := ledgerPath(projectRoot)
+	// Contained append (2026-08-25 review P0): O_APPEND|O_CREATE follows a
+	// planted symlink at ledger.md — or at .odo itself — onto an external
+	// file. The committable tree must hold real components only.
+	if err := guardProjectWritePath(projectRoot, path); err != nil {
+		return fmt.Errorf("append ledger: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("append ledger: create dir: %w", err)
 	}

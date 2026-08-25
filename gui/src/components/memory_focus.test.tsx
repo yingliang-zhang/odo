@@ -30,20 +30,20 @@ beforeEach(() => {
 describe("MemoryPanel focus deep links (tri-review P1 #5, 2026-08-24)", () => {
   it("applies a focus request that arrives after first mount", async () => {
     const { rerender } = render(
-      <MemoryPanel conversationId={1} focus={{ tab: "proposals", n: 1 }} />,
+      <MemoryPanel conversationId={1} active={true} focus={{ tab: "proposals", n: 1 }} />,
     );
     await screen.findByText(/No pending memory proposals/i);
     expect(proposalsTab()).toHaveAttribute("aria-selected", "true");
     expect(vi.mocked(readMemory).mock.calls.length).toBe(0);
 
-    rerender(<MemoryPanel conversationId={1} focus={{ tab: "files", n: 2 }} />);
+    rerender(<MemoryPanel conversationId={1} active={true} focus={{ tab: "files", n: 2 }} />);
     expect(filesTab()).toHaveAttribute("aria-selected", "true");
     expect(vi.mocked(readMemory).mock.calls.length).toBe(1);
   });
 
   it("re-fires a repeated same-target request through the nonce", async () => {
     const { rerender } = render(
-      <MemoryPanel conversationId={1} focus={{ tab: "files", n: 1 }} />,
+      <MemoryPanel conversationId={1} active={true} focus={{ tab: "files", n: 1 }} />,
     );
     await waitFor(() => expect(vi.mocked(readMemory).mock.calls.length).toBe(1));
     expect(filesTab()).toHaveAttribute("aria-selected", "true");
@@ -53,13 +53,13 @@ describe("MemoryPanel focus deep links (tri-review P1 #5, 2026-08-24)", () => {
     expect(proposalsTab()).toHaveAttribute("aria-selected", "true");
 
     // …a second toast click-through to "files" must still land.
-    rerender(<MemoryPanel conversationId={1} focus={{ tab: "files", n: 2 }} />);
+    rerender(<MemoryPanel conversationId={1} active={true} focus={{ tab: "files", n: 2 }} />);
     expect(filesTab()).toHaveAttribute("aria-selected", "true");
   });
 
   it("leaves a manual sub-tab choice alone while the focus object is unchanged", async () => {
     const focus = { tab: "files", n: 1 } as const;
-    const { rerender } = render(<MemoryPanel conversationId={1} focus={focus} />);
+    const { rerender } = render(<MemoryPanel conversationId={1} active={true} focus={focus} />);
     expect(filesTab()).toHaveAttribute("aria-selected", "true");
 
     fireEvent.click(proposalsTab());
@@ -67,7 +67,7 @@ describe("MemoryPanel focus deep links (tri-review P1 #5, 2026-08-24)", () => {
 
     // A parent re-render carrying the SAME focus request must not
     // re-apply it — the user clicked "Proposals" after the request.
-    rerender(<MemoryPanel conversationId={1} focus={focus} />);
+    rerender(<MemoryPanel conversationId={1} active={true} focus={focus} />);
     expect(proposalsTab()).toHaveAttribute("aria-selected", "true");
   });
 });

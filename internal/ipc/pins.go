@@ -28,7 +28,7 @@ func pinsPath(projectRoot string) string {
 // read is contained to .odo. Pins are human-owned: the daemon writes them
 // only via the pin IPC command and never truncates at write time.
 func readPins(projectRoot string) string {
-	b, err := readWithinDir(filepath.Join(projectRoot, ".odo"), pinsPath(projectRoot))
+	b, err := readWithinDir(projectRoot, filepath.Join(projectRoot, ".odo"), pinsPath(projectRoot))
 	if err != nil {
 		return ""
 	}
@@ -60,7 +60,7 @@ func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
 		return Response{}, err
 	}
 
-	old := readFileWithin(filepath.Join(s.projectRoot, ".odo"), pinsPath(s.projectRoot)) // contained: the write basis feeds the file itself (2026-08-24 tri-review P0)
+	old := readFileWithin(s.projectRoot, filepath.Join(s.projectRoot, ".odo"), pinsPath(s.projectRoot)) // contained: the write basis feeds the file itself (2026-08-24 tri-review P0)
 	out := strings.TrimRight(old, "\n")
 	join := ""
 	if out != "" {
@@ -70,7 +70,7 @@ func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
 	if len(content) > pinsCap {
 		return Response{}, fmt.Errorf("pins.md would exceed %d bytes: pin %q", pinsCap, text)
 	}
-	if err := writeFileAtomic(pinsPath(s.projectRoot), content, 0o644); err != nil {
+	if err := writeFileWithin(s.projectRoot, pinsPath(s.projectRoot), content, 0o644); err != nil {
 		return Response{}, fmt.Errorf("pin: write pins.md: %w", err)
 	}
 	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
@@ -91,5 +91,5 @@ func (s *Server) handleReadPins(ctx context.Context, req Request) (Response, err
 	if _, err := s.resolveProject(ctx, req.ProjectRoot); err != nil {
 		return Response{}, fmt.Errorf("read_pins: %w", err)
 	}
-	return Response{MemoryContent: readFileWithin(filepath.Join(s.projectRoot, ".odo"), pinsPath(s.projectRoot))}, nil // contained to project .odo (2026-08-24 tri-review P0)
+	return Response{MemoryContent: readFileWithin(s.projectRoot, filepath.Join(s.projectRoot, ".odo"), pinsPath(s.projectRoot))}, nil // contained to project .odo (2026-08-24 tri-review P0)
 }

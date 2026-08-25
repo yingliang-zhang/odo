@@ -14,9 +14,16 @@ import { cn } from "../lib/utils";
 
 interface Props {
   projectRoot?: string | null;
+  // Keep-alive activation edge (2026-08-25 review P1): App mounts the
+  // panel once and CSS-hides it; skills are plain files — an apply_memory
+  // skill write, an external editor, or a CLI add changes the tree while
+  // hidden. On inactive→active the list re-fetches and a non-editing
+  // selection re-reads its body. Draft protection: an open editor's
+  // editText is never touched.
+  active: boolean;
 }
 
-function SkillsPanel({ projectRoot }: Props) {
+function SkillsPanel({ projectRoot, active }: Props) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +65,24 @@ function SkillsPanel({ projectRoot }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Activation edge (the Props contract). viewRef reads the LATEST
+  // selection/edit state without adding them to the dep list (a selection
+  // change alone must not re-fire the edge).
+  const wasActiveRef = useRef(active);
+  const viewRef = useRef<{ selected: SkillInfo | null; editing: boolean }>({ selected, editing });
+  viewRef.current = { selected, editing };
+  useEffect(() => {
+    if (!wasActiveRef.current && active) {
+      void refresh();
+      const { selected: sel, editing: ed } = viewRef.current;
+      if (sel && !ed) void selectSkill(sel);
+    }
+    wasActiveRef.current = active;
+    // selectSkill is a plain function — intentionally read at fire time,
+    // not tracked as a dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, refresh]);
 
   const selectSkill = async (skill: SkillInfo) => {
     setSelected(skill);

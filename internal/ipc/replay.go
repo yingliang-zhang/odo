@@ -314,7 +314,7 @@ func buildResumeCard(projectRoot, wsName string, events []store.Event) (block, n
 	// tree and the loops below are injected as the resume card — a planted
 	// symlink escaping wiki/ must degrade to no card, never inject
 	// external bytes.
-	raw, err := readWithinDir(filepath.Join(projectRoot, "wiki"), newest)
+	raw, err := readWithinDir(projectRoot, filepath.Join(projectRoot, "wiki"), newest)
 	if err != nil {
 		return "", ""
 	}

@@ -77,6 +77,8 @@ func main() {
 			os.Exit(runRetractCLI(args[1:]))
 		case "models":
 			os.Exit(runModelsCLI(args[1:]))
+		case "preview-setup":
+			os.Exit(runPreviewSetupCLI(args[1:]))
 		}
 	}
 
