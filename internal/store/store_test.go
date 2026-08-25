@@ -52,10 +52,16 @@ func TestOpenMigrates(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	// Fresh journals are created at v3 directly (schemaV1 DDL is the
-	// current shape; migrateV2/V3 only upgrade older journals).
-	if version != 3 {
-		t.Fatalf("schema_version = %d, want 3", version)
+	// Fresh journals record v3 from schemaV1, then migrateV4 stamps 4 —
+	// the v4 index lives outside schemaV1's unconditional DDL because old
+	// databases may carry duplicate active names that must dedupe first.
+	if version != 4 {
+		t.Fatalf("schema_version = %d, want 4", version)
+	}
+	var idxName string
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_workstreams_active_name'`).Scan(&idxName); err != nil {
+		t.Errorf("idx_workstreams_active_name missing on a fresh journal: %v", err)
 	}
 
 	for _, table := range []string{"projects", "workstreams", "conversations", "events", "diffs"} {
@@ -150,8 +156,8 @@ func TestMigrateV1ToV3(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("schema_version = %d, want 3 after upgrade", version)
+	if version != 4 {
+		t.Fatalf("schema_version = %d, want 4 after upgrade", version)
 	}
 
 	// Rows survive the upgrade with the new columns NULL on legacy diffs.
@@ -245,8 +251,8 @@ func TestMigrateV2ToV3(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("schema_version = %d, want 3 after upgrade", version)
+	if version != 4 {
+		t.Fatalf("schema_version = %d, want 4 after upgrade", version)
 	}
 	d, err := s.GetDiff(ctx, 1)
 	if err != nil {

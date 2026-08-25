@@ -756,6 +756,10 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 	if err != nil {
 		return false, "workstream_lookup"
 	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up).
+	if err := s.guardLiveWorkstreamLocked(w); err != nil {
+		return false, "workstream_deleted"
+	}
 
 	// M18 W2 item 4: assemble FIRST — the receipt closure rides the
 	// user_message, so assembly (and the fail-closed assertion) must run

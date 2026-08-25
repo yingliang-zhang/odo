@@ -65,6 +65,14 @@ func (s *Server) sweepPendingBatch(ctx context.Context, c store.Conversation, w 
 	if err != nil {
 		return
 	}
+	// Recovery first (2026-08-25 review follow-up P1): a marker-first apply
+	// stranded by a crash is restored from its recorded bodies now — waiting
+	// past this distill's fold would let a NEW apply marker retire the
+	// stranded one with its layers never written (markers claim layers
+	// newest-first).
+	s.memMu.Lock()
+	s.healMemoryFromJournalLocked(ctx, c.ID, events)
+	s.memMu.Unlock()
 	batch := findPendingBatch(events)
 	if !batch.exists || batch.consumed {
 		return

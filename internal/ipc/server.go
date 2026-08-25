@@ -201,6 +201,14 @@ type Server struct {
 	// autoLandDone is the tests-only completion signal (nil in production).
 	ladderMu     sync.Mutex
 	autoLandDone chan struct{}
+	// memMu is the project-wide single-writer lock for the memory file
+	// family (memory.md, pins.md, archive, a batch's skill files)
+	// (2026-08-25 audit P1): cross-workstream read-modify-write — a pin
+	// racing a panel-gated auto-apply — lost one side to a
+	// last-rename-wins race, and one batch could be consumed twice when
+	// a manual apply raced the distill-side sweep. Leaf lock: holders
+	// touch files and the store only, never s.mu/acceptMu/ladderMu.
+	memMu sync.Mutex
 
 	// verifyAdvised keys project roots that already got the one-time
 	// .odo-verify setup advisory (verify_advisory.go) — one transcript row
@@ -224,11 +232,25 @@ type Server struct {
 	autoPending  map[int64]*autoPendingEntry // conversationID -> scheduled (not yet fired) auto-distill
 	autoInFlight map[int64]*autoInFlight     // conversationID -> firing/fired auto-distill cancel handle
 	slashing     map[int64]int               // conversationID -> live /panel+//vision queries (fold-integrity gate)
-	// Live /panel leg tally per conversation: registered at fan-out,
-	// incremented per answering leg, deleted when the last panel of the
-	// conversation ends. Poll-side heartbeat only (never journaled — the
-	// previewEvent precedent).
-	panelProg map[int64]*PanelProgress
+	// Live /panel leg tally per conversation: one slice entry per
+	// IN-FLIGHT consult (2026-08-25 audit P2 — a shared tally let a
+	// finishing panel decrement Total under another panel's legs,
+	// yielding Done > Total and a mixed leg list). Registered at fan-out,
+	// removed by its own consult when done. Poll-side heartbeat only
+	// (never journaled — the previewEvent precedent); the poll snapshot
+	// merges the batches.
+	panelProg map[int64][]*PanelProgress
+
+	// deletingWs keys workstreams whose delete is between the idle proof
+	// and the SQL commit (2026-08-25 review follow-up, closing the audit
+	// P1's residual window). The flag is raised under the SAME s.mu hold
+	// that proved the lane idle; every liveness-bearing start (run,
+	// distill, slash/panel, loop admission, scheduled auto) checks it
+	// under s.mu via guardLiveWorkstreamLocked, so a start racing the
+	// commit either already registered (the delete refuses busy) or hits
+	// the flag (the start refuses). Deleted-after-commit starts refuse on
+	// the status half of that guard.
+	deletingWs map[int64]struct{}
 
 	// Test seams (zero in production): autoIdle overrides the prefs-resolved
 	// idle (bypasses the 15s daemon floor); autoJitter caps the T2 startup
@@ -295,6 +317,15 @@ type Server struct {
 	// receipt from the injected content and drill assertSlashReceipts'
 	// fail-closed refusal before any moa call. Production never sets it.
 	slashReceiptBreachForTest func(receipt map[string]string)
+	// Crash-window failpoints (2026-08-25 review follow-up; the
+	// receiptBreachForTest seam precedent): non-nil ONLY in tests.
+	// failApplyAfterMarker returns from applyResolvedBatch as if the daemon
+	// died right after the (marker-first) consumption marker journaled —
+	// no file written — staging the exact post-crash journal state.
+	// failPinAfterReceipt does the same after the pin's journal-first
+	// receipt. Both let the heal paths be drilled end to end.
+	failApplyAfterMarker error
+	failPinAfterReceipt  error
 }
 
 // NewServer builds a Server bound to one project root. ad becomes the default
@@ -320,7 +351,8 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		autoPending:  make(map[int64]*autoPendingEntry),
 		autoInFlight: make(map[int64]*autoInFlight),
 		slashing:     make(map[int64]int),
-		panelProg:    make(map[int64]*PanelProgress),
+		panelProg:    make(map[int64][]*PanelProgress),
+		deletingWs:   make(map[int64]struct{}),
 		loops:        make(map[int64]struct{}),
 		autoJitter:   autoStartupJitterMax,
 		livenessStop: make(chan struct{}),
@@ -654,6 +686,13 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 		if w.ProjectID != p.ID {
 			return Response{}, fmt.Errorf("bootstrap: workstream %d belongs to another project", req.WorkstreamID)
 		}
+		// Deleted-lane refusal (2026-08-25 review follow-up): a bootstrap
+		// creates the conversation every start site keys on, so a
+		// soft-deleted lane must turn callers away at the door, not after
+		// a fresh idle conversation exists on it.
+		if w.Status != store.WorkstreamActive {
+			return Response{}, fmt.Errorf("bootstrap: workstream %d is %s", req.WorkstreamID, w.Status)
+		}
 	} else {
 		w, err = s.store.CreateOrGetWorkstream(ctx, p.ID, "main")
 		if err != nil {
@@ -685,6 +724,22 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 	if err != nil {
 		return Response{}, err
 	}
+	// Crash-window recovery (2026-08-25 review follow-up P1): a marker-first
+	// apply or receipt-first pin can leave FILES lagging the journal after a
+	// crash; the newest markers pitch their recorded bodies back on (exact
+	// before/after hash predicates — landed and foreign layers untouched).
+	// The heal always folds the FULL journal: the after-hint tail replay may
+	// not reach back to the stranded marker.
+	healEvents := events
+	if after > 0 {
+		if full, ferr := s.store.ListEvents(ctx, c.ID, 0); ferr == nil {
+			healEvents = full
+		}
+	}
+	s.memMu.Lock()
+	s.healMemoryFromJournalLocked(ctx, c.ID, healEvents)
+	s.healPinsFromJournalLocked(ctx, c.ID, healEvents)
+	s.memMu.Unlock()
 	// D8: Generate AGENTS.md so OMP reads Odo's project rules as its system
 	// prompt. Odo owns the prompt prefix (memory/pins/wiki/skills); AGENTS.md
 	// is the bridge that tells OMP to treat Odo's injection as authoritative.
@@ -699,21 +754,20 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 	}, nil
 }
 
-// generateAgentsMD writes an AGENTS.md file in .odo/ so OMP reads
-// Odo's project rules as its system prompt. The content is derived from
-// .odo/memory.md (project behavior rules) and .odo/pins.md (user-authored
-// verbatim statements). If neither file exists, a minimal default is written.
-// AGENTS.md is regenerated on every bootstrap so it never drifts, but the
-// file is only rewritten when the derived content actually changed.
+// generateAgentsMD writes an AGENTS.md file in .odo/ so OMP reads Odo's
+// protocol rules as its system prompt. Content is the STABLE protocol
+// only (the prompt-authority/journal-pull rule and the odo-todo write
+// contract) — memory.md and pins.md are NOT copied here (2026-08-25
+// audit P1): they already ride every prompt through the receipted
+// injection layer, and the second copy refreshed only at bootstrap
+// drifted behind mid-session apply/retract/pin, handing OMP rules the
+// receipts don't cover. Regenerated on every bootstrap; rewritten only
+// when the content actually changed.
 //
-// Containment (2026-08-24 tri-review P0): .odo/ is committable, so both
-// rule reads go through readWithinDir — a checked-in symlink escaping
-// .odo/ degrades to "section absent" instead of copying external secret
-// bytes into the prompt bridge (the learner snapshotter's
-// ruleSnapshotTarget.base convention). The write side refuses a symlinked
-// AGENTS.md outright: the daemon owns the file, no legitimate link
-// exists, and os.WriteFile would otherwise follow one onto an external
-// file.
+// Containment (2026-08-24 tri-review P0): the write side refuses a
+// symlinked AGENTS.md outright: the daemon owns the file, no legitimate
+// link exists, and os.WriteFile would otherwise follow one onto an
+// external file.
 func (s *Server) generateAgentsMD() {
 	var b strings.Builder
 	b.WriteString("# AGENTS.md\n\n")
@@ -745,24 +799,7 @@ func (s *Server) generateAgentsMD() {
 	b.WriteString("rest of the current epoch. Read-only view of the plan: `odo todo`.\n")
 	b.WriteString("Never quote this block inside explanations (docs, examples, echoes) —\n")
 	b.WriteString("the merge is mechanical; emit it only to change the plan.\n\n")
-	// (2026-08-24 tri-review P0) .odo/ is committable: an implanted symlink
-	// at a rule file pointing outside the project-odo root would copy
-	// external secret bytes straight into the system-prompt bridge. A
-	// planted link degrades to "section absent", exactly like a missing
-	// file; a link pointing deeper inside .odo/ still reads.
 	odoDir := filepath.Join(s.projectRoot, ".odo")
-	// Append project memory if it exists.
-	if data, err := readWithinDir(s.projectRoot, odoDir, filepath.Join(odoDir, "memory.md")); err == nil {
-		b.WriteString("## Memory\n\n")
-		b.Write(data)
-		b.WriteString("\n\n")
-	}
-	// Append pins if they exist.
-	if data, err := readWithinDir(s.projectRoot, odoDir, filepath.Join(odoDir, "pins.md")); err == nil {
-		b.WriteString("## Pins\n\n")
-		b.Write(data)
-		b.WriteString("\n\n")
-	}
 	agentsPath := filepath.Join(odoDir, "AGENTS.md")
 	// Bootstrap runs on every project/workstream switch; skip the rewrite
 	// (and the mtime churn it triggers in file watchers — OMP included)
@@ -845,6 +882,66 @@ func (s *Server) handleDeleteWorkstream(ctx context.Context, req Request) (Respo
 	p, err := s.resolveProject(ctx, req.ProjectRoot)
 	if err != nil {
 		return Response{}, fmt.Errorf("delete_workstream: %w", err)
+	}
+	// Active-run guard (2026-08-25 audit P1): the store check below covers
+	// pending diffs only — deleting a workstream whose conversation still
+	// has a live run/distill/panel/loop strands the NEXT produced diff on
+	// a soft-deleted workstream the Review inbox (active-only listing)
+	// never shows. Conversation liveness is daemon memory, so it is
+	// checked here, before the SQL layer gets a say.
+	if c, cerr := s.store.GetActiveConversation(ctx, req.WorkstreamID); cerr == nil {
+		s.mu.Lock()
+		busy := ""
+		if runID, ok := s.byConv[c.ID]; ok {
+			if meta := s.runs[runID]; meta != nil && !meta.finished {
+				busy = "an agent run"
+			}
+		}
+		if _, ok := s.distilling[c.ID]; ok && busy == "" {
+			busy = "a distill"
+		}
+		if kind, ok := s.distillKind[c.ID]; ok && busy == "" {
+			busy = "a " + kind + " distill"
+		}
+		if n := s.slashing[c.ID]; n > 0 && busy == "" {
+			busy = "a slash consult"
+		}
+		if len(s.panelProg[c.ID]) > 0 && busy == "" {
+			busy = "a panel consult"
+		}
+		if _, ok := s.loops[c.ID]; ok && busy == "" {
+			busy = "a loop"
+		}
+		if _, ok := s.autoPending[c.ID]; ok && busy == "" {
+			busy = "a scheduled distill"
+		}
+		if busy != "" {
+			s.mu.Unlock()
+			return Response{}, fmt.Errorf("delete_workstream: workstream %d has %s in flight — let it finish or cancel it first", req.WorkstreamID, busy)
+		}
+		// Atomic bar on NEW starts (2026-08-25 review follow-up): the old
+		// code dropped the lock here and ran the SQL delete unlocked — a
+		// start sliding into that gap keyed live work onto a lane the SQL
+		// then soft-deleted, and its diff stranded off the active-only
+		// Review inbox. The flag rises under the SAME hold that proved
+		// the lane idle, so start sites (guardLiveWorkstreamLocked) see
+		// either their own registration (busy wins) or this flag.
+		if _, ok := s.deletingWs[req.WorkstreamID]; ok {
+			s.mu.Unlock()
+			return Response{}, fmt.Errorf("delete_workstream: workstream %d delete already in flight", req.WorkstreamID)
+		}
+		s.deletingWs[req.WorkstreamID] = struct{}{}
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			delete(s.deletingWs, req.WorkstreamID)
+			s.mu.Unlock()
+		}()
+		// Journal-derived loop liveness: a daemon restart drops the
+		// in-memory liveness bit, but the journal's fold still knows.
+		if st, _, lerr := s.loopActiveState(ctx, c.ID); lerr == nil && st != nil {
+			return Response{}, fmt.Errorf("delete_workstream: workstream %d has an active loop — stop it first", req.WorkstreamID)
+		}
 	}
 	if err := s.store.DeleteWorkstream(ctx, req.WorkstreamID); err != nil {
 		return Response{}, fmt.Errorf("delete_workstream: %w", err)
@@ -1005,6 +1102,12 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
 	if err != nil {
 		return Response{}, err
+	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up): without it
+	// this run's diff would strand on a lane the Review inbox stopped
+	// listing.
+	if err := s.guardLiveWorkstreamLocked(w); err != nil {
+		return Response{}, fmt.Errorf("send_message: %w", err)
 	}
 	// R1+R4: replay (and its cold-start complement, the resume card) are
 	// assembled BEFORE journaling this message, so the replay excludes the
@@ -1740,17 +1843,18 @@ func (s *Server) pollLocked(ctx context.Context, req Request) (Response, int64, 
 			preview = meta.previewEvent
 		}
 	}
-	// /panel heartbeat: hand the poller a COPY of the live tally — legs
-	// bump Done under s.mu and the response encodes after this handler
-	// drops the lock, so the shared pointer (and now the shared Legs
-	// slice) would race.
+	// /panel heartbeat: hand the poller a MERGED copy of every in-flight
+	// consult's tally — legs bump Done under s.mu and the response encodes
+	// after this handler drops the lock, so shared state would race.
 	var panelProg *PanelProgress
-	if tally := s.panelProg[c.ID]; tally != nil {
-		cp := *tally
-		if tally.Legs != nil {
-			cp.Legs = append([]PanelLeg(nil), tally.Legs...)
+	if batches := s.panelProg[c.ID]; len(batches) > 0 {
+		merged := &PanelProgress{}
+		for _, b := range batches {
+			merged.Done += b.Done
+			merged.Total += b.Total
+			merged.Legs = append(merged.Legs, b.Legs...)
 		}
-		panelProg = &cp
+		panelProg = merged
 	}
 	return Response{
 		Events:        events,
@@ -1841,6 +1945,11 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 	if err != nil {
 		log.Printf("a2-continuation: get workstream: %v", err)
 		return drop("workstream_lookup")
+	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up).
+	if err := s.guardLiveWorkstreamLocked(w); err != nil {
+		log.Printf("a2-continuation: %v", err)
+		return drop("workstream_deleted")
 	}
 
 	// R1: continuation runs replay the current epoch too — the previous
@@ -2569,6 +2678,7 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 // HEAD, while a non-sentinel refusal (protected path, conflicted index,
 // apply error) stays log-only.
 var errBaseStale = errors.New("base stale")
+
 // dirtyPatchRefusal builds the pre-apply refusal shared by the fresh- and
 // stale-base accept paths (tri-review P0, 2026-08-24): the main checkout
 // carries uncommitted user work on the patch's own paths, and applying
@@ -2587,6 +2697,7 @@ func dirtyPatchRefusal(dirty []string) error {
 	}
 	return fmt.Errorf("accept_diff: main checkout has uncommitted changes on the patch's own paths (%s); commit or stash them, then retry the accept — the pipeline refuses to apply over them", strings.Join(shown, ", "))
 }
+
 // stagedEditsRefusal builds the pre-adjudication accept refusal
 // (tri-review P1, 2026-08-24): the patch's own paths carry STAGED index
 // content diverging from HEAD (IndexEditsBeyondHEAD), and the accept's
@@ -2606,6 +2717,7 @@ func stagedEditsRefusal(staged []string) error {
 	}
 	return fmt.Errorf("accept_diff: main checkout has staged changes on the patch's own paths (%s) — the accept stages and commits those paths wholesale and would overwrite the staged content; unstage the edits, then retry the accept", strings.Join(shown, ", "))
 }
+
 // extraEditsRefusal builds the ALREADY-LANDED accept refusal (tri-review
 // P1, 2026-08-24): the M20 reverse-apply probe sees the patch at hunk
 // granularity, so uncommitted user edits on the patch's own paths BEYOND
@@ -3639,30 +3751,43 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 	// Fan-out progress heartbeat (poll-side, never journaled): the tally
 	// registered here flows to poll_events so the GUI's spinner row can
 	// count legs during multi-minute consults. Concurrent panels on one
-	// conversation share the batch entry — Total sums, the last panel to
-	// end deletes it; every answering leg (answer or error) bumps Done.
+	// conversation each hold their OWN batch entry (2026-08-25 audit P2 —
+	// a shared entry corrupted a surviving panel's tally); the poll
+	// snapshot sums batches, and a finishing panel removes only its own.
+	// Every answering leg (answer or error) bumps its own batch's Done.
 	s.mu.Lock()
-	prog := s.panelProg[c.ID]
-	if prog == nil {
-		prog = &PanelProgress{}
-		s.panelProg[c.ID] = prog
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up): the tally
+	// registration IS the panel's liveness claim — w loads inside this
+	// hold so the check races neither the delete's flag nor its commit.
+	w, werr := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if werr == nil {
+		werr = s.guardLiveWorkstreamLocked(w)
 	}
-	// Leg rows are append-only for the entry's lifetime, so a goroutine's
-	// captured index stays valid until the whole entry is deleted (which
-	// happens only after every leg has answered).
-	legBase := len(prog.Legs)
+	if werr != nil {
+		s.mu.Unlock()
+		return Response{}, fmt.Errorf("panel: %w", werr)
+	}
+	prog := &PanelProgress{}
 	for _, m := range models {
 		prog.Legs = append(prog.Legs, PanelLeg{Model: m.model + "@" + m.provider})
 	}
-	prog.Total += len(models)
+	prog.Total = len(models)
+	s.panelProg[c.ID] = append(s.panelProg[c.ID], prog)
 	s.mu.Unlock()
 	defer func() {
+		// Runs after wg.Wait(): every leg of THIS batch has answered, so
+		// removing it can no longer race its own goroutines; other
+		// in-flight consults keep their batches and leg indices untouched.
 		s.mu.Lock()
-		if tally := s.panelProg[c.ID]; tally != nil {
-			tally.Total -= len(models)
-			if tally.Total <= 0 {
-				delete(s.panelProg, c.ID)
+		batches := s.panelProg[c.ID]
+		for i, b := range batches {
+			if b == prog {
+				s.panelProg[c.ID] = append(batches[:i:i], batches[i+1:]...)
+				break
 			}
+		}
+		if len(s.panelProg[c.ID]) == 0 {
+			delete(s.panelProg, c.ID)
 		}
 		s.mu.Unlock()
 	}()
@@ -3696,7 +3821,7 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 				OutputTokens: resp.OutputTokens, Escalations: resp.Escalations,
 				RequestSHA16: resp.RequestSHA16, RequestBytes: resp.RequestBytes,
 			}
-		}(legBase + i)
+		}(i)
 	}
 	wg.Wait()
 
@@ -4072,6 +4197,18 @@ func (s *Server) handleDistill(ctx context.Context, req Request) (Response, erro
 	if s.slashing[c.ID] > 0 {
 		s.mu.Unlock()
 		return Response{}, fmt.Errorf("distill: slash query in progress for conversation %d", c.ID)
+	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up): w loads
+	// under this same hold so the read cannot slip past the delete's
+	// flag window.
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		s.mu.Unlock()
+		return Response{}, err
+	}
+	if err := s.guardLiveWorkstreamLocked(w); err != nil {
+		s.mu.Unlock()
+		return Response{}, fmt.Errorf("distill: %w", err)
 	}
 	s.distilling[c.ID] = struct{}{}
 	s.distillKind[c.ID] = distillTriggerManual
@@ -5306,6 +5443,25 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 		return Response{}, errors.New("apply_memory: no pending batch")
 	}
 	if batch.consumed {
+		// Heal before refusing (2026-08-25 review follow-up P1): the
+		// consumption marker may have outlived a crash before its file
+		// writes — the refusal is only truthful once files and journal
+		// agree, so restore the stranded layers first.
+		s.memMu.Lock()
+		healed := s.healMemoryFromJournalLocked(ctx, c.ID, events)
+		s.memMu.Unlock()
+		// The heal replaying THIS batch's recorded bodies means the
+		// caller's retry just performed the apply it asked for — report
+		// success, mirroring the in-core heal check (the marker-first
+		// ordering otherwise regressed the crashed-apply retry from the
+		// idempotent success into a refusal, TestUserMemoryIdempotency).
+		// A no-op heal (fully landed earlier, or foreign state the heal
+		// refuses to clobber) still refuses, per the consumed contract.
+		for _, epoch := range healed {
+			if epoch == batch.epoch && req.Epoch == batch.epoch {
+				return Response{Applied: true}, nil
+			}
+		}
 		return Response{}, fmt.Errorf("apply_memory: epoch %d already applied", req.Epoch)
 	}
 	if req.Epoch != batch.epoch {
@@ -5342,6 +5498,34 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 // path (additive — pre-panel rows carry no actor), autoActor for the
 // panel-gated auto-apply and legacy sweep.
 func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, batch pendingBatch, accepted []bool, actor string) (Response, error) {
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
+	// Single-writer re-check (2026-08-25 audit P1): every caller's
+	// pending/consumed probe ran UNLOCKED, so two consumers of the same
+	// batch (manual apply vs the auto sweep, or two distills) both passed
+	// and applied. Under memMu the journal is re-folded; a batch already
+	// consumed by the racing apply fails closed here instead of
+	// re-appending archive lines, reaffirm bumps, and the apply marker.
+	if events, err := s.store.ListEvents(ctx, c.ID, 0); err == nil {
+		// Recovery FIRST (2026-08-25 review follow-up P1): the apply marker
+		// fell to marker-first ordering below — a crash after it leaves the
+		// batch consumed with FILES lagging. Healing those layers from the
+		// marker's recovery block before planning has two jobs here: an
+		// older stranded marker's rules return before the fresh plan reads
+		// the files, and when the stranded marker IS this batch the work
+		// just completed — report success rather than a double-consumption
+		// refusal. A LIVE racing winner cannot be mistaken for a stranded
+		// one: memMu is held across its whole write section, so any marker
+		// visible here has its writer finished (or dead).
+		for _, healed := range s.healMemoryFromJournalLocked(ctx, c.ID, events) {
+			if healed == batch.epoch {
+				return Response{Applied: true}, nil
+			}
+		}
+		if cur := findPendingBatch(events); !cur.exists || cur.consumed || cur.epoch != batch.epoch {
+			return Response{}, fmt.Errorf("apply_memory: epoch %d already applied", batch.epoch)
+		}
+	}
 	var acceptedRefs []MemoryAccept
 	var memAccepted []acceptedRule
 	var userAccepted []acceptedUserRule
@@ -5417,14 +5601,76 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 		userChanged = newUser != oldUser
 	}
 
+	// Batch-consumed marker (daemon-computed counts, ADR inv 4) — journaled
+	// BEFORE the file writes (2026-08-25 review follow-up P1): the old
+	// file-then-journal order's crash window left the model reading rules
+	// the journal still showed pending, and a post-restart re-apply
+	// doubled reaffirm bumps and archive lines onto the changed file.
+	// Marker-first makes consumption the journaled intent: the batch can
+	// never be consumed twice, and a crash after this point is repaired by
+	// healMemoryFromJournalLocked (bootstrap / next apply) from the
+	// recovery block — each changed layer's before/after hash plus its
+	// post-state body, so a stranded file is rewritten exactly and an
+	// already-landed (or foreign-advanced) one is left alone.
+	memBeforeSHA := sha16([]byte(oldMem))
+	memAfterSHA := sha16([]byte(memPlan.content))
+	var oldArchive string
+	if memChanged && memPlan.archiveAppend != "" {
+		oldArchive = readArchive(s.projectRoot)
+	}
+	recovery := applyRecovery{}
+	if memChanged {
+		recovery.Memory = &applyRecoveryLayer{BeforeSHA: memBeforeSHA, AfterSHA: memAfterSHA, Body: memPlan.content}
+		if memPlan.archiveAppend != "" {
+			recovery.Archive = &applyRecoveryLayer{
+				BeforeSHA: sha16([]byte(oldArchive)),
+				AfterSHA:  sha16([]byte(oldArchive + memPlan.archiveAppend)),
+				Body:      memPlan.archiveAppend, // append chunk only
+			}
+		}
+	}
+	if userChanged {
+		recovery.User = &applyRecoveryLayer{
+			BeforeSHA: sha16([]byte(oldUser)), AfterSHA: sha16([]byte(newUser)), Body: newUser,
+		}
+	}
+	for _, sw := range skillWrites {
+		recovery.Skills = append(recovery.Skills, applyRecoverySkill{
+			Name:      filepath.Base(sw.path),
+			BeforeSHA: sha16([]byte(readFileFull(sw.path))), // pre-write bytes ("" when the file is absent)
+			AfterSHA:  sha16([]byte(sw.content)),
+			Body:      sw.content,
+		})
+	}
+	applyPayload := map[string]interface{}{
+		"action":   "memory_apply",
+		"epoch":    batch.epoch,
+		"accepted": acceptedRefs,
+		"rejected": rejected,
+		"metrics":  map[string]int{"accepted": len(acceptedRefs), "rejected": len(rejected)},
+		"recovery": recovery,
+	}
+	if actor != "" {
+		applyPayload["actor"] = actor
+	}
+	applyEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(applyPayload))
+	if err != nil {
+		return Response{}, err
+	}
+	// Test-only crash drill (2026-08-25 review follow-up): return as if the
+	// daemon died here — marker journaled, no file written — so the heal
+	// path is exercised end to end. Production never sets the seam.
+	if s.failApplyAfterMarker != nil {
+		return Response{}, s.failApplyAfterMarker
+	}
+
 	// Writes: archive first, then user.md, memory.md LAST. A mid-sequence
-	// failure then leaves the previous memory.md intact, so a retry replans
-	// against the ORIGINAL rules — no duplicate appends and no
-	// evicted-but-unarchived loss (archive append re-running on retry is a
-	// harmless duplicate append-only line, never a loss).
+	// archive-write failure leaves the previous memory.md intact; the batch
+	// is consumed either way (marker above), and the heal restores whatever
+	// the failure skipped on the next fold.
 	if memChanged && memPlan.archiveAppend != "" {
 		arcPath := filepath.Join(s.projectRoot, ".odo", archiveFileName)
-		if err := writeFileWithin(s.projectRoot, arcPath, readArchive(s.projectRoot)+memPlan.archiveAppend, 0o644); err != nil {
+		if err := writeFileWithin(s.projectRoot, arcPath, oldArchive+memPlan.archiveAppend, 0o644); err != nil {
 			return Response{}, fmt.Errorf("apply_memory: append archive: %w", err)
 		}
 	}
@@ -5455,7 +5701,7 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 		if memPlan.reaffirmed > 0 {
 			detail += fmt.Sprintf("; reaffirmed %d", memPlan.reaffirmed)
 		}
-		beforeSHA, afterSHA := sha16([]byte(oldMem)), sha16([]byte(memPlan.content))
+		beforeSHA, afterSHA := memBeforeSHA, memAfterSHA // hoisted: the marker's recovery block attests the same pair
 		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":      "memory",
 			"cause":      "apply",
@@ -5521,28 +5767,6 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 		}
 	}
 
-	// Batch-consumed marker (daemon-computed counts, ADR inv 4) — captured
-	// so the M6 ledger row can cite its seq. actor is additive: human
-	// applies (the pre-panel rows too) carry none, panel decisions name
-	// autoActor, so audit can split who decided.
-	applyPayload := map[string]interface{}{
-		"action":   "memory_apply",
-		"epoch":    batch.epoch,
-		"accepted": acceptedRefs,
-		"rejected": rejected,
-		"metrics": map[string]int{
-			"accepted": len(acceptedRefs),
-			"rejected": len(rejected),
-		},
-	}
-	if actor != "" {
-		applyPayload["actor"] = actor
-	}
-	applyEv, err := s.store.AppendEvent(ctx, c.ID, store.EventReviewAction, mustJSON(applyPayload))
-	if err != nil {
-		return Response{}, err
-	}
-
 	// M6: ledger append (best-effort). Separate "(apply)" section: the file
 	// is append-only and a later epoch's distill section may already follow
 	// the epoch this apply belongs to. Section header includes the
@@ -5559,6 +5783,200 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 		}))
 	}
 	return Response{Applied: true}, nil
+}
+
+// applyRecoveryLayer is one layer's recorded post-state on the
+// memory_apply marker (2026-08-25 review follow-up P1): the before/after
+// hashes make the crash-window heal exact, and Body is what gets written.
+// For the archive Body is the APPEND CHUNK only (the file is unbounded;
+// the heal replays the append onto a still-before archive).
+type applyRecoveryLayer struct {
+	BeforeSHA string `json:"before_sha"`
+	AfterSHA  string `json:"after_sha"`
+	Body      string `json:"body"`
+}
+
+// applyRecoverySkill is one skill file's applyRecoveryLayer plus the
+// basename it writes to.
+type applyRecoverySkill struct {
+	Name      string `json:"name"`
+	BeforeSHA string `json:"before_sha"`
+	AfterSHA  string `json:"after_sha"`
+	Body      string `json:"body"`
+}
+
+// applyRecovery is the memory_apply marker's recovery block: every layer
+// whose write the marker precedes, so a crash between marker and writes
+// is repairable from the journal alone.
+type applyRecovery struct {
+	Memory  *applyRecoveryLayer  `json:"memory,omitempty"`
+	Archive *applyRecoveryLayer  `json:"archive,omitempty"`
+	User    *applyRecoveryLayer  `json:"user,omitempty"`
+	Skills  []applyRecoverySkill `json:"skills,omitempty"`
+}
+
+// Empty reports whether nothing was recorded (a marker from a no-write
+// apply — nothing accepted — or a legacy pre-recovery row).
+func (r applyRecovery) Empty() bool {
+	return r.Memory == nil && r.Archive == nil && r.User == nil && len(r.Skills) == 0
+}
+
+// healMemoryFromJournalLocked repairs the file projection of applies that
+// crashed between the (marker-first) consumption marker and the file
+// writes (2026-08-25 review follow-up P1). Markers fold newest-first with
+// per-layer claims: the NEWEST marker carrying a layer's recovery block
+// is that layer's authority, and its predicate alone decides — the file
+// still at before_sha proves the write never landed (write the recorded
+// body); already at after_sha is a no-op; any other hash is a later or
+// foreign state the heal must never clobber. A claimed layer is then
+// closed for every older marker. Legacy rows (journaled file-first, no
+// recovery block) claim nothing: their own writes preceded them, so they
+// never strand.
+//
+// Heal is lane-local: it folds ONE conversation's journal, repairing only
+// markers journaled on that lane. Callers: handleBootstrap, batch sweeps
+// (before the distill retires an older marker unhealed), apply paths.
+// The residual — a crashed lane that never sees fresh activity — stays
+// stale until it does; the direction is always journal-authoritative
+// (files lag the receipts, never lead them). Best-effort: heal failures
+// log and skip, callers never fail. Caller holds memMu. Returns the
+// epochs that had at least one layer rewritten (newest-first).
+func (s *Server) healMemoryFromJournalLocked(ctx context.Context, convID int64, events []store.Event) []int {
+	odoDir := filepath.Join(s.projectRoot, ".odo")
+	claimed := map[string]bool{}
+	var healedEpochs []int
+	healedLayers := map[int][]string{}
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action   string        `json:"action"`
+			Epoch    int           `json:"epoch"`
+			Recovery applyRecovery `json:"recovery"`
+		}
+		if json.Unmarshal(events[i].Payload, &p) != nil || p.Action != "memory_apply" {
+			continue
+		}
+		// healLayer runs the exact predicate for one recorded layer and
+		// closes its claim regardless of outcome: the newest claimant is
+		// the layer's authority even when the file has moved on.
+		healLayer := func(name string, current string, rec *applyRecoveryLayer, write func(string) error) {
+			if claimed[name] {
+				return
+			}
+			claimed[name] = true
+			sha := sha16([]byte(current))
+			if sha == rec.AfterSHA || sha != rec.BeforeSHA {
+				return // landed already, or later/foreign state — never clobber
+			}
+			if err := write(rec.Body); err != nil {
+				log.Printf("memory: heal %s for crashed apply epoch %d: %v", name, p.Epoch, err)
+				return
+			}
+			healedLayers[p.Epoch] = append(healedLayers[p.Epoch], name)
+			if len(healedLayers[p.Epoch]) == 1 {
+				healedEpochs = append(healedEpochs, p.Epoch)
+			}
+		}
+		if p.Recovery.Memory != nil {
+			memPath := filepath.Join(odoDir, memoryFileName)
+			healLayer("memory", readFileFull(memPath), p.Recovery.Memory, func(body string) error {
+				return writeFileWithin(s.projectRoot, memPath, body, 0o644)
+			})
+		}
+		if p.Recovery.Archive != nil {
+			arcPath := filepath.Join(odoDir, archiveFileName)
+			rec := p.Recovery.Archive
+			healLayer("archive", readArchive(s.projectRoot), &applyRecoveryLayer{
+				BeforeSHA: rec.BeforeSHA, AfterSHA: rec.AfterSHA, Body: rec.Body,
+			}, func(body string) error {
+				// Body is the append chunk, not the whole archive: replay
+				// the append onto the still-before archive.
+				return writeFileWithin(s.projectRoot, arcPath, readArchive(s.projectRoot)+rec.Body, 0o644)
+			})
+		}
+		if p.Recovery.User != nil {
+			if home, err := os.UserHomeDir(); err == nil {
+				userPath := filepath.Join(home, ".odo", "user.md")
+				healLayer("user", readFileFull(userPath), p.Recovery.User, func(body string) error {
+					return writeFileAtomic(userPath, body, 0o600)
+				})
+			} else {
+				claimed["user"] = true
+				log.Printf("memory: heal user for crashed apply epoch %d: resolve home: %v", p.Epoch, err)
+			}
+		}
+		for _, sk := range p.Recovery.Skills {
+			target := filepath.Join(odoDir, "skills", filepath.Base(sk.Name))
+			healLayer("skill:"+sk.Name, readFileFull(target), &applyRecoveryLayer{
+				BeforeSHA: sk.BeforeSHA, AfterSHA: sk.AfterSHA, Body: sk.Body,
+			}, func(body string) error {
+				return writeFileWithin(s.projectRoot, target, body, 0o644)
+			})
+		}
+	}
+	for _, epoch := range healedEpochs {
+		layers := healedLayers[epoch]
+		log.Printf("memory: healed crashed apply epoch %d (restored %s)", epoch, strings.Join(layers, ", "))
+		if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "memory",
+			"cause":  "recover",
+			"detail": fmt.Sprintf("restored %s after crashed apply epoch %d", strings.Join(layers, ", "), epoch),
+		})); err != nil {
+			log.Printf("memory: journal heal receipt: %v", err)
+		}
+	}
+	return healedEpochs
+}
+
+// healPinsFromJournalLocked completes a pin whose receipt journaled (with
+// its before/after hashes and post-state body) but whose file write never
+// landed — the journal-first pin ordering's crash window (2026-08-25
+// review follow-up P1). Same predicate as the apply heal: the file still
+// at before_sha gets the recorded body; at after_sha is a no-op; anything
+// else is later/foreign and untouched. Only the NEWEST pin receipt
+// matters: a later receipt's RMW basis already accounts for the earlier
+// pin. Legacy receipts (journaled after their write, no after_sha) need
+// nothing. Caller holds memMu; best-effort like the apply heal.
+func (s *Server) healPinsFromJournalLocked(ctx context.Context, convID int64, events []store.Event) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Layer     string `json:"layer"`
+			Cause     string `json:"cause"`
+			BeforeSHA string `json:"before_sha"`
+			AfterSHA  string `json:"after_sha"`
+			Body      string `json:"body"`
+		}
+		if json.Unmarshal(events[i].Payload, &p) != nil || p.Layer != "pins" || p.Cause != "pin" {
+			continue
+		}
+		if p.AfterSHA == "" {
+			return // legacy receipt: written file-first — nothing recoverable
+		}
+		odoDir := filepath.Join(s.projectRoot, ".odo")
+		path := pinsPath(s.projectRoot)
+		cur := readFileWithin(s.projectRoot, odoDir, path)
+		if sha := sha16([]byte(cur)); sha == p.AfterSHA || sha != p.BeforeSHA {
+			return
+		}
+		if err := writeFileWithin(s.projectRoot, path, p.Body, 0o644); err != nil {
+			log.Printf("pins: heal after crashed pin (receipt seq %d): %v", events[i].Seq, err)
+			return
+		}
+		log.Printf("pins: restored body after crashed pin write (receipt seq %d)", events[i].Seq)
+		if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":  "pins",
+			"cause":  "recover",
+			"detail": "restored pins.md after crashed pin write",
+		})); err != nil {
+			log.Printf("pins: journal heal receipt: %v", err)
+		}
+		return
+	}
 }
 
 // R-W2 (router-vs-omp-eval-2026-08-14): prefs.md `distill_via:` picks the
@@ -6097,6 +6515,45 @@ func (s *Server) pendingDiffInfos(ctx context.Context, conversationID int64) []D
 	return out
 }
 
+// guardLiveWorkstreamLocked refuses to begin new liveness-bearing work
+// (run, distill, slash consult, loop admission, scheduled auto) on a
+// workstream that is mid-delete or already soft-deleted (2026-08-25
+// review follow-up, closing the audit P1's residual window): the
+// previous diff's busy-check released s.mu before the SQL delete — a
+// start inside that window keyed live work onto a lane the Review inbox
+// (active-only) had just stopped listing, and its next diff stranded
+// unseen. The mid-delete flag rises under the SAME s.mu hold that proved
+// the lane idle, so exactly one refusal fires: the delete sees the
+// start's registration (busy), or the start sees the flag here. The
+// status half covers starts arriving after the commit. Caller holds
+// s.mu; w is the caller's row read under the same hold.
+func (s *Server) guardLiveWorkstreamLocked(w store.Workstream) error {
+	if _, ok := s.deletingWs[w.ID]; ok {
+		return fmt.Errorf("workstream %d is being deleted — let the delete finish", w.ID)
+	}
+	if w.Status != store.WorkstreamActive {
+		return fmt.Errorf("workstream %d is %s — new work refuses a deleted lane", w.ID, w.Status)
+	}
+	return nil
+}
+
+// guardLiveConversationLocked is guardLiveWorkstreamLocked for call sites
+// holding only a conversation ID (armAutoLocked): conv and workstream
+// load under the caller's s.mu hold so the read is race-free against the
+// delete commit (store reads under s.mu are the maybeAutoAutoAfterActivity
+// precedent; both are human-paced).
+func (s *Server) guardLiveConversationLocked(ctx context.Context, convID int64) error {
+	c, err := s.store.GetConversation(ctx, convID)
+	if err != nil {
+		return err
+	}
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		return err
+	}
+	return s.guardLiveWorkstreamLocked(w)
+}
+
 // checkConversation validates that the conversation exists and belongs to
 // this daemon's project.
 func (s *Server) checkConversation(ctx context.Context, conversationID int64) (store.Conversation, error) {
@@ -6267,6 +6724,15 @@ func (s *Server) handleDeleteSkill(ctx context.Context, req Request) (Response, 
 		return Response{}, fmt.Errorf("delete_skill: invalid name: %s", req.Name)
 	}
 	target := filepath.Join(dir, fname)
+	if req.Scope != "global" {
+		// Containment (2026-08-25 audit P0): update_skill was guarded but
+		// delete was not — a symlinked .odo or .odo/skills would make
+		// os.Remove unlink a file OUTSIDE the committable tree. Refuse
+		// before touching the filesystem, mirroring handleUpdateSkill.
+		if err := guardProjectWritePath(s.projectRoot, target); err != nil {
+			return Response{}, fmt.Errorf("delete_skill: %w", err)
+		}
+	}
 	if err := os.Remove(target); err != nil {
 		return Response{}, fmt.Errorf("delete_skill: %w", err)
 	}

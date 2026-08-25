@@ -355,6 +355,13 @@ func (s *Server) armAutoLocked(ctx context.Context, convID int64, trigger string
 	if s.autoPending[convID] != nil {
 		return // belt: maybeAutoAfterActivityLocked already checked
 	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up): a timer
+	// armed now would claim liveness past the delete commit; skip quietly
+	// (activity on a dying lane is the caller's concern to surface).
+	if err := s.guardLiveConversationLocked(ctx, convID); err != nil {
+		log.Printf("auto-distill: skip arm for conversation %d — %v", convID, err)
+		return
+	}
 	fireAt := time.Now().Add(delay)
 	entry := &autoPendingEntry{
 		trigger: trigger,
@@ -485,6 +492,18 @@ func (s *Server) runAutoDistill(convID int64, trigger string) {
 	if s.slashing[convID] > 0 {
 		s.mu.Unlock()
 		skip("slash_active")
+		return
+	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up): w loads
+	// under this hold; between them the flag and the SQL commit leave no
+	// start window.
+	if w, werr := s.store.GetWorkstream(ctx, c.WorkstreamID); werr != nil {
+		s.mu.Unlock()
+		skip("workstream_lookup")
+		return
+	} else if err := s.guardLiveWorkstreamLocked(w); err != nil {
+		s.mu.Unlock()
+		skip("workstream_deleted")
 		return
 	}
 	s.distilling[convID] = struct{}{}

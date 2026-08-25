@@ -921,7 +921,15 @@ export default function App() {
             }
           }
         }
-        setError(null);
+        // Clear only POLL-origin errors (2026-08-25 audit P2): an
+        // unconditional clear let the ~1.5 s background tick wipe a fresh
+        // switch/send error seconds after it was raised — the user saw the
+        // view roll back with no cause. Those errors expire on the
+        // ERROR_BANNER_MS timer like before; only the poll's own failure
+        // line self-heals on the next healthy tick.
+        setError((prev) =>
+          prev !== null && prev.startsWith("poll failed:") ? null : prev,
+        );
         // E P2: reset consecutive failure counter on success
         pollFailRef.current = 0;
         setDaemonDown(false);

@@ -501,6 +501,10 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 	if err != nil {
 		return false, "workstream_lookup"
 	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up).
+	if err := s.guardLiveWorkstreamLocked(w); err != nil {
+		return false, "workstream_deleted"
+	}
 
 	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, conversationID, prompt)
 	if assertErr != nil {
@@ -1315,9 +1319,12 @@ func (s *Server) loopRoundBlockingFindings(events []store.Event, loopID int64, r
 
 // loopRoundUnion decodes a round row's union findings (inline or spilled).
 func (s *Server) loopRoundUnion(ev store.Event) []finding {
-	if path := jsonStr(ev.Payload, "findings_path"); path != "" {
-		data, err := os.ReadFile(strings.TrimSuffix(s.projectRoot, "/") + "/" + path)
-		if err != nil {
+	if jsonStr(ev.Payload, "findings_path") != "" {
+		// Contained + sha16-checked (2026-08-25 audit P2): a spilled
+		// union is the round's fix-driving evidence — tampered bytes
+		// silently became findings before this guard.
+		data := s.loopArtifactBody(ev.Payload, "findings_path")
+		if data == nil {
 			return nil
 		}
 		var out []finding

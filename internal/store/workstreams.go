@@ -29,6 +29,13 @@ func (s *Store) CreateOrGetWorkstream(ctx context.Context, projectID int64, name
 		 RETURNING id, created_at`, projectID, name).
 		Scan(&w.ID, &w.CreatedAt)
 	if err != nil {
+		// v4 partial-unique-index race: a concurrent creator passed its own
+		// SELECT between ours and the INSERT and won. The constraint now
+		// proves the row exists — re-read and return it exactly as the
+		// get-hit path above would have.
+		if existing, serr := s.GetWorkstreamByName(ctx, projectID, name); serr == nil {
+			return existing, nil
+		}
 		return Workstream{}, fmt.Errorf("store: create workstream: %w", err)
 	}
 	return w, nil

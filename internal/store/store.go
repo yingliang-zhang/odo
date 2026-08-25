@@ -238,9 +238,8 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (3)`); err != nil {
 			return fmt.Errorf("store: migrate: record version: %w", err)
 		}
-		return nil
-	}
-	if err != nil {
+		version = 3 // fall through: fresh databases get v4's index below
+	} else if err != nil {
 		return fmt.Errorf("store: migrate: read schema_version: %w", err)
 	}
 	if version < 2 {
@@ -252,6 +251,98 @@ func migrate(db *sql.DB) error {
 		if err := migrateV3(db); err != nil {
 			return err
 		}
+	}
+	if version < 4 {
+		if err := migrateV4(db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV4 (2026-08-25 audit P2): active workstream names gain a partial
+// unique index — create/rename were check-then-write, so two racing IPC
+// goroutines could both pass the SELECT and write the same active name.
+// The index is NOT in schemaV1's unconditional DDL: an existing database
+// may carry the race's fossil duplicates, and those must be renamed
+// (newest id keeps the name, older rows take a -dup-<id> suffix) before
+// the index can build. Atomic like V2/V3: a crash retries the upgrade.
+//
+// Collision-free rename (2026-08-25 review follow-up): -dup-<id> can
+// itself collide with a legitimately named active row — "main"
+// duplicated beside an existing "main-dup-2" would rename the loser
+// straight INTO the taken name, the CREATE UNIQUE INDEX would fail, and
+// every subsequent Open would wedge on the migration. Names are computed
+// in Go against the taken set (duplicates are a rarity; per-row updates
+// are cheap), with a -dup-<id>-<n> ladder on collision.
+func migrateV4(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: migrate v4: begin: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT id, project_id, name FROM workstreams WHERE status = 'active' ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("store: migrate v4: scan workstreams: %w", err)
+	}
+	type wsRow struct {
+		id, projectID int64
+		name          string
+	}
+	type wsName struct {
+		projectID int64
+		name      string
+	}
+	var active []wsRow
+	for rows.Next() {
+		var r wsRow
+		if err := rows.Scan(&r.id, &r.projectID, &r.name); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: migrate v4: scan row: %w", err)
+		}
+		active = append(active, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("store: migrate v4: rows: %w", err)
+	}
+	rows.Close()
+	// taken = every active (project, name); keeper = the newest id per
+	// group (it keeps the plain name). A loser's old name stays taken —
+	// the keeper still holds it.
+	taken := map[wsName]bool{}
+	keeper := map[wsName]int64{}
+	for _, r := range active {
+		k := wsName{r.projectID, r.name}
+		taken[k] = true
+		if keeper[k] < r.id {
+			keeper[k] = r.id
+		}
+	}
+	for _, r := range active {
+		if keeper[wsName{r.projectID, r.name}] == r.id {
+			continue // newest of the group (or the only row) keeps the name
+		}
+		cand := fmt.Sprintf("%s-dup-%d", r.name, r.id)
+		for n := 1; taken[wsName{r.projectID, cand}]; n++ {
+			cand = fmt.Sprintf("%s-dup-%d-%d", r.name, r.id, n)
+		}
+		if _, err := tx.Exec(`UPDATE workstreams SET name = ? WHERE id = ?`, cand, r.id); err != nil {
+			return fmt.Errorf("store: migrate v4: dedupe workstream %d: %w", r.id, err)
+		}
+		taken[wsName{r.projectID, cand}] = true
+	}
+	stmts := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workstreams_active_name ON workstreams(project_id, name) WHERE status = 'active'`,
+		`UPDATE schema_version SET version = 4`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("store: migrate v4: %s: %w", q, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: migrate v4: commit: %w", err)
 	}
 	return nil
 }

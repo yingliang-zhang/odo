@@ -234,6 +234,11 @@ func (s *Server) startParkedGoalRunLocked(ctx context.Context, c store.Conversat
 		log.Printf("parked: get workstream: %v", err)
 		return false
 	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up).
+	if err := s.guardLiveWorkstreamLocked(w); err != nil {
+		log.Printf("parked: skipping dequeue for conversation %d — %v", c.ID, err)
+		return false
+	}
 	// Full prompt-assembly parity with send/continuation: fresh memory
 	// layers (ADR-0003), journal replay, receipt closure. The goal's own
 	// park row is still waiting at this point (consumption journals below),

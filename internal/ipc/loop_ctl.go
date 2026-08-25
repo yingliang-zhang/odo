@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -283,8 +282,10 @@ func (s *Server) loopReadDesign(events []store.Event, designLockSeq int) string 
 		if text := jsonStr(ev.Payload, "design_lock"); text != "" {
 			return text
 		}
-		if path := jsonStr(ev.Payload, "design_lock_path"); path != "" {
-			if data, err := os.ReadFile(strings.TrimSuffix(s.projectRoot, "/") + "/" + path); err == nil {
+		if jsonStr(ev.Payload, "design_lock_path") != "" {
+			// Contained + sha16-checked (2026-08-25 audit P2): the design
+			// lock steers the implement prompt verbatim.
+			if data := s.loopArtifactBody(ev.Payload, "design_lock_path"); data != nil {
 				return string(data)
 			}
 		}

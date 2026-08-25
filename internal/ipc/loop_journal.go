@@ -342,6 +342,32 @@ func (s *Server) spillField(payload map[string]interface{}, loopID int64, field,
 	payload[field+"_sha16"] = sha
 }
 
+// loopArtifactBody reads back a spilled artifact with the two checks the
+// write side attested but the readers skipped (2026-08-25 audit P2):
+// containment through the read guard (the .odo/loop tree is daemon-owned;
+// a planted symlink or a tampered journaled path must not read outside
+// it) and the journaled <field>_sha16 — a replaced/corrupted artifact
+// must never steer the next round's fix or implementation prompt as if
+// it were the attested bytes. Any violation degrades to nil, the reader's
+// "no body" path (fail closed: findings go empty, the design lock goes
+// absent) — never to unverified content.
+func (s *Server) loopArtifactBody(payload []byte, pathField string) []byte {
+	rel := jsonStr(payload, pathField)
+	if rel == "" {
+		return nil
+	}
+	data, err := readWithinDir(s.projectRoot, filepath.Join(s.projectRoot, ".odo", "loop"), filepath.Join(s.projectRoot, rel))
+	if err != nil {
+		log.Printf("loop: spill %s unreadable: %v", rel, err)
+		return nil
+	}
+	if sha := jsonStr(payload, strings.TrimSuffix(pathField, "_path")+"_sha16"); sha != "" && sha16(data) != sha {
+		log.Printf("loop: spill %s sha16 mismatch — artifact refused (swapped after journaling)", rel)
+		return nil
+	}
+	return data
+}
+
 // --- journaling ---------------------------------------------------------------
 
 // journalLoop appends one EventLoopEvent row for loopID, stamping the

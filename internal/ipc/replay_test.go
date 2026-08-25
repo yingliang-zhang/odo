@@ -306,26 +306,34 @@ func TestAgentsMDSkipsEscapingRuleSymlink(t *testing.T) {
 	}
 }
 
-// TestAgentsMDReadsSymlinkWithinOdo: the in-dir fast path stays intact —
-// a pins.md symlink resolving deeper INSIDE the project-odo root reads
-// like a plain file (only escapes degrade).
-func TestAgentsMDReadsSymlinkWithinOdo(t *testing.T) {
+// TestAgentsMDNeverCopiesDynamicRules (2026-08-25 audit P1): AGENTS.md is
+// the stable-protocol bridge ONLY — memory.md/pins.md ride the receipted
+// prompt injection and must not appear in the system-prompt copy, even
+// when both files are present and fully readable (a second, bootstrap-
+// refreshed copy drifted behind mid-session apply/retract/pin with no
+// receipt coverage).
+func TestAgentsMDNeverCopiesDynamicRules(t *testing.T) {
 	root, odoDir := agentsMDRig(t)
-	target := filepath.Join(odoDir, "pins-real.md")
-	const pins = "pin it down\n"
-	if err := os.WriteFile(target, []byte(pins), 0o644); err != nil {
+	const mem = "- never touch source data — cites: x; reaffirmed: 1\n"
+	const pins = "- pin it down\n"
+	if err := os.WriteFile(filepath.Join(odoDir, "memory.md"), []byte(mem), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(odoDir, "pins.md")); err != nil {
-		t.Skipf("symlink not supported on this platform: %v", err)
+	if err := os.WriteFile(filepath.Join(odoDir, "pins.md"), []byte(pins), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	(&Server{projectRoot: root}).generateAgentsMD()
 	agents, err := os.ReadFile(filepath.Join(odoDir, "AGENTS.md"))
 	if err != nil {
 		t.Fatalf("read AGENTS.md: %v", err)
 	}
-	if !strings.Contains(string(agents), "## Pins") || !strings.Contains(string(agents), pins) {
-		t.Errorf("AGENTS.md lost the in-dir symlink target's pins:\n%s", agents)
+	for _, absent := range []string{"## Memory", "## Pins", "never touch source data", "pin it down"} {
+		if strings.Contains(string(agents), absent) {
+			t.Errorf("AGENTS.md copies dynamic rules %q — the receipted prompt layer owns those:\n%s", absent, agents)
+		}
+	}
+	if !strings.Contains(string(agents), "## Project Rules") || !strings.Contains(string(agents), "## Plan todos") {
+		t.Errorf("AGENTS.md lost the stable protocol sections:\n%s", agents)
 	}
 }
 

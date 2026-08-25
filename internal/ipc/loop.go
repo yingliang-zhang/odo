@@ -166,6 +166,16 @@ func (s *Server) loopStartAudit(ctx context.Context, c *store.Conversation, args
 				return store.Event{}, fmt.Errorf("loop: agent already running for conversation %d — /loop audit starts on landed work", c.ID)
 			}
 		}
+		// Mid-delete/deleted lane bar (2026-08-25 review follow-up): w
+		// loads inside this hold so admission cannot race the delete's
+		// flag window.
+		w, werr := s.store.GetWorkstream(ctx, c.WorkstreamID)
+		if werr != nil {
+			return store.Event{}, werr
+		}
+		if err := s.guardLiveWorkstreamLocked(w); err != nil {
+			return store.Event{}, fmt.Errorf("loop: %w", err)
+		}
 		st, _, err := s.loopActiveState(ctx, c.ID)
 		if err != nil {
 			return store.Event{}, err
@@ -348,6 +358,16 @@ func (s *Server) loopStartTasks(ctx context.Context, c *store.Conversation, args
 				return store.Event{}, fmt.Errorf("loop: agent already running for conversation %d", c.ID)
 			}
 		}
+		// Mid-delete/deleted lane bar (2026-08-25 review follow-up): w
+		// loads inside this hold so admission cannot race the delete's
+		// flag window.
+		w, werr := s.store.GetWorkstream(ctx, c.WorkstreamID)
+		if werr != nil {
+			return store.Event{}, werr
+		}
+		if err := s.guardLiveWorkstreamLocked(w); err != nil {
+			return store.Event{}, fmt.Errorf("loop: %w", err)
+		}
 		st, _, err := s.loopActiveState(ctx, c.ID)
 		if err != nil {
 			return store.Event{}, err
@@ -379,7 +399,24 @@ func (s *Server) readLoopTaskFile(rel string) (string, error) {
 	if clean == "" || clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || filepath.IsAbs(rel) || !strings.HasPrefix(abs, root+"/") {
 		return "", fmt.Errorf("file %q escapes the project root", rel)
 	}
-	data, err := os.ReadFile(abs)
+	// Size pre-check (2026-08-25 audit P1): os.Stat follows links, so the
+	// measured bytes are the ones the read below would pull — a multi-GB
+	// tasks file is refused BEFORE it lands in memory whole. Swap-after-
+	// stat stays outside the model (the resolution-time convention);
+	// the post-read check remains the authority.
+	if fi, err := os.Stat(abs); err == nil && fi.Size() > settleDiffCapBytes {
+		return "", fmt.Errorf("file %q over the %dB cap", rel, settleDiffCapBytes)
+	}
+	// Contained read (same audit P1): the old bare os.ReadFile followed a
+	// checked-in symlink (tasks.md -> ~/.ssh/config) straight out of the
+	// project despite the textual escape rule above — the gap class the
+	// read guard closes for .odo/wiki. Anchored at resolvedRoot (canon
+	// anchor inside readWithinDir), matching handleReadFile's semantics.
+	anchor := s.resolvedRoot
+	if anchor == "" {
+		anchor = s.projectRoot
+	}
+	data, err := readWithinDir(s.projectRoot, anchor, abs)
 	if err != nil {
 		return "", fmt.Errorf("file %q: %w", rel, err)
 	}

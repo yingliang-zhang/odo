@@ -42,6 +42,12 @@ type skillEntry struct {
 // is enough for 2–4 concise skills.
 const skillsInjectionCap = 8 * 1024
 
+// skillMaxFileBytes caps one skill file's scan-time read (2026-08-25 audit
+// P2): injection caps at 8 KB across skills, so a file over this cap could
+// never be meaningfully injected — it is skipped whole, and the scan never
+// pulls an unbounded file into memory.
+const skillMaxFileBytes = 64 * 1024
+
 // frontmatterRe matches the YAML frontmatter block at the start of a file:
 // ---\n key: value\n ... \n---\n  (trailing newline optional for EOF-terminated files).
 var frontmatterRe = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---(?:\r?\n|$)`)
@@ -136,6 +142,19 @@ func scanSkills(projectRoot string) []skillEntry {
 	byName := map[string]skillEntry{}
 
 	for _, d := range dirs {
+		// Containment (2026-08-25 audit P0): the per-file Lstat below
+		// rejects symlinked FILES, but a symlinked DIRECTORY (.odo or
+		// .odo/skills itself) would let every regular file inside an
+		// external tree scan clean and ride into the prompt. The project
+		// scope resolves through guardedBase — a planted link degrades the
+		// whole project scope to absent (the read guard's vanished
+		// semantics). Global ~/.odo/skills stays unguarded: dotfiles links
+		// are legitimate, outside the threat model.
+		if d.scope == "project" {
+			if _, err := guardedBase(projectRoot, d.root); err != nil {
+				continue
+			}
+		}
 		files, err := filepath.Glob(filepath.Join(d.root, "*.md"))
 		if err != nil || len(files) == 0 {
 			continue
@@ -171,10 +190,13 @@ func scanSkills(projectRoot string) []skillEntry {
 				fh.Close()
 				continue
 			}
-			content, err := io.ReadAll(fh)
+			content, err := io.ReadAll(io.LimitReader(fh, skillMaxFileBytes+1))
 			fh.Close()
 			if err != nil {
 				continue
+			}
+			if len(content) > skillMaxFileBytes {
+				continue // oversized: whole-skip, never a partial injection
 			}
 			name, desc, origin, keywords, body := parseFrontmatter(string(content))
 			if name == "" {
@@ -278,7 +300,7 @@ func formatSkillsForInjection(entries []skillEntry, maxBytes int) (string, []ski
 		header := "### Skill: " + e.info.Name + "\n\n"
 		block := header + e.body + "\n\n---\n\n"
 		if b.Len()+len(block) > maxBytes {
-			break
+			continue // skip the oversized skill; smaller ones may still fit
 		}
 		b.WriteString(block)
 		receipts = append(receipts, skillReceiptItem{

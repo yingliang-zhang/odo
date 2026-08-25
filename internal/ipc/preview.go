@@ -942,14 +942,23 @@ func (s *Server) handlePreviewQuery(ctx context.Context, c *store.Conversation, 
 		s.mu.Unlock()
 		return Response{}, err
 	}
+	// Mid-delete/deleted lane bar (2026-08-25 review follow-up): w loads
+	// inside this hold so the slot registration cannot race the delete's
+	// flag window.
+	w, werr := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if werr == nil {
+		werr = s.guardLiveWorkstreamLocked(w)
+	}
+	if werr != nil {
+		s.mu.Unlock()
+		return Response{}, fmt.Errorf("send_message: %w", werr)
+	}
 	s.slashing[c.ID]++
 	s.mu.Unlock()
 	defer s.releaseSlashSlot(ctx, c.ID)
-
-	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
-	if err != nil {
-		return Response{}, err
-	}
+	// w was loaded inside the slot-registration hold above (the deleted-lane
+	// bar) — reuse it here; a post-commit delete now refuses further work
+	// at the next guard rather than mid-assemble.
 
 	// Vision's lean contract (slashModeVision): the block is assembled
 	// before the /preview user_message journals, so it never contains the
