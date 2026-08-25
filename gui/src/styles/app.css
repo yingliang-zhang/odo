@@ -682,6 +682,53 @@ body {
    chrome all live on the elements in Sidebar.tsx. Collapse stays a 48px icon
    rail — expanded content stays mounted (form state survives), hidden via
    group-data-[sidebar-state=collapsed]. Class names remain as DOM hooks. */
+/* GUI perf Phase 1: collapse/expand motion without layout thrash. The
+   aside's width/padding flip instantly (Tailwind data-sidebar-state
+   variants — one relayout per toggle, zero mid-animation), and the
+   visible motion is transform/opacity only: the surface slides in from
+   the window's left edge while rail icons / section labels fade. The
+   data-sidebar-anim attribute is set by Sidebar.tsx only between a user
+   toggle and animationend, so first mount plays nothing.
+   Two identical keyframes under DISTINCT names, on purpose: the CSS
+   animation-name must CHANGE for a mid-animation re-toggle to restart
+   the slide — collapsing then expanding within one duration would
+   otherwise play the first animation's remainder (or nothing) while the
+   geometry has already flipped. Do not merge them. */
+@keyframes sidebar-surface-in-collapse {
+  from {
+    transform: translateX(calc(-1 * var(--sidebar-width)));
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes sidebar-surface-in-expand {
+  from {
+    transform: translateX(calc(-1 * var(--sidebar-width)));
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes sidebar-labels-in {
+  from,
+  40% {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.sidebar[data-sidebar-anim="collapse"] {
+  animation: sidebar-surface-in-collapse var(--dur-slow) var(--ease-out);
+}
+.sidebar[data-sidebar-anim="expand"] {
+  animation: sidebar-surface-in-expand var(--dur-slow) var(--ease-out);
+}
+.sidebar[data-sidebar-anim] .sidebar-rail,
+.sidebar[data-sidebar-anim] .sidebar-sections {
+  animation: sidebar-labels-in var(--dur-slow) var(--ease-out);
+}
 
 /* Tri-model right sidebar gap: file preview dialog — overlay/wrapper chrome
    removed in Phase 5 (Radix Dialog + Tailwind); content styles stay. */

@@ -49,7 +49,14 @@ export default function ContextPanel({
   const MIN_WIDTH = 280;
   const MAX_WIDTH = 600;
   const [panelWidth, setPanelWidth] = useState(380);
-  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const dragRef = useRef<{ startX: number; startW: number; lastX: number } | null>(null);
+  const rafRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    },
+    [],
+  );
 
   // Review finding 8 (2026-08-24) — tab strip overflow. Measured in Chromium
   // at the 380px default: six tabs span scrollWidth 419-457px (varies with
@@ -105,18 +112,37 @@ export default function ContextPanel({
   if (!open) return null;
 
   const onResizePointerDown = (e: ReactPointerEvent) => {
-    dragRef.current = { startX: e.clientX, startW: panelWidth };
+    dragRef.current = { startX: e.clientX, startW: panelWidth, lastX: e.clientX };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onResizePointerMove = (e: ReactPointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
-    // Grip is on the left edge of a right-docked panel: dragging left
-    // (clientX decreases) must widen the panel.
-    setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, d.startW + (d.startX - e.clientX))));
+    // GUI perf Phase 1 (resize): no width commit per pointermove — the
+    // latest position is buffered and ONE commit lands per animation
+    // frame; a per-move setPanelWidth forced a full chat-area relayout at
+    // pointer-event cadence (up to ~120Hz on some mice).
+    d.lastX = e.clientX;
+    if (rafRef.current != null) return; // latest position wins this frame
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const cur = dragRef.current;
+      if (!cur) return;
+      // Grip is on the left edge of a right-docked panel: dragging left
+      // (clientX decreases) must widen the panel.
+      setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, cur.startW + (cur.startX - cur.lastX))));
+    });
   };
   const onResizePointerUp = () => {
+    // Cancel any pending frame before the final synchronous commit so
+    // the panel never ends a frame stale.
+    const d = dragRef.current;
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
     dragRef.current = null;
+    if (d) setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, d.startW + (d.startX - d.lastX))));
   };
 
   const badges: Record<PanelTab, number | null | undefined> = {

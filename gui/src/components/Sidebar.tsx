@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useRef, useMemo, useState } from "react";
 import { errorMessage } from "../api";
 import { ChevronRight, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ProjectEntry, Workstream } from "../types";
@@ -476,6 +476,24 @@ export default function Sidebar({
   };
 
   // Render a project group with its workstreams
+  // GUI perf Phase 1 (sidebar motion): width/padding flip INSTANTLY (one
+  // relayout per toggle), and the visible motion is transform/opacity only
+  // (data-sidebar-anim keyframes in app.css) — the old width transition
+  // re-laid-out the entire chat column for every animation frame. Layout
+  // effect, not passive: the attr must be set before the first paint of
+  // the new geometry or the surface flashes at its final spot for a frame.
+  // The attr lives only between a user toggle and animationend, so the
+  // first mount plays nothing. Collapse/expand use DISTINCT animation
+  // names so a mid-animation re-toggle restarts the slide — a same-name
+  // animation would not restart on an attr-value flip.
+  const prevCollapsedRef = useRef(collapsed);
+  const [sidebarAnim, setSidebarAnim] = useState<"collapse" | "expand" | null>(null);
+  useLayoutEffect(() => {
+    if (prevCollapsedRef.current === collapsed) return;
+    prevCollapsedRef.current = collapsed;
+    setSidebarAnim(collapsed ? "collapse" : "expand");
+  }, [collapsed]);
+
   const renderProject = (p: ProjectEntry) => {
     const isActive = p.root === activeProjectRoot;
     const isExpanded = !collapsedProjects.has(p.root);
@@ -673,9 +691,14 @@ export default function Sidebar({
         "w-[var(--sidebar-width)] border-r border-[var(--stroke-tertiary)] bg-[var(--bg-raised)]",
         "px-3 py-3.5",
         "data-[sidebar-state=collapsed]:w-[var(--sidebar-width-icon)] data-[sidebar-state=collapsed]:px-1.5 data-[sidebar-state=collapsed]:py-2.5",
-        "transition-[width_var(--dur-slow)_var(--ease-out),padding_0.22s_var(--ease-out)] will-change-[width]",
       )}
       data-sidebar-state={collapsed ? "collapsed" : "expanded"}
+      data-sidebar-anim={sidebarAnim ?? undefined}
+      onAnimationEnd={(e) => {
+        // Child fades (rail/sections) bubble their animationend up here —
+        // only the aside's own surface animation clears the state.
+        if (e.target === e.currentTarget) setSidebarAnim(null);
+      }}
     >
       <div className="sidebar-rail hidden flex-col gap-1 group-data-[sidebar-state=collapsed]/sidebar:flex">
         <button

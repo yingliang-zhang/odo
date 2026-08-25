@@ -259,6 +259,14 @@ interface Fold {
   notePath?: string; // folded epoch's wiki note, when the marker names one
   noteName?: string; // its basename without .md, for display
 }
+// GUI perf Phase 1 (transcript windowing): the chat mounts only the LAST
+// TRANSCRIPT_WINDOW_GROUPS run groups by default; a chip at the top of
+// the rendered window reveals the PREVIOUS N groups per click, stepwise.
+// The full history is already in memory (poll replay) — the cut is render
+// scope only, zero information loss. Mechanism chosen: a run-group count
+// (over a byte cap: deterministic counts in e2e fixtures, one cheap slice
+// per render). Exported for the e2e fixtures.
+export const TRANSCRIPT_WINDOW_GROUPS = 25;
 
 // One unit of rendered output inside a run: a plain bubble, or a bundle of
 // consecutive tool events collapsed under a "N tool calls" <details>
@@ -1229,6 +1237,41 @@ function ChatSurface({
   // shrinks under the cursor (events arrive while searching).
   useEffect(() => setMatchIdx(0), [trimmedQuery]);
   const clampedIdx = matches.length === 0 ? 0 : Math.min(matchIdx, matches.length - 1);
+  // GUI perf Phase 1 (render window): mount scope is sliced to the tail
+  // run groups; the fold above, runRenderItems, and every derive* still
+  // read the FULL events array (journal folds are not render scope), and
+  // ⌘F matches over the full visibleEvents — never the window — so the
+  // cut loses nothing (zero information loss: poll replay holds it all).
+  // Expansion is remembered per conversation: the id travels in the key,
+  // so a workstream switch can never render another conversation's window
+  // expanded (the "default" fallback only applies while no conversation
+  // is loaded — nothing renders then). `pages` counts back from the live
+  // tail: new runs stream in below without re-keying, and the Math.max
+  // clamp absorbs a shrinking array.
+  const [windowExpand, setWindowExpand] = useState<{ key: string; pages: number } | null>(null);
+  const windowKey = String(conversationId ?? "default");
+  const windowPages = windowExpand?.key === windowKey ? windowExpand.pages : 0;
+  const chosenWindowStart = Math.max(0, runGroups.length - TRANSCRIPT_WINDOW_GROUPS * (1 + windowPages));
+  // ⌘F jump-to-match: a hit can live in a hidden group. runGroups
+  // partitions visibleEvents — preamble group included — so a membership
+  // scan always finds the match's group (seq equality by construction: each
+  // group owns exactly its members, safe under the non-seq-ascending
+  // journal order at distill boundaries). Force that group — and
+  // everything below it, so the live tail and preview are never windowed
+  // out mid-search — into the window while the search is active. Derived,
+  // no state: closing the search snaps back to the chosen expansion.
+  const matchGroupStart = useMemo(() => {
+    if (matches.length === 0) return null;
+    const seq = matches[clampedIdx].seq;
+    for (let i = 0; i < runGroups.length; i++) {
+      if (runGroups[i].events.some((e) => e.seq === seq)) return i;
+    }
+    return null;
+  }, [matches, clampedIdx, runGroups]);
+  const renderWindowStart =
+    matchGroupStart != null ? Math.min(chosenWindowStart, matchGroupStart) : chosenWindowStart;
+  const renderedGroups = useMemo(() => runGroups.slice(renderWindowStart), [runGroups, renderWindowStart]);
+  const hiddenGroupCount = renderWindowStart;
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Focus the field when the bar opens; ⌘F while open refocuses instead
@@ -1511,7 +1554,29 @@ function ChatSurface({
           )}
           </div>
         )}
-          {runGroups.map((group, groupIdx) => (
+          {hiddenGroupCount > 0 && (
+            <div
+              className="transcript-window-chip flex max-w-full items-center gap-2 self-center rounded-[10px] border border-border bg-bg-raised px-3 py-1 text-caption text-text-dim"
+              role="note"
+            >
+              <span className="transcript-window-chip-text">
+                {hiddenGroupCount} earlier run group{hiddenGroupCount === 1 ? "" : "s"} hidden · click to expand
+              </span>
+              <button
+                type="button"
+                className="transcript-window-chip-btn cursor-pointer rounded-sm border border-border bg-transparent px-2 py-px text-micro text-text-dim hover:border-accent-user hover:text-accent-user"
+                aria-expanded={windowPages > 0}
+                onClick={() =>
+                  // Stepwise: one click reveals the PREVIOUS N groups,
+                  // never the whole history at once.
+                  setWindowExpand({ key: windowKey, pages: windowPages + 1 })
+                }
+              >
+                Expand
+              </button>
+            </div>
+          )}
+          {renderedGroups.map((group, groupIdx) => (
             <RunGroupBoundary
               key={`${conversationId ?? "none"}:${group.start?.seq ?? "preamble"}`}
               resetKey={String(conversationId ?? "none") + ":" + String(group.start?.seq ?? "preamble") + ":" + String(group.events.length)}
@@ -1540,7 +1605,7 @@ function ChatSurface({
                   // Tool groups default-collapsed; an active ⌘F search
                   // forces them open so jump-to-match still reaches tool
                   // bubbles (the <details> `open` attribute, no JS state).
-                  const trailing = agentRunning && groupIdx === runGroups.length - 1 && itemIdx === items.length - 1;
+                  const trailing = agentRunning && groupIdx === renderedGroups.length - 1 && itemIdx === items.length - 1;
                   const lastCall = [...item.events].reverse().find((e) => e.type === "agent_tool_call");
                   return (
                     <details
@@ -1854,7 +1919,10 @@ function ChatSurface({
 // frozen useCallbacks; autoDistill/autoDistillBlocked are useMemo'd
 // finds. handleResumeParked/handleDropParked/handleDropSteer rebuild only
 // on conversation/project switches; the rest are primitives.
-// NOT done (follow-up, deliberately out of scope): windowing or
-// virtualizing the runGroups list itself — when `events` does change, a
-// long conversation still re-maps its full history.
+// Windowing landed in GUI perf Phase 1 (TRANSCRIPT_WINDOW_GROUPS above):
+// the rendered list is a tail slice, so a long conversation mounts a
+// bounded bubble count even when `events` changes (fold/run-item memos
+// still iterate the full array — CPU there, DOM here). True row
+// virtualization (top-spacer IndexMode) is a possible follow-up, not a
+// gap.
 export default memo(ChatSurface);
