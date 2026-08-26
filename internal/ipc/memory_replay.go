@@ -104,6 +104,13 @@ const (
 	replayAll   = replayApply | replayPin
 )
 
+// replayJournalReadPage is the boot replayer's journal page size (K3
+// hygiene, 2026-08-26): large enough that a healthy boot is a handful of
+// round trips, small enough that no project's journal ever materializes
+// in memory — the pre-paging one-shot listing copied every payload of a
+// long-lived project's events into one []Event per boot.
+const replayJournalReadPage = 512
+
 // memReceipt is one replay candidate: a memory_apply layer block
 // (memory/archive/user/skill) or a pins receipt, judged per layer by the
 // newest-only doctrine.
@@ -188,124 +195,162 @@ type memReceiptEval struct {
 	reason       string // why a foreign receipt conflicted
 }
 
-// parseLaneMemReceipts folds ONE lane's seq-ascending events into the
-// lane's newest-per-layer receipts (a later row of the same layer
-// overwrites the earlier candidate). kinds selects the receipt families.
-// Old cause:"recover" rows and the heal_merged/heal_conflict/heal_resolved
-// family never become candidates — the fold sees receipts only, today as
-// before (2026-08-26 doctrine). A legacy pin receipt (no after_sha) still
-// enters the fold — as a terminal landed boundary, not a replayable
-// receipt: its write landed file-first, so it has nothing to replay, but
-// as the lane's newest pins attestation it must mask every older
-// journal-first receipt. Falling through to the older receipt instead
-// (the inversion) manufactured false heal_conflicts on pins the legacy
-// write had already superseded.
-func parseLaneMemReceipts(events []store.Event, kinds int) map[string]memReceipt {
-	proposeByEpoch := map[int]*proposePayload{}
-	out := map[string]memReceipt{}
-	for i := range events {
-		ev := events[i]
-		switch {
-		case ev.Type == store.EventReviewAction && kinds&replayApply != 0:
-			var head struct {
-				Action string `json:"action"`
+// laneMemReceiptFold is the streaming per-lane receipt fold: feed the
+// lane's events in journal order, one at a time, and cand accumulates the
+// newest-per-layer receipts (a later row of the same layer overwrites the
+// earlier candidate). The boot replayer keeps ONE fold per lane alive
+// across journal pages (K3 hygiene, 2026-08-26): propose→apply pairing
+// and the newest picks are order-dependent state, not full-list
+// operations, so page boundaries are invisible to the result and the
+// full project journal never materializes. Bounded retention (the prune
+// in feed): proposeByEpoch sheds proposes a folded apply supersedes, so
+// the live footprint stays O(live candidates + the newest applied /
+// pending proposes), never O(the lane's whole distill history).
+type laneMemReceiptFold struct {
+	proposeByEpoch map[int]*proposePayload
+	cand           map[string]memReceipt
+}
+
+func newLaneMemReceiptFold() *laneMemReceiptFold {
+	return &laneMemReceiptFold{proposeByEpoch: map[int]*proposePayload{}, cand: map[string]memReceipt{}}
+}
+
+// feed folds ONE event into the lane's candidates. Old cause:"recover"
+// rows and the heal_merged/heal_conflict/heal_resolved family never
+// become candidates — the fold sees receipts only, today as before
+// (2026-08-26 doctrine). A legacy pin receipt (no after_sha) still enters
+// the fold — as a terminal landed boundary, not a replayable receipt: its
+// write landed file-first, so it has nothing to replay, but as the lane's
+// newest pins attestation it must mask every older journal-first receipt.
+// Falling through to the older receipt instead (the inversion)
+// manufactured false heal_conflicts on pins the legacy write had already
+// superseded.
+func (f *laneMemReceiptFold) feed(ev store.Event, kinds int) {
+	switch {
+	case ev.Type == store.EventReviewAction && kinds&replayApply != 0:
+		var head struct {
+			Action string `json:"action"`
+		}
+		if json.Unmarshal(ev.Payload, &head) != nil {
+			return
+		}
+		if head.Action == "memory_propose" {
+			var pp proposePayload
+			if json.Unmarshal(ev.Payload, &pp) == nil {
+				f.proposeByEpoch[pp.Epoch] = &pp
 			}
-			if json.Unmarshal(ev.Payload, &head) != nil {
-				continue
+			return
+		}
+		if head.Action != "memory_apply" {
+			return
+		}
+		var p struct {
+			Epoch    int            `json:"epoch"`
+			Accepted []MemoryAccept `json:"accepted"`
+			Recovery applyRecovery  `json:"recovery"`
+		}
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			return
+		}
+		// Prune proposes this fold can never reference again (K3 hygiene):
+		// an apply pairs with its OWN epoch's propose, and no LATER apply
+		// pairs with an older one — a batch left unapplied past the next
+		// distill is superseded, never applied later (findPendingBatch's
+		// doctrine: a new distill supersedes any older batch). The current
+		// epoch's own propose stays: an idempotent apply retry can
+		// journal the same epoch again before dedupe catches it. Worst
+		// case of a pathological out-of-order apply is the pre-existing
+		// nil-propose path — a safe conflict, never a wrong merge.
+		for epoch := range f.proposeByEpoch {
+			if epoch < p.Epoch {
+				delete(f.proposeByEpoch, epoch)
 			}
-			if head.Action == "memory_propose" {
-				var pp proposePayload
-				if json.Unmarshal(ev.Payload, &pp) == nil {
-					proposeByEpoch[pp.Epoch] = &pp
-				}
-				continue
-			}
-			if head.Action != "memory_apply" {
-				continue
-			}
-			var p struct {
-				Epoch    int            `json:"epoch"`
-				Accepted []MemoryAccept `json:"accepted"`
-				Recovery applyRecovery  `json:"recovery"`
-			}
-			if json.Unmarshal(ev.Payload, &p) != nil {
-				continue
-			}
-			base := memReceipt{
-				convID:   ev.ConversationID,
-				eventID:  ev.ID,
-				seq:      ev.Seq,
-				epoch:    p.Epoch,
-				accepted: p.Accepted,
-				propose:  proposeByEpoch[p.Epoch],
-			}
-			if p.Recovery.Memory != nil {
-				r := base
-				r.layer = "memory"
-				r.before, r.after, r.body = p.Recovery.Memory.BeforeSHA, p.Recovery.Memory.AfterSHA, p.Recovery.Memory.Body
-				r.entries = p.Recovery.Memory.Entries
-				out[r.layer] = r
-			}
-			if p.Recovery.Archive != nil {
-				r := base
-				r.layer = "archive"
-				r.before, r.after, r.body = p.Recovery.Archive.BeforeSHA, p.Recovery.Archive.AfterSHA, p.Recovery.Archive.Body
-				out[r.layer] = r
-			}
-			if p.Recovery.User != nil {
-				r := base
-				r.layer = "user"
-				r.before, r.after, r.body = p.Recovery.User.BeforeSHA, p.Recovery.User.AfterSHA, p.Recovery.User.Body
-				out[r.layer] = r
-			}
-			for _, sk := range p.Recovery.Skills {
-				r := base
-				r.layer = "skill:" + filepath.Base(sk.Name)
-				r.before, r.after, r.body = sk.BeforeSHA, sk.AfterSHA, sk.Body
-				out[r.layer] = r
-			}
-			// Pins receipts carry whole bodies; propose rows are only consulted
+		}
+		base := memReceipt{
+			convID:   ev.ConversationID,
+			eventID:  ev.ID,
+			seq:      ev.Seq,
+			epoch:    p.Epoch,
+			accepted: p.Accepted,
+			propose:  f.proposeByEpoch[p.Epoch],
+		}
+		if p.Recovery.Memory != nil {
+			r := base
+			r.layer = "memory"
+			r.before, r.after, r.body = p.Recovery.Memory.BeforeSHA, p.Recovery.Memory.AfterSHA, p.Recovery.Memory.Body
+			r.entries = p.Recovery.Memory.Entries
+			f.cand[r.layer] = r
+		}
+		if p.Recovery.Archive != nil {
+			r := base
+			r.layer = "archive"
+			r.before, r.after, r.body = p.Recovery.Archive.BeforeSHA, p.Recovery.Archive.AfterSHA, p.Recovery.Archive.Body
+			f.cand[r.layer] = r
+		}
+		if p.Recovery.User != nil {
+			r := base
+			r.layer = "user"
+			r.before, r.after, r.body = p.Recovery.User.BeforeSHA, p.Recovery.User.AfterSHA, p.Recovery.User.Body
+			f.cand[r.layer] = r
+		}
+		for _, sk := range p.Recovery.Skills {
+			r := base
+			r.layer = "skill:" + filepath.Base(sk.Name)
+			r.before, r.after, r.body = sk.BeforeSHA, sk.AfterSHA, sk.Body
+			f.cand[r.layer] = r
+		}
+		// Pins receipts carry whole bodies; propose rows are only consulted
 		// by the memory-layer merge, so pins-only callers skip the
 		// review_action family entirely here.
-		case ev.Type == store.EventMemoryUpdate && kinds&replayPin != 0:
-			var p struct {
-				Layer     string `json:"layer"`
-				Cause     string `json:"cause"`
-				BeforeSHA string `json:"before_sha"`
-				AfterSHA  string `json:"after_sha"`
-				Body      string `json:"body"`
-			}
-			if json.Unmarshal(ev.Payload, &p) != nil || p.Layer != "pins" || p.Cause != "pin" {
-				continue
-			}
-			if p.AfterSHA == "" {
-				// Legacy receipt (pre-recovery, written file-first):
-				// nothing recoverable, but this row is the layer's newest
-				// attestation — record it as a terminal landed boundary so
-				// no OLDER journal-first receipt becomes the candidate,
-				// in this lane's fold and in the project-wide event-id
-				// pick (the tombstone still carries its event id).
-				out["pins"] = memReceipt{
-					layer:   "pins",
-					convID:  ev.ConversationID,
-					eventID: ev.ID,
-					seq:     ev.Seq,
-					legacy:  true,
-				}
-				continue
-			}
-			out["pins"] = memReceipt{
+	case ev.Type == store.EventMemoryUpdate && kinds&replayPin != 0:
+		var p struct {
+			Layer     string `json:"layer"`
+			Cause     string `json:"cause"`
+			BeforeSHA string `json:"before_sha"`
+			AfterSHA  string `json:"after_sha"`
+			Body      string `json:"body"`
+		}
+		if json.Unmarshal(ev.Payload, &p) != nil || p.Layer != "pins" || p.Cause != "pin" {
+			return
+		}
+		if p.AfterSHA == "" {
+			// Legacy receipt (pre-recovery, written file-first):
+			// nothing recoverable, but this row is the layer's newest
+			// attestation — record it as a terminal landed boundary so
+			// no OLDER journal-first receipt becomes the candidate,
+			// in this lane's fold and in the project-wide event-id
+			// pick (the tombstone still carries its event id).
+			f.cand["pins"] = memReceipt{
 				layer:   "pins",
 				convID:  ev.ConversationID,
 				eventID: ev.ID,
 				seq:     ev.Seq,
-				before:  p.BeforeSHA,
-				after:   p.AfterSHA,
-				body:    p.Body,
+				legacy:  true,
 			}
+			return
+		}
+		f.cand["pins"] = memReceipt{
+			layer:   "pins",
+			convID:  ev.ConversationID,
+			eventID: ev.ID,
+			seq:     ev.Seq,
+			before:  p.BeforeSHA,
+			after:   p.AfterSHA,
+			body:    p.Body,
 		}
 	}
-	return out
+}
+
+// parseLaneMemReceipts folds ONE lane's seq-ascending events into the
+// lane's newest-per-layer receipts — the one-shot wrapper around
+// laneMemReceiptFold (the live apply-retry / pin-RMW / sweep callers hold
+// the lane's full event slice already; only the boot replayer streams).
+func parseLaneMemReceipts(events []store.Event, kinds int) map[string]memReceipt {
+	f := newLaneMemReceiptFold()
+	for i := range events {
+		f.feed(events[i], kinds)
+	}
+	return f.cand
 }
 
 // orderedLayers sorts receipt-map keys so replay and drilling are
@@ -843,26 +888,50 @@ func (s *Server) replayMemoryJournal(ctx context.Context) {
 		}
 		return
 	}
-	events, err := s.store.ListProjectEvents(ctx, p.ID)
-	if err != nil {
-		log.Printf("memory replay: startup scan: %v", err)
-		return
+	// Paged streaming fold (K3 hygiene): the journal arrives in
+	// replayJournalReadPage-sized keyset pages; one laneMemReceiptFold per
+	// lane carries the order-dependent state (propose→apply pairing,
+	// newest-per-layer) across page boundaries, so memory stays bounded no
+	// matter how old the project gets.
+	pageSize := replayJournalReadPage
+	if s.replayJournalPageSizeForTest > 0 {
+		pageSize = s.replayJournalPageSizeForTest
 	}
-	byLane := make(map[int64][]store.Event)
-	var lanes []int64
-	for _, e := range events {
-		if _, ok := byLane[e.ConversationID]; !ok {
-			lanes = append(lanes, e.ConversationID)
+	folds := map[int64]*laneMemReceiptFold{}
+	var lanes []int64 // first-appearance order, as the pre-paging code walked them
+	var afterID int64
+	for {
+		page, err := s.store.ListProjectEventsPage(ctx, p.ID, afterID, pageSize)
+		if err != nil {
+			log.Printf("memory replay: startup scan: %v", err)
+			return
 		}
-		byLane[e.ConversationID] = append(byLane[e.ConversationID], e)
+		for i := range page {
+			f := folds[page[i].ConversationID]
+			if f == nil {
+				f = newLaneMemReceiptFold()
+				folds[page[i].ConversationID] = f
+				lanes = append(lanes, page[i].ConversationID)
+			}
+			f.feed(page[i], replayAll)
+			afterID = page[i].ID
+		}
+		if len(page) < pageSize {
+			break
+		}
 	}
 	// Per layer, the globally newest receipt is the sole authority ("Do
 	// NOT scan non-newest receipts" — supersession through the apply path
 	// is itself the newest receipt and stays authoritative; the landed
 	// branch keeps the fold re-boot idempotent).
 	newest := map[string]memReceipt{}
+	// Walk lanes in first-appearance (journal) order — the pre-paging
+	// code's construction order. Strict > on globally unique event ids
+	// makes ties impossible, so this is belt and braces with
+	// orderedLayers below: map iteration order must never gate file
+	// state.
 	for _, lane := range lanes {
-		for layer, r := range parseLaneMemReceipts(byLane[lane], replayAll) {
+		for layer, r := range folds[lane].cand {
 			if cur, ok := newest[layer]; !ok || r.eventID > cur.eventID {
 				newest[layer] = r
 			}

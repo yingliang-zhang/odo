@@ -445,6 +445,69 @@ func seqs(events []Event) []int {
 	return out
 }
 
+// TestListProjectEventsPageContract pins the paged listing's two
+// contracts (2026-08-26 K3 hygiene): limit must be POSITIVE — there is
+// deliberately no unbounded full-list path, so limit <= 0 is a refused
+// programming error, not a clamp — and keyset pages resume strictly by
+// e.id (the cross-conversation total order) with a short final page.
+func TestListProjectEventsPageContract(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	p, _ := s.CreateOrGetProject(ctx, "/repo/pp", "pp")
+	w, _ := s.CreateOrGetWorkstream(ctx, p.ID, "main")
+	c1, _ := s.CreateConversation(ctx, w.ID, "")
+	c2, _ := s.CreateConversation(ctx, w.ID, "")
+
+	// Interleave lanes so global id order differs from per-lane seq order.
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		conv := c1.ID
+		if i%2 == 1 {
+			conv = c2.ID
+		}
+		ev, err := s.AppendEvent(ctx, conv, EventAgentText, `{"n":1}`)
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		ids = append(ids, ev.ID)
+	}
+
+	if _, err := s.ListProjectEventsPage(ctx, p.ID, 0, 0); err == nil {
+		t.Error("limit=0: want an error, got nil — the unbounded path must stay refused")
+	}
+	if _, err := s.ListProjectEventsPage(ctx, p.ID, 0, -3); err == nil {
+		t.Error("limit=-3: want an error, got nil")
+	}
+
+	// Two-row keyset pages reassemble the journal in exact global order.
+	var got []int64
+	var afterID int64
+	for {
+		page, err := s.ListProjectEventsPage(ctx, p.ID, afterID, 2)
+		if err != nil {
+			t.Fatalf("page after %d: %v", afterID, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, e := range page {
+			got = append(got, e.ID)
+			afterID = e.ID
+		}
+		if len(page) < 2 {
+			break
+		}
+	}
+	if len(got) != len(ids) {
+		t.Fatalf("paged rows = %d, want %d", len(got), len(ids))
+	}
+	for i := range ids {
+		if got[i] != ids[i] {
+			t.Fatalf("page row %d: id %d, want %d (keyset order must match append order)", i, got[i], ids[i])
+		}
+	}
+}
+
 func TestConversationLifecycle(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

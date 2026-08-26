@@ -34,8 +34,9 @@ package ipc
 // (FIX 2: lookup failures re-arm a retry instead of dying — the silence
 // can never become permanent). Scheduler bookkeeping (scheduled /
 // skipped / cap_suspended_until) is excluded from the fold render AND
-// from window eligibility (foldExcludedMemoryUpdate / measureWindow), so
-// the storm has no bytes to feed on either. The journal row is the
+// from window eligibility (foldExcludedMemoryUpdate /
+// windowExcludedMemoryUpdate — the render/eligibility split), so the
+// storm has no bytes to feed on either. The journal row is the
 // durable record: boot restores live suspensions (StartupAutoScan), and
 // pending_counts discloses the resume time to the Memory tab
 // (autoCapResumeForBadges — rowless pre-fix journals get the computed
@@ -243,17 +244,22 @@ type windowStats struct {
 func measureWindow(window []store.Event) windowStats {
 	var st windowStats
 	for _, ev := range window {
-		// Scheduler bookkeeping (foldExcludedMemoryUpdate) counts toward
-		// NEITHER axis: not bytes (its render is "") and not events — the
-		// window measures agent/user activity only, so a suspended day's
-		// worth of trigger noise can't keep an otherwise-quiet window
-		// "eligible" (or feed the daily-cap feedback loop it came from).
+		// Scheduler bookkeeping AND boot-recovery heal rows count toward
+		// NEITHER axis (windowExcludedMemoryUpdate — the eligibility-side
+		// predicate, wider than the render's foldExcludedMemoryUpdate):
+		// not bytes and not events — the window measures agent/user
+		// activity only, so a suspended day's worth of trigger noise or a
+		// post-crash boot's heal storm (KB-sized stranded_body payloads
+		// included) can't keep an otherwise-quiet window "eligible" (or
+		// feed the daily-cap feedback loop the noise came from). Heal rows
+		// still RENDER in the prompt — the split lives in the two
+		// predicates' comments in server.go.
 		if ev.Type == store.EventMemoryUpdate {
 			var p struct {
 				Layer string `json:"layer"`
 				Cause string `json:"cause"`
 			}
-			if jsonUnmarshalOK(ev.Payload, &p) && foldExcludedMemoryUpdate(p.Layer, p.Cause) {
+			if jsonUnmarshalOK(ev.Payload, &p) && windowExcludedMemoryUpdate(p.Layer, p.Cause) {
 				continue
 			}
 		}

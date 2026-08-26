@@ -9,8 +9,10 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -118,9 +120,23 @@ func projectHeals(t *testing.T, rig *testRig, cause string) []map[string]interfa
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
-	events, err := rig.store.ListProjectEvents(context.Background(), p.ID)
-	if err != nil {
-		t.Fatalf("list project events: %v", err)
+	// Page through the journal deliberately small: every heal-drill then
+	// exercises ListProjectEventsPage's boundaries too.
+	var events []store.Event
+	var afterID int64
+	for {
+		page, err := rig.store.ListProjectEventsPage(context.Background(), p.ID, afterID, 4)
+		if err != nil {
+			t.Fatalf("list project events page: %v", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		events = append(events, page...)
+		afterID = page[len(page)-1].ID
+		if len(page) < 4 {
+			break
+		}
 	}
 	var out []map[string]interface{}
 	for _, ev := range events {
@@ -136,6 +152,233 @@ func projectHeals(t *testing.T, rig *testRig, cause string) []map[string]interfa
 		}
 	}
 	return out
+}
+
+// TestReplayJournalPagingEquivalence (2026-08-26 K3 hygiene drill): the
+// boot replayer streams the project journal in bounded keyset pages, and
+// page-boundary placement must be INVISIBLE to the outcome. The same
+// synthetic journal is built twice — receipts AND heal rows straddling
+// page boundaries (paged fold: 2-row pages, ≥3 pages, proposes separated
+// from their applies across the cut) — then folded once with the default
+// 512-row page (a single page: the pre-paging full-list fold) and once
+// paged. Required identical: the recover / heal_merged / heal_conflict /
+// heal_resolved payloads, their interleaved journal order, the layer
+// projections, and re-boot idempotence.
+func TestReplayJournalPagingEquivalence(t *testing.T) {
+	causes := []string{"recover", "heal_merged", "heal_conflict", "heal_resolved"}
+	type snapshot struct {
+		order []string                            // interleaved "eventID:cause" of ledger rows
+		rows  map[string][]map[string]interface{} // per-cause payloads in journal order
+		files map[string]string                   // layer projections
+		total int                                 // project journal length
+	}
+
+	// build seeds ONE deterministic synthetic journal (fresh store →
+	// identical event ids) exercising every outcome class in a single
+	// pass: memory entry-merge + conflict retirement, archive chunk
+	// append, pins conflict, skill restore, and a superseded lane-A
+	// receipt the newest-per-layer pick must skip.
+	build := func(pageSize int) (*testRig, string) {
+		root := initRepo(t)
+		t.Setenv("HOME", t.TempDir())
+		rig := startRig(t, root)
+		t.Cleanup(func() { rig.stop(t) })
+		rig.server.replayJournalPageSizeForTest = pageSize
+		convA := bootstrapConv(t, rig, root)
+		ws := rig.call(t, Request{Cmd: CmdCreateWorkstream, ProjectRoot: root, Name: "beta"})
+		convB := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root, WorkstreamID: ws.Workstream.ID}).Conversation.ID
+
+		foreign := "- hand-authored rule — cites: hand; reaffirmed: 1\n"
+		writeProjFile(t, root, ".odo/memory.md", foreign)
+		writeProjFile(t, root, ".odo/pins.md", "- a human pins edit\n")
+		arcOld := "- kept old archive line\n"
+		arcForeign := arcOld + "- later hand line\n" // foreign: past the receipt's basis, chunk absent
+		writeProjFile(t, root, ".odo/memory-archive.md", arcForeign)
+
+		// Lane A (older): a legitimate memory receipt — superseded by lane
+		// B's later apply; the fold must never evaluate it. (before "" =
+		// the crashed batch's long-gone basis; the foreign projection is
+		// what makes lane B's twin a MERGE candidate below.)
+		markerA := seedApplyReceipt(t, rig, convA, 1, []MemoryProposal{
+			{Target: "memory.md", Rule: "lane-a rule", Evidence: "e1"},
+		}, nil, []MemoryAccept{{Target: "memory.md", Index: 0}},
+			applyRecovery{Memory: memLayer("", "- lane-a rule — cites: e1; reaffirmed: 1\n")})
+
+		// A pre-existing open conflict for lane A's receipt: the landed
+		// memory merge must RETIRE it (heal_resolved, actor superseded).
+		if _, err := rig.store.AppendEvent(context.Background(), convA, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer": "memory", "cause": "heal_conflict", "detail": "pre-seeded open conflict for retirement",
+			"stranded_receipt_seq": markerA.Seq, "stranded_conversation": convA,
+			"stranded_body":       "- lane-a rule — cites: e1; reaffirmed: 1\n",
+			"stranded_body_sha16": sha16([]byte("- lane-a rule — cites: e1; reaffirmed: 1\n")),
+		})); err != nil {
+			t.Fatalf("seed open conflict: %v", err)
+		}
+		// A stray merge row from an earlier boot: fold skips heal rows
+		// wholesale; it must be invisible identically under both pagings.
+		if _, err := rig.store.AppendEvent(context.Background(), convA, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer": "archive", "cause": "heal_merged", "receipt_seq": 1, "stranded_conversation": convA,
+			"entries_added": 1, "detail": "stray ledger noise from an earlier boot",
+		})); err != nil {
+			t.Fatalf("seed stray heal row: %v", err)
+		}
+
+		// Lane B (newest authority): memory merge + archive append in one
+		// apply, verbatim recorded entries so the merged line is the
+		// receipt's own (round-3 FIX C determinism).
+		mergedLine := "- beta merged rule — cites: e2; reaffirmed: 4\n"
+		recM := memLayer("", mergedLine)
+		recM.Entries = []applyRecoveryEntry{{Rule: "beta merged rule", Line: strings.TrimSuffix(mergedLine, "\n")}}
+		chunk := "\n## 2026-08-26 — rotated from memory.md (overflow)\n- rotated rule — cites: e2; reaffirmed: 1\n"
+		recA := &applyRecoveryLayer{BeforeSHA: sha16([]byte(arcOld)), AfterSHA: sha16([]byte(arcOld + chunk)), Body: chunk}
+		seedApplyReceipt(t, rig, convB, 2, []MemoryProposal{
+			{Target: "memory.md", Rule: "beta merged rule", Evidence: "e2"},
+		}, nil, []MemoryAccept{{Target: "memory.md", Index: 0}},
+			applyRecovery{Memory: recM, Archive: recA})
+		seedPinReceipt(t, rig, convB, "", "- a human pins edit\n- stranded pin\n")
+		skillBody := "---\nname: paging-skill\ndescription: paging drill\n---\n\nFold in pages.\n"
+		seedApplyReceipt(t, rig, convB, 3, nil, nil, nil,
+			applyRecovery{Skills: []applyRecoverySkill{{
+				Name: "paging-skill.md", BeforeSHA: sha16([]byte("")), AfterSHA: sha16([]byte(skillBody)), Body: skillBody,
+			}}})
+		return rig, root
+	}
+
+	// capture folds the journal + projections into a comparable snapshot;
+	// the read itself pages at a THIRD size (3), proving read-side
+	// boundary-agnosticism too.
+	capture := func(rig *testRig, root string) snapshot {
+		p, err := rig.store.GetProjectByRoot(context.Background(), rig.root)
+		if err != nil {
+			t.Fatalf("project: %v", err)
+		}
+		snap := snapshot{rows: map[string][]map[string]interface{}{}, files: map[string]string{}}
+		var afterID int64
+		for {
+			page, err := rig.store.ListProjectEventsPage(context.Background(), p.ID, afterID, 3)
+			if err != nil {
+				t.Fatalf("capture page: %v", err)
+			}
+			if len(page) == 0 {
+				break
+			}
+			snap.total += len(page)
+			for _, ev := range page {
+				if ev.Type != store.EventMemoryUpdate {
+					continue
+				}
+				var payload map[string]interface{}
+				if json.Unmarshal(ev.Payload, &payload) != nil {
+					continue
+				}
+				cause, _ := payload["cause"].(string)
+				for _, want := range causes {
+					if cause == want {
+						snap.order = append(snap.order, fmt.Sprintf("%d:%s", ev.ID, cause))
+					}
+				}
+			}
+			afterID = page[len(page)-1].ID
+			if len(page) < 3 {
+				break
+			}
+		}
+		for _, c := range causes {
+			snap.rows[c] = projectHeals(t, rig, c)
+		}
+		snap.files["memory"] = readFileStr(t, filepath.Join(root, ".odo", "memory.md"))
+		snap.files["pins"] = readFileStr(t, filepath.Join(root, ".odo", "pins.md"))
+		snap.files["archive"] = readFileStr(t, filepath.Join(root, ".odo", "memory-archive.md"))
+		snap.files["skill"] = readFileStr(t, filepath.Join(root, ".odo", "skills", "paging-skill.md"))
+		return snap
+	}
+
+	// Full-list fold: the default 512-row page swallows the whole journal.
+	rigFull, rootFull := build(0)
+	rigFull.server.replayMemoryJournal(context.Background())
+	full := capture(rigFull, rootFull)
+	if (full.total+1)/2 < 3 {
+		t.Fatalf("synthetic journal = %d events, want ≥5 so 2-row pages span ≥3 pages", full.total)
+	}
+
+	// Paged fold: 2-row pages, proposes separated from their applies.
+	rigPaged, rootPaged := build(2)
+	rigPaged.server.replayMemoryJournal(context.Background())
+	paged := capture(rigPaged, rootPaged)
+
+	if !reflect.DeepEqual(full, paged) {
+		t.Errorf("paged replay diverged from the full-list fold\n full: order=%v rows=%v files=%v\npaged: order=%v rows=%v files=%v",
+			full.order, full.rows, full.files, paged.order, paged.rows, paged.files)
+	}
+
+	// Sanity: every outcome class actually fired (a degenerate no-op
+	// journal would also be "equivalent").
+	wantCounts := map[string]int{"recover": 1, "heal_merged": 3, "heal_conflict": 2, "heal_resolved": 1}
+	for _, c := range causes {
+		if got := len(paged.rows[c]); got != wantCounts[c] {
+			t.Errorf("paged %s rows = %d, want %d (stray seed + replay outcomes)", c, got, wantCounts[c])
+		}
+	}
+
+	// Re-boot idempotence under paging: a second pass journals nothing.
+	rigPaged.server.replayMemoryJournal(context.Background())
+	if again := capture(rigPaged, rootPaged); !reflect.DeepEqual(paged, again) {
+		t.Errorf("paged re-boot diverged (idempotence broken)\nfirst: order=%v rows=%v\nagain: order=%v rows=%v",
+			paged.order, paged.rows, again.order, again.rows)
+	}
+}
+
+// TestLaneMemReceiptFoldProposePrune (2026-08-26 K3 hygiene): the
+// streaming fold's propose retention must stay O(the newest applied
+// epoch + the unapplied tail), never O(the lane's distill history) —
+// an apply fold prunes every older epoch (a superseded batch is never
+// applied later) while keeping its OWN epoch's propose (same-epoch retry
+// pairing) — and the pruning never breaks the newest candidate's
+// propose→apply pairing.
+func TestLaneMemReceiptFoldProposePrune(t *testing.T) {
+	propose := func(epoch int) store.Event {
+		return store.Event{Type: store.EventReviewAction, ConversationID: 1, Payload: json.RawMessage(mustJSON(map[string]interface{}{
+			"action":    "memory_propose",
+			"epoch":     epoch,
+			"proposals": []MemoryProposal{{Target: "memory.md", Rule: fmt.Sprintf("rule %d", epoch), Evidence: "e"}},
+		}))}
+	}
+	apply := func(epoch int) store.Event {
+		return store.Event{Type: store.EventReviewAction, ConversationID: 1, Payload: json.RawMessage(mustJSON(map[string]interface{}{
+			"action":   "memory_apply",
+			"epoch":    epoch,
+			"accepted": []MemoryAccept{{Target: "memory.md", Index: 0}},
+			"recovery": applyRecovery{Memory: memLayer("", fmt.Sprintf("- rule %d\n", epoch))},
+		}))}
+	}
+
+	f := newLaneMemReceiptFold()
+	f.feed(propose(1), replayApply)
+	f.feed(apply(1), replayApply)
+	if len(f.proposeByEpoch) != 1 || f.proposeByEpoch[1] == nil {
+		t.Fatalf("after apply 1: proposes = %v, want exactly {1} (own epoch retained for same-epoch retry pairing)", f.proposeByEpoch)
+	}
+	f.feed(propose(2), replayApply)
+	f.feed(apply(2), replayApply)
+	if len(f.proposeByEpoch) != 1 || f.proposeByEpoch[2] == nil {
+		t.Fatalf("after apply 2: proposes = %v, want exactly {2} (superseded epoch 1 pruned)", f.proposeByEpoch)
+	}
+	// An unapplied tail (failed applies distilling onward) persists
+	// unpruned UNTIL a newer apply folds — the retention bound.
+	f.feed(propose(3), replayApply)
+	f.feed(propose(4), replayApply)
+	if len(f.proposeByEpoch) != 3 {
+		t.Fatalf("with two pending batches: proposes = %v, want {2 3 4}", f.proposeByEpoch)
+	}
+	f.feed(apply(4), replayApply)
+	if len(f.proposeByEpoch) != 1 || f.proposeByEpoch[4] == nil {
+		t.Fatalf("after apply 4: proposes = %v, want exactly {4} (the tail pruned by the newer apply)", f.proposeByEpoch)
+	}
+	// The newest candidate still resolves its own propose after pruning.
+	cand := f.cand["memory"]
+	if cand.propose == nil || len(cand.propose.Proposals) != 1 || cand.propose.Proposals[0].Rule != "rule 4" {
+		t.Errorf("newest memory candidate's propose = %+v, want the epoch-4 batch (rule 4)", cand.propose)
+	}
 }
 
 // healRowCounts returns all four replay-ledger cause counts project-wide.

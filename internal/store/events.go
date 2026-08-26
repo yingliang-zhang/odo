@@ -75,13 +75,27 @@ func (s *Store) ListEvents(ctx context.Context, conversationID int64, afterSeq i
 	return events, rows.Err()
 }
 
-// ListProjectEvents returns every event across all conversations of a
-// project (workstreams of any status, conversations of any state), in
-// global journal order (row id — the single-connection insertion order,
-// the only total order comparable across conversations; per-conversation
-// seqs are not). The boot-time memory-intent replayer folds this to pick
-// each layer's newest receipt: per-lane folds can't see cross-lane
-// supersession (2026-08-26 memory-replay doctrine).
+// ListProjectEventsPage returns one page of events across all
+// conversations of a project (workstreams of any status, conversations of
+// any state), in global journal order (row id — the single-connection
+// insertion order, the only total order comparable across conversations;
+// per-conversation seqs are not): rows with e.id > afterID (pass 0 to
+// start at the journal head), oldest first, capped at limit. limit must
+// be positive: there is deliberately NO unbounded full-list path — the
+// one-shot listing this replaced materialized every payload of a
+// long-lived project's journal per boot, so a limit <= 0 call is a
+// programming error, refused rather than silently resurrecting that
+// one-shot behavior. Keyset pagination (e.id > ?), never
+// OFFSET: page k costs the same regardless of journal length, and a row
+// appended mid-scan can never duplicate or displace a row already
+// returned.
+//
+// Paged by construction (2026-08-26 K3 hygiene): the boot-time
+// memory-intent replayer folds the journal to pick each layer's newest
+// receipt, and that reduce is streaming — the one-shot full listing it
+// replaced materialized every payload of a long-lived project's journal
+// in memory at every boot. There is deliberately no unbounded full-list
+// API; consumers that fold the whole journal page through this.
 //
 // A receipt on an archived/soft-deleted lane keeps folding, but NOT
 // because of the JOIN flavor (round-4 FIX 5): the WHERE predicate
@@ -98,16 +112,20 @@ func (s *Store) ListEvents(ctx context.Context, conversationID int64, afterSeq i
 // construction — the journal is the outbox, and a destroyed journal row
 // has no replay source. No such path exists today (delete is soft,
 // rotate takes the daemon offline first).
-func (s *Store) ListProjectEvents(ctx context.Context, projectID int64) ([]Event, error) {
+func (s *Store) ListProjectEventsPage(ctx context.Context, projectID, afterID int64, limit int) ([]Event, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: list project events page: limit must be positive, got %d", limit)
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT e.id, e.conversation_id, e.seq, e.type, e.payload_json, e.created_at
 		 FROM events e
 		 LEFT JOIN conversations c ON e.conversation_id = c.id
 		 LEFT JOIN workstreams w ON c.workstream_id = w.id
-		 WHERE w.project_id = ?
-		 ORDER BY e.id ASC`, projectID)
+		 WHERE w.project_id = ? AND e.id > ?
+		 ORDER BY e.id ASC
+		 LIMIT ?`, projectID, afterID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("store: list project events: %w", err)
+		return nil, fmt.Errorf("store: list project events page: %w", err)
 	}
 	defer rows.Close()
 
@@ -116,7 +134,7 @@ func (s *Store) ListProjectEvents(ctx context.Context, projectID int64) ([]Event
 		var e Event
 		var payload string
 		if err := rows.Scan(&e.ID, &e.ConversationID, &e.Seq, &e.Type, &payload, &e.CreatedAt); err != nil {
-			return nil, fmt.Errorf("store: list project events: scan: %w", err)
+			return nil, fmt.Errorf("store: list project events page: scan: %w", err)
 		}
 		e.Payload = json.RawMessage(payload)
 		events = append(events, e)
@@ -130,7 +148,7 @@ func (s *Store) ListProjectEvents(ctx context.Context, projectID int64) ([]Event
 // poll cheap: these rows are rare marker rows, and the alternative is
 // re-folding the full journal on every pending_counts tick. An open
 // conflict journaled on an archived/soft-deleted lane still counts and
-// still resolves — for the same lifecycle reason as ListProjectEvents
+// still resolves — for the same lifecycle reason as ListProjectEventsPage
 // (delete is a status flip and the join carries no status predicate;
 // the JOIN flavor itself is semantically INNER here, and destroyed lane
 // rows drop out by construction — see that function's boundary note,

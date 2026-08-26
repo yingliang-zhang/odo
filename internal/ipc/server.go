@@ -426,6 +426,11 @@ type Server struct {
 	// receipt. Both let the replay paths be drilled end to end.
 	failApplyAfterMarker error
 	failPinAfterReceipt  error
+	// replayJournalPageSizeForTest (same test-only posture; production
+	// never sets it): non-zero forces the boot replayer's journal page
+	// size — the paging-equivalence drill folds an identical synthetic
+	// journal in 2-row pages and requires byte-identical outcomes.
+	replayJournalPageSizeForTest int
 	// bootstrapPreCreateGateForTest parks handleBootstrap after its
 	// resolve reads and before the guarded create, so a drill can run a
 	// REAL delete through the guard-passed-but-create-pending window
@@ -6803,6 +6808,10 @@ func foldExcludedReviewAction(action, actor string) bool {
 // (3786→3819 events / 497KB→565KB of pure scheduler noise in production).
 // Outcome rows keep rendering: fired / failed / cancelled_by_send /
 // supersession markers are epoch signal, one per actual fold at most.
+//
+// This is the RENDER-side predicate only. The eligibility count
+// (measureWindow) is the strictly wider windowExcludedMemoryUpdate — the
+// two must not reconverge: the render/exclusion split is load-bearing.
 func foldExcludedMemoryUpdate(layer, cause string) bool {
 	if layer != "auto_distill" {
 		return false
@@ -6810,6 +6819,46 @@ func foldExcludedMemoryUpdate(layer, cause string) bool {
 	switch cause {
 	case "scheduled", "skipped", autoCauseCapSuspended:
 		return true
+	}
+	return false
+}
+
+// windowExcludedMemoryUpdate is the ELIGIBILITY-side predicate
+// (measureWindow only — the distill prompt never sees it): everything
+// foldExcludedMemoryUpdate excludes PLUS the boot replayer's recovery
+// family — recover / heal_merged / heal_conflict / heal_resolved
+// (design notes also call the restore row heal_replayed; both names
+// below), journaled with layer = the healed memory layer (NOT
+// auto_distill, so the render predicate above never matches them). Heal
+// rows are boot/crash-recovery bookkeeping, not agent/user activity: a
+// post-crash boot that journals a merge storm re-stamps whichever
+// conversation window those rows ride, and heal_conflict rows embed
+// KB-sized stranded_body payloads that would swamp the byte axis (DSF
+// verification note, 2026-08-26).
+//
+// The split is deliberate and asymmetric: the SAME heal rows KEEP
+// RENDERING in the distill prompt — they are outcome rows in the
+// fired / failed / cancelled_by_send class (they happened to real memory
+// content; they ARE the epoch's history), so the eligibility count knows
+// them and the render filter must not.
+//
+// The recovery-cause set is matched only on layers the boot replayer
+// actually heals (replayLayerKind: memory / archive / user / pins /
+// skill:<base>) — a structural tie, not just a comment: the replayer is
+// the family's only writer today, and a memory_update on any OTHER layer
+// carrying one of these cause strings (no such writer exists) keeps
+// counting as activity instead of silently vanishing from both axes.
+func windowExcludedMemoryUpdate(layer, cause string) bool {
+	if foldExcludedMemoryUpdate(layer, cause) {
+		return true
+	}
+	// recover is the journaled restore cause in memory_replay.go;
+	// heal_replayed is the same family's name in the design notes and the
+	// original triage — neither naming must ever count as window activity.
+	switch cause {
+	case "recover", "heal_replayed", "heal_merged", "heal_conflict", "heal_resolved":
+		_, ok := replayLayerKind(layer)
+		return ok
 	}
 	return false
 }

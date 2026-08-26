@@ -278,6 +278,153 @@ func TestAutoSchedulerRowsExcludedFromWindow(t *testing.T) {
 	}
 }
 
+// TestHealRowsExcludedFromWindow (2026-08-26 DSF follow-up, the
+// eligibility half of the split): the boot replayer's recovery family —
+// recover (the journaled name) / heal_replayed (the same family's
+// design-note name) / heal_merged / heal_conflict / heal_resolved,
+// journaled with layer = the healed memory layer — is
+// boot/crash-recovery bookkeeping, excluded from BOTH eligibility axes
+// exactly like scheduler noise (the render half — they keep folding into
+// the prompt — is pinned in TestHealRowsStillRenderInDistillPrompt).
+// KB-sized stranded_body payloads must not inflate the byte axis. The
+// layer gate's negative space is pinned too: recovery-named causes on
+// layers the replayer never heals still count as ordinary activity.
+func TestHealRowsExcludedFromWindow(t *testing.T) {
+	healRow := func(cause string, extra map[string]interface{}) store.Event {
+		payload := map[string]interface{}{"layer": "memory", "cause": cause, "detail": "boot recovery bookkeeping"}
+		for k, v := range extra {
+			payload[k] = v
+		}
+		return store.Event{Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(payload))}
+	}
+	for _, cause := range []string{"recover", "heal_replayed", "heal_merged", "heal_conflict", "heal_resolved"} {
+		if st := measureWindow([]store.Event{healRow(cause, nil)}); st.events != 0 || st.eligibleBytes != 0 {
+			t.Errorf("measureWindow(%s) = {events:%d bytes:%d}, want {0 0} — recovery rows are never window activity",
+				cause, st.events, st.eligibleBytes)
+		}
+		if render := distillRender(healRow(cause, nil)); !strings.Contains(render, fmt.Sprintf(`"cause":%q`, cause)) {
+			t.Errorf("distillRender(%s) = %q — heal outcomes keep rendering (they ARE the epoch's history)", cause, render)
+		}
+	}
+	// A heal_conflict's stranded body is exactly what inflated
+	// eligibleBytes pre-fix: 4KB of recovery payload, zero window bytes.
+	conflict := healRow("heal_conflict", map[string]interface{}{
+		"stranded_receipt_seq":  7,
+		"stranded_conversation": 1,
+		"stranded_body":         strings.Repeat("s", 4096),
+	})
+	if st := measureWindow([]store.Event{conflict}); st.events != 0 || st.eligibleBytes != 0 {
+		t.Errorf("measureWindow(heal_conflict + 4KB stranded_body) = {events:%d bytes:%d}, want {0 0}", st.events, st.eligibleBytes)
+	}
+
+	// The layer gate keeps the exclusion structural: the SAME recovery
+	// cause strings on a layer the boot replayer never heals (no writer
+	// produces such rows today — this pins the negative space so a future
+	// writer's genuine activity can't be silently undercounted) must
+	// count on both axes.
+	for _, layer := range []string{"note", "wiki", "auto_distill"} {
+		row := store.Event{Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{
+			"layer": layer, "cause": "heal_conflict", "detail": "hypothetical non-replay-layer writer",
+		}))}
+		if st := measureWindow([]store.Event{row}); st.events != 1 || st.eligibleBytes == 0 {
+			t.Errorf("measureWindow(%s/heal_conflict) = {events:%d bytes:%d}, want events:1 bytes>0 — the heal exclusion stops at the replayer's layer family",
+				layer, st.events, st.eligibleBytes)
+		}
+	}
+
+	// Rig half (mirrors TestAutoSchedulerRowsExcludedFromWindow): a window
+	// of nothing but heal rows is ineligible — the evaluation skips with
+	// window_events=0 window_bytes=0 and never arms.
+	root := initRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, learnerFlowWrapper))
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	enableAuto(rig, 0, -1, 0)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+
+	for i, cause := range []string{"recover", "heal_merged", "heal_conflict", "heal_resolved", "heal_conflict"} {
+		payload := map[string]interface{}{
+			"layer":  "memory",
+			"cause":  cause,
+			"detail": "boot recovery bookkeeping",
+		}
+		if cause == "heal_conflict" {
+			payload["stranded_receipt_seq"] = i + 1
+			payload["stranded_conversation"] = convID
+			payload["stranded_body"] = strings.Repeat("s", 3000+i)
+		}
+		if _, err := rig.store.AppendEvent(context.Background(), convID, store.EventMemoryUpdate, mustJSON(payload)); err != nil {
+			t.Fatalf("journal heal row: %v", err)
+		}
+	}
+	evaluate(rig.server, convID)
+	skips := autoRows(t, rig, convID, "skipped")
+	if len(skips) == 0 {
+		t.Fatal("no skip journaled for the heal-only window")
+	}
+	detail := skips[len(skips)-1]["detail"].(string)
+	if !strings.Contains(detail, "window_events=0") || !strings.Contains(detail, "window_bytes=0") ||
+		!strings.Contains(detail, "below_min_events") {
+		t.Errorf("skip detail = %q, want window_events=0 window_bytes=0 below_min_events (heal rows excluded from BOTH axes)", detail)
+	}
+	if pendingEntry(rig.server, convID) != nil {
+		t.Error("armed on a heal-only window")
+	}
+
+	// Real growth still counts under the heal noise: 6 real events over
+	// the byte floor arm the ordinary idle timer, measured as exactly 6.
+	journalWindow(t, rig, convID, 6, 20000)
+	evaluate(rig.server, convID)
+	if pendingEntry(rig.server, convID) == nil {
+		t.Error("eligible window (6 real events) under heal noise did not arm")
+	}
+	scheds := autoRows(t, rig, convID, "scheduled")
+	if last := scheds[len(scheds)-1]["detail"].(string); !strings.Contains(last, "trigger=idle") || !strings.Contains(last, "window_events=6") {
+		t.Errorf("last scheduled detail = %q, want trigger=idle window_events=6 (real activity armed it, heal rows ignored)", last)
+	}
+}
+
+// TestHealRowsStillRenderInDistillPrompt pins the render half of the
+// split (the trap in the DSF note): the same heal_* rows that
+// windowExcludedMemoryUpdate removes from the eligibility count KEEP
+// RENDERING in the distill prompt — they are outcome rows in the
+// fired / failed / cancelled_by_send class; they happened to real memory
+// content, they ARE the epoch's history. Layer-agnostic (a pins
+// heal_resolved renders too). Scheduler bookkeeping of the identical
+// shape stays excluded (foldExcludedMemoryUpdate unchanged).
+func TestHealRowsStillRenderInDistillPrompt(t *testing.T) {
+	rows := []struct {
+		layer, cause string
+	}{
+		{"memory", "recover"},
+		{"memory", "heal_merged"},
+		{"memory", "heal_conflict"},
+		{"pins", "heal_resolved"},
+		{"archive", "heal_merged"},
+	}
+	var events []store.Event
+	for i, row := range rows {
+		events = append(events, store.Event{Seq: i + 1, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{
+			"layer": row.layer, "cause": row.cause, "detail": "boot recovery bookkeeping",
+		}))})
+	}
+	events = append(events, store.Event{Seq: len(rows) + 1, Type: store.EventMemoryUpdate, Payload: json.RawMessage(
+		`{"layer":"auto_distill","cause":"skipped","detail":"trigger=idle window_events=0 window_bytes=0 reason=below_min_events"}`)})
+
+	prompt, _ := distillPrompt(events)
+	for _, row := range rows {
+		want := fmt.Sprintf(`"layer":%q,"cause":%q`, row.layer, row.cause)
+		if !strings.Contains(prompt, want) {
+			t.Errorf("distill prompt missing %s — heal outcomes are epoch signal, they keep rendering", want)
+		}
+	}
+	if strings.Contains(prompt, `"cause":"skipped"`) {
+		t.Error("scheduler row rendered in the distill prompt — the render filter must stay unchanged")
+	}
+}
+
 // TestAutoCapResumeDistills (design 5): a resume past the horizon with
 // quota available clears the suspension, journals exactly ONE normal
 // scheduled row (the kick's ordinary evaluation), and the cycle resumes
