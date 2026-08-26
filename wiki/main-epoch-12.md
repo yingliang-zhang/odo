@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Epoch 11 session: #28 rebuild assessment, `.odo-verify` discoverability fix (verify advisory)
 
 ## Decisions

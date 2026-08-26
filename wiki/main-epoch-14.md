@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # /panel Core-Design Review and P0 Fix Batch
 
 ## Context

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Auto-distill goroutines joined into Server lifecycle (distillWG fix)
 
 ## Deployment of prior hardening batch

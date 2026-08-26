@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # odo — landWG Lifecycle Landing (diff #74) & Boot Journal Replayer (diff #75 lineage)
 
 Scope note: covers journal seq 4430–6439 only; earlier rounds of the same efforts are referenced where the visible window cites them.

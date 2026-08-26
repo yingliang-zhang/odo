@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Diff #33 Auto-Land Block: Diagnosis and Panel Checklist Fixes
 
 ## Context

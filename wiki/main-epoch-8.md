@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo Session: UI fixes, slash-consult visibility, diff-20 settlement, M20 auto-land overhaul
 
 ## Landed + deployed: TopBar project name & sidebar create-input fixes (`ab70237`)

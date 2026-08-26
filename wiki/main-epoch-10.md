@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo runs #21–#24: #23 rejected, #24 accepted, #22 verified green (pending GUI accept)
 
 ## User decisions (GUI)

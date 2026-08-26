@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo — #34 Ledger Correction and Majority-Vote Doctrine for Diverged Panels (2026-08-22)
 
 ## Trigger

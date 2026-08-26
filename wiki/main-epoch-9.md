@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo Workstream Review — M20 Auto-Land & UI Switch-Cache
 
 ## Status

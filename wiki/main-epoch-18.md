@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Session: Manual land of #34 + review-prompt objective anchor fix
 
 ## Decisions

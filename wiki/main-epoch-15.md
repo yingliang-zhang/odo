@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo P1 Batch: Review Fixes #5–#9 Implemented and Verified
 
 ## Context
