@@ -58,7 +58,7 @@ test("‹ › controls appear at 280px and move the strip; active tab stays in v
 
   // Drag the panel to the 280px MIN: 194px of tabs clip without navigation.
   await dragGripBy(page, 120);
-  expect(await panelWidth(page)).toBe("280px");
+  await expect.poll(() => panelWidth(page)).toBe("280px");
 
   const navLeft = page.getByRole("button", { name: "Scroll tabs left" });
   const navRight = page.getByRole("button", { name: "Scroll tabs right" });
@@ -89,12 +89,12 @@ test("‹ › controls disappear once every tab fits", async ({ page }) => {
   await openPanel(page);
 
   await dragGripBy(page, 120); // → 280px, overflowing
-  expect(await panelWidth(page)).toBe("280px");
+  await expect.poll(() => panelWidth(page)).toBe("280px");
   await expect(page.getByRole("button", { name: "Scroll tabs right" })).toBeVisible();
 
   // Drag far past MAX: the grip clamps at 600px, where all tabs fit.
   await dragGripBy(page, -340);
-  expect(await panelWidth(page)).toBe("600px");
+  await expect.poll(() => panelWidth(page)).toBe("600px");
   await expect(page.getByRole("button", { name: "Scroll tabs left" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Scroll tabs right" })).toHaveCount(0);
   await expectActiveTabInStrip(page);
