@@ -108,6 +108,11 @@ const (
 	// and the notification receipt (notified with Request.LoopID +
 	// Request.Text = terminal kind).
 	CmdLoopCtl = "loop_ctl"
+	// resolve_heal_conflict closes one journaled heal_conflict (a stranded
+	// memory/pins crash-recovery): Resolve overwrites the layer file with
+	// the stranded body; Dismiss records the decision without touching
+	// files. Both journal heal_resolved (2026-08-26 memory-replay doctrine).
+	CmdResolveHealConflict = "resolve_heal_conflict"
 )
 
 // Request is one command line on the socket.
@@ -158,6 +163,16 @@ type Request struct {
 	// LoopBudget carries resume's optional budget raise.
 	LoopID     int64 `json:"loop_id,omitempty"`
 	LoopBudget int64 `json:"loop_budget,omitempty"`
+	// resolve_heal_conflict: the journaled heal_conflict's layer and its
+	// stranded receipt's per-conversation journal seq; Dismissed selects the
+	// resolve-without-write decision. StrandedConversation is the row's
+	// identity half — the receipt's owning conversation: heal rows may ride
+	// a different carrier after active-conversation rotation, so lookup and
+	// routing run on it, never on the request's conversation.
+	Layer                string `json:"layer,omitempty"`
+	ReceiptSeq           int    `json:"receipt_seq,omitempty"`
+	Dismissed            bool   `json:"dismissed,omitempty"`
+	StrandedConversation int64  `json:"stranded_conversation,omitempty"`
 }
 
 // AutoDistillInfo is one scheduled auto-distill for the pending_counts
@@ -379,6 +394,16 @@ type Response struct {
 	AutoDistill     []AutoDistillInfo `json:"auto_distill,omitempty"`
 	Distilling      bool              `json:"distilling,omitempty"`
 	DistillingConvs []int64           `json:"distilling_convs,omitempty"`
+	// pending_counts: unresolved heal_conflict rows across the whole project
+	// (heal_conflict minus heal_resolved, folded by content key) — the
+	// Memory tab's "N stranded crash-recoveries" banner count.
+	StrandedMemoryOps int `json:"stranded_memory_ops,omitempty"`
+	// pending_counts: the counted rows themselves, project-wide (round-3
+	// FIX F) — the count is project-wide, so the actionable rows must be
+	// too: a conflict riding a rotated/foreign lane rendered "N stranded"
+	// with zero rows to act on. The GUI folds THIS list, and routes each
+	// resolve by the row's owning conversation.
+	StrandedOps []StrandedOp `json:"stranded_ops,omitempty"`
 	// auto_distill_ctl: whether a scheduled auto-distill was disarmed.
 	Disarmed bool `json:"disarmed,omitempty"`
 	// search_events: cross-conversation search results.
@@ -407,4 +432,16 @@ type Response struct {
 	FileContent   string `json:"file_content,omitempty"`
 	FileResolved  string `json:"file_resolved,omitempty"`
 	FileTruncated bool   `json:"file_truncated,omitempty"`
+}
+
+// StrandedOp is one OPEN heal_conflict row as pending_counts exposes it
+// project-wide (2026-08-26 memory-replay doctrine, round-3 FIX F). The
+// identity fields are the resolve request's addressing halves:
+// StrandedConversation is the receipt's owning conversation (routing AND
+// content-key half — heal rows may ride a rotated carrier).
+type StrandedOp struct {
+	StrandedConversation int64  `json:"conversation_id"`
+	Layer                string `json:"layer"`
+	ReceiptSeq           int    `json:"receipt_seq"`
+	Detail               string `json:"detail,omitempty"`
 }

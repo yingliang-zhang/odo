@@ -622,7 +622,14 @@ type memoryApplyPlan struct {
 	retracted            []string // rule texts moved to the archive (conflict)
 	unmatchedContradicts []string // contradicts texts matching nothing (journaled)
 	added                int      // new rule lines appended
-	reaffirmed           int      // existing rules bumped to epoch
+	// addedEntries is the verbatim per-rule record of every appended add:
+	// the rule plus the EXACT line written (rule text, evidence, and the
+	// epoch's reaffirmed count as planMemoryApply rendered them). The
+	// memory_apply recovery block carries it so a cross-lane entry-merge
+	// replay reuses the live apply's own line instead of re-stamping
+	// metadata (2026-08-26 memory-replay doctrine, round-3 FIX C).
+	addedEntries []applyRecoveryEntry
+	reaffirmed   int // existing rules bumped to epoch
 }
 
 // planMemoryApply computes the new memory.md plus archive appends for an
@@ -677,6 +684,7 @@ func planMemoryApply(old string, accepted []acceptedRule, reaffirm []string, epo
 			text: a.rule, cites: a.evidence, reaffirmed: epoch, influx: true, raw: line,
 		})
 		plan.added++
+		plan.addedEntries = append(plan.addedEntries, applyRecoveryEntry{Rule: a.rule, Line: line})
 	}
 
 	// (3) Overflow rotation: evict lowest-reaffirmed candidates (never

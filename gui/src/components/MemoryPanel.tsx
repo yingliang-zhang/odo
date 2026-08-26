@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { applyMemory, errorMessage, memoryProposals, readMemory, readPins } from "../api";
-import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult } from "../types";
+import { applyMemory, errorMessage, memoryProposals, readMemory, readPins, resolveHealConflict } from "../api";
+import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult, StrandedOp } from "../types";
 import LoadingInline from "./LoadingInline";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -50,6 +50,15 @@ interface Props {
   // files re-fetch. Draft protection: an unchanged batch identity keeps
   // the user's in-flight Accept/Reject decisions (see refreshBatch).
   active: boolean;
+  // Stranded crash-recoveries (2026-08-26 memory-replay doctrine):
+  // strandedTotal and strandedOps BOTH ride pending_counts, project-wide
+  // (round-3 FIX F — every counted conflict renders an actionable row,
+  // Resolve restores the stranded body, Dismiss records the decision).
+  // onResolved re-reads pending_counts after a decision so banner and
+  // rows converge ahead of the poll cadence.
+  strandedTotal?: number;
+  strandedOps?: StrandedOp[];
+  onResolved?: () => void;
 }
 
 // Split the mixed proposals array into per-target sections while keeping
@@ -207,7 +216,7 @@ function SkillProposalRow({
   );
 }
 
-function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active }: Props) {
+function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved }: Props) {
   const [tab, setTab] = useState<"proposals" | "files">(focus?.tab ?? "proposals");
   // External sub-tab requests. This effect is what keeps deep links
   // working under the panel's keep-alive tabs: the panel now survives
@@ -231,6 +240,10 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
   const [pins, setPins] = useState<string | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
+  // Per-op resolve in-flight guard (keyed `conv:layer:receiptSeq`).
+  const [strandBusy, setStrandBusy] = useState<string | null>(null);
+  const ops = strandedOps ?? [];
+  const total = strandedTotal ?? 0;
   // Unmount guard: every async fetch below checks this before touching
   // state so a late resolution can't setState on a dead component.
   const mountedRef = useRef(true);
@@ -402,6 +415,33 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
     }
   };
 
+  // Resolve/Dismiss one journaled heal_conflict (2026-08-26 doctrine):
+  // the daemon restores from the row's embedded stranded body (never the
+  // client), journals heal_resolved on the row's OWNING conversation
+  // (round-3 FIX F — the request routes by it even when the human acts
+  // from a different lane's Memory tab), and the refreshed pending_counts
+  // drops the row and the banner count ahead of the poll cadence.
+  const handleResolve = async (op: StrandedOp, dismissed: boolean) => {
+    const key = `${op.strandedConversation}:${op.layer}:${op.receiptSeq}`;
+    if (strandBusy === key) return;
+    setStrandBusy(key);
+    setError(null);
+    try {
+      const resp = await resolveHealConflict(
+        { conversationId: op.strandedConversation, layer: op.layer, receiptSeq: op.receiptSeq, strandedConversation: op.strandedConversation, dismissed },
+        projectRoot ?? undefined,
+      );
+      if (!resp.applied) throw new Error("daemon did not confirm the resolution");
+      if (!mountedRef.current) return;
+      if (tab === "files") void loadFiles();
+      onResolved?.();
+    } catch (e) {
+      if (mountedRef.current) setError(`resolve failed: ${errorMessage(e)}`);
+    } finally {
+      if (mountedRef.current) setStrandBusy(null);
+    }
+  };
+
   const memRows = batch ? byTarget(batch, "memory.md") : [];
   const userRows = batch ? byTarget(batch, "user.md") : [];
   const skillRows = batch ? byTarget(batch, "skills") : [];
@@ -415,6 +455,42 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
 
   return (
     <div className="mem-panel h-full flex flex-col">
+      {(total > 0 || ops.length > 0) && (
+        <div className="mem-stranded mb-3 rounded-md border border-[var(--warn)] bg-[rgba(211,156,53,0.08)] px-3 py-2">
+          <div className="mem-stranded-copy text-[12px] text-[var(--warn)]">
+            {total > 0 ? `${total} stranded crash-recoveries — open to review` : "Stranded crash-recoveries — open to review"}
+          </div>
+          {ops.map((op) => {
+            const key = `${op.strandedConversation}:${op.layer}:${op.receiptSeq}`;
+            return (
+              <div key={key} className="mem-stranded-row mt-2 flex items-center justify-between gap-2">
+                <div className="min-w-0 text-[11px] text-[var(--text-dim)]">
+                  <span className="font-medium text-[var(--text)]">{op.layer}</span>
+                  {op.detail != null && <span className="mem-stranded-detail"> · {op.detail}</span>}
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  <button
+                    type="button"
+                    className="mem-stranded-resolve bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--ok-text)] cursor-pointer disabled:opacity-50"
+                    disabled={strandBusy === key}
+                    onClick={() => void handleResolve(op, false)}
+                  >
+                    Resolve
+                  </button>
+                  <button
+                    type="button"
+                    className="mem-stranded-dismiss bg-[var(--bg-input)] border border-[var(--border)] rounded-md py-[3px] px-2.5 text-[12px] text-[var(--text-dim)] cursor-pointer disabled:opacity-50"
+                    disabled={strandBusy === key}
+                    onClick={() => void handleResolve(op, true)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="mem-tabs flex gap-1.5 mb-3" role="tablist" aria-label="Memory sections">
         <button
           type="button"

@@ -599,15 +599,15 @@ func TestPanelProgressConcurrentBatches(t *testing.T) {
 // TestApplyMemoryCrashWindowHeals drills the marker-first apply protocol end
 // to end: the consumption marker journals BEFORE the file writes, so the
 // crash leaves the batch consumed (never applied twice) with the FILES
-// lagging; the journal-authoritative heal then restores the layers from
-// the marker's recovery block — exactly, once, and a re-apply onto the
-// healed file is refused (the reviewer's double-reaffirm scenario).
+// lagging; the boot replayer then restores the layers from the marker's
+// recovery block — exactly, once, and a re-apply onto the healed file is
+// refused (the reviewer's double-reaffirm scenario).
 func TestApplyMemoryCrashWindowHeals(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 	rig := startRig(t, root)
-	defer rig.stop(t)
+	defer rig.stopOnce(t)
 	convID := bootstrapConv(t, rig, root)
 
 	// Existing rule for the reaffirm half; the batch reaffirms it and adds
@@ -643,10 +643,13 @@ func TestApplyMemoryCrashWindowHeals(t *testing.T) {
 		t.Fatalf("pending batch after crash = %+v, want epoch 2 CONSUMED (journal-authoritative)", cur)
 	}
 
-	// Recovery (the restart): bootstrap folds the journal, finds the
-	// stranded layers at before_sha, and replays the recorded bodies.
-	rig.server.failApplyAfterMarker = nil
-	rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	// Recovery (the restart): a fresh daemon folds the project journal at
+	// boot, finds the stranded layers at before_sha, and replays the
+	// recorded bodies (2026-08-26 doctrine: the replayer owns this now,
+	// not a bootstrap-time lane scan).
+	rig = restartRig(t, rig)
+	defer rig.stopOnce(t)
+
 	const wantOld = "- Keep the lane discipline. — cites: main-epoch-1; reaffirmed: 2"
 	const wantNew = "- " + newRule + " — cites: main-epoch-2; reaffirmed: 2"
 	got := readFileStr(t, memPath)
@@ -660,9 +663,10 @@ func TestApplyMemoryCrashWindowHeals(t *testing.T) {
 		t.Errorf("recover receipts = %d, want exactly 1 for the healed crash", len(recovers))
 	}
 
-	// Idempotent + single-consumption: a second bootstrap heals nothing
+	// Idempotent + single-consumption: a second boot pass replays nothing
 	// more, and the reviewer's re-apply-onto-changed-file stays refused.
-	rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	rig.server.replayMemoryJournal(context.Background())
+
 	if resp := rig.callExpectErr(t, applyReq); !strings.Contains(resp.Error, "already applied") {
 		t.Errorf("re-apply after heal error = %q, want the consumed refusal", resp.Error)
 	}
@@ -670,7 +674,7 @@ func TestApplyMemoryCrashWindowHeals(t *testing.T) {
 		t.Errorf("memory.md after refusal = %q — the refusal must never touch the healed file", got)
 	}
 	if recovers := memoryUpdatesByCause(t, allEvents(t, rig, convID), "recover"); len(recovers) != 1 {
-		t.Errorf("recover receipts after re-bootstrap = %d, want 1 (heal is a no-op on landed layers)", len(recovers))
+		t.Errorf("recover receipts after the second boot pass = %d, want 1 (replay is a no-op on landed layers)", len(recovers))
 	}
 }
 
@@ -683,7 +687,7 @@ func TestPinCrashWindowHeals(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 	rig := startRig(t, root)
-	defer rig.stop(t)
+	defer rig.stopOnce(t)
 	convID := bootstrapConv(t, rig, root)
 	pinsFile := filepath.Join(root, ".odo", "pins.md")
 
@@ -699,11 +703,12 @@ func TestPinCrashWindowHeals(t *testing.T) {
 		t.Fatalf("pin receipts = %+v, want the crashed pin journaled with its recovery fields", pinReceipts)
 	}
 
-	// Recovery via bootstrap replay of the receipted body.
-	rig.server.failPinAfterReceipt = nil
-	rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	// Recovery via the replayer: a fresh daemon restores the receipted
+	// body at boot (2026-08-26 doctrine).
+	rig = restartRig(t, rig)
+	defer rig.stopOnce(t)
 	if got := readFileStr(t, pinsFile); got != "- pin alpha crash\n" {
-		t.Fatalf("pins.md after heal = %q, want exactly the recovered pin", got)
+		t.Fatalf("pins.md after boot replay = %q, want exactly the recovered pin", got)
 	}
 	// The next pin's RMW basis includes the recovered line — both survive.
 	rig.call(t, Request{Cmd: CmdPin, ConversationID: convID, Text: "pin beta after heal"})
@@ -853,6 +858,7 @@ func TestConversationlessDeleteBootstrapRace(t *testing.T) {
 		t.Errorf("post-delete bootstrap: error = %q, want the deleted refusal", resp.Error)
 	}
 }
+
 // TestDeleteRetriesWhenBootstrapCommitsFirst drills the OTHER half of
 // the ordering argument (2026-08-25 panel follow-up): the bootstrap
 // wins the race — its conversation commits between the delete's

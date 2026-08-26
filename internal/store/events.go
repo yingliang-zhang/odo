@@ -75,6 +75,94 @@ func (s *Store) ListEvents(ctx context.Context, conversationID int64, afterSeq i
 	return events, rows.Err()
 }
 
+// ListProjectEvents returns every event across all conversations of a
+// project (workstreams of any status, conversations of any state), in
+// global journal order (row id — the single-connection insertion order,
+// the only total order comparable across conversations; per-conversation
+// seqs are not). The boot-time memory-intent replayer folds this to pick
+// each layer's newest receipt: per-lane folds can't see cross-lane
+// supersession (2026-08-26 memory-replay doctrine).
+//
+// A receipt on an archived/soft-deleted lane keeps folding, but NOT
+// because of the JOIN flavor (round-4 FIX 5): the WHERE predicate
+// filters a right-side column (w.project_id = ?), which collapses LEFT
+// to INNER whenever a lane row exists — and drops the events row under
+// either form when it doesn't. The archived-lane guarantee comes from
+// the data lifecycle, stated plainly: workstream delete is a STATUS
+// flip, conversation rotation never retires the old row, and these
+// joins carry NO status predicate — every surviving lane row still
+// produces its events here. The coverage boundary stands: events whose
+// lane rows were DESTROYED (a hard cascade-delete of
+// conversations/workstreams, or `odo journal rotate` moving the whole
+// SQLite file out from under the store) are unrecoverable by
+// construction — the journal is the outbox, and a destroyed journal row
+// has no replay source. No such path exists today (delete is soft,
+// rotate takes the daemon offline first).
+func (s *Store) ListProjectEvents(ctx context.Context, projectID int64) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.id, e.conversation_id, e.seq, e.type, e.payload_json, e.created_at
+		 FROM events e
+		 LEFT JOIN conversations c ON e.conversation_id = c.id
+		 LEFT JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE w.project_id = ?
+		 ORDER BY e.id ASC`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list project events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var payload string
+		if err := rows.Scan(&e.ID, &e.ConversationID, &e.Seq, &e.Type, &payload, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: list project events: scan: %w", err)
+		}
+		e.Payload = json.RawMessage(payload)
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// ListHealLedgerRows returns the project's heal_conflict/heal_resolved
+// memory_update rows in global journal order — the stranded_memory_ops
+// fold's input. Payload LIKE filters (the markers.go convention) keep the
+// poll cheap: these rows are rare marker rows, and the alternative is
+// re-folding the full journal on every pending_counts tick. An open
+// conflict journaled on an archived/soft-deleted lane still counts and
+// still resolves — for the same lifecycle reason as ListProjectEvents
+// (delete is a status flip and the join carries no status predicate;
+// the JOIN flavor itself is semantically INNER here, and destroyed lane
+// rows drop out by construction — see that function's boundary note,
+// round-4 FIX 5).
+func (s *Store) ListHealLedgerRows(ctx context.Context, projectID int64) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.id, e.conversation_id, e.seq, e.type, e.payload_json, e.created_at
+		 FROM events e
+		 LEFT JOIN conversations c ON e.conversation_id = c.id
+		 LEFT JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE w.project_id = ? AND e.type = ?
+		   AND (e.payload_json LIKE '%"cause":"heal_conflict"%'
+		        OR e.payload_json LIKE '%"cause":"heal_resolved"%')
+		 ORDER BY e.id ASC`, projectID, EventMemoryUpdate)
+	if err != nil {
+		return nil, fmt.Errorf("store: list heal ledger rows: %w", err)
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var payload string
+		if err := rows.Scan(&e.ID, &e.ConversationID, &e.Seq, &e.Type, &payload, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: list heal ledger rows: scan: %w", err)
+		}
+		e.Payload = json.RawMessage(payload)
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // SearchResult is one event match from SearchEvents, carrying the event
 // plus its workstream/conversation context for display.
 type SearchResult struct {

@@ -1,4 +1,4 @@
-import type { AutoDistillCountdown, Diff, DiffInfoEx } from "./types";
+import type { AutoDistillCountdown, Diff, DiffInfoEx, StrandedOp } from "./types";
 
 // (tri-review P1 #4, 2026-08-24) Reference stabilization for the 350 ms
 // poll loop: the daemon's JSON deserializes fresh Diff / Diff[] references
@@ -136,6 +136,26 @@ export function sameDiffInfoExList(a: DiffInfoEx[], b: DiffInfoEx[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     if (!sameDiffInfoEx(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+// Stranded crash-recovery rows (2026-08-26 doctrine, round-3 FIX F):
+// order-sensitive — the daemon sorts (conversation, layer, seq) and the
+// Memory tab renders in that order.
+export function sameStrandedOp(a: StrandedOp, b: StrandedOp): boolean {
+  return (
+    a.layer === b.layer &&
+    a.receiptSeq === b.receiptSeq &&
+    a.strandedConversation === b.strandedConversation &&
+    a.detail === b.detail
+  );
+}
+
+export function sameStrandedOpsList(a: StrandedOp[], b: StrandedOp[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (!sameStrandedOp(a[i], b[i])) return false;
   }
   return true;
 }

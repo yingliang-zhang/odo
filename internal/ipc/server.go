@@ -298,7 +298,7 @@ type Server struct {
 	// drain. In-flight distills are NOT aborted — they complete and
 	// drain via distillWG (joining is the fix, not cancelling).
 	autoStopped bool
-	slashing     map[int64]int               // conversationID -> live /panel+//vision queries (fold-integrity gate)
+	slashing    map[int64]int // conversationID -> live /panel+//vision queries (fold-integrity gate)
 	// Live /panel leg tally per conversation: one slice entry per
 	// IN-FLIGHT consult (2026-08-25 audit P2 — a shared tally let a
 	// finishing panel decrement Total under another panel's legs,
@@ -413,7 +413,7 @@ type Server struct {
 	// died right after the (marker-first) consumption marker journaled —
 	// no file written — staging the exact post-crash journal state.
 	// failPinAfterReceipt does the same after the pin's journal-first
-	// receipt. Both let the heal paths be drilled end to end.
+	// receipt. Both let the replay paths be drilled end to end.
 	failApplyAfterMarker error
 	failPinAfterReceipt  error
 	// bootstrapPreCreateGateForTest parks handleBootstrap after its
@@ -471,6 +471,16 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// so it runs FIRST — before the recoveries below can journal fresh
 	// expectation rows for the work they resume.
 	s.recoverOrphanedRequests(context.Background())
+	// Memory/pins intents (2026-08-26 memory-replay doctrine): the boot
+	// replayer — project-wide, total-order, newest-receipt-per-layer —
+	// restores or surfaces every replayable intent that crashed between
+	// journal and file write. After the orphan sweep (which folds the OLD
+	// journal only, so its form stays one row per ask), before any
+	// parked-goal dequeue or loop recovery resumes runs — prompts then
+	// read the repaired projection from the first resumed run. Runs once
+	// per boot, single-threaded by construction; the runtime resolve IPC
+	// and the apply-path retry convergence take memMu instead.
+	s.replayMemoryJournal(context.Background())
 	// W6: recover the durable parked-goal queues from the journal and
 	// dequeue for free conversations — at daemon startup, after the store
 	// is open and before serving (NewServer is the only touchable init
@@ -746,6 +756,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleMemoryProposals(ctx, req)
 	case CmdApplyMemory:
 		resp, err = s.handleApplyMemory(ctx, req)
+	case CmdResolveHealConflict:
+		resp, err = s.handleResolveHealConflict(ctx, req)
 	case CmdCurate:
 		resp, err = s.handleCurate(ctx, req)
 	case CmdPin:
@@ -891,22 +903,13 @@ func (s *Server) handleBootstrap(ctx context.Context, req Request) (Response, er
 	if err != nil {
 		return Response{}, err
 	}
-	// Crash-window recovery (2026-08-25 review follow-up P1): a marker-first
-	// apply or receipt-first pin can leave FILES lagging the journal after a
-	// crash; the newest markers pitch their recorded bodies back on (exact
-	// before/after hash predicates — landed and foreign layers untouched).
-	// The heal always folds the FULL journal: the after-hint tail replay may
-	// not reach back to the stranded marker.
-	healEvents := events
-	if after > 0 {
-		if full, ferr := s.store.ListEvents(ctx, c.ID, 0); ferr == nil {
-			healEvents = full
-		}
-	}
-	s.memMu.Lock()
-	s.healMemoryFromJournalLocked(ctx, c.ID, healEvents)
-	s.healPinsFromJournalLocked(ctx, c.ID, healEvents)
-	s.memMu.Unlock()
+	// Crash-window recovery moved to the boot replayer (2026-08-26
+	// memory-replay doctrine): NewServer replays the project-wide journal
+	// before serving (the daemon that could strand a projection is dead by
+	// definition), and a LIVE write failure converges through the apply
+	// retry's engine pass. A per-bootstrap lane scan duplicated that
+	// engine — removed, not replaced.
+
 	// D8: Generate AGENTS.md so OMP reads Odo's project rules as its system
 	// prompt. Odo owns the prompt prefix (memory/pins/wiki/skills); AGENTS.md
 	// is the bridge that tells OMP to treat Odo's injection as authoritative.
@@ -2552,6 +2555,7 @@ func (s *Server) stopLiveness() {
 	s.livenessOnce.Do(func() { close(s.livenessStop) })
 	s.livenessWG.Wait()
 }
+
 // stopAutoDistill closes the auto-distill subsystem against further
 // fires and arms (P1, the stopLiveness mirror): every pending timer is
 // stopped and forgotten — an already-fired callback's identity check
@@ -5265,6 +5269,20 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 		}
 		parkedByWS[c.WorkstreamID] += depth
 	}
+	// Stranded crash-recoveries (2026-08-26 memory-replay doctrine):
+	// unresolved heal_conflict rows across the whole project — the Memory
+	// tab's banner count. SQL prefilters the two marker causes; the pairing
+	// fold runs in Go. Best-effort: a ledger read error must never blank
+	// the badges.
+	stranded := 0
+	var strandedOps []StrandedOp
+	if ledgerRows, lerr := s.store.ListHealLedgerRows(ctx, p.ID); lerr == nil {
+		unresolved, _ := foldHealLedger(ledgerRows)
+		stranded = len(unresolved)
+		strandedOps = strandedOpRows(unresolved)
+	} else {
+		log.Printf("pending_counts: stranded-ops fold: %v", lerr)
+	}
 	return Response{
 		PendingCounts:      counts,
 		RunningWorkstreams: running,
@@ -5272,6 +5290,8 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 		AutoDistill:        snap.auto,
 		Distilling:         len(snap.distillingConvs) > 0,
 		DistillingConvs:    snap.distillingConvs,
+		StrandedMemoryOps:  stranded,
+		StrandedOps:        strandedOps,
 	}, nil
 }
 
@@ -5880,25 +5900,33 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 		return Response{}, errors.New("apply_memory: no pending batch")
 	}
 	if batch.consumed {
-		// Heal before refusing (2026-08-25 review follow-up P1): the
+		// Replay before refusing (2026-08-26 memory-replay doctrine): the
 		// consumption marker may have outlived a crash before its file
 		// writes — the refusal is only truthful once files and journal
-		// agree, so restore the stranded layers first.
+		// agree, so restore the stranded layers first. The engine re-reads
+		// under memMu: apply/pin receipts append only under that lock, so
+		// the unlocked snapshot at handler top may already lag a landed
+		// racer.
 		s.memMu.Lock()
-		healed := s.healMemoryFromJournalLocked(ctx, c.ID, events)
+		var repaired []int
+		if fresh, rerr := s.store.ListEvents(ctx, c.ID, 0); rerr == nil {
+			repaired = s.replayLaneMemReceipts(ctx, c.ID, fresh, replayApply)
+		}
 		s.memMu.Unlock()
-		// The heal replaying THIS batch's recorded bodies means the
-		// caller's retry just performed the apply it asked for — report
-		// success, mirroring the in-core heal check (the marker-first
+		// The replay restoring/entry-merging THIS batch's recorded layers
+		// means the caller's retry just performed the apply it asked for —
+		// report success, mirroring the in-core check (the marker-first
 		// ordering otherwise regressed the crashed-apply retry from the
 		// idempotent success into a refusal, TestUserMemoryIdempotency).
-		// A no-op heal (fully landed earlier, or foreign state the heal
-		// refuses to clobber) still refuses, per the consumed contract.
-		for _, epoch := range healed {
+		// A no-op pass (fully landed earlier, or foreign state that
+		// conflicted into the review ledger instead) still refuses, per
+		// the consumed contract.
+		for _, epoch := range repaired {
 			if epoch == batch.epoch && req.Epoch == batch.epoch {
 				return Response{Applied: true}, nil
 			}
 		}
+
 		return Response{}, fmt.Errorf("apply_memory: epoch %d already applied", req.Epoch)
 	}
 	if req.Epoch != batch.epoch {
@@ -5944,18 +5972,20 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 	// consumed by the racing apply fails closed here instead of
 	// re-appending archive lines, reaffirm bumps, and the apply marker.
 	if events, err := s.store.ListEvents(ctx, c.ID, 0); err == nil {
-		// Recovery FIRST (2026-08-25 review follow-up P1): the apply marker
-		// fell to marker-first ordering below — a crash after it leaves the
-		// batch consumed with FILES lagging. Healing those layers from the
-		// marker's recovery block before planning has two jobs here: an
-		// older stranded marker's rules return before the fresh plan reads
-		// the files, and when the stranded marker IS this batch the work
-		// just completed — report success rather than a double-consumption
-		// refusal. A LIVE racing winner cannot be mistaken for a stranded
-		// one: memMu is held across its whole write section, so any marker
-		// visible here has its writer finished (or dead).
-		for _, healed := range s.healMemoryFromJournalLocked(ctx, c.ID, events) {
-			if healed == batch.epoch {
+		// Recovery FIRST (2026-08-25 review follow-up P1, engine since the
+		// 2026-08-26 memory-replay doctrine): the apply marker fell to
+		// marker-first ordering below — a crash after it leaves the batch
+		// consumed with FILES lagging. Replaying those layers from the
+		// marker's recovery block (restore, or entry-merge onto a foreign
+		// projection) before planning has two jobs here: an older stranded
+		// marker's rules return before the fresh plan reads the files, and
+		// when the stranded marker IS this batch the work just completed —
+		// report success rather than a double-consumption refusal. A LIVE
+		// racing winner cannot be mistaken for a stranded one: memMu is
+		// held across its whole write section, so any marker visible here
+		// has its writer finished (or dead).
+		for _, repaired := range s.replayLaneMemReceipts(ctx, c.ID, events, replayApply) {
+			if repaired == batch.epoch {
 				return Response{Applied: true}, nil
 			}
 		}
@@ -6045,10 +6075,11 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 	// doubled reaffirm bumps and archive lines onto the changed file.
 	// Marker-first makes consumption the journaled intent: the batch can
 	// never be consumed twice, and a crash after this point is repaired by
-	// healMemoryFromJournalLocked (bootstrap / next apply) from the
-	// recovery block — each changed layer's before/after hash plus its
-	// post-state body, so a stranded file is rewritten exactly and an
-	// already-landed (or foreign-advanced) one is left alone.
+	// the replay engine (boot replayer / next apply) from the recovery
+	// block — each changed layer's before/after hash plus its post-state
+	// body, so a stranded file is rewritten exactly, an already-landed one
+	// is left alone, and a foreign-advanced one entry-merges add-style
+	// intent or conflicts into the review ledger (2026-08-26 doctrine).
 	memBeforeSHA := sha16([]byte(oldMem))
 	memAfterSHA := sha16([]byte(memPlan.content))
 	var oldArchive string
@@ -6057,7 +6088,12 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 	}
 	recovery := applyRecovery{}
 	if memChanged {
-		recovery.Memory = &applyRecoveryLayer{BeforeSHA: memBeforeSHA, AfterSHA: memAfterSHA, Body: memPlan.content}
+		recovery.Memory = &applyRecoveryLayer{
+			BeforeSHA: memBeforeSHA,
+			AfterSHA:  memAfterSHA,
+			Body:      memPlan.content,
+			Entries:   memPlan.addedEntries,
+		}
 		if memPlan.archiveAppend != "" {
 			recovery.Archive = &applyRecoveryLayer{
 				BeforeSHA: sha16([]byte(oldArchive)),
@@ -6222,15 +6258,31 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 	return Response{Applied: true}, nil
 }
 
+// applyRecoveryEntry is the memory layer's verbatim per-rule record of
+// one appended add-style line: the rule text plus the EXACT line the live
+// apply wrote (evidence and the apply epoch's reaffirmed count as
+// planMemoryApply rendered them). The replay engine's entry-merge reuses
+// Line verbatim when the receipt carries it — a cross-lane merge never
+// re-stamps metadata the apply already authored (2026-08-26 memory-replay
+// doctrine, round-3 FIX C).
+type applyRecoveryEntry struct {
+	Rule string `json:"rule"`
+	Line string `json:"line"`
+}
+
 // applyRecoveryLayer is one layer's recorded post-state on the
 // memory_apply marker (2026-08-25 review follow-up P1): the before/after
 // hashes make the crash-window heal exact, and Body is what gets written.
 // For the archive Body is the APPEND CHUNK only (the file is unbounded;
-// the heal replays the append onto a still-before archive).
+// the heal replays the append onto a still-before archive). Entries rides
+// the memory layer only (omit on archive/user): the entry-merge replay's
+// verbatim line source — legacy receipts without it fall back to the
+// synthesized reaffirmed: 1 line.
 type applyRecoveryLayer struct {
-	BeforeSHA string `json:"before_sha"`
-	AfterSHA  string `json:"after_sha"`
-	Body      string `json:"body"`
+	BeforeSHA string               `json:"before_sha"`
+	AfterSHA  string               `json:"after_sha"`
+	Body      string               `json:"body"`
+	Entries   []applyRecoveryEntry `json:"entries,omitempty"`
 }
 
 // applyRecoverySkill is one skill file's applyRecoveryLayer plus the
@@ -6258,163 +6310,12 @@ func (r applyRecovery) Empty() bool {
 	return r.Memory == nil && r.Archive == nil && r.User == nil && len(r.Skills) == 0
 }
 
-// healMemoryFromJournalLocked repairs the file projection of applies that
-// crashed between the (marker-first) consumption marker and the file
-// writes (2026-08-25 review follow-up P1). Markers fold newest-first with
-// per-layer claims: the NEWEST marker carrying a layer's recovery block
-// is that layer's authority, and its predicate alone decides — the file
-// still at before_sha proves the write never landed (write the recorded
-// body); already at after_sha is a no-op; any other hash is a later or
-// foreign state the heal must never clobber. A claimed layer is then
-// closed for every older marker. Legacy rows (journaled file-first, no
-// recovery block) claim nothing: their own writes preceded them, so they
-// never strand.
-//
-// Heal is lane-local: it folds ONE conversation's journal, repairing only
-// markers journaled on that lane. Callers: handleBootstrap, batch sweeps
-// (before the distill retires an older marker unhealed), apply paths.
-// The residual — a crashed lane that never sees fresh activity — stays
-// stale until it does; the direction is always journal-authoritative
-// (files lag the receipts, never lead them). Best-effort: heal failures
-// log and skip, callers never fail. Caller holds memMu. Returns the
-// epochs that had at least one layer rewritten (newest-first).
-func (s *Server) healMemoryFromJournalLocked(ctx context.Context, convID int64, events []store.Event) []int {
-	odoDir := filepath.Join(s.projectRoot, ".odo")
-	claimed := map[string]bool{}
-	var healedEpochs []int
-	healedLayers := map[int][]string{}
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != store.EventReviewAction {
-			continue
-		}
-		var p struct {
-			Action   string        `json:"action"`
-			Epoch    int           `json:"epoch"`
-			Recovery applyRecovery `json:"recovery"`
-		}
-		if json.Unmarshal(events[i].Payload, &p) != nil || p.Action != "memory_apply" {
-			continue
-		}
-		// healLayer runs the exact predicate for one recorded layer and
-		// closes its claim regardless of outcome: the newest claimant is
-		// the layer's authority even when the file has moved on.
-		healLayer := func(name string, current string, rec *applyRecoveryLayer, write func(string) error) {
-			if claimed[name] {
-				return
-			}
-			claimed[name] = true
-			sha := sha16([]byte(current))
-			if sha == rec.AfterSHA || sha != rec.BeforeSHA {
-				return // landed already, or later/foreign state — never clobber
-			}
-			if err := write(rec.Body); err != nil {
-				log.Printf("memory: heal %s for crashed apply epoch %d: %v", name, p.Epoch, err)
-				return
-			}
-			healedLayers[p.Epoch] = append(healedLayers[p.Epoch], name)
-			if len(healedLayers[p.Epoch]) == 1 {
-				healedEpochs = append(healedEpochs, p.Epoch)
-			}
-		}
-		if p.Recovery.Memory != nil {
-			memPath := filepath.Join(odoDir, memoryFileName)
-			healLayer("memory", readFileFull(memPath), p.Recovery.Memory, func(body string) error {
-				return writeFileWithin(s.projectRoot, memPath, body, 0o644)
-			})
-		}
-		if p.Recovery.Archive != nil {
-			arcPath := filepath.Join(odoDir, archiveFileName)
-			rec := p.Recovery.Archive
-			healLayer("archive", readArchive(s.projectRoot), &applyRecoveryLayer{
-				BeforeSHA: rec.BeforeSHA, AfterSHA: rec.AfterSHA, Body: rec.Body,
-			}, func(body string) error {
-				// Body is the append chunk, not the whole archive: replay
-				// the append onto the still-before archive.
-				return writeFileWithin(s.projectRoot, arcPath, readArchive(s.projectRoot)+rec.Body, 0o644)
-			})
-		}
-		if p.Recovery.User != nil {
-			if home, err := os.UserHomeDir(); err == nil {
-				userPath := filepath.Join(home, ".odo", "user.md")
-				healLayer("user", readFileFull(userPath), p.Recovery.User, func(body string) error {
-					return writeFileAtomic(userPath, body, 0o600)
-				})
-			} else {
-				claimed["user"] = true
-				log.Printf("memory: heal user for crashed apply epoch %d: resolve home: %v", p.Epoch, err)
-			}
-		}
-		for _, sk := range p.Recovery.Skills {
-			target := filepath.Join(odoDir, "skills", filepath.Base(sk.Name))
-			healLayer("skill:"+sk.Name, readFileFull(target), &applyRecoveryLayer{
-				BeforeSHA: sk.BeforeSHA, AfterSHA: sk.AfterSHA, Body: sk.Body,
-			}, func(body string) error {
-				return writeFileWithin(s.projectRoot, target, body, 0o644)
-			})
-		}
-	}
-	for _, epoch := range healedEpochs {
-		layers := healedLayers[epoch]
-		log.Printf("memory: healed crashed apply epoch %d (restored %s)", epoch, strings.Join(layers, ", "))
-		if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
-			"layer":  "memory",
-			"cause":  "recover",
-			"detail": fmt.Sprintf("restored %s after crashed apply epoch %d", strings.Join(layers, ", "), epoch),
-		})); err != nil {
-			log.Printf("memory: journal heal receipt: %v", err)
-		}
-	}
-	return healedEpochs
-}
-
-// healPinsFromJournalLocked completes a pin whose receipt journaled (with
-// its before/after hashes and post-state body) but whose file write never
-// landed — the journal-first pin ordering's crash window (2026-08-25
-// review follow-up P1). Same predicate as the apply heal: the file still
-// at before_sha gets the recorded body; at after_sha is a no-op; anything
-// else is later/foreign and untouched. Only the NEWEST pin receipt
-// matters: a later receipt's RMW basis already accounts for the earlier
-// pin. Legacy receipts (journaled after their write, no after_sha) need
-// nothing. Caller holds memMu; best-effort like the apply heal.
-func (s *Server) healPinsFromJournalLocked(ctx context.Context, convID int64, events []store.Event) {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != store.EventMemoryUpdate {
-			continue
-		}
-		var p struct {
-			Layer     string `json:"layer"`
-			Cause     string `json:"cause"`
-			BeforeSHA string `json:"before_sha"`
-			AfterSHA  string `json:"after_sha"`
-			Body      string `json:"body"`
-		}
-		if json.Unmarshal(events[i].Payload, &p) != nil || p.Layer != "pins" || p.Cause != "pin" {
-			continue
-		}
-		if p.AfterSHA == "" {
-			return // legacy receipt: written file-first — nothing recoverable
-		}
-		odoDir := filepath.Join(s.projectRoot, ".odo")
-		path := pinsPath(s.projectRoot)
-		cur := readFileWithin(s.projectRoot, odoDir, path)
-		if sha := sha16([]byte(cur)); sha == p.AfterSHA || sha != p.BeforeSHA {
-			return
-		}
-		if err := writeFileWithin(s.projectRoot, path, p.Body, 0o644); err != nil {
-			log.Printf("pins: heal after crashed pin (receipt seq %d): %v", events[i].Seq, err)
-			return
-		}
-		log.Printf("pins: restored body after crashed pin write (receipt seq %d)", events[i].Seq)
-		if _, err := s.store.AppendEvent(ctx, convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
-			"layer":  "pins",
-			"cause":  "recover",
-			"detail": "restored pins.md after crashed pin write",
-		})); err != nil {
-			log.Printf("pins: journal heal receipt: %v", err)
-		}
-		return
-	}
-}
+// The 2026-08-25 per-lane heals (lane-local scans with a silent
+// never-clobber foreign branch) were RETIRED by the 2026-08-26
+// memory-replay doctrine: the shared engine in memory_replay.go owns the
+// predicate at every former call site — the boot replayer (project-wide,
+// authoritative), the apply paths' retry convergence, and the pin
+// handler's RMW-basis pass.
 
 // R-W2 (router-vs-omp-eval-2026-08-14): prefs.md `distill_via:` picks the
 // distill route; R-W3 adds `learner_via:` and `curator_via:` for the other

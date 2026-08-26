@@ -880,6 +880,7 @@ func TestShowHEADFile(t *testing.T) {
 		t.Error("absent-from-HEAD file: want error (fail-open to the advisory)")
 	}
 }
+
 // DirtyPaths backs the accept/refresh pre-apply refusal (tri-review P0):
 // staged, unstaged, and untracked changes on the queried paths are all
 // named; clean paths and paths outside the query set are not.

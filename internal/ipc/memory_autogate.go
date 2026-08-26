@@ -59,22 +59,38 @@ func (s *Server) autoApplyProposals(ctx context.Context, c store.Conversation, b
 
 // sweepPendingBatch decides an older unconsumed batch through the panel.
 // Called from distillCore before the learner — its rows are this fold's
-// own bookkeeping (owned by unownedFoldGrowth's attributed set).
+// own bookkeeping (owned by unownedFoldGrowth's attributed set). A batch
+// already CONSUMED is out of the sweep's decision remit but not out of
+// crash exposure: the consumed branch below routes its marker through the
+// replay engine so a failed write is repaired (or conflicted for review)
+// at sweep time, not deferred to the next apply or restart (round-4
+// FIX 1).
 func (s *Server) sweepPendingBatch(ctx context.Context, c store.Conversation, w store.Workstream, models []reviewModel) {
 	events, err := s.store.ListEvents(ctx, c.ID, 0)
 	if err != nil {
 		return
 	}
-	// Recovery first (2026-08-25 review follow-up P1): a marker-first apply
-	// stranded by a crash is restored from its recorded bodies now — waiting
-	// past this distill's fold would let a NEW apply marker retire the
-	// stranded one with its layers never written (markers claim layers
-	// newest-first).
-	s.memMu.Lock()
-	s.healMemoryFromJournalLocked(ctx, c.ID, events)
-	s.memMu.Unlock()
+
 	batch := findPendingBatch(events)
-	if !batch.exists || batch.consumed {
+	if !batch.exists {
+		return
+	}
+	if batch.consumed {
+		// The consumed marker may have outlived a crash before its file
+		// writes: the batch is decided and gone from the sweep's remit,
+		// but its recovery block is still the only replayable intent for
+		// the files it lagged. Route it through the SAME engine pass the
+		// apply core retries with (marker-first doctrine, round-4 FIX 1) —
+		// newest-per-layer discipline over this lane's receipts — so the
+		// sweep repairs or journals NOW instead of stranding the files
+		// until the next manual apply or daemon restart. memMu + a fresh
+		// re-read mirror handleApplyMemory's consumed branch: an unlocked
+		// snapshot may lag a landed racer.
+		s.memMu.Lock()
+		if fresh, rerr := s.store.ListEvents(ctx, c.ID, 0); rerr == nil {
+			s.replayLaneMemReceipts(ctx, c.ID, fresh, replayApply)
+		}
+		s.memMu.Unlock()
 		return
 	}
 	if autoApplyRefused(events, batch.epoch) {

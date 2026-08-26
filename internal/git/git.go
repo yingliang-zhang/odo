@@ -264,6 +264,7 @@ func PathsDifferFromHEAD(repoPath string, paths []string) (bool, error) {
 	}
 	return false, fmt.Errorf("git diff --quiet HEAD: %s", tail)
 }
+
 // ExtraEditsBeyondPatch returns the subset of the patch's own paths whose
 // WORKING-TREE bytes differ from the patch's post-image (tri-review P1,
 // 2026-08-24, the "already-landed sweep"). The accept path's M20
@@ -283,6 +284,7 @@ func PathsDifferFromHEAD(repoPath string, paths []string) (bool, error) {
 //   - content already COMMITTED (HEAD IS the post-image — a manual
 //     merge/cherry-pick landed it): the reverse --check succeeds, so the
 //     HEAD-seeded temp index is the post-image as-is.
+//
 // Both directions failing means HEAD drifted inside the hunks
 // themselves; the probe then names every patch path whose worktree bytes
 // differ from HEAD — an ambiguous path is refused rather than swept

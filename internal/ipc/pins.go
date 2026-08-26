@@ -62,14 +62,16 @@ func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
 
 	s.memMu.Lock() // single-writer (2026-08-25 audit P1): pin read-modify-write races batch applies cross-workstream
 	defer s.memMu.Unlock()
-	// Recovery FIRST (2026-08-25 review follow-up P1): the receipt now
-	// journals BEFORE the file write (marker-first, the apply protocol's
-	// shape), so a crash in between is repaired from the journal — the old
-	// file-first order could hand the model a pin no receipt covered, and
-	// its crash window had no path back. The heal also protects THIS pin's
-	// read-modify-write basis: it must include the crashed pin's line.
+	// Recovery FIRST (2026-08-25 review follow-up P1, replay-engine form
+	// since 2026-08-26): the receipt now journals BEFORE the file write
+	// (marker-first, the apply protocol's shape), so a crash in between is
+	// repaired from the journal — the old file-first order could hand the
+	// model a pin no receipt covered, and its crash window had no path
+	// back. The replay also protects THIS pin's read-modify-write basis:
+	// it must include the crashed pin's line. Same engine as the boot
+	// replayer, pins-only scope — never an independent scan.
 	if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
-		s.healPinsFromJournalLocked(ctx, c.ID, events)
+		s.replayLaneMemReceipts(ctx, c.ID, events, replayPin)
 	}
 	old := readFileWithin(s.projectRoot, filepath.Join(s.projectRoot, ".odo"), pinsPath(s.projectRoot)) // contained: the write basis feeds the file itself (2026-08-24 tri-review P0)
 	out := strings.TrimRight(old, "\n")
@@ -83,8 +85,8 @@ func (s *Server) handlePin(ctx context.Context, req Request) (Response, error) {
 	}
 	// Journal-first with the recovery fields (before/after sha + body —
 	// bounded by pinsCap): consumption is journaled intent, so the pin can
-	// never land journal-less, and a crash after this append is healed by
-	// healPinsFromJournalLocked (next pin or next bootstrap of this lane).
+	// never land journal-less, and a crash after this append is repaired by
+	// the replay engine (boot replayer / the next pin's basis pass).
 	if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 		"layer":      "pins",
 		"cause":      "pin",

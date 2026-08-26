@@ -53,11 +53,11 @@ import {
   SwitchCache,
 } from "./switch_cache";
 import { deriveLoopStates, loopMode } from "./loop";
-import { sameAutoDistillList, sameCountMap, sameDiff, sameDiffInfoExList, sameDiffList, sameIdList } from "./diff_stable";
+import { sameAutoDistillList, sameCountMap, sameDiff, sameDiffInfoExList, sameDiffList, sameIdList, sameStrandedOpsList } from "./diff_stable";
 import { derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
-import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PanelProgress, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, Workstream } from "./types";
+import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PanelProgress, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, StrandedOp, Workstream } from "./types";
 import { strings } from "./strings";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
@@ -319,6 +319,13 @@ export default function App() {
   // coverage blocks, and the in-flight distill list.
   const [autoDistill, setAutoDistill] = useState<AutoDistillCountdown[]>([]);
   const [distillingConvs, setDistillingConvs] = useState<number[]>([]);
+  // Stranded memory crash-recoveries (2026-08-26 memory-replay doctrine):
+  // count AND rows both ride pending_counts, project-wide (round-3
+  // FIX F — the pre-FIX-F per-conversation event fold could light the
+  // banner over zero actionable rows when the conflict rode a rotated
+  // lane).
+  const [strandedMemoryOps, setStrandedMemoryOps] = useState(0);
+  const [strandedOps, setStrandedOps] = useState<StrandedOp[]>([]);
   // M5: curate's bridge call blocks for minutes (like distill). The daemon
   // itself serves other connections throughout (M11 goroutine-per-
   // connection); curatingRef only suspends this client's own poll loop
@@ -423,6 +430,14 @@ export default function App() {
       setAutoDistill((prev) => (sameAutoDistillList(prev, auto) ? prev : auto));
       const distilling = counts.distilling_convs ?? [];
       setDistillingConvs((prev) => (sameIdList(prev, distilling) ? prev : distilling));
+      setStrandedMemoryOps(counts.stranded_memory_ops ?? 0);
+      const ops: StrandedOp[] = (counts.stranded_ops ?? []).map((r) => ({
+        layer: r.layer,
+        receiptSeq: r.receipt_seq,
+        strandedConversation: r.conversation_id,
+        detail: r.detail,
+      }));
+      setStrandedOps((prev) => (sameStrandedOpsList(prev, ops) ? prev : ops));
       pendingTotalRef.current = Object.values(pending).reduce((a, b) => a + b, 0);
     } catch {
       // Stale badges are fine; never disturb the poll loop.
@@ -2231,6 +2246,9 @@ export default function App() {
               onApplied={handleMemoryReviewClosed}
               projectRoot={project?.root_path ?? null}
               active={panelTab === "memory"}
+              strandedTotal={strandedMemoryOps}
+              strandedOps={strandedOps}
+              onResolved={refreshPendingCounts}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>

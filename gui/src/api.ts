@@ -57,6 +57,7 @@ import type {
   ReadPinsResponse,
   ReadWikiResponse,
   RejectDiffResponse,
+  ResolveHealConflictResponse,
   ReviewDiffResponse,
   SendMessageRequest,
   SendMessageResponse,
@@ -437,6 +438,23 @@ export function curate(conversationId: number, projectRoot?: string): Promise<Cu
 // naming the pin text; nothing is written.
 export function pin(conversationId: number, text: string, projectRoot?: string): Promise<PinResponse> {
   return invoke<PinResponse>("pin", { conversationId, text, projectRoot: projectRoot ?? null });
+}
+// resolve_heal_conflict (2026-08-26 memory-replay doctrine): close one
+// journaled heal_conflict — Resolve restores the stranded body, Dismiss
+// records the decision without a write. applied=false (or a thrown
+// error string) means files and the ledger stayed untouched.
+export function resolveHealConflict(
+  args: { conversationId: number; layer: string; receiptSeq: number; strandedConversation: number; dismissed?: boolean },
+  projectRoot?: string,
+): Promise<ResolveHealConflictResponse> {
+  return invoke<ResolveHealConflictResponse>("resolve_heal_conflict", {
+    conversationId: args.conversationId,
+    layer: args.layer,
+    receiptSeq: args.receiptSeq,
+    strandedConversation: args.strandedConversation,
+    dismissed: args.dismissed ?? false,
+    projectRoot: projectRoot ?? null,
+  });
 }
 
 // M5 curation: .odo/pins.md content for the review panel reader; same

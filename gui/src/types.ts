@@ -637,6 +637,26 @@ export interface PendingCountsResponse {
   auto_distill?: AutoDistillCountdown[];
   distilling?: boolean;
   distilling_convs?: number[];
+  // 2026-08-26 memory-replay doctrine: unresolved heal_conflict rows
+  // across the whole project — the Memory tab's banner count.
+  stranded_memory_ops?: number;
+  // Round-3 FIX F: the counted rows themselves, project-wide — the count
+  // is project-wide, so the actionable rows must be too (a conflict on a
+  // rotated lane would otherwise light the banner with zero rows to act
+  // on). The Memory tab folds THIS list, not its own conversation's
+  // events; resolve routes by each row's owning conversation.
+  stranded_ops?: StrandedOpRow[];
+}
+
+// One OPEN heal_conflict row from pending_counts (wire shape). The
+// identity fields are the resolve request's addressing halves:
+// conversation_id is the receipt's OWNING conversation (routing and
+// content-key half — a heal row may ride a rotated carrier lane).
+export interface StrandedOpRow {
+  conversation_id: number;
+  layer: string;
+  receipt_seq: number;
+  detail?: string;
 }
 
 // Daemon `auto_distill_ctl` (M12): the chip's Cancel — disarms a scheduled
@@ -753,6 +773,33 @@ export interface PinResponse {
   ok: boolean;
   error?: string;
   applied?: boolean;
+}
+
+// One open heal_conflict (a stranded crash-recovery intent) surfaced for
+// the Memory tab's review rows — the panel-facing projection of
+// StrandedOpRow (round-3 FIX F: the daemon's project-wide pending_counts
+// list is the ONLY row source; the per-conversation event fold rendered
+// "N stranded" with zero actionable rows whenever the conflict rode a
+// rotated lane). The daemon pairs conflicts with resolutions by
+// (stranded_conversation, layer, receipt_seq) — the row identity and the
+// resolve request both carry the conversation half.
+export interface StrandedOp {
+  layer: string;
+  receiptSeq: number;
+  // The receipt's owning conversation — the row's identity half, and the
+  // routing key for resolve_heal_conflict (never the carrier).
+  strandedConversation: number;
+  detail?: string;
+}
+
+// resolve_heal_conflict: applied confirms the stranded body was restored
+// (or the dismissal journaled); stranded_memory_ops is the post-action
+// project-wide count so the badge converges without a second poll.
+export interface ResolveHealConflictResponse {
+  ok: boolean;
+  error?: string;
+  applied?: boolean;
+  stranded_memory_ops?: number;
 }
 
 // read_pins: .odo/pins.md content, "" when absent (same shape as

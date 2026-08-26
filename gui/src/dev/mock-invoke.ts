@@ -6,6 +6,45 @@
 import * as fx from "./fixtures";
 import { deriveLoopStates } from "../loop";
 import { isAdvisorySlash } from "../slash";
+// Unresolved heal_conflict rows in the fixture journal (2026-08-26
+// memory-replay doctrine): conflict minus resolved, paired by
+// (stranded_conversation, layer, receipt seq), returned in the daemon's
+// sorted wire order (conversation, layer, seq) — mirrors the
+// pending_counts stranded_ops/stranded_memory_ops fold, project-wide
+// (round-3 FIX F: rows span every lane's events, not the viewed one).
+function strandedOpsRows(): Array<{ conversation_id: number; layer: string; receipt_seq: number; detail?: string }> {
+  const open = new Map<string, { conversation_id: number; layer: string; receipt_seq: number; detail?: string }>();
+  const closed = new Set<string>();
+  for (const e of fx.events) {
+    if (e.type !== "memory_update") continue;
+    const p = e.payload as Record<string, unknown> | undefined;
+    if (p == null) continue;
+    const layer = typeof p.layer === "string" ? p.layer : "";
+    if (layer === "") continue;
+    if (p.cause === "heal_conflict") {
+      const seq = typeof p.stranded_receipt_seq === "number" ? p.stranded_receipt_seq : 0;
+      const conv = typeof p.stranded_conversation === "number" ? p.stranded_conversation : e.conversation_id;
+      if (seq > 0) {
+        open.set(`${conv}|${layer}|${seq}`, {
+          conversation_id: conv,
+          layer,
+          receipt_seq: seq,
+          detail: typeof p.detail === "string" ? p.detail : undefined,
+        });
+      }
+    } else if (p.cause === "heal_resolved") {
+      const seq = typeof p.receipt_seq === "number" ? p.receipt_seq : 0;
+      const conv = typeof p.stranded_conversation === "number" ? p.stranded_conversation : e.conversation_id;
+      if (seq > 0) closed.add(`${conv}|${layer}|${seq}`);
+    }
+  }
+  const rows: Array<{ conversation_id: number; layer: string; receipt_seq: number; detail?: string }> = [];
+  for (const [key, row] of open) {
+    if (!closed.has(key)) rows.push(row);
+  }
+  rows.sort((a, b) => a.conversation_id - b.conversation_id || a.layer.localeCompare(b.layer) || a.receipt_seq - b.receipt_seq);
+  return rows;
+}
 
 // Detect Tauri webview: __TAURI_INTERNALS__ is injected by Tauri v2.
 function isTauri(): boolean {
@@ -400,10 +439,65 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         auto_distill: [...(fx.autoDistill ?? [])],
         distilling: false,
         distilling_convs: [],
+        stranded_memory_ops: strandedOpsRows().length,
+        stranded_ops: strandedOpsRows(),
       };
     }
     case "auto_distill_ctl": {
       return { ok: true, disarmed: true };
+    }
+    // 2026-08-26 memory-replay doctrine: close one journaled
+    // heal_conflict. Validation mirrors the daemon: the named
+    // (stranded_conversation, layer, receipt_seq) conflict must exist and
+    // be unresolved — keyed by the row's stranded conversation, never by
+    // the request's carrier lane.
+    case "resolve_heal_conflict": {
+      const convId = (args?.conversationId as number) ?? 1;
+      const layer = (args?.layer as string) ?? "";
+      const receiptSeq = (args?.receiptSeq as number) ?? 0;
+      const strandedConv = (args?.strandedConversation as number) ?? convId;
+      const key = `${strandedConv}|${layer}|${receiptSeq}`;
+      let openRow = false;
+      for (const e of fx.events) {
+        if (e.type !== "memory_update") continue;
+        const p = e.payload as Record<string, unknown> | undefined;
+        if (p == null) continue;
+        const conv = typeof p.stranded_conversation === "number" ? p.stranded_conversation : e.conversation_id;
+        if (
+          p.cause === "heal_conflict" &&
+          p.layer === layer &&
+          p.stranded_receipt_seq === receiptSeq &&
+          `${conv}|${layer}|${receiptSeq}` === key
+        ) {
+          openRow = true;
+        }
+        if (
+          p.cause === "heal_resolved" &&
+          p.layer === layer &&
+          p.receipt_seq === receiptSeq &&
+          `${conv}|${layer}|${receiptSeq}` === key
+        ) {
+          return { ok: false, error: `resolve_heal_conflict: ${layer} receipt ${receiptSeq} (stranded conversation ${strandedConv}) already resolved` };
+        }
+      }
+      if (!openRow) {
+        return { ok: false, error: `resolve_heal_conflict: no heal_conflict for ${layer} receipt ${receiptSeq} (stranded conversation ${strandedConv})` };
+      }
+      const event = fx.ev(
+        "memory_update",
+        {
+          layer,
+          cause: "heal_resolved",
+          receipt_seq: receiptSeq,
+          stranded_conversation: strandedConv,
+          actor: "human",
+          ...(args?.dismissed ? { dismissed: true } : {}),
+        },
+        convId,
+      );
+      fx.events.push(event);
+      const rows = strandedOpsRows();
+      return { ok: true, applied: true, stranded_memory_ops: rows.length, stranded_ops: rows };
     }
     // M12 (D-todo): fixture events carry no todo_merge rows, so the Plan
     // chip is hidden in dev mode; the mock still answers the verb so a

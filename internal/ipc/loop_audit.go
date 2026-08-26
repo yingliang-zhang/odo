@@ -218,15 +218,15 @@ func splitNewCarriedFPs(fps []string, earlier []loopRound) (newFPS, carried []st
 
 // auditLegResult is one auditor leg's journaled outcome.
 type auditLegResult struct {
-	Model          string   `json:"model"`
-	Verdict        string   `json:"verdict"` // complete | parse_error | infra | truncated
-	FindingsCount  int      `json:"findings_count"`
-	RequestSHA16   string   `json:"request_sha16,omitempty"`
-	RequestBytes   int      `json:"request_bytes,omitempty"`
-	OutputTokens   int      `json:"output_tokens,omitempty"`
-	Escalations    []moa.Escalation `json:"escalations,omitempty"`
-	BaseURLScrubbed string  `json:"base_url_scrubbed"`
-	Findings       []finding `json:"-"` // union input, not journaled per-leg
+	Model           string           `json:"model"`
+	Verdict         string           `json:"verdict"` // complete | parse_error | infra | truncated
+	FindingsCount   int              `json:"findings_count"`
+	RequestSHA16    string           `json:"request_sha16,omitempty"`
+	RequestBytes    int              `json:"request_bytes,omitempty"`
+	OutputTokens    int              `json:"output_tokens,omitempty"`
+	Escalations     []moa.Escalation `json:"escalations,omitempty"`
+	BaseURLScrubbed string           `json:"base_url_scrubbed"`
+	Findings        []finding        `json:"-"` // union input, not journaled per-leg
 }
 
 // auditSystem is the auditor role contract. Severity rubric P0–P3; the

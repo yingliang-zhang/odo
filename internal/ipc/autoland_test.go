@@ -279,6 +279,7 @@ func TestRunVerifyGateProvisionsGuiDeps(t *testing.T) {
 		}
 	})
 }
+
 // TestRunVerifyGatePersistsLog pins the #47/#48 diagnosis failures: the
 // journaled 4KB tail swallowed the very --- FAIL line a human needed
 // (twice), forcing blind same-bytes reproductions. The gate now persists
@@ -2926,6 +2927,7 @@ func TestPlaywrightBrowsersDir(t *testing.T) {
 		t.Errorf("override = %q, want /custom/browsers", got)
 	}
 }
+
 // TestCapDetailTailBias pins the flipped cap policy (#40 investigate): an
 // oversized detail keeps its TAIL — go-test output carries ---
 // FAIL/ok-summary lines at the end, and head-trimming journaled 4KB of

@@ -178,6 +178,41 @@ func startRig(t *testing.T, root string) *testRig {
 	return &testRig{root: root, sock: sock, store: st, server: srv, adapter: omp, listen: l}
 }
 
+// restartRig stops the live rig and reopens the SAME journal with a fresh
+// Server (all NewServer boot recoveries run — the parked / memory-replay
+// crash drills stage a "daemon restarted" by swapping the server under the
+// store). The returned rig answers on a new socket; the caller defers its
+// stop (the old rig's own deferred stop already ran through stopOnce).
+func restartRig(t *testing.T, r *testRig) *testRig {
+	t.Helper()
+	r.stopOnce(t)
+	mgr := worktree.NewManager(r.root)
+	if err := mgr.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs: %v", err)
+	}
+	st, err := store.Open(filepath.Join(mgr.StateDir(), "journal.sqlite"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	omp := adapter.NewOMP(mgr.StateDir())
+	srv := NewServer(st, r.root, omp, mgr)
+	// Same dark-launch as startRig (auto + liveness stay deterministic).
+	srv.autoDisabled = true
+	srv.livenessDisabled.Store(true)
+	sockDir, err := os.MkdirTemp("", "odo-sock")
+	if err != nil {
+		t.Fatalf("sockdir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "odo.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(l)
+	return &testRig{root: r.root, sock: sock, store: st, server: srv, adapter: omp, listen: l}
+}
+
 // stopOnce is the single-flight teardown for drills that stop the
 // daemon mid-test (restart window) AND defer a teardown for fatal
 // aborts: both call sites race the same rig, so the Once makes the
@@ -5419,7 +5454,7 @@ func TestOrphanedRequestClosedOnDaemonRestart(t *testing.T) {
 	}
 	newBootServer := func() *Server {
 		srv := NewServer(st, root, adapter.NewOMP(mgr.StateDir()), mgr)
-		srv.autoDisabled = true // same dark-launch as startRig: no timer noise
+		srv.autoDisabled = true          // same dark-launch as startRig: no timer noise
 		srv.livenessDisabled.Store(true) // C11 ditto: no background drains
 		return srv
 	}
