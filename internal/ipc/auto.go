@@ -14,11 +14,32 @@ package ipc
 //   fired              — the timer's evaluation passed, distill starting
 //   skipped            — evaluation or disarm (detail reason):
 //                        disabled | below_min_events | below_min_bytes |
-//                        hourly_cap | daily_cap | backoff | backoff_suspended |
+//                        hourly_cap | backoff | backoff_suspended |
 //                        run_active | distill_active | slash_active |
 //                        disarmed_by_send | disarmed_by_user |
 //                        superseded_by_manual | superseded_by_urgent |
 //                        superseded_by_activity
+//
+// daily_cap is NOT a skipped reason anymore (2026-08-26 storm fix): the
+// first cap hit per suspension window journals ONE
+//   cap_suspended_until    — detail: RFC3339 earliest quota release
+// and the project then suspends: activity journals NOTHING (no repeated
+// scheduled/skipped — those bookkeeping rows were growing the very
+// window they measured: 3786→3819 events, 497KB→565KB of pure scheduler
+// noise in production) and exactly one resume timer points at the
+// horizon. installAutoCapLocked is the check→journal→arm critical
+// section (FIX 1: concurrent lanes race it under s.mu — one row, one
+// timer). The resume re-checks the quota, then either re-suspends once
+// (no catch-up backfill) or clears and restarts the ordinary cycle
+// (FIX 2: lookup failures re-arm a retry instead of dying — the silence
+// can never become permanent). Scheduler bookkeeping (scheduled /
+// skipped / cap_suspended_until) is excluded from the fold render AND
+// from window eligibility (foldExcludedMemoryUpdate / measureWindow), so
+// the storm has no bytes to feed on either. The journal row is the
+// durable record: boot restores live suspensions (StartupAutoScan), and
+// pending_counts discloses the resume time to the Memory tab
+// (autoCapResumeForBadges — rowless pre-fix journals get the computed
+// fallback oldest-counted+24h).
 //
 // M17 F1 retired window_exceeds_prompt_budget: the render filter
 // (distillRender) keeps real windows under the cap by construction, and an
@@ -85,6 +106,30 @@ type autoPendingEntry struct {
 	trigger string
 	fireAt  time.Time
 	timer   *time.Timer
+}
+
+// autoCauseCapSuspended is the suspension journal cause (detail: RFC3339
+// earliest quota release). One row per suspension window; the row is the
+// durable record boot restores and the badge leverage reads.
+const autoCauseCapSuspended = "cap_suspended_until"
+
+// autoCapRetryDelay is the FIX-2 re-arm wait when a resume's lookups
+// fail transiently (store hiccup): the suspension outlives the failure
+// by construction, retrying instead of dying into permanent silence.
+const autoCapRetryDelay = time.Minute
+
+// autoCapEntry is one project's daily-cap suspension (s.autoCap, keyed
+// by project like the cap itself). Exactly one entry per project: the
+// storm fix's "suspend once, single timer" invariant —
+// installAutoCapLocked owns the check→journal→arm critical section.
+// timer is nil only between the fire claim (runAutoCapResume takes it)
+// and the resume's outcome; firing marks that in-flight window so a
+// racing inspection never mistakes the empty slot for a lost timer.
+type autoCapEntry struct {
+	convID   int64       // kick target: the lane that hit the cap (fallback: the project's active lanes)
+	resumeAt time.Time   // earliest quota release — the single timer's deadline
+	timer    *time.Timer // the ONE pending resume; nil inside runAutoCapResume
+	firing   bool        // resume in flight — the timer slot is intentionally empty
 }
 
 // autoInFlight is the cancel-before-note handle for a fired auto distill:
@@ -198,6 +243,20 @@ type windowStats struct {
 func measureWindow(window []store.Event) windowStats {
 	var st windowStats
 	for _, ev := range window {
+		// Scheduler bookkeeping (foldExcludedMemoryUpdate) counts toward
+		// NEITHER axis: not bytes (its render is "") and not events — the
+		// window measures agent/user activity only, so a suspended day's
+		// worth of trigger noise can't keep an otherwise-quiet window
+		// "eligible" (or feed the daily-cap feedback loop it came from).
+		if ev.Type == store.EventMemoryUpdate {
+			var p struct {
+				Layer string `json:"layer"`
+				Cause string `json:"cause"`
+			}
+			if jsonUnmarshalOK(ev.Payload, &p) && foldExcludedMemoryUpdate(p.Layer, p.Cause) {
+				continue
+			}
+		}
 		st.events++
 		st.eligibleBytes += distillRenderSize(ev)
 	}
@@ -291,6 +350,14 @@ func (s *Server) releaseSlashSlot(ctx context.Context, convID int64) {
 func (s *Server) maybeAutoAfterActivityLocked(ctx context.Context, convID int64) {
 	prefs := s.resolveAutoPrefs()
 	if !prefs.enabled {
+		return
+	}
+	// Daily-cap suspension gate: while suspended, activity journals NOTHING
+	// and arms NOTHING — the storm's per-activity scheduled+skipped pairs
+	// were what fed the un-folded window. The gate also heals a lost timer
+	// and drops an expired horizon so the evaluation falls through as the
+	// organic resume (FIX 2).
+	if s.gateAutoCapLocked(ctx, convID) {
 		return
 	}
 	if _, ok := s.distillKind[convID]; ok {
@@ -483,7 +550,22 @@ func (s *Server) runAutoDistill(convID int64, trigger string) {
 	dayAgo := time.Now().UTC().Add(-24 * time.Hour).Format(autoEventTimeLayout)
 	if w, werr := s.store.GetWorkstream(ctx, c.WorkstreamID); werr == nil {
 		if n, err := s.store.CountAutoDistillsForProject(ctx, w.ProjectID, dayAgo); err == nil && n >= prefs.dailyCap {
-			skip("daily_cap")
+			times, terr := s.store.AutoDistillTimesForProject(ctx, w.ProjectID, dayAgo)
+			if terr != nil || len(times) == 0 {
+				// Horizon unreadable: fall back to the pre-fix journaled
+				// skip — a suspension without a trustworthy horizon would
+				// fabricate a resume time (worse than one noisy row).
+				skip("daily_cap")
+				return
+			}
+			// Storm fix: suspend, never skip-loop. The first hit per
+			// suspension window journals the single cap_suspended_until row
+			// and arms the single resume timer; concurrent capped fires
+			// converge inside the critical section (FIX 1).
+			horizon := autoCapResumeAt(times, prefs.dailyCap, time.Now())
+			s.mu.Lock()
+			s.installAutoCapLocked(ctx, convID, w.ProjectID, horizon, true)
+			s.mu.Unlock()
 			return
 		}
 	}
@@ -562,6 +644,328 @@ func (s *Server) runAutoDistill(convID int64, trigger string) {
 	}
 }
 
+// installAutoCapLocked is the daily-cap suspension's check→journal→arm
+// critical section: exactly the FIRST caller for a suspension window
+// journals the single cap_suspended_until row and installs the entry;
+// every later caller — a concurrent capped fire (FIX 1), the boot-time
+// row restore, the activity gate's heal — only converges the horizon
+// EARLIER (a fresher quota ledger wins; a later estimate never pushes the
+// resume past the journaled record) and heals the single timer.
+// journalRow=false is the boot restore: the row it re-arms from already
+// IS the window's record. Caller holds s.mu.
+func (s *Server) installAutoCapLocked(ctx context.Context, convID, projectID int64, resumeAt time.Time, journalRow bool) {
+	if s.autoStopped {
+		return // shutdown began: a new resume timer would outlive the drain
+	}
+	now := time.Now()
+	if entry := s.autoCap[projectID]; entry != nil {
+		if entry.firing {
+			return // the in-flight resume owns the window: its outcome decides
+		}
+		if now.Before(entry.resumeAt) {
+			if resumeAt.Before(entry.resumeAt) && !resumeAt.Before(now) {
+				entry.resumeAt = resumeAt
+			}
+			s.armAutoCapLocked(projectID, entry)
+			return
+		}
+		// Horizon passed under us: the old suspension is over; the fresh
+		// horizon below starts a new window (one new row).
+		dropAutoCapEntry(entry)
+		delete(s.autoCap, projectID)
+	}
+	entry := &autoCapEntry{convID: convID, resumeAt: resumeAt}
+	s.autoCap[projectID] = entry
+	if journalRow {
+		s.journalAuto(ctx, convID, autoCauseCapSuspended, resumeAt.UTC().Format(time.RFC3339))
+	}
+	s.armAutoCapLocked(projectID, entry)
+}
+
+// armAutoCapLocked installs the entry's ONE resume timer (idempotent: a
+// live timer or an in-flight resume short-circuits). Same claim pattern
+// as armAutoLocked: the callback proceeds only while the registry still
+// holds THIS entry with an unclaimed, unfired timer, and the resume
+// goroutine joins distillWG before s.mu is released so Wait's drain
+// counts it. Caller holds s.mu.
+func (s *Server) armAutoCapLocked(projectID int64, entry *autoCapEntry) {
+	if s.autoCap[projectID] != entry || entry.timer != nil || entry.firing || s.autoStopped {
+		return
+	}
+	delay := time.Until(entry.resumeAt)
+	if delay < 0 {
+		delay = 0
+	}
+	entry.timer = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		if s.autoCap[projectID] != entry || entry.timer == nil || entry.firing {
+			s.mu.Unlock()
+			return // superseded or claimed between arm and fire
+		}
+		s.distillWG.Add(1)
+		s.mu.Unlock()
+		go func() {
+			defer s.distillWG.Done()
+			s.runAutoCapResume(projectID)
+		}()
+	})
+}
+
+// dropAutoCapEntry stops the entry's timer WITHOUT touching the registry —
+// the caller owns deletion (the map slot is the timer callback's identity).
+func dropAutoCapEntry(entry *autoCapEntry) {
+	if entry.timer != nil {
+		entry.timer.Stop()
+		entry.timer = nil
+	}
+}
+
+// gateAutoCapLocked reports whether the conversation's project sits under
+// a daily-cap suspension. While it does, activity journals NOTHING and
+// arms NOTHING (the storm's per-activity scheduled+skipped pairs were
+// what fed the un-folded window). The gate heals the entry in passing: a
+// lost timer re-arms (FIX 2 — the gate never swallows the project's
+// activity forever), an expired horizon drops so the evaluation falls
+// through as the organic resume. Caller holds s.mu. Conv→project
+// resolution is SQL under the lock (the guardLiveConversationLocked
+// precedent, human-paced) and runs only while a suspension exists for
+// SOME project, so the steady-state cost is nil.
+func (s *Server) gateAutoCapLocked(ctx context.Context, convID int64) bool {
+	if len(s.autoCap) == 0 {
+		return false
+	}
+	c, err := s.store.GetConversation(ctx, convID)
+	if err != nil {
+		return false // unknown lane: the ordinary evaluation's own guards decide
+	}
+	w, err := s.store.GetWorkstream(ctx, c.WorkstreamID)
+	if err != nil {
+		return false
+	}
+	entry := s.autoCap[w.ProjectID]
+	if entry == nil {
+		return false
+	}
+	if time.Now().Before(entry.resumeAt) {
+		if entry.timer == nil && !entry.firing {
+			log.Printf("auto-distill: re-arming lost cap-resume timer for project %d (deadline %s)",
+				w.ProjectID, entry.resumeAt.UTC().Format(time.RFC3339))
+		}
+		s.armAutoCapLocked(w.ProjectID, entry)
+		return true
+	}
+	if entry.firing {
+		return true // the resume decides in a moment — stay silent
+	}
+	// Horizon passed without a fired resume (timer lost to a state the
+	// gate's heal couldn't see): drop and fall through — the evaluation
+	// below either re-caps (fresh suspension) or folds.
+	dropAutoCapEntry(entry)
+	delete(s.autoCap, w.ProjectID)
+	return false
+}
+
+// autoCapResumeAt computes the earliest moment the project's 24h quota
+// drops below cap: at the horizon the (len(times)-cap+1)-th oldest
+// counted marker has aged out. A horizon already in the past collapses to
+// now (the release is immediate — and a quota ledger with no pressure at
+// all, len < cap, also reports now).
+func autoCapResumeAt(times []string, cap int, now time.Time) time.Time {
+	if cap < 1 {
+		cap = 1
+	}
+	i := len(times) - cap
+	if i < 0 {
+		return now
+	}
+	resume := parseEventTime(times[i]).Add(24 * time.Hour)
+	if resume.Before(now) {
+		return now
+	}
+	return resume
+}
+
+// resolvedAutoCapRetry applies the test-seam override to the FIX-2 retry.
+func (s *Server) resolvedAutoCapRetry() time.Duration {
+	if s.autoCapRetry > 0 {
+		return s.autoCapRetry
+	}
+	return autoCapRetryDelay
+}
+
+// autoCapQuota re-reads the project's 24h quota ledger: the earliest
+// release time and whether the daily cap still holds.
+func (s *Server) autoCapQuota(ctx context.Context, projectID int64) (resumeAt time.Time, capped bool, err error) {
+	prefs := s.resolveAutoPrefs()
+	dayAgo := time.Now().UTC().Add(-24 * time.Hour).Format(autoEventTimeLayout)
+	times, err := s.store.AutoDistillTimesForProject(ctx, projectID, dayAgo)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return autoCapResumeAt(times, prefs.dailyCap, time.Now()), len(times) >= prefs.dailyCap, nil
+}
+
+// autoCapKickConvs picks the resume's kick targets: the suspension's
+// origin lane when still active, else every active conversation of the
+// project (a lane deleted mid-suspension must not take the resume down
+// with it — FIX 2). Each target gets ONE ordinary evaluation — a sub-min
+// window journals its usual skip, an eligible one arms its usual timer,
+// exactly like activity would have. A conversation-less project kicks
+// nothing: no lane can own a foldable window, so the suspension simply
+// ends.
+func (s *Server) autoCapKickConvs(ctx context.Context, projectID, convID int64) ([]int64, error) {
+	convs, err := s.store.ListActiveConversations(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("auto-cap resume: list conversations for project %d: %w", projectID, err)
+	}
+	for _, c := range convs {
+		if c.ID == convID {
+			return []int64{convID}, nil
+		}
+	}
+	ids := make([]int64, 0, len(convs))
+	for _, c := range convs {
+		ids = append(ids, c.ID)
+	}
+	return ids, nil
+}
+
+// runAutoCapResume is the suspension timer's fire path: re-check the
+// quota, then either re-suspend (journal-free when the horizon held; ONE
+// extension row when markers landed mid-suspension and moved it — never
+// a skipped/scheduled backfill) or clear the suspension and restart the
+// ordinary cycle with one evaluation per live lane. Entry bookkeeping
+// runs under s.mu; lookups and the kick run outside it (the
+// runAutoDistill shape). FIX 2 (timer resilience): a transient store or
+// lookup failure re-arms the entry resolvedAutoCapRetry() out instead of
+// dying — the suspension (and the activity gate's silence) never becomes
+// permanent through one bad lookup.
+func (s *Server) runAutoCapResume(projectID int64) {
+	ctx := context.Background()
+	s.mu.Lock()
+	entry := s.autoCap[projectID]
+	if entry == nil || entry.timer == nil || entry.firing {
+		if entry != nil && !entry.firing {
+			// Timer-less, non-firing entry is a state only a bug leaves
+			// (the gate heals live ones): drop it so the next cap
+			// evaluation re-installs cleanly.
+			delete(s.autoCap, projectID)
+		}
+		s.mu.Unlock()
+		return
+	}
+	entry.timer = nil
+	entry.firing = true
+	convID := entry.convID
+	s.mu.Unlock()
+
+	resumeAt, capped, qerr := s.autoCapQuota(ctx, projectID)
+	if qerr != nil {
+		log.Printf("auto-distill: cap resume quota recheck for project %d: %v — retrying", projectID, qerr)
+		s.mu.Lock()
+		if s.autoCap[projectID] == entry {
+			entry.firing = false
+			entry.resumeAt = time.Now().Add(s.resolvedAutoCapRetry())
+			s.armAutoCapLocked(projectID, entry)
+		}
+		s.mu.Unlock()
+		return
+	}
+	if capped {
+		s.mu.Lock()
+		if s.autoCap[projectID] == entry {
+			delete(s.autoCap, projectID)
+			entry.firing = false
+			now := time.Now()
+			switch {
+			case !resumeAt.After(now):
+				// Unparseable ledger timestamps: the horizon is UNKNOWN,
+				// not "now" — an immediate re-fire would hot-loop. Retry
+				// on the FIX-2 cadence, journal nothing.
+				entry.resumeAt = now.Add(s.resolvedAutoCapRetry())
+				s.autoCap[projectID] = entry
+				s.armAutoCapLocked(projectID, entry)
+			case resumeAt.Equal(entry.resumeAt):
+				// The journaled horizon held: re-arm, journal NOTHING.
+				s.autoCap[projectID] = entry
+				s.armAutoCapLocked(projectID, entry)
+			default:
+				// Markers landed mid-suspension (an in-flight fold's
+				// marker): ONE extension row with the truthful new horizon.
+				s.installAutoCapLocked(ctx, convID, projectID, resumeAt, true)
+			}
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	// Quota available: restart the ordinary cycle — each live lane is
+	// re-evaluated ONCE; no catch-up of the silenced interval.
+	targets, terr := s.autoCapKickConvs(ctx, projectID, convID)
+	s.mu.Lock()
+	if s.autoCap[projectID] == entry {
+		if terr != nil {
+			log.Printf("auto-distill: cap resume for project %d: %v — retrying", projectID, terr)
+			entry.firing = false
+			entry.resumeAt = time.Now().Add(s.resolvedAutoCapRetry())
+			s.armAutoCapLocked(projectID, entry)
+			s.mu.Unlock()
+			return
+		}
+		delete(s.autoCap, projectID)
+	}
+	for _, id := range targets {
+		s.maybeAutoAfterActivityLocked(ctx, id)
+	}
+	s.mu.Unlock()
+}
+
+// autoCapResumeForBadges derives the Memory tab's daily-cap chip for
+// pending_counts. Read-only; never journals. Precedence: the in-memory
+// suspension entry (authoritative while the daemon lives), then the
+// journal's newest cap_suspended_until row (the durable record — survives
+// restarts, and its passing horizon ENDS the chip: a hardened horizon is
+// never extended by computation), then the upgrade fallback for journals
+// that predate the row (oldest counted distill + 24h, marked computed).
+// FIX 3: a disabled auto subsystem discloses NOTHING — no chip, and a
+// disable never extends a stale impression past its timestamp.
+func (s *Server) autoCapResumeForBadges(ctx context.Context, projectID int64) *AutoCapResumeInfo {
+	prefs := s.resolveAutoPrefs()
+	if !prefs.enabled {
+		return nil
+	}
+	s.mu.Lock()
+	if entry := s.autoCap[projectID]; entry != nil && time.Now().Before(entry.resumeAt) {
+		info := &AutoCapResumeInfo{ResumeAtUnix: entry.resumeAt.Unix()}
+		s.mu.Unlock()
+		return info
+	}
+	s.mu.Unlock()
+	payload, err := s.store.LatestAutoCapSuspension(ctx, projectID)
+	if err == nil && payload != nil {
+		var row struct {
+			Detail string `json:"detail"`
+		}
+		jsonUnmarshalOK([]byte(*payload), &row)
+		resumeAt, perr := time.Parse(time.RFC3339, row.Detail)
+		if perr != nil || !time.Now().Before(resumeAt) {
+			return nil
+		}
+		return &AutoCapResumeInfo{ResumeAtUnix: resumeAt.Unix()}
+	}
+	// Rowless upgrade path (or unreadable leverage — degrade quietly).
+	dayAgo := time.Now().UTC().Add(-24 * time.Hour).Format(autoEventTimeLayout)
+	times, terr := s.store.AutoDistillTimesForProject(ctx, projectID, dayAgo)
+	if terr != nil || len(times) < prefs.dailyCap {
+		return nil
+	}
+	resumeAt := autoCapResumeAt(times, prefs.dailyCap, time.Now())
+	if !time.Now().Before(resumeAt) {
+		return nil
+	}
+	return &AutoCapResumeInfo{ResumeAtUnix: resumeAt.Unix(), Computed: true}
+}
+
 // consecutiveAutoFailures walks the journal newest-first, counting
 // auto_distill{failed} rows until a reset event: a user message ("next
 // user event" clears suspension) or a successful distill marker (any
@@ -637,6 +1041,38 @@ func (s *Server) StartupAutoScan(ctx context.Context) error {
 
 	prefs := s.resolveAutoPrefs()
 	if prefs.enabled {
+		// Suspension restore (storm fix): a cap_suspended_until row whose
+		// horizon outlived the daemon re-arms its entry and single resume
+		// timer — a restart drops the in-memory registry but never the
+		// journal. journalRow=false: the row being restored IS this
+		// window's record. A passed horizon is skipped: the ordinary T2
+		// scan below re-arms the stale windows, and their fires re-cap or
+		// fold organically.
+		if payload, err := s.store.LatestAutoCapSuspension(ctx, p.ID); err == nil && payload != nil && len(convs) > 0 {
+			var row struct {
+				Detail string `json:"detail"`
+			}
+			if jsonUnmarshalOK([]byte(*payload), &row) {
+				if resumeAt, perr := time.Parse(time.RFC3339, row.Detail); perr == nil && time.Now().Before(resumeAt) {
+					s.mu.Lock()
+					s.installAutoCapLocked(ctx, convs[0].ID, p.ID, resumeAt, false)
+					s.mu.Unlock()
+				}
+			}
+		}
+		// The cap (and its suspension) is project-wide, so a live
+		// suspension silences T2 for the WHOLE project: journal NOTHING,
+		// arm NOTHING — the resume timer owns the restart.
+		s.mu.Lock()
+		capEntry := s.autoCap[p.ID]
+		suspended := capEntry != nil && time.Now().Before(capEntry.resumeAt)
+		s.mu.Unlock()
+		if suspended {
+			// Journal NOTHING, arm NOTHING — the single resume timer owns
+			// the restart, curate included (the resume's kick and later
+			// distill successes drive it).
+			return nil
+		}
 		idle := s.resolvedIdle(prefs)
 		for _, c := range convs {
 			events, err := s.store.ListEvents(ctx, c.ID, 0)

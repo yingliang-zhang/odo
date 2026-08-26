@@ -404,6 +404,11 @@ type Response struct {
 	// with zero rows to act on. The GUI folds THIS list, and routes each
 	// resolve by the row's owning conversation.
 	StrandedOps []StrandedOp `json:"stranded_ops,omitempty"`
+	// pending_counts: the auto-distill daily-cap suspension disclosure —
+	// the Memory tab's "今日额度已用完 · 预计恢复" chip. Nil while the cap
+	// is un-hit, the horizon has passed, or auto-distill is disabled (the
+	// chip never outlives either). Project-scoped like the cap itself.
+	AutoDistillCapResume *AutoCapResumeInfo `json:"auto_distill_cap_resume,omitempty"`
 	// auto_distill_ctl: whether a scheduled auto-distill was disarmed.
 	Disarmed bool `json:"disarmed,omitempty"`
 	// search_events: cross-conversation search results.
@@ -432,6 +437,16 @@ type Response struct {
 	FileContent   string `json:"file_content,omitempty"`
 	FileResolved  string `json:"file_resolved,omitempty"`
 	FileTruncated bool   `json:"file_truncated,omitempty"`
+}
+
+// AutoCapResumeInfo discloses an auto-distill daily-cap suspension through
+// pending_counts (the Memory tab's chip). ResumeAtUnix is the earliest
+// quota release, rendered against the client clock; Computed marks the
+// upgrade fallback — a journal that predates cap_suspended_until rows gets
+// oldest-counted-distill + 24h instead of the row's hardened horizon.
+type AutoCapResumeInfo struct {
+	ResumeAtUnix int64 `json:"resume_at_unix"`
+	Computed     bool  `json:"computed,omitempty"`
 }
 
 // StrandedOp is one OPEN heal_conflict row as pending_counts exposes it

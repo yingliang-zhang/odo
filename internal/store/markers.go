@@ -81,6 +81,61 @@ func (s *Store) CountAutoDistillsForProject(ctx context.Context, projectID int64
 	return n, nil
 }
 
+// AutoDistillTimesForProject returns the created_at of every AUTO distill
+// marker across the project's conversations since sinceTs, OLDEST first —
+// the daily-cap quota ledger. The suspension horizon reads it: the cap
+// releases the moment enough of the oldest counted markers age out of the
+// 24h window.
+func (s *Store) AutoDistillTimesForProject(ctx context.Context, projectID int64, sinceTs string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.created_at FROM events e
+		 JOIN conversations c ON e.conversation_id = c.id
+		 JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE w.project_id = ? AND `+autoDistillPayloadMatch+`
+		   AND e.created_at > ?
+		 ORDER BY e.created_at ASC, e.id ASC`, projectID, sinceTs)
+	if err != nil {
+		return nil, fmt.Errorf("store: auto distill times for project %d: %w", projectID, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err != nil {
+			return nil, fmt.Errorf("store: scan auto distill time for project %d: %w", projectID, err)
+		}
+		out = append(out, ts)
+	}
+	return out, rows.Err()
+}
+
+// LatestAutoCapSuspension returns the payload of the NEWEST
+// memory_update{layer:"auto_distill", cause:"cap_suspended_until"} row
+// project-wide — nil when the journal carries none (pre-suspension-row
+// journals). The ipc layer decodes the detail (the suspension's RFC3339
+// resume timestamp) with the same struct it wrote; the badge leverage and
+// the boot-time suspension restore read it.
+func (s *Store) LatestAutoCapSuspension(ctx context.Context, projectID int64) (*string, error) {
+	var payload sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT e.payload_json FROM events e
+		 JOIN conversations c ON e.conversation_id = c.id
+		 JOIN workstreams w ON c.workstream_id = w.id
+		 WHERE w.project_id = ?
+		   AND e.type = 'memory_update'
+		   AND e.payload_json LIKE '%"layer":"auto_distill"%'
+		   AND e.payload_json LIKE '%"cause":"cap_suspended_until"%'
+		 ORDER BY e.created_at DESC, e.id DESC
+		 LIMIT 1`, projectID).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: latest cap suspension for project %d: %w", projectID, err)
+	}
+	return &payload.String, nil
+}
+
 // AutoCurateState derives the auto-curate trigger inputs: how many distill
 // markers (any trigger, manual included — every new note feeds the
 // curator) landed since the latest PASSING curate marker project-wide,

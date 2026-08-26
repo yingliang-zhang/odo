@@ -594,6 +594,12 @@ syncParkedGoals(1);
 // it wants the countdown visible.
 export const autoDistill: AutoDistillCountdown[] = [];
 
+// Daily-cap suspension seed (2026-08-26 storm fix): null = quiet — the
+// Memory tab's chip stays hidden. E2E assigns a FRESH object (never
+// mutates fields) like every fixture override; the mock re-wraps per
+// poll.
+export const autoDistillCap: { resume: { resume_at_unix: number; computed?: boolean } | null } = { resume: null };
+
 // ---------- M8 Skills ----------
 
 export const skills: SkillInfo[] = [

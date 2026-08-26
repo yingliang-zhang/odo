@@ -646,6 +646,20 @@ export interface PendingCountsResponse {
   // on). The Memory tab folds THIS list, not its own conversation's
   // events; resolve routes by each row's owning conversation.
   stranded_ops?: StrandedOpRow[];
+  // Auto-distill daily-cap suspension disclosure: the Memory tab's
+  // "今日额度已用完 · 预计恢复" chip. Absent while quiet, past the
+  // horizon, or auto-distill disabled (FIX 3 — the chip never outlives
+  // either).
+  auto_distill_cap_resume?: AutoDistillCapResume | null;
+}
+
+// One daily-cap suspension as pending_counts discloses it (daemon
+// AutoCapResumeInfo): resume_at_unix is the earliest quota release,
+// rendered against the client clock; computed marks the pre-suspension-
+// row journal fallback (oldest counted distill + 24h).
+export interface AutoDistillCapResume {
+  resume_at_unix: number;
+  computed?: boolean;
 }
 
 // One OPEN heal_conflict row from pending_counts (wire shape). The

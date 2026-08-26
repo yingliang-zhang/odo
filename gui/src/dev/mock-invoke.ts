@@ -441,6 +441,9 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         distilling_convs: [],
         stranded_memory_ops: strandedOpsRows().length,
         stranded_ops: strandedOpsRows(),
+        // Daily-cap chip fixture (2026-08-26 storm fix): fresh object per
+        // poll, same identity discipline as the arrays above.
+        auto_distill_cap_resume: fx.autoDistillCap.resume ? { ...fx.autoDistillCap.resume } : null,
       };
     }
     case "auto_distill_ctl": {

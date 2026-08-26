@@ -292,6 +292,13 @@ type Server struct {
 	distillKind  map[int64]string            // conversationID -> kind of in-flight distill
 	autoPending  map[int64]*autoPendingEntry // conversationID -> scheduled (not yet fired) auto-distill
 	autoInFlight map[int64]*autoInFlight     // conversationID -> firing/fired auto-distill cancel handle
+	// autoCap is the daily-cap suspension registry, keyed by PROJECT (the
+	// cap is project-wide, so the storm-fix suspension is too): one entry =
+	// at most one cap_suspended_until journal row per window + at most one
+	// resume timer. installAutoCapLocked owns the check→journal→arm
+	// critical section; gateAutoCapLocked silences activity while an entry
+	// lives; stopAutoDistill tears the timers down with the rest.
+	autoCap map[int64]*autoCapEntry // projectID -> daily-cap suspension
 	// autoStopped closes the auto subsystem against NEW arms once
 	// shutdown begins (stopAutoDistill, called from Wait/rig teardown):
 	// armAutoLocked turns them away so no fresh timer can outlive the
@@ -334,6 +341,9 @@ type Server struct {
 	autoIdle      time.Duration
 	autoJitter    time.Duration
 	autoCurateAge time.Duration
+	// autoCapRetry overrides the FIX-2 resume retry cadence (zero →
+	// autoCapRetryDelay); tests set seconds, never the 1m default.
+	autoCapRetry time.Duration
 	// C11 (2026-08-22 P0): daemon-side liveness drain. drainRun used to be
 	// reachable only from pollLocked — i.e. only while the GUI kept
 	// polling — so a closed GUI wedged every in-flight run mid-conversation:
@@ -453,6 +463,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		distillKind:  make(map[int64]string),
 		autoPending:  make(map[int64]*autoPendingEntry),
 		autoInFlight: make(map[int64]*autoInFlight),
+		autoCap:      make(map[int64]*autoCapEntry),
 		slashing:     make(map[int64]int),
 		panelProg:    make(map[int64][]*PanelProgress),
 		deletingWs:   make(map[int64]struct{}),
@@ -2571,6 +2582,13 @@ func (s *Server) stopAutoDistill() {
 		for id, entry := range s.autoPending {
 			entry.timer.Stop()
 			delete(s.autoPending, id)
+		}
+		// Daily-cap resume timers join the same teardown: an already-fired
+		// callback's identity check no-ops against the dropped registry,
+		// and armAutoCapLocked's autoStopped bar covers re-arms.
+		for id, entry := range s.autoCap {
+			dropAutoCapEntry(entry)
+			delete(s.autoCap, id)
 		}
 	}
 	s.mu.Unlock()
@@ -5292,6 +5310,9 @@ func (s *Server) handlePendingCounts(ctx context.Context, req Request) (Response
 		DistillingConvs:    snap.distillingConvs,
 		StrandedMemoryOps:  stranded,
 		StrandedOps:        strandedOps,
+		// Daily-cap suspension disclosure (storm fix): journal-derived,
+		// gated on the subsystem being enabled (FIX 3); nil while quiet.
+		AutoDistillCapResume: s.autoCapResumeForBadges(ctx, p.ID),
 	}, nil
 }
 
@@ -6688,6 +6709,14 @@ func distillRender(ev store.Event) string {
 			Cause string `json:"cause"`
 		}
 		if jsonUnmarshalOK(ev.Payload, &p) {
+			// Auto-distill scheduler bookkeeping never renders (the same
+			// exclusion measureWindow applies to eligibility): under the
+			// daily-cap storm these rows were the noise that outgrew the
+			// window they were measuring. The note summarizes agent/user
+			// activity; the scheduler's own arming decisions are not it.
+			if foldExcludedMemoryUpdate(p.Layer, p.Cause) {
+				return ""
+			}
 			return fmt.Sprintf("### memory_update (seq %d) {\"layer\":%q,\"cause\":%q}\n\n", ev.Seq, p.Layer, p.Cause)
 		}
 		return fmt.Sprintf("### memory_update (seq %d) [payload omitted — %d bytes]\n\n", ev.Seq, len(ev.Payload))
@@ -6759,6 +6788,27 @@ func foldExcludedReviewAction(action, actor string) bool {
 	}
 	switch action {
 	case "moa_review", "auto_revise_round", "run_prompt", "auto_land_started":
+		return true
+	}
+	return false
+}
+
+// foldExcludedMemoryUpdate reports whether a memory_update row is
+// auto-distill SCHEDULER bookkeeping: scheduled / skipped /
+// cap_suspended_until rows are the trigger machinery's own noise. They
+// journal every evaluation (nothing skips silently — the scheduler's
+// audit trail), but they never fold into the prompt and never count
+// toward eligibility: under the daily-cap feedback loop those rows were
+// precisely what outgrew the un-folded window they were measuring
+// (3786→3819 events / 497KB→565KB of pure scheduler noise in production).
+// Outcome rows keep rendering: fired / failed / cancelled_by_send /
+// supersession markers are epoch signal, one per actual fold at most.
+func foldExcludedMemoryUpdate(layer, cause string) bool {
+	if layer != "auto_distill" {
+		return false
+	}
+	switch cause {
+	case "scheduled", "skipped", autoCauseCapSuspended:
 		return true
 	}
 	return false

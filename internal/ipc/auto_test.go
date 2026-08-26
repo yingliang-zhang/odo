@@ -490,13 +490,19 @@ func TestAutoFrequencyCaps(t *testing.T) {
 		t.Error("cap skip left a pending entry")
 	}
 
-	// Daily cap: prefs override (12 → 1); the two auto markers above hit it.
+	// Daily cap (2026-08-26 storm fix): prefs override (12 → 1); the two
+	// auto markers above hit it, and the first hit SUSPENDS — one
+	// cap_suspended_until row plus a live registry entry, not a journaled
+	// skip. auto_cap_test.go owns the deep drills; here the caps test only
+	// pins that daily pressure no longer reads as a skip.
 	writePrefs(t, home, "auto_distill_daily_cap: 1\nauto_distill_max_per_hour: 99\n")
 	armPendingNow(rig.server, convID, distillTriggerIdle)
 	rig.server.runAutoDistill(convID, distillTriggerIdle)
-	rows = autoRows(t, rig, convID, "skipped")
-	if n := len(rows); !strings.Contains(rows[n-1]["detail"].(string), "daily_cap") {
-		t.Fatalf("skips = %v, want daily_cap", rows)
+	if got := len(autoRows(t, rig, convID, autoCauseCapSuspended)); got != 1 {
+		t.Fatalf("cap_suspended_until rows = %d, want exactly 1", got)
+	}
+	if entry := capEntryFor(rig.server, projectIDForConv(t, rig, convID)); entry == nil || entry.timer == nil {
+		t.Fatalf("suspension entry after cap hit = %+v, want armed entry", entry)
 	}
 
 	// Manual exemption, clean journal: three manual markers must not trip

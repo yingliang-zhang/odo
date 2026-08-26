@@ -57,7 +57,7 @@ import { sameAutoDistillList, sameCountMap, sameDiff, sameDiffInfoExList, sameDi
 import { derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
-import type { AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PanelProgress, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, StrandedOp, Workstream } from "./types";
+import type { AutoDistillCapResume, AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PanelProgress, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, StrandedOp, Workstream } from "./types";
 import { strings } from "./strings";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
@@ -326,6 +326,10 @@ export default function App() {
   // lane).
   const [strandedMemoryOps, setStrandedMemoryOps] = useState(0);
   const [strandedOps, setStrandedOps] = useState<StrandedOp[]>([]);
+  // Auto-distill daily-cap suspension (2026-08-26 storm fix): the Memory
+  // tab's "今日额度已用完 · 预计恢复" chip, riding pending_counts like the
+  // countdowns; null while uncapped, past the horizon, or disabled.
+  const [autoDistillCapResume, setAutoDistillCapResume] = useState<AutoDistillCapResume | null>(null);
   // M5: curate's bridge call blocks for minutes (like distill). The daemon
   // itself serves other connections throughout (M11 goroutine-per-
   // connection); curatingRef only suspends this client's own poll loop
@@ -438,6 +442,13 @@ export default function App() {
         detail: r.detail,
       }));
       setStrandedOps((prev) => (sameStrandedOpsList(prev, ops) ? prev : ops));
+      // Daily-cap chip: value-compared like the multiset lists above —
+      // the daemon deserializes a fresh object every poll, and a nil→
+      // object→nil flap never re-renders equal states.
+      const capResume = counts.auto_distill_cap_resume ?? null;
+      setAutoDistillCapResume((prev) =>
+        prev?.resume_at_unix === capResume?.resume_at_unix && (prev?.computed ?? false) === (capResume?.computed ?? false) ? prev : capResume,
+      );
       pendingTotalRef.current = Object.values(pending).reduce((a, b) => a + b, 0);
     } catch {
       // Stale badges are fine; never disturb the poll loop.
@@ -775,6 +786,7 @@ export default function App() {
     setParkedGoals({});
     setAutoDistill([]);
     setDistillingConvs([]);
+    setAutoDistillCapResume(null);
     setInboxDiffs([]);
   }, []);
 
@@ -2249,6 +2261,12 @@ export default function App() {
               strandedTotal={strandedMemoryOps}
               strandedOps={strandedOps}
               onResolved={refreshPendingCounts}
+              autoDistillCapResume={autoDistillCapResume}
+              // FIX 3 (2026-08-26 storm fix): the chip also gates on the
+              // auto-distill pref — "never" hides it even if a stale poll
+              // still carries a resume time; unset settings read as the
+              // daemon's default-ON posture.
+              autoDistillEnabled={appSettings?.auto_distill !== "never"}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>

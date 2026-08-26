@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins, resolveHealConflict } from "../api";
-import type { MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult, StrandedOp } from "../types";
+import type { AutoDistillCapResume, MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult, StrandedOp } from "../types";
 import LoadingInline from "./LoadingInline";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -59,6 +59,14 @@ interface Props {
   strandedTotal?: number;
   strandedOps?: StrandedOp[];
   onResolved?: () => void;
+  // Daily-cap suspension disclosure (2026-08-26 storm fix): the daemon's
+  // earliest quota release, riding pending_counts; null while uncapped or
+  // past the horizon.
+  autoDistillCapResume?: AutoDistillCapResume | null;
+  // FIX 3: the chip also gates on the auto-distill pref — App derives it
+  // from the fetched settings ("never" hides the chip regardless of what
+  // a stale poll carried).
+  autoDistillEnabled?: boolean;
 }
 
 // Split the mixed proposals array into per-target sections while keeping
@@ -216,7 +224,7 @@ function SkillProposalRow({
   );
 }
 
-function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved }: Props) {
+function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved, autoDistillCapResume, autoDistillEnabled = true }: Props) {
   const [tab, setTab] = useState<"proposals" | "files">(focus?.tab ?? "proposals");
   // External sub-tab requests. This effect is what keeps deep links
   // working under the panel's keep-alive tabs: the panel now survives
@@ -491,6 +499,22 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
           })}
         </div>
       )}
+      {/* Daily-cap suspension chip (2026-08-26 storm fix): the daemon
+          discloses the earliest quota release on pending_counts. FIX 3:
+          hidden while auto-distill is disabled, and never rendered past
+          the horizon even if a stale poll value lingers. */}
+      {autoDistillEnabled &&
+        autoDistillCapResume != null &&
+        autoDistillCapResume.resume_at_unix * 1000 > Date.now() && (
+          <div
+            className="mem-cap-notice mb-3 rounded-md border border-[var(--warn)] bg-[rgba(211,156,53,0.08)] px-3 py-2"
+            data-computed={autoDistillCapResume.computed || undefined}
+          >
+            <div className="text-[12px] text-[var(--warn)]">
+              {`今日额度已用完 · 预计恢复 ${new Date(autoDistillCapResume.resume_at_unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+            </div>
+          </div>
+        )}
       <div className="mem-tabs flex gap-1.5 mb-3" role="tablist" aria-label="Memory sections">
         <button
           type="button"
