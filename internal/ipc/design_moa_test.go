@@ -325,6 +325,10 @@ func TestDesignMoaPrefsOff(t *testing.T) {
 		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 		writePrefs(t, home, prefs+designMoaPrefs[len("design_via: moa\n"):]) // review legs + orchestrator, flag as cased
 		rig := startRig(t, root)
+		// Single-flight teardown: the flag-refusal loop stops each rig
+		// explicitly at iteration end; a fatal abort mid-iteration still
+		// gets torn down.
+		defer rig.stopOnce(t)
 		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 
 		resp := rig.callExpectErr(t, Request{
@@ -333,7 +337,7 @@ func TestDesignMoaPrefsOff(t *testing.T) {
 		if !strings.Contains(resp.Error, "design_moa requires design_via: moa in prefs") {
 			t.Errorf("prefs %q: error = %q, want the flag refusal", prefs, resp.Error)
 		}
-		rig.stop(t)
+		rig.stopOnce(t)
 	}
 }
 

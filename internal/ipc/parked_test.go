@@ -208,6 +208,9 @@ func TestParkedGoalSurvivesRestart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 	rig := startRig(t, root)
+	// Single-flight teardown: the restart stop below owns the rig only
+	// on the happy path; a fatal abort before it still gets torn down.
+	defer rig.stopOnce(t)
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
@@ -230,7 +233,7 @@ func TestParkedGoalSurvivesRestart(t *testing.T) {
 	}
 
 	// Stop the rig (close the server, keep the store on disk).
-	rig.stop(t)
+	rig.stopOnce(t)
 
 	// Re-open the SAME store and build a new Server — recoverParkedGoals
 	// must seed the queue from the journal and auto-dequeue (parked_goals

@@ -1163,6 +1163,7 @@ func TestLoopRestartMidRunSuspends(t *testing.T) {
 		return 200, "", 0
 	})
 	rig1 := startRig(t, root)
+	defer rig1.stopOnce(t)
 	convID := loopBoot(t, rig1)
 	base := gitOut(t, root, "rev-parse", "HEAD")
 	gitIn(t, root, "commit", "--allow-empty", "-m", "work")
@@ -1170,7 +1171,7 @@ func TestLoopRestartMidRunSuspends(t *testing.T) {
 	waitLoop(t, rig1.store, convID, "fix spawn", func(sc loopScan) bool {
 		return len(sc.ofKind(loopKindFixSpawn)) == 1
 	})
-	rig1.stop(t) // daemon killed mid fix run — no drain, no diff rows
+	rig1.stopOnce(t) // daemon killed mid fix run — no drain, no diff rows
 
 	rig2 := startRig(t, root) // NewServer → recoverLoops runs synchronously
 	t.Cleanup(func() { rig2.stop(t) })

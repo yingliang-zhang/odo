@@ -85,6 +85,10 @@ type testRig struct {
 	server  *Server
 	adapter *adapter.OMP
 	listen  net.Listener
+	// stopflight guards the teardown: crash drills stop mid-test
+	// (daemon restart) and their fatal-abort defer stops again — one
+	// sync.Once replaces the hand-rolled stopped flags.
+	stopflight sync.Once
 }
 
 func gitIn(t *testing.T, dir string, args ...string) {
@@ -174,6 +178,15 @@ func startRig(t *testing.T, root string) *testRig {
 	return &testRig{root: root, sock: sock, store: st, server: srv, adapter: omp, listen: l}
 }
 
+// stopOnce is the single-flight teardown for drills that stop the
+// daemon mid-test (restart window) AND defer a teardown for fatal
+// aborts: both call sites race the same rig, so the Once makes the
+// second call a no-op instead of double-closing the store.
+func (r *testRig) stopOnce(t *testing.T) {
+	t.Helper()
+	r.stopflight.Do(func() { r.stop(t) })
+}
+
 func (r *testRig) stop(t *testing.T) {
 	t.Helper()
 	// C11: stop the liveness drain FIRST — liveness_test.go opt-ins leave
@@ -191,6 +204,17 @@ func (r *testRig) stop(t *testing.T) {
 	r.server.distillWG.Wait()
 	// P1: join the boot-time stranded-diff recovery — it reads the store.
 	r.server.recoverWG.Wait()
+	// Mirror Wait's ordering: every drain-capable context is joined
+	// above, so seal admissions AND drop still-registered runs' lifetime
+	// pins before the land join — a late pipeline admission is refused,
+	// an in-flight RUN never blocks teardown either.
+	r.server.sealLandAndReleasePins()
+	// P1 (#63 verify-flake class): join every spawned auto-land pipeline
+	// — the recover fan-out's accept tails write journal and worktree git
+	// state past the status flip a test polls for; they must complete
+	// before the store close and TempDir cleanup below. In-flight
+	// pipelines are joined, never cancelled.
+	r.server.landWG.Wait()
 	// M17: drain detached auto-curates before closing the store — F3's
 	// fail-open evaluation goroutine would otherwise journal into a
 	// closed journal (or hold journal files open past TempDir cleanup).
@@ -276,6 +300,9 @@ func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	rig := startRig(t, root)
+	// Single-flight teardown: the mid-test restart below stops this rig
+	// explicitly; a fatal abort before it must not leak the live server.
+	defer rig.stopOnce(t)
 
 	// --- bootstrap: fresh project gets project/workstream/conversation ---
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
@@ -332,9 +359,9 @@ func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	}
 
 	// --- restart: journal survives; second server restores the session ---
-	rig.stop(t)
+	rig.stopOnce(t)
 	rig = startRig(t, root)
-	defer rig.adapter.CloseAll()
+	defer rig.stopOnce(t)
 
 	boot2 := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	if boot2.Conversation == nil || boot2.Conversation.ID != convID {
@@ -5213,6 +5240,9 @@ func TestSteerLedgerClosedOnDaemonRestart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
 	rig := startRig(t, root)
+	// Single-flight teardown: the crash stop below owns the rig only on
+	// the happy path; a fatal abort before it still gets torn down.
+	defer rig.stopOnce(t)
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
@@ -5223,7 +5253,7 @@ func TestSteerLedgerClosedOnDaemonRestart(t *testing.T) {
 	steerB := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "second note", Steer: true})
 	seqA, seqB := steerA.Event.Seq, steerB.Event.Seq
 	// Crash: stop with the run live. The journaled steers stay open.
-	rig.stop(t)
+	rig.stopOnce(t)
 
 	mgr := worktree.NewManager(root)
 	if err := mgr.EnsureDirs(); err != nil {
@@ -5333,6 +5363,9 @@ func TestOrphanedRequestClosedOnDaemonRestart(t *testing.T) {
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
 	writePrefs(t, home, "") // hermetic prefs: no auto-land noise
 	rig := startRig(t, root)
+	// Single-flight teardown: the crash stop below owns the rig only on
+	// the happy path; a fatal abort before it still gets torn down.
+	defer rig.stopOnce(t)
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
@@ -5355,7 +5388,7 @@ func TestOrphanedRequestClosedOnDaemonRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	rig.stop(t)
+	rig.stopOnce(t)
 
 	mgr := worktree.NewManager(root)
 	if err := mgr.EnsureDirs(); err != nil {

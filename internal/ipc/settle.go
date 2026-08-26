@@ -737,6 +737,16 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Land-seal first (the second #66 repair): an in-flight settle
+	// pipeline reaching its revise admission after Wait's pin sweep must
+	// refuse BEFORE journaling or starting anything — a pinned-past-sweep
+	// run would hang landWG.Wait forever. The caller's revise_spawn_failed
+	// row marks the round infra, and the pending diff waits for the next
+	// boot's recovery (restart-interruptible, unchanged).
+	if s.landSealed {
+		return false, "land_sealed"
+	}
+
 	if runID, ok := s.byConv[d.ConversationID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			return false, "active_run"
@@ -828,7 +838,12 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 		_ = s.mgr.Remove(wtPath) // nothing to review; don't orphan a worktree
 		return false, "agent_start: " + err.Error()
 	}
-	s.runs[runID] = &runMeta{
+	// Registration and the landWG lifetime pin in one s.mu hold —
+	// this admission runs inside a landWG pipeline, where the pin Adds
+	// while the parent's unit still holds the counter. The refusal is
+	// unreachable (the early seal gate shares one s.mu hold with the
+	// seal/sweep) — the atomic backstop, unwound like agent-start.
+	if !s.bindRunLocked(d.ConversationID, runID, &runMeta{
 		runID:          runID,
 		runDirID:       runDirID,
 		adapter:        "",
@@ -838,8 +853,11 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 		goal:           prompt,     // the synthesized repair prompt — the run's truthful trigger
 		reviewGoal:     originGoal, // the panel judges against the user's original words
 		originDiffID:   originID,   // chain root for product linking (Fix B1)
+	}) {
+		_ = ad.Cancel(ctx, runID)
+		_ = s.mgr.Remove(wtPath)
+		return false, "land_sealed"
 	}
-	s.byConv[d.ConversationID] = runID
 	return true, ""
 }
 

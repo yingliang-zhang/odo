@@ -654,7 +654,14 @@ func (s *Server) recoverPendingDiffs(ctx context.Context) {
 		// Schema v3: the diff row carries it verbatim — the conversation's
 		// newest message is the wrong anchor for a diff produced runs ago
 		// (the #34 false objective-mismatch rejection).
-		go s.maybeAutoLand(r.Diff, wtPath, s.diffGoal(ctx, r.Diff), false, "")
+		// landWG: the spawned pipeline outruns this enumeration (recoverWG
+		// only joins the enumeration) — register it so Wait joins the
+		// accept tail too (the #63 verify-flake class).
+		s.landWG.Add(1)
+		go func(d store.Diff, wtPath, goal string) {
+			defer s.landWG.Done()
+			s.maybeAutoLand(d, wtPath, goal, false, "")
+		}(r.Diff, wtPath, s.diffGoal(ctx, r.Diff))
 	}
 }
 

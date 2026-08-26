@@ -482,6 +482,13 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Land-seal first (the second #66 repair): a ladder tail's
+	// fireLoopTick racing shutdown must refuse BEFORE journaling — the
+	// loop's journaled state simply waits for the next boot's fold.
+	if s.landSealed {
+		return false, "land_sealed"
+	}
+
 	if runID, ok := s.byConv[conversationID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			return false, "active_run"
@@ -571,7 +578,12 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 			s.removeParkedGoalLocked(conversationID, seq)
 		}
 	}
-	s.runs[runID] = &runMeta{
+	// Registration and the landWG lifetime pin in one s.mu hold —
+	// loopWG joins ahead of landWG in Wait, so the pin's Add provably
+	// precedes the join. The refusal is unreachable (the early seal
+	// gate shares one s.mu hold with the seal/sweep) — the atomic
+	// backstop; post-receipt the queue goals stay consumed.
+	if !s.bindRunLocked(conversationID, runID, &runMeta{
 		runID:          runID,
 		runDirID:       runDirID,
 		adapter:        adName,
@@ -583,8 +595,11 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 		loopKind:       kind,
 		loopRound:      round,
 		loopTask:       task,
+	}) {
+		_ = ad.Cancel(ctx, runID)
+		_ = s.mgr.Remove(wtPath)
+		return false, "land_sealed"
 	}
-	s.byConv[conversationID] = runID
 	return true, ""
 }
 

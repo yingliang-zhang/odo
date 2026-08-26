@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2205,6 +2206,13 @@ func TestRecoverReFireAnchorsStoredGoal(t *testing.T) {
 	// manager against the repo, same as production.
 	s := &Server{store: f.st, projectRoot: root, mgr: worktree.NewManager(root)}
 	s.recoverPendingDiffs(ctx)
+	// P1 (#63 verify-flake class): the recover lands asynchronously — its
+	// accept tail (apply/commit git writes into the repo, worktree rescue
+	// snapshot, journal appends) outlives the status flip the polls below
+	// observe. Bypassing rig.stop (raw server, no Wait surface), so drain
+	// the pipeline group directly before teardown — deferred now so even
+	// a fatal abort joins before t.Cleanup reclaims the tempdirs.
+	defer s.landWG.Wait()
 
 	// The re-fire fans out in goroutines; wait for both legs.
 	deadline := time.Now().Add(30 * time.Second)
@@ -2240,6 +2248,414 @@ func TestRecoverReFireAnchorsStoredGoal(t *testing.T) {
 	}
 	if got.Status != store.DiffAccepted {
 		t.Errorf("diff status = %q, want accepted (unanimous panel on the true objective)", got.Status)
+	}
+}
+
+// TestLandWGDrainPinFencesWait drills the STRUCTURAL Add-vs-Wait fence
+// on landWG ISOLATED as the only possible fence (the #68 K3 finding-3
+// repair): the #66 pass parked the terminal drain inside an RPC poll,
+// which fenced Wait three ways at once — the poll conn's s.wg frame held
+// s.wg.Wait, the handler's pollLocked hold on s.mu blocked the seal's
+// sweep, AND the lifetime pin held landWG — so the drill passed even
+// with bindRunLocked's pin Add deleted, and proved nothing. This pass:
+//
+//  1. the drain is driven DIRECTLY (the test calls drainRun under
+//     s.mu itself) — no RPC, so no s.wg frame can fence Wait;
+//  2. the gate closure DROPS s.mu for the park and re-acquires on
+//     release — the seal's s.mu acquisition cannot fence Wait either;
+//  3. the gate sits AFTER retireRunInDrain unregistered the run
+//     (landWG pin-fence repair #68 K3 finding 1 keeps the pin through
+//     the retire), so the seal's sweep — which releases the pins of
+//     every still-registered run — CANNOT reach this run's pin;
+//
+// …which leaves the lifetime pin as the ONLY thing holding landWG.
+// The negative assertion therefore has teeth in both directions:
+//
+//   - delete bindRunLocked's landWG.Add(1) (the pin) → the counter
+//     is zero when Wait reaches landWG.Wait → Wait returns mid-park
+//     → the drill FAILS;
+//   - let retireRunInDrain release the pin mid-branch (the pre-repair
+//     shape) → same zero counter → same loud failure — the drill also
+//     pins the finding-1 ordering.
+//
+// Post-release, Wait's return must still follow the tail's OWN
+// completion: the parked finish is a no-diff run with a queued steer,
+// so its tail spawns the continuation unit, the continuation refuses
+// at the seal (Wait's seal ran during the park — s.mu was free) and
+// journals steer_dropped{land_sealed}, and ONLY that unit's Done
+// lets landWG.Wait return. Reading the closure row from the OPEN
+// store afterwards proves Wait returned in order, not early.
+func TestLandWGDrainPinFencesWait(t *testing.T) {
+	root := initRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// No-diff finish with a normal text (verdict none — no false-stop
+	// retry), so the terminal tail takes the steer-continuation branch.
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, noopStubWrapper))
+	rig := startRig(t, root)
+	// Wait replaces rig.stop as the teardown core below; the
+	// single-flight guard keeps a fatal abort from leaking the live
+	// server into TempDir cleanup and from double-closing.
+	defer rig.stopOnce(t)
+	convID := bootstrapConv(t, rig, root)
+
+	// Arm the seam BEFORE any drain can finish. The gate runs inside
+	// drainRun with the driver's s.mu hold; it DROPS the lock for the
+	// park (and re-acquires before returning) so the mutex itself can
+	// never be what stalls Wait's seal step.
+	gateEntered := make(chan struct{})
+	release := make(chan struct{})
+	var gateOnce sync.Once
+	rig.server.drainTailGate = func() {
+		rig.server.mu.Unlock()
+		gateOnce.Do(func() { close(gateEntered) })
+		<-release
+		rig.server.mu.Lock()
+	}
+	t.Cleanup(func() { rig.server.drainTailGate = nil })
+
+	// A no-op run (1s stub), plus one steer queued against it so the
+	// terminal tail is the continuation spawn, not a parked-goal or
+	// retry. Both RPCs complete while the run is still live.
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "check everything"})
+	steer := rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "also check b", Steer: true})
+	steerSeq := steer.Event.Seq
+
+	// Drive drains DIRECTLY, poll-style, until one parks inside the
+	// seam. This goroutine — not an RPC handler — is the drain's call
+	// context, and it never joins s.wg.
+	var drainErr atomic.Value
+	drainReturned := make(chan struct{})
+	go func() {
+		defer close(drainReturned)
+		for {
+			select {
+			case <-gateEntered:
+				return
+			default:
+			}
+			rig.server.mu.Lock()
+			if runID := rig.server.byConv[convID]; runID != "" {
+				if meta := rig.server.runs[runID]; meta != nil {
+					if err := rig.server.drainRun(context.Background(), meta); err != nil {
+						drainErr.Store(err)
+					}
+				}
+			}
+			rig.server.mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+	select {
+	case <-gateEntered:
+	case <-time.After(20 * time.Second):
+		if err, _ := drainErr.Load().(error); err != nil {
+			t.Fatalf("direct drain failed before reaching the tail gate: %v", err)
+		}
+		t.Fatal("the drain never reached its terminal tail gate")
+	}
+
+	// The production shutdown shape starts while the tail is held:
+	// the listener closes (no new handlers), then Wait joins every
+	// spawn context in order. s.wg is empty (no conn in flight — the
+	// drain rides a test goroutine) and s.mu is free (the gate dropped
+	// it), so Wait runs straight to landWG.Wait.
+	if err := rig.listen.Close(); err != nil {
+		t.Fatalf("listen close: %v", err)
+	}
+	waitDone := make(chan struct{})
+	go func() { rig.server.Wait(); close(waitDone) }()
+
+	// THE teeth: Wait must NOT return while the tail is held — the
+	// lifetime pin is the only thing that can hold landWG here. If
+	// the pin Add (bindRunLocked) or the keep-through-retire ordering
+	// (retireRunInDrain) breaks, this fires.
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned while a drainRun tail was held pre-Add — the lifetime-pin fence is broken")
+	case <-time.After(400 * time.Millisecond):
+	}
+
+	// Release: the tail's continuation Add and the drain-end unpin
+	// both run, the spawned continuation refuses at the seal and
+	// closes the steer's ledger, and ONLY THEN can Wait pass.
+	close(release)
+	select {
+	case <-drainReturned:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the released drain never returned")
+	}
+	select {
+	case <-waitDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Wait never returned after the held tail was released")
+	}
+
+	// In-order completion: the continuation unit's steer_dropped
+	// closure must be journaled BEFORE Wait returned (its Done is what
+	// released landWG.Wait) — read back from an OPEN store (a Wait
+	// that returned early over a closing handle turns this read into
+	// the #63 flake's panic instead).
+	evs, err := rig.store.ListEvents(context.Background(), convID, 0)
+	if err != nil {
+		t.Fatalf("list events after Wait: %v", err)
+	}
+	found := false
+	for _, ev := range evs {
+		if ev.Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action string  `json:"action"`
+			Cause  string  `json:"cause"`
+			Seqs   []int64 `json:"steer_seqs"`
+		}
+		if !jsonUnmarshalOK(ev.Payload, &p) || p.Action != "steer_dropped" {
+			continue
+		}
+		if p.Cause == "land_sealed" {
+			for _, s := range p.Seqs {
+				if s == int64(steerSeq) {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no steer_dropped{land_sealed} row for seq %d after Wait — the continuation tail must complete under the join", steerSeq)
+	}
+}
+
+// TestManualAcceptTailJoinedByWait drills the MANUAL accept surface
+// against teardown — the sibling of the auto-land tail in the #63
+// class the repair #66 audit closed. handleDiffAction is fully
+// synchronous inside the connection handler (dispatch → handler;
+// the frame's Add is at Serve's accept loop, its Done at handler
+// return), so its entire accept tail — the git apply/commit pair,
+// the rescueResolvedWorktree snapshot, supersedeChain, the
+// resolution row — is joined transitively by Wait's s.wg.Wait
+// BEFORE the store closes. The drill holds the accept conn open so
+// the production shutdown shape (listener closed, Wait started)
+// begins while the accept is still mid-flight in the handler, then
+// proves the join STRUCTURALLY, not by timing: the diffActionGate
+// seam parks the handler after the accept tail's work and before the
+// response, and the drill asserts Wait cannot pass while the frame
+// is held (the first pass only observed the completed response,
+// which a too-early Wait return would also produce). Post-release:
+// the resolution response is complete AND the store stays open
+// through Wait's return.
+func TestManualAcceptTailJoinedByWait(t *testing.T) {
+	root := settleRigRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// auto_apply: off — the AUTO pipeline must not race the manual
+	// accept for the same diff (acceptMu serializes them; whichever
+	// won first would fail the other's assertion).
+	writePrefs(t, home, "auto_apply: off\n")
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stopOnce(t)
+	convID := bootstrapConv(t, rig, root)
+
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Add hello.txt with the greeting"})
+	done := pollDone(t, rig, convID)
+	if done.Diff == nil {
+		t.Fatal("the run produced no diff")
+	}
+
+	// A hand-held connection carries the accept so teardown can
+	// start while the handler still owns it. The warm roundtrip
+	// proves Serve accepted this conn — a listener close must not
+	// strand an unaccepted dial in the backlog.
+	conn, err := net.Dial("unix", rig.sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	enc := json.NewEncoder(conn)
+	dec := json.NewDecoder(conn)
+	if err := enc.Encode(Request{Cmd: CmdPendingCounts, ProjectRoot: root}); err != nil {
+		t.Fatalf("warm encode: %v", err)
+	}
+	var warm Response
+	if err := dec.Decode(&warm); err != nil {
+		t.Fatalf("warm roundtrip: %v", err)
+	}
+	// Arm the seam: handleDiffAction parks AFTER the full accept tail
+	// (apply/commit, rescue, supersede, resolution, retire, ladder
+	// resume) but BEFORE the response, with s.mu not held. This is what
+	// converts the drill from timing luck into a structural proof: the
+	// shutdown shape below provably BEGINS while the accept frame is
+	// still mid-flight inside the handler — a response that was merely
+	// serialized early can no longer impersonate a join.
+	gateEntered := make(chan struct{})
+	release := make(chan struct{})
+	var gateOnce, releaseOnce sync.Once
+	rig.server.diffActionGate = func() {
+		gateOnce.Do(func() { close(gateEntered) })
+		<-release
+	}
+	t.Cleanup(func() {
+		rig.server.diffActionGate = nil
+		releaseOnce.Do(func() { close(release) }) // never strand a parked handler into teardown
+	})
+	if err := enc.Encode(Request{Cmd: CmdAcceptDiff, DiffID: done.Diff.ID}); err != nil {
+		t.Fatalf("accept encode: %v", err)
+	}
+	select {
+	case <-gateEntered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the accept handler never reached its tail gate")
+	}
+
+	// The production shutdown shape starts while the handler is parked
+	// mid-flight: the listener closes (no new handlers), then Wait.
+	if err := rig.listen.Close(); err != nil {
+		t.Fatalf("listen close: %v", err)
+	}
+	waitDone := make(chan struct{})
+	go func() { rig.server.Wait(); close(waitDone) }()
+
+	// THE proof (the first pass's gap): Wait must NOT return while the
+	// accept frame is parked — its s.wg.Wait is fenced by this conn's
+	// handler. If Wait could pass here, the s.wg join never covered the
+	// accept tail and the store read below would prove nothing.
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned while the manual accept handler was parked mid-tail — the s.wg join does not fence the accept surface")
+	case <-time.After(400 * time.Millisecond):
+	}
+
+	// In order: release; the response observes the accept tail COMPLETE
+	// (applied, resolution journaled); Wait's s.wg join then covers the
+	// handler's return once the conn closes.
+	releaseOnce.Do(func() { close(release) })
+	var acc Response
+	if err := dec.Decode(&acc); err != nil {
+		t.Fatalf("accept response: %v", err)
+	}
+	if !acc.OK || !acc.Applied {
+		t.Fatalf("manual accept response = %+v, want OK with Applied", acc)
+	}
+	conn.Close()
+	select {
+	case <-waitDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Wait never returned after the manual accept's response and conn close — the s.wg join is broken")
+	}
+	// The store the accept tail wrote is still OPEN after Wait —
+	// Wait never closes it (caller's job); a premature close turns
+	// this read into the closed-handle panic the flake class named.
+	d, err := rig.store.GetDiff(context.Background(), done.Diff.ID)
+	if err != nil {
+		t.Fatalf("get diff after Wait: %v", err)
+	}
+	if d.Status != store.DiffAccepted {
+		t.Errorf("diff status after Wait = %q, want accepted — the manual accept tail must complete under the join", d.Status)
+	}
+}
+
+// TestLandSealRefusesLateAdmission drills the second #66 repair — the
+// seal half of sealLandAndReleasePins. The first pass's sweep-only
+// ordering had a late-bind hole: an in-flight landWG unit (a settle
+// pipeline reaching its revise spawn, a drain tail's steer
+// continuation) could bindRunLocked AFTER the sweep, registering a
+// pinned run no drain-capable context remains to unpin — landWG.Wait
+// hangs forever and the daemon wedges mid-shutdown. The seal closes
+// admissions under the SAME s.mu hold as the sweep, so every late
+// admission refuses instead. This drill seals a live rig directly
+// (the production shape: listener already closed), then attacks the
+// choke point and the two pipeline-surface helpers, and finally
+// proves Wait COMPLETES — the exact hang the hole produced.
+func TestLandSealRefusesLateAdmission(t *testing.T) {
+	root := settleRigRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "auto_apply: off\n")
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+	rig := startRig(t, root)
+	defer rig.stopOnce(t)
+	convID := bootstrapConv(t, rig, root)
+	ctx := context.Background()
+
+	// A pending diff for the revise-admission attack (the finding's
+	// exact scenario: a pipeline spawning its repair run post-sweep).
+	patchPath := filepath.Join(t.TempDir(), "late.diff")
+	if err := os.WriteFile(patchPath, []byte("diff --git a/late.txt b/late.txt\nnew file mode 100644\n--- /dev/null\n+++ b/late.txt\n@@ -0,0 +1 @@\n+late\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := rig.store.InsertDiff(ctx, convID, patchPath, gitOut(t, root, "rev-parse", "HEAD"), "", "LATE GOAL")
+	if err != nil {
+		t.Fatalf("insert diff: %v", err)
+	}
+
+	// The production shutdown shape: the listener closes first…
+	if err := rig.listen.Close(); err != nil {
+		t.Fatalf("listen close: %v", err)
+	}
+	// …then Wait's ordering joins the drain-capable contexts and seals
+	// under one s.mu hold. Called directly here (Wait itself runs
+	// below — the seal is idempotent).
+	rig.server.sealLandAndReleasePins()
+
+	// (1) The choke point itself: no Add, no pin, no registration.
+	rig.server.mu.Lock()
+	if rig.server.bindRunLocked(convID, "late-run", &runMeta{}) {
+		rig.server.mu.Unlock()
+		t.Fatal("bindRunLocked admitted a run after the seal")
+	}
+	if _, ok := rig.server.runs["late-run"]; ok {
+		rig.server.mu.Unlock()
+		t.Fatal("a refused bind still registered the run")
+	}
+	rig.server.mu.Unlock()
+
+	// (2) The continuation surface (drain tail / startContinuationRun):
+	// refused before any journal/worktree/agent side effect.
+	// startFollowupRunLocked's caller holds s.mu (startFollowupRun is
+	// the locking entry) — take it here exactly as a drain would.
+	rig.server.mu.Lock()
+	admitted, reason := rig.server.startFollowupRunLocked(convID, 0, []string{"late steer"}, nil, false)
+	rig.server.mu.Unlock()
+	if admitted || reason != "land_sealed" {
+		t.Fatalf("startFollowupRunLocked after seal = (%v, %q), want (false, land_sealed)", admitted, reason)
+	}
+
+	// (3) The revise surface — the finding's exact scenario: an
+	// in-flight settle pipeline spawning its repair round after the
+	// sweep (startReviseRun takes s.mu itself). The refusal must land
+	// BEFORE the evidence-before-action journaling: no repair
+	// user_message may exist afterwards.
+	admitted, reason = rig.server.startReviseRun(ctx, d, 2, d.ID, "LATE GOAL", "patchsha", "", nil, "REPAIR PROMPT", settleNeedsFixes)
+	if admitted || reason != "land_sealed" {
+		t.Fatalf("startReviseRun after seal = (%v, %q), want (false, land_sealed)", admitted, reason)
+	}
+	evs, err := rig.store.ListEvents(ctx, convID, 0)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, ev := range evs {
+		if ev.Type == store.EventUserMessage && strings.Contains(string(ev.Payload), "REPAIR PROMPT") {
+			t.Fatal("a sealed revise attempt still journaled its repair user_message")
+		}
+	}
+
+	// (4) Wait must COMPLETE — the hang the late-bind hole produced.
+	waitDone := make(chan struct{})
+	go func() { rig.server.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Wait hung after post-seal admission attempts — the late-bind pin leak is back")
+	}
+
+	// (5) The attacked diff is untouched: still pending for the next
+	// boot's recovery (restart-interruptible posture preserved).
+	got, err := rig.store.GetDiff(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("get diff after Wait: %v", err)
+	}
+	if got.Status != store.DiffPending {
+		t.Errorf("diff status = %q, want pending — a refused revise must leave the diff for boot recovery", got.Status)
 	}
 }
 

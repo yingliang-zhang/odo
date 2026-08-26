@@ -116,6 +116,13 @@ type runMeta struct {
 	toolCalls int
 	thinkings int
 	isRetry   bool // false-stop retry run — immune to a further auto-retry
+	// landPinned: bindRunLocked's landWG lifetime pin — true from the
+	// registration's s.mu hold until unpinRunLandLocked runs (terminal
+	// drain, retire, or Wait's sweep). The pin keeps the landWG counter
+	// non-zero for the run's whole life, which makes every drainRun
+	// tail Add provably precede landWG.Wait regardless of the drain's
+	// call context.
+	landPinned bool
 	// M19 (/loop): loop provenance. Non-zero loopID marks a loop-spawned
 	// run ("fix" for Mode A audits, "implement" for Mode B tasks);
 	// drainRun's terminal tail skips maybeAutoLand for these and drives
@@ -179,6 +186,51 @@ type Server struct {
 	// precedent (Add-before-go, joined at Wait/teardown).
 	distillWG sync.WaitGroup
 	recoverWG sync.WaitGroup
+	// P1 (2026-08-26, the #63 verify-flake class): the recover fan-out
+	// and the drainRun tail spawned the auto-land pipeline detached —
+	// its accept tail (rescue snapshot's worktree git reads, land and
+	// supersede journal appends, run-verdict rows) outlived the
+	// returning handler and wrote into a closing store/worktree
+	// (TestRecoverReFireAnchorsStoredGoal: git still writing
+	// .git/objects at TempDir RemoveAll, appends landing on a closed
+	// store). landWG joins every maybeAutoLand continuation in Wait,
+	// after recoverWG (whose fan-out performs its Adds first) —
+	// joining converts the pipeline's restart-interruptible posture
+	// ONLY at shutdown; no in-flight pipeline is aborted.
+	//
+	// Add-vs-Wait is fenced STRUCTURALLY by the run-lifetime pin
+	// (2026-08-26 repair #66, supersedes the argued-by-comment
+	// "exactly two drainRun contexts" construction): bindRunLocked
+	// performs landWG.Add(1) under the same s.mu hold that registers
+	// the run at its byConv site, and the pin is released exactly
+	// once (terminal drain, retire, or Wait's sweep). While a run
+	// lives the counter never reaches zero, so a drainRun tail's Add
+	// can never execute against a zero counter concurrently with
+	// Wait — for every present AND future drainRun call-site
+	// context. Admissions from inside a landWG pipeline (revise,
+	// continuation) Add while the parent's unit still holds the
+	// counter — the same zero-counter impossibility. The group also
+	// joins drainRun's steer-continuation admissions
+	// (startContinuationRun spawns: run_prompt/steer_dropped journal
+	// rows, follow-up worktree creation) — the same flake class as
+	// the accept tail.
+	//
+	// Drills: TestLandWGDrainPinFencesWait (a tail held provably
+	// pre-Add is still joined by Wait, in order, under -race) and
+	// TestManualAcceptTailJoinedByWait (the manual-accept surface).
+	landWG sync.WaitGroup
+	// landSealed closes run admissions (2026-08-26, the late-bind hole
+	// found in repair #66's first pass). sealLandAndReleasePins sets it
+	// under the SAME s.mu hold that drops the still-registered runs'
+	// lifetime pins: an in-flight landWG unit (revise spawn, steer
+	// continuation, ladder loop tick) reaching bindRunLocked after that
+	// point is REFUSED, never pinned — an unchecked late pin would
+	// outlive the sweep and hang landWG.Wait forever (no drain-capable
+	// context is left to release it, and the run could never drain).
+	// Refusal keeps the restart-interruptible posture: the diff stays
+	// pending and the boot recovery re-pipelines it next run. Drilled by
+	// TestLandSealRefusesLateAdmission.
+	landSealed bool
 	// M19 (/loop): loops is the liveness-only claim that a tick chain or
 	// driver goroutine is driving a conversation's loop (the designing
 	// precedent; the journal fold is the state). loopWG keeps blocking
@@ -302,6 +354,25 @@ type Server struct {
 	livenessStop chan struct{}
 	livenessOnce sync.Once
 	livenessWG   sync.WaitGroup
+	// drainTailGate (test-only; production never sets it): drainRun
+	// invokes it on each terminal finish — the diff path immediately
+	// BEFORE the pipeline/tick/continuation switch, the no-diff path
+	// AFTER the run's retire unregistered it and BEFORE the retry/
+	// continuation/parked-goal tail. It runs with the caller's s.mu
+	// hold and may RELEASE s.mu while parked (re-acquiring before
+	// return): the landWG pin drill parks a finish here so the run's
+	// lifetime pin — never the mutex or an s.wg frame — is what
+	// provably fences Wait.
+	drainTailGate func()
+	// diffActionGate (test-only; production never sets it): invoked at
+	// the END of handleDiffAction's success tail — after the apply/commit
+	// pair, the rescue snapshot, supersedeChain, the resolution journal,
+	// the run retire, and the ladder resume, before the response — with
+	// s.mu not held. The manual-accept drill parks the handler here so
+	// Wait provably begins while the accept frame is still mid-flight:
+	// "the response was already serialized" can no longer impersonate
+	// "s.wg joined the handler".
+	diffActionGate func()
 	// P1 #8 (2026-08-22 panel review): an N=1 "unanimous" panel is a
 	// single judge with no dissent channel, so auto-land stays UNARMED at
 	// one review model. The first attempt journals ONE
@@ -545,7 +616,8 @@ func (s *Server) Serve(listener net.Listener) error {
 // outcome. Call after Serve returns (the listener is closed) to drain
 // in-flight requests — e.g. a distill still inside its 10-minute agent run —
 // before shutdown cleanup kills agents and closes the journal.
-// Also drains (P1): the boot-time stranded-diff recovery and every fired
+// Also drains (P1): the boot-time stranded-diff recovery, every spawned
+// auto-land pipeline (recover fan-out and drainRun tails), and every fired
 // auto-distill, after closing the auto subsystem against new fires/arms.
 func (s *Server) Wait() {
 	// C11: stop the liveness drain FIRST — its tick takes s.mu and
@@ -559,6 +631,24 @@ func (s *Server) Wait() {
 	// P1: join the boot-time stranded-diff recovery — it reads the store
 	// (and spawns the pipeline per-diff); it must not outlive the close.
 	s.recoverWG.Wait()
+	// Seal run admissions AND drop the lifetime pins of still-registered
+	// runs in one critical section: every drain-capable context (liveness
+	// tick, poll handlers, loop drivers, boot recovery) is joined above,
+	// so no drain can still register a tail for these runs; an in-flight
+	// pipeline's late revise/continuation spawn is refused instead of
+	// pinning past the sweep (which would hang landWG.Wait forever). An
+	// in-flight RUN never blocks shutdown (in-flight LAND pipelines
+	// below do; the restart-interruptible posture is preserved for runs).
+	s.sealLandAndReleasePins()
+	// P1 (#63 verify-flake class): join every auto-land pipeline
+	// spawned by the recovery fan-out or a drainRun tail — their
+	// accept tails (git rescue reads, journal appends) must complete
+	// against an OPEN store. The Add-vs-Wait fencing is the
+	// run-lifetime pin (every drainRun tail Adds while its run's pin
+	// holds the counter non-zero), never an ordering convention — see
+	// bindRunLocked. Joined, never cancelled — an in-flight pipeline
+	// finishes.
+	s.landWG.Wait()
 	// P1: close the auto-distill SUBSYSTEM first — no new fires/arms can
 	// land after this (armAutoLocked turns away re-arms from in-flight
 	// runs; pending timers are stopped) — then join every FIRED distill.
@@ -1275,8 +1365,16 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 		worktreePath:   wtPath,
 		goal:           req.Text,
 	}
-	s.runs[runID] = meta
-	s.byConv[c.ID] = runID
+	// Registration and the landWG lifetime pin in one s.mu hold — the
+	// structural Add-vs-Wait fence the drainRun tails rely on. The seal
+	// is unreachable through Serve (Wait joins every handler connection
+	// before sealing); the branch is the atomic backstop for direct
+	// callers and mirrors the agent-start cleanup.
+	if !s.bindRunLocked(c.ID, runID, meta) {
+		_ = ad.Cancel(ctx, runID)
+		_ = s.mgr.Remove(wtPath)
+		return Response{}, s.failRun(ctx, c.ID, fmt.Errorf("send_message: land admissions sealed (shutting down)"))
+	}
 	return Response{Event: &ev}, nil
 }
 
@@ -2029,6 +2127,14 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 		return false, reason
 	}
 
+	// Land-seal first (the second #66 repair): the daemon is draining
+	// (Wait / rig teardown). A late continuation racing shutdown from an
+	// in-flight pipeline must refuse before ANY side effect — journal,
+	// worktree, agent, pin. The drained steers close as dropped with the
+	// seal as cause (a ledger truth, like every other refusal).
+	if s.landSealed {
+		return drop("land_sealed")
+	}
 	// Re-check: don't start if a run is already active for this conversation
 	// (user may have sent a normal message in the window between drain and
 	// this goroutine).
@@ -2117,7 +2223,14 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 		return false, "agent_start"
 	}
 
-	s.runs[runID] = &runMeta{
+	// Registration and the landWG lifetime pin in one s.mu hold
+	// (bindRunLocked) — the admission runs inside a poll drain or a
+	// landWG pipeline; the pin fences the drain tails either way. The
+	// refusal is unreachable (the early seal gate above and this bind
+	// share one s.mu hold with sealLandAndReleasePins) — it is the
+	// atomic backstop, and post-receipt the steers stay CONSUMED (no
+	// drop row: the exactly-one-ending invariant).
+	if !s.bindRunLocked(conversationID, runID, &runMeta{
 		runID:          runID,
 		runDirID:       runDirID,
 		adapter:        "",
@@ -2126,8 +2239,11 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 		worktreePath:   wtPath,
 		goal:           prompt, // the joined queued steers, verbatim
 		isRetry:        isRetry,
+	}) {
+		_ = ad.Cancel(ctx, runID)
+		_ = s.mgr.Remove(wtPath)
+		return false, "land_sealed"
 	}
-	s.byConv[conversationID] = runID
 	return true, ""
 }
 
@@ -2456,12 +2572,108 @@ func (s *Server) stopAutoDistill() {
 	s.mu.Unlock()
 }
 
-// drainRun pulls new adapter events into the journal once. When the terminal
-// event arrives it extracts the worktree diff exactly once and records it.
-// Caller holds s.mu (called from handlePollEvents — and, since C11, from
-// the liveness drain's drainActiveRuns): consumed/finished must not
-// advance concurrently or the same events journal twice.
+// bindRunLocked registers meta as the conversation's live run AND pins
+// landWG for the run's WHOLE LIFETIME (2026-08-26 repair #66 — the
+// structural Add-vs-Wait fence replacing the argued-by-comment
+// drainRun-contexts list). The Add happens under the same s.mu hold as
+// the registration, so it provably precedes any Wait that could reach
+// landWG: every admission context (send/poll handlers, the liveness
+// tick, the loop drivers, boot recovery) is joined ahead of
+// landWG.Wait, and an admission from inside a landWG pipeline (revise,
+// continuation) Adds while the parent's own unit still holds the
+// counter. While the run lives the counter never reaches zero, so a
+// later drainRun tail Add can never execute against a zero counter
+// concurrently with Wait — REGARDLESS of the drain's call context,
+// including a future call site outside pollLocked/drainActiveRuns.
+// Returns false when land admissions are sealed (the second #66
+// repair): sealLandAndReleasePins seals and sweeps under one s.mu
+// hold, so the refusal observed here is atomic with the pin drop — a
+// late pipeline admission (revise spawn, steer continuation, loop
+// tick racing shutdown) can NEVER register a run whose pin no sweep
+// will release. The caller unwinds its just-started agent/worktree
+// exactly like an agent-start failure; the diff stays pending for
+// the next boot's recovery. Caller holds s.mu.
+func (s *Server) bindRunLocked(conversationID int64, runID string, meta *runMeta) bool {
+	if s.landSealed {
+		return false
+	}
+	s.landWG.Add(1)
+	meta.landPinned = true
+	s.runs[runID] = meta
+	s.byConv[conversationID] = runID
+	return true
+}
+
+// unpinRunLandLocked releases bindRunLocked's lifetime pin exactly
+// once. Release points: drainRun's terminal drain (deferred, so it
+// follows every land-tail Add that drain made), retireRun's map delete,
+// and sealLandAndReleasePins at Wait/teardown. The flag makes the
+// release idempotent — a finished run ALSO swept at Wait cannot take
+// the counter negative. Caller holds s.mu.
+func (s *Server) unpinRunLandLocked(meta *runMeta) {
+	if meta.landPinned {
+		meta.landPinned = false
+		s.landWG.Done()
+	}
+}
+
+// sealLandAndReleasePins is the last ordering step before landWG.Wait,
+// and its two halves live in ONE s.mu critical section by necessity:
+//
+//  1. SEAL admissions — after this, bindRunLocked only refuses. Without
+//     the seal, an in-flight landWG unit's late revise/continuation/
+//     loop-tick spawn would register a run whose lifetime pin no sweep
+//     ever releases (every drain-capable context is already joined), and
+//     landWG.Wait below would hang FOREVER — observed as a stuck daemon
+//     shutdown. With the seal, that late admission unwinds like an
+//     agent-start failure and the pending diff waits for the next boot's
+//     recovery (restart-interruptible posture preserved).
+//  2. SWEEP the lifetime pins of every still-registered run — an
+//     in-flight RUN never blocks shutdown (in-flight LAND pipelines do;
+//     the distinction is the design). The seal must precede the sweep
+//     under the same hold: interleaved, a bind could slip a pinned run
+//     past the sweep and reintroduce the hang above.
+//
+// At this point every drain-capable context (liveness tick, poll
+// handlers, loop drivers, boot recovery) is already joined (Wait's own
+// order; rig teardown mirrors it), so no drain can still register a
+// tail for the swept runs.
+func (s *Server) sealLandAndReleasePins() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.landSealed = true
+	for _, meta := range s.runs {
+		s.unpinRunLandLocked(meta)
+	}
+}
+
+// drainRun pulls new adapter events into the journal once. When the
+// terminal event arrives it extracts the worktree diff exactly once
+// and records it. Caller holds s.mu (called from handlePollEvents —
+// and, since C11, from the liveness drain's drainActiveRuns):
+// consumed/finished must not advance concurrently or the same
+// events journal twice.
+//
+// The terminal tail's land-Adds are fenced by the run's lifetime
+// pin (bindRunLocked), NOT by a census of this function's call
+// sites: the deferred release below runs at function end — after
+// every tail Add, on every finish path — so the counter stays
+// non-zero from the run's registration until its last tail is
+// registered.
 func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
+	// Release the run's landWG lifetime pin when the drain reaches a
+	// terminal state, however the function exits. The defer
+	// evaluates AFTER the body's tail registrations on every path,
+	// so the pin always outlives the run's own Adds. It is the SOLE
+	// release on drain-internal finishes — retireRunInDrain
+	// deliberately skips its own release so a mid-branch retire can
+	// never drop the pin ahead of the retry/continuation/parked-goal
+	// registrations (#68 K3 finding 1).
+	defer func() {
+		if meta.finished {
+			s.unpinRunLandLocked(meta)
+		}
+	}()
 	evs, err := s.adapterFor(meta.adapter).Events(ctx, meta.runID, meta.consumed)
 	if err != nil {
 		return err
@@ -2595,7 +2807,7 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 				s.journalRunVerdict(ctx, meta, verdict, false)
 			}
 			meta.finished = true
-			s.retireRun(ctx, meta.conversationID, "")
+			s.retireRunInDrain(ctx, meta.conversationID)
 			if meta.loopID != 0 {
 				s.loopNoDiffAfterRun(ctx, meta, verdict)
 				s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
@@ -2613,8 +2825,21 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 		meta.finished = true // agent changed nothing; run is complete
 		// Nothing to review, so retire immediately: previously only a review
 		// action retired runs, and every no-diff run leaked its worktree
-		// forever (P1). Retire BEFORE firing a continuation.
-		s.retireRun(ctx, meta.conversationID, "")
+		// forever (P1). Retire BEFORE firing a continuation — and WITHOUT
+		// releasing the lifetime pin: the defer at drainRun's top owns the
+		// release so it provably follows every registration below (retry
+		// bind, steer continuation, parked-goal activation). A mid-branch
+		// release here fenced those Adds only by the s.mu happenstance of
+		// the drain's call context — the #68 K3 finding-1 window.
+		s.retireRunInDrain(ctx, meta.conversationID)
+		// Test seam (landWG pin drill): hold the tail provably AFTER the
+		// retire unregistered the run (Wait's pin sweep can no longer
+		// reach it) and BEFORE this path's registrations, while the
+		// counter still rides the kept pin. A gate that drops s.mu while
+		// parked isolates the fencing to landWG alone.
+		if s.drainTailGate != nil {
+			s.drainTailGate()
+		}
 		if meta.loopID != 0 {
 			// M19: a loop fix/implement run produced no diff — failure
 			// matrix fix_no_diff / run_tainted (no continuations, no
@@ -2675,7 +2900,16 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 						"the model/gateway is likely stalled. Nothing was produced; resend manually.")
 			}
 			if len(queuedSteers) > 0 && !meta.errored {
-				go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+				// landWG, like the land tails below: the admission
+				// journals run_prompt/steer_dropped rows and creates the
+				// follow-up worktree — detached it shared the #63
+				// teardown-flake class (journal appends landing on a
+				// closing store, mkdir inside a reclaimed tempdir).
+				s.landWG.Add(1)
+				go func() {
+					defer s.landWG.Done()
+					s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+				}()
 			} else {
 				// An errored (or cancelled) run continues nothing: the
 				// drained steers must not vanish journal-silent — close
@@ -2750,6 +2984,15 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 				"unreviewed diff — likely model/gateway stall. Auto-land is blocked; review the diff manually.")
 	}
 
+	// Test seam (landWG pin drill): hold the tail provably BEFORE any
+	// of the registrations below (loop tick, land pipeline,
+	// continuation) — the lifetime pin keeps the counter non-zero
+	// throughout the hold, and Wait must not pass until the released
+	// tail runs to completion.
+	if s.drainTailGate != nil {
+		s.drainTailGate()
+	}
+
 	// M16 (O-1 v2): the pending diff spawns the auto-land pipeline
 	// (pref-gated inside; goroutine, no locks held — the continuation
 	// trigger's shape). meta's fields are copied as arguments.
@@ -2768,12 +3011,18 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	} else if meta.originDiffID != 0 {
 		// Ladder repair run: its product re-enters the full pipeline; the
 		// tick a tasks loop waits on fires AFTER settle's rows land.
+		s.landWG.Add(1)
 		go func() {
+			defer s.landWG.Done()
 			s.maybeAutoLand(newDiff, meta.worktreePath, reviewGoal, meta.errored, verdict)
 			s.fireLoopTick(meta.conversationID)
 		}()
 	} else {
-		go s.maybeAutoLand(newDiff, meta.worktreePath, reviewGoal, meta.errored, verdict)
+		s.landWG.Add(1)
+		go func() {
+			defer s.landWG.Done()
+			s.maybeAutoLand(newDiff, meta.worktreePath, reviewGoal, meta.errored, verdict)
+		}()
 	}
 
 	// A2-lite: if steering messages were queued during this run, auto-start
@@ -2781,7 +3030,13 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	// the dead steering.txt path — the agent sees the follow-up in a fresh
 	// run with full memory-layer injection, not a silent file it never reads.
 	if len(queuedSteers) > 0 && !meta.errored {
-		go s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+		// landWG (same class as the no-diff continuation above): the
+		// admission journals and creates a worktree — join, never abort.
+		s.landWG.Add(1)
+		go func() {
+			defer s.landWG.Done()
+			s.startContinuationRun(meta.conversationID, meta.workstreamID, queuedSteers)
+		}()
 	} else {
 		// An errored (or cancelled) run continues nothing: close the
 		// ledger on the drained steers (a no-op when the queue was empty).
@@ -3053,6 +3308,22 @@ func (s *Server) journalRefreshAttempt(ctx context.Context, d store.Diff, phase,
 // actor is "" for the human click path; the auto-land pipeline passes
 // autoActor so the journaled resolution carries its provenance (and stays
 // out of the human streaks — ComputeAutonomy).
+//
+// Concurrency contract (2026-08-26 repair #66, landWG audit): this
+// function MUST stay fully synchronous, top to tail — the guard
+// checks, the apply/commit pair, the rescueResolvedWorktree snapshot
+// (the git diff --cached HEAD read), supersedeChain, the resolution
+// journal, and the maybeLadderResume tail. Its only callers are
+// already-registered frames: dispatch inside handleConn for the
+// manual accept/reject (s.wg, Add at Serve's accept loop and Done on
+// handler return; Wait joins it before the store closes) and the
+// maybeAutoLand settle pipeline for the auto accept (a landWG unit —
+// autoland.go's recover fan-out wrapper and drainRun's registered
+// tails; landWG.Wait joins it last). Any future async continuation
+// here MUST register a landWG unit itself, or the #63
+// write-into-closed-store class returns. The -race pair
+// TestLandWGDrainPinFencesWait + TestManualAcceptTailJoinedByWait
+// drills both surfaces mid-flight against a closing server.
 func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, actor, commitMessage string) (Response, error) {
 	if diffID == 0 {
 		return Response{}, fmt.Errorf("%s_diff: diff_id is required", action)
@@ -3436,6 +3707,17 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		s.maybeLadderResume(ctx, d.ConversationID, diffID, actor)
 	}
 
+	// Test seam (the landWG manual-accept drill; production never sets
+	// it): park the handler AFTER the full accept tail — apply/commit,
+	// rescue snapshot, supersedeChain, resolution journal, retire,
+	// ladder resume — but BEFORE the response, with s.mu not held, so
+	// the drill proves Wait's s.wg join fences shutdown around a
+	// mid-flight manual accept rather than observing a response that
+	// was merely serialized early.
+	if s.diffActionGate != nil {
+		s.diffActionGate()
+	}
+
 	return Response{DiffID: diffID, Applied: applied}, nil
 }
 
@@ -3496,7 +3778,26 @@ func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
 // review. fallbackWT is the reviewed diff's recorded worktree ("" for the
 // no-diff retire out of drainRun). Removal failures are logged, not fatal —
 // the review already happened and the startup sweeper converges orphans.
-// Caller holds s.mu (via retireRunForDiff, or drainRun's no-diff path).
+// Caller holds s.mu (via retireRunForDiff — drainRun's own finishes go
+// through retireRunInDrain below).
+func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT string) {
+	s.retireRunCore(ctx, conversationID, fallbackWT, true)
+}
+
+// retireRunInDrain is drainRun's retire entry for its no-diff and
+// memory-refusal finishes: the identical slot retire, WITHOUT the
+// lifetime-pin release. drainRun's deferred unpin owns the release so it
+// provably follows every tail registration of the drain — retry bind,
+// steer continuation, parked-goal activation, loop resume. Releasing here
+// would drop the pin mid-branch and fence those Adds only by the drain's
+// call-context happenstance (#68 K3 finding 1).
+func (s *Server) retireRunInDrain(ctx context.Context, conversationID int64) {
+	s.retireRunCore(ctx, conversationID, "", false)
+}
+
+// retireRunCore implements both entries; releaseLandPin selects whether
+// the lifetime pin drops with the slot retire (review path) or defers to
+// drainRun's function-end release (drain path).
 //
 // Target selection (tri-review P1, 2026-08-24): the run retired is the one
 // whose worktreePath IS the reviewed diff's own — never whichever run the
@@ -3506,7 +3807,7 @@ func (s *Server) retireRunForDiff(ctx context.Context, d store.Diff) {
 // that run's own diff was still in the pipeline — while the reviewed diff's
 // worktree was orphaned. The byConv binding selects only when there is no
 // worktree to match (drainRun's no-diff retire, legacy pre-v2 diff rows).
-func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT string) {
+func (s *Server) retireRunCore(ctx context.Context, conversationID int64, fallbackWT string, releaseLandPin bool) {
 	var wtPath, liveWT, closedRunID string
 
 	targetID := ""
@@ -3528,6 +3829,13 @@ func (s *Server) retireRun(ctx context.Context, conversationID int64, fallbackWT
 			liveWT = meta.worktreePath
 		} else {
 			wtPath = meta.worktreePath
+			if releaseLandPin {
+				// Release the lifetime pin ahead of the delete —
+				// finished runs already released at their terminal drain
+				// (this no-ops), so the call is the balance point's belt
+				// AND suspenders.
+				s.unpinRunLandLocked(meta)
+			}
 			_ = s.adapterFor(meta.adapter).Close(ctx, targetID)
 			delete(s.runs, targetID)
 			closedRunID = targetID

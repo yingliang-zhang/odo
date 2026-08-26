@@ -362,8 +362,7 @@ type Response struct {
 	Rejected   []MemoryAccept   `json:"rejected,omitempty"`
 	// distill: count of pending memory+user proposals in the new batch.
 	MemoryProposals int `json:"memory_proposals,omitempty"`
-	// pending_counts: Go map keys serialize as JSON strings — that is the
-	// contract the frontend implements.
+	// pending_counts: Go map keys serialize as JSON strings — the key encoding is the frontend contract.
 	PendingCounts      map[int64]int `json:"pending_counts,omitempty"`
 	RunningWorkstreams []int64       `json:"running_workstreams,omitempty"`
 	// P1a (review inbox): list_all_pending_diffs payload — pending diffs

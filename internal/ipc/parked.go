@@ -211,6 +211,13 @@ func (s *Server) dequeueParkedGoalOnRunDoneLocked(ctx context.Context, meta *run
 // run ever covers (silently dropping a human message, the exact failure
 // the durable inbox exists to prevent).
 func (s *Server) startParkedGoalRunLocked(ctx context.Context, c store.Conversation, goal parkedGoal, actor string) (started bool) {
+	// Land-seal first (the second #66 repair): the daemon is draining —
+	// leave the goal queued for the next boot's dequeue rather than
+	// binding a run past Wait's pin sweep.
+	if s.landSealed {
+		log.Printf("parked: skipping dequeue for conversation %d — land admissions sealed (shutting down)", c.ID)
+		return false
+	}
 	if runID, ok := s.byConv[c.ID]; ok {
 		if meta := s.runs[runID]; meta != nil && !meta.finished {
 			return false
@@ -286,15 +293,24 @@ func (s *Server) startParkedGoalRunLocked(ctx context.Context, c store.Conversat
 		log.Printf("parked: journal run_prompt: %v", err)
 		return false
 	}
-	s.runs[runID] = &runMeta{
+	// Registration and the landWG lifetime pin in one s.mu hold —
+	// bindRunLocked keeps the counter non-zero until the run's terminal
+	// drain, so the drain tails never race Wait on an empty group. The
+	// refusal is unreachable (the early seal gate shares one s.mu hold
+	// with the seal/sweep) — the atomic backstop; post-receipt the goal
+	// stays consumed.
+	if !s.bindRunLocked(c.ID, runID, &runMeta{
 		runID:          runID,
 		runDirID:       runDirID,
 		conversationID: c.ID,
 		workstreamID:   c.WorkstreamID,
 		worktreePath:   wtPath,
 		goal:           goal.text, // the parked goal, verbatim
+	}) {
+		_ = ad.Cancel(ctx, runID)
+		_ = s.mgr.Remove(wtPath)
+		return false
 	}
-	s.byConv[c.ID] = runID
 	return true
 }
 
