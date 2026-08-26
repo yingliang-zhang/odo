@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Round 4: Conflict-Retirement & Sweep Fixes (Stranded Memory/Pins Replay, bug-fix-epoch-7)
 
 ## Context

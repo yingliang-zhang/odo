@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Auto-Distill daily_cap Suspension Fix (epoch: cap feedback loop)
 
 ## Defect

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Auto-Distill Daily-Cap Feedback Loop Fix (Epoch Regeneration)
 
 ## Context

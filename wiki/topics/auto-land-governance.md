@@ -1,0 +1,17 @@
+# Auto-Land Governance & Settlement Policy
+
+- 2026-08-20 doctrine: hard blocks shrunk to memory paths + supply-chain manifests only; gate-source files downgrade to panel risk annotation with a byte-bound `patch_sha16` evidence gate (`panelVerdictAttestsDiff`); old `rejectProtectedPaths`/`rejectExecutorPaths` deleted (UI-epoch-11)
+- Gate-source diffs (`protectedGateFiles`) require unanimous panel attestation — the majority valve was stripped of attestation power so a 2/3 panel cannot land its own gate weakening; human Accept remains the only fallback (main-epoch-14)
+- Divergent verdicts incl. `panel_mixed` enter the repair ladder instead of instant auto-reject; at round cap a strict majority (>½) decides, else suspend for human (main-epoch-19)
+- Three-round rule (settleMaxReviseRounds 3→2): rounds 1–2 fail closed on any reject; round 3 terminal majority valve lands with `majority_accept` evidence; any truncated leg invalidates the valve (main-epoch-21)
+- `reviewVerdict` forces truncated→needs_fixes at construction; the cap-count loop also abstains explicitly as self-proof against producer regressions (main-epoch-20)
+- Infra failure is not a verdict: panel infra failure blocks (never passes), and `panel_infra` is the only non-terminal blocked reason whose designed retry is restart re-fire (main-epoch-17)
+- `auto_land_blocked{verify_failed}` is terminal — no replay, no re-review; manual Accept is the unconditional unlock path (main-epoch-26)
+- Memory/wiki paths are hard-blocked for every actor including human Accept (invariant: agents never write memory); memory-path diffs are rejected at registration inside `drainRun` before `InsertDiff` with a salvage `.diff` kept and transcript advisory pointing to the distill/`commitWiki` route (main-epoch-24)
+- Repair chain is permanently closed above the 64KB `repair_prompt_too_large` cap (design rule: no silent truncation, ever) — a 102KB diff blocked structurally despite 2:1 panel accept; manual Accept was the only unlock (main-epoch-33)
+- M20: pipeline armed by default with `off` kill-switch; prefs lacking a `review:` line leave the pipeline unarmed (silent zero-row exit); `auto_apply` default flipped `off`→`main` fail-closed — tests asserting the old defaults were stale, not regressions (main-epoch-9)
+- Single-judge deployments disarm the panel: with one review model the panel never arms; once-per-daemon-lifetime `single_judge_panel` advisory; panel legs and the shared auto-land/review/skills funnel all carry outer deadlines (main-epoch-15)
+- `.odo-verify` is never auto-created by design (a daemon committing its own verify oracle is exactly what the supply-chain gate blocks); the discoverability gap is closed by a once-per-project advisory hook at the `verify_unconfigured` block point (main-epoch-12)
+- Verify-config classification is three-state None/Partial/Ready judged from committed HEAD content (`git ShowHEADFile`), never disk copy; scoped-only config yields a scope-flavored advisory (main-epoch-13)
+- Panel answers stay raw per-leg concatenation: divergence is the product; an inline consolidator was rejected except a future lazy merge over journaled answers (main-epoch-14)
+- Wiki content (topic updates, 'stuck' definitions, superseded claims) is daemon-owned and must land through the distill/wiki-commit pipeline, not agent diffs — a diff touching `wiki/topics/*` was fully rejected at registration for this (main-epoch-42)

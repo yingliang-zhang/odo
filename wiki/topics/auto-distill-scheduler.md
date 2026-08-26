@@ -1,0 +1,9 @@
+# Auto-Distill Scheduler & Daily-Cap Circuit Breaker
+
+- Daily-cap feedback loop: after cap hit, every activity re-ran urgent→scheduled→skipped, and those bookkeeping rows grew the eligible window they measured (production: 3786→3819 events, 497KB→565KB of pure scheduler noise) (bug-fix-epoch-9)
+- Fix shape (cap numbers unchanged): journal exactly one `cap_suspended_until` row per day with RFC3339 earliest quota release; at most one pending timer aimed at the oldest counted distill exiting the 24h window; scheduler-internal causes excluded from event/byte eligibility; resume is one normal scheduled row — no catch-up storm (bug-fix-epoch-9)
+- Round-1 panel hardening: serialized race-free first-hit (exactly one suspension row + one timer across concurrent `runAutoDistill`, proven under `-race`); `runAutoCapResume` re-arms or re-suspends on lookup failure so a lost timer can't permanently swallow a project (bug-fix-epoch-10)
+- GUI suspended chip '今日额度已用完 · 预计恢复 <time>' reads the suspension row with a computed oldest-distill+24h fallback for old journals, gated on auto-distill being enabled (bug-fix-epoch-10)
+- Auto-distill goroutines were outside the Server lifecycle (timer callbacks untracked by `Server.wg`): reproduced 1-in-3 failure of `TestAutoUrgentUpgradeSupersedesIdle` writing journal after store close; all spawns/timers now join the waitgroup and `rig.stop` drains in-flight work (main-epoch-42)
+- Lifecycle join semantics: `distillWG` + `recoverWG` + `autoStopped` flag with single close path `stopAutoDistill()`; Wait() order recoverWG → stopAutoDistill → distillWG before store teardown, so a long distill completes against an OPEN store (bug-fix-epoch-5)
+- `maybeAutoLand` goroutines are deliberately NOT joined into Wait() — auto-land is restart-interruptible by design via `auto_land_started`/`refresh_attempted` breadcrumbs; joining would be a behavior change (bug-fix-epoch-5)

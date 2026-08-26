@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Journal Replayer — Regenerate Round 3 (FIX A–F)
 
 ## Context & status
