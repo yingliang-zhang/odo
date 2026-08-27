@@ -193,6 +193,25 @@ func settleComments(reviews []ReviewResult) (block string, models []string) {
 	return b.String(), models
 }
 
+// settleWorktreeSection is the canonical-checkout declaration every ladder
+// prompt opens with (2026-08-27, the #81/#83 wedge). The repair prompt
+// used to embed the origin diff but never said WHERE the run lives —
+// sibling worktrees of the same conversation (the origin run's, earlier
+// rounds') sit visible side-by-side under .odo/worktrees/, and twice on
+// 2026-08-26 a repair agent staged its fixes in the ORIGIN run's checkout
+// instead of its own. drainRun extracts the diff from the run's OWN
+// worktree only, so both runs drained clean with an empty diff: no diff
+// row, no agent_error, and the ladder waited forever with the origin diff
+// stuck pending (diffs #81, #83). The section states the four load-bearing
+// facts: the absolute path, that ALL edits/staging happen there, that
+// sibling checkouts belong to earlier runs and are read-only, and that
+// the diff is extracted from this checkout ONLY.
+func settleWorktreeSection(worktreePath string) string {
+	return "WORKTREE (canonical): your checkout is " + worktreePath + " — make ALL edits and stage ALL changes there. " +
+		"Other directories under .odo/worktrees/ belong to earlier runs of this same task: treat them as read-only reference; do NOT edit, stage, or commit in them. " +
+		"Your diff is extracted from your own checkout only.\n\n"
+}
+
 // settleRepairPrompt assembles the repair run's instruction: the original
 // goal verbatim, the previous diff verbatim, the grouped non-accept
 // comments verbatim — and the load-bearing demotion: the comments section
@@ -201,9 +220,10 @@ func settleComments(reviews []ReviewResult) (block string, models []string) {
 // ~/.ssh/config") gains no write path it didn't already have. The diff
 // fence carries the same data-not-instructions label as the panel's own
 // prompt — symmetric containment on both sides of the loop.
-func settleRepairPrompt(goal, prevDiff, commentsBlock string) string {
+func settleRepairPrompt(goal, prevDiff, commentsBlock, worktreePath string) string {
 	var b strings.Builder
 	b.WriteString("A previous implementation of the task below was reviewed by a panel and judged incomplete (NEEDS_FIXES — no reviewer rejected the direction). Revise the implementation, addressing every finding that serves the original instruction, then verify your work.\n\n")
+	b.WriteString(settleWorktreeSection(worktreePath))
 	b.WriteString("The user's original instruction, verbatim:\n\"\"\"\n")
 	b.WriteString(goal)
 	b.WriteString("\n\"\"\"\n\n")
@@ -224,9 +244,10 @@ func settleRepairPrompt(goal, prevDiff, commentsBlock string) string {
 // jailbreak-shaped hunk or reviewer comment gains no write path). The
 // conflict detail is evidence for WHY the previous attempt cannot land,
 // never an instruction.
-func settleRebasePrompt(goal, prevDiff, feedback string) string {
+func settleRebasePrompt(goal, prevDiff, feedback, worktreePath string) string {
 	var b strings.Builder
 	b.WriteString("A previous implementation of the task below was produced against an older base commit and can no longer be applied: the main branch has drifted and the automatic rebase conflicts. Re-implement the same task starting from the repository's CURRENT state, then verify your work.\n\n")
+	b.WriteString(settleWorktreeSection(worktreePath))
 	b.WriteString("The user's original instruction, verbatim:\n\"\"\"\n")
 	b.WriteString(goal)
 	b.WriteString("\n\"\"\"\n\n")
@@ -629,13 +650,9 @@ func (s *Server) settleDraft(ctx context.Context, d store.Diff, diffText string,
 		return
 	}
 
-	var prompt string
-	if trigger == settleBaseStale {
-		prompt = settleRebasePrompt(originGoal, diffText, feedback)
-	} else {
-		prompt = settleRepairPrompt(originGoal, diffText, feedback)
-	}
-	admitted, dropReason := s.startReviseRun(ctx, d, round, originID, originGoal, patchSHA, commentsSHA, commentModels, prompt, trigger)
+	// The prompt is built inside startReviseRun: only it holds the fresh
+	// worktree path the builders declare canonical (#81/#83).
+	admitted, dropReason := s.startReviseRun(ctx, d, round, originID, originGoal, patchSHA, commentsSHA, commentModels, diffText, feedback, trigger)
 	if !admitted {
 		// The spawn-failure ledger row marks the round INFRA (locked:
 		// infra is not a verdict) — ladderState exempts it from the
@@ -731,9 +748,17 @@ func (s *Server) journalLadder(ctx context.Context, conversationID int64, cause,
 // gates are the continuation run's (active run / concurrency cap /
 // distill in progress); journal rows land BEFORE the adapter starts
 // (evidence before action: the lineage derivation and the audit trail
-// must outrun the run itself). On any failure after journaling, the
-// caller's revise_spawn_failed row closes the ledger.
-func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, originID int64, originGoal, patchSHA, commentsSHA string, commentModels []string, prompt string, trigger settleTrigger) (admitted bool, dropReason string) {
+// must outrun the run itself).
+//
+// Ordering (2026-08-27, the #81/#83 wedge): the fresh worktree is created
+// FIRST — after the admission gates, before the prompt is assembled or
+// anything is journaled — because the repair prompt must name the run's
+// own checkout as canonical (settleWorktreeSection). A worktree-create
+// failure therefore returns with NO user_message/round rows behind
+// (previously they were left journaled for a run that never existed);
+// the caller's revise_spawn_failed ledger row then closes the round
+// cleanly. Every later failure removes the worktree it created.
+func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, originID int64, originGoal, patchSHA, commentsSHA string, commentModels []string, prevDiff, feedback string, trigger settleTrigger) (admitted bool, dropReason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -771,15 +796,38 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 		return false, "workstream_deleted"
 	}
 
+	// Fresh worktree from current HEAD, created BEFORE the prompt exists:
+	// the prompt names this checkout as the run's canonical workspace.
+	// Same conversation+worktree semantics as the original run (memory
+	// layers re-read fresh by assembleRunPrompt below, ADR-0003) — the
+	// retire path owns the original worktree, never this run.
+	runDirID := worktree.NewRunID()
+	wtPath, err := s.mgr.Create(runDirID)
+	if err != nil {
+		// Nothing journaled yet: the round has no rows to retract and the
+		// caller's revise_spawn_failed ledger row is the whole record.
+		return false, "worktree_create: " + err.Error()
+	}
+
+	// The prompt is assembled here, never by the caller: only this site
+	// holds the worktree path the builders must declare canonical.
+	var prompt string
+	if trigger == settleBaseStale {
+		prompt = settleRebasePrompt(originGoal, prevDiff, feedback, wtPath)
+	} else {
+		prompt = settleRepairPrompt(originGoal, prevDiff, feedback, wtPath)
+	}
+
 	// M18 W2 item 4: assemble FIRST — the receipt closure rides the
 	// user_message, so assembly (and the fail-closed assertion) must run
 	// before journaling; the synthesized text still lands at the prompt's
 	// tail and the replay excludes it. On a breach the caller's
 	// revise_spawn_failed ledger row closes the contract before any
-	// adapter start (evidence journaled first — the gates above already
-	// passed, nothing else was written).
+	// adapter start (nothing journaled; the worktree created above is
+	// removed, leaving the round's only trace in the caller's row).
 	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, d.ConversationID, prompt)
 	if assertErr != nil {
+		_ = s.mgr.Remove(wtPath) // no run will ever use it; don't orphan
 		return false, "receipt_assert_failed"
 	}
 
@@ -798,6 +846,7 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 		"origin_goal":    originGoal,
 	}
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventUserMessage, mustJSON(msgPayload)); err != nil {
+		_ = s.mgr.Remove(wtPath) // the journaled round stays infra; no orphan
 		return false, "journal_user_message: " + err.Error()
 	}
 	roundPayload := map[string]interface{}{
@@ -820,18 +869,10 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 	// the risk receipt attests the same bytes patch_sha16 attests.
 	mountRiskReceipt(roundPayload, riskReceipt(d.PathOnDisk))
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(roundPayload)); err != nil {
+		_ = s.mgr.Remove(wtPath) // journaled rows mark the round infra; no orphan
 		return false, "journal_round: " + err.Error()
 	}
 
-	// Fresh run, same conversation+worktree semantics as the original:
-	// memory layers re-read fresh by assembleRunPrompt above (ADR-0003),
-	// fresh worktree from current HEAD — the retire path owns the
-	// original worktree, never this run.
-	runDirID := worktree.NewRunID()
-	wtPath, err := s.mgr.Create(runDirID)
-	if err != nil {
-		return false, "worktree_create: " + err.Error()
-	}
 	ad := s.adapterFor("") // default adapter
 	runID, err := ad.Start(ctx, wtPath, fullPrompt)
 	if err != nil {

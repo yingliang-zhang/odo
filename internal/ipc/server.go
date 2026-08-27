@@ -2115,7 +2115,7 @@ func (s *Server) startContinuationRun(conversationID, workstreamID int64, queued
 func (s *Server) startFollowupRun(conversationID, workstreamID int64, queuedTexts []string, steerSeqs []int64, isRetry bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.startFollowupRunLocked(conversationID, workstreamID, queuedTexts, steerSeqs, isRetry)
+	s.startFollowupRunLocked(conversationID, workstreamID, queuedTexts, steerSeqs, isRetry, 0)
 }
 
 // startFollowupRunLocked performs the admission + start with the caller
@@ -2127,6 +2127,13 @@ func (s *Server) startFollowupRun(conversationID, workstreamID int64, queuedText
 // Under the drain's own lock a send cannot interleave, so the verdict row
 // reflects the true admission outcome.
 //
+// originDiffID carries the parent run's revise-chain identity (0 for
+// continuations — the retry of a REVISE run re-runs the same repair
+// prompt in a fresh worktree, so a clean-but-empty terminal drain is the
+// same #81/#83 sibling-worktree signature and must journal the same
+// revise_product_missing failure, and a produced diff links back to its
+// chain via auto_revise_product like the first run's would have).
+//
 // steerSeqs carries the drained steers' journal seqs (nil for a steerless
 // retry). Admission consumes them — the run_prompt row links steer_seqs —
 // and every refusal BEFORE that row lands closes the ledger with a
@@ -2134,7 +2141,7 @@ func (s *Server) startFollowupRun(conversationID, workstreamID int64, queuedText
 // and the refusal reason coexist — a goroutine entry would otherwise lose
 // them silently). A refusal AFTER the receipt closes nothing: consumption
 // is the steers' exactly-one ending and a drop row would contradict it.
-func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queuedTexts []string, steerSeqs []int64, isRetry bool) (admitted bool, dropReason string) {
+func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queuedTexts []string, steerSeqs []int64, isRetry bool, originDiffID int64) (admitted bool, dropReason string) {
 	ctx := context.Background()
 	prompt := strings.Join(queuedTexts, "\n\n")
 
@@ -2258,6 +2265,7 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 		worktreePath:   wtPath,
 		goal:           prompt, // the joined queued steers, verbatim
 		isRetry:        isRetry,
+		originDiffID:   originDiffID, // chain identity rides the retry (0 for continuations)
 	}) {
 		_ = ad.Cancel(ctx, runID)
 		_ = s.mgr.Remove(wtPath)
@@ -2879,6 +2887,47 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			return nil
 		}
 		switch {
+		case meta.originDiffID > 0 && !meta.errored && verdict != verdictFalseStop:
+			// revise_product_missing (2026-08-27, diffs #81/#83 of
+			// 2026-08-26): a revise-chain run drained CLEAN — agent_done,
+			// possibly real tool calls (no_text is the same class: the
+			// work happened, just not here) — but its OWN worktree holds
+			// nothing. The observed cause both times: the repair agent
+			// staged its work in a SIBLING worktree of this conversation
+			// (the origin run's), invisible to ExtractDiff, which reads
+			// only meta.worktreePath. The old default path journaled NO
+			// diff row and NO error — the ladder waited forever with the
+			// origin diff stuck pending after a clean agent_done. Make
+			// the failure loud instead: a machine row for the chain
+			// (ladderState ignores unknown review_action rows, so the
+			// suspension/round logic is untouched) plus a
+			// transcript-visible advisory naming the operator recovery.
+			// Errored runs stay on agent_error truth (skipped above), and
+			// a false-stop revise run keeps its one-shot retry below —
+			// with the canonical-worktree section in its prompt, the
+			// retry is the right first handler for that signature.
+			if _, err := s.store.AppendEvent(ctx, meta.conversationID, store.EventReviewAction, mustJSON(map[string]interface{}{
+				"action":         "revise_product_missing",
+				"actor":          autoActor,
+				"origin_diff_id": meta.originDiffID,
+				"run_dir_id":     meta.runDirID,
+				"detail":         "revise run ended clean but no diff was extracted from its own worktree " + meta.worktreePath,
+			})); err != nil {
+				log.Printf("drainRun: journal revise_product_missing for conversation %d: %v (non-fatal)", meta.conversationID, err)
+			}
+			s.journalRunAdvisory(ctx, meta.conversationID,
+				"the revise run produced no diff in its own checkout ("+meta.worktreePath+") — its work may be staged in a sibling "+
+					"worktree of this conversation (inspect .odo/worktrees/ siblings with `git -C <sibling> diff --cached`, then re-apply "+
+					"with a zero-change re-snapshot run). The origin diff stays pending; no product was registered.")
+			// Then the default-branch tail, exactly: the queued steers are
+			// abandoned (journaled dropped — NEVER a continuation for this
+			// signature) and the parked-goal/auto-distill dance runs.
+			// No run_verdict row: the machine row above is this signature's
+			// ledger truth (these revise runs never earned retry_fired).
+			s.journalSteersDropped(ctx, meta.conversationID, steerSeqs(queuedSteers), steerDropCause(meta))
+			if !s.dequeueParkedGoalOnRunDoneLocked(ctx, meta) {
+				s.maybeAutoAfterActivityLocked(ctx, meta.conversationID)
+			}
 		case verdict == verdictFalseStop && !meta.isRetry:
 			// One automatic retry, verbatim goal plus any queued steers —
 			// the steers were typed against work the dead run never did.
@@ -2899,7 +2948,7 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 			// consumption (the run_prompt row links their seqs — the goal
 			// itself has none); refused is a journaled steer_dropped inside
 			// startFollowupRunLocked. Either way the ledger closes.
-			admitted, dropReason := s.startFollowupRunLocked(meta.conversationID, meta.workstreamID, texts, steerSeqs(queuedSteers), true)
+			admitted, dropReason := s.startFollowupRunLocked(meta.conversationID, meta.workstreamID, texts, steerSeqs(queuedSteers), true, meta.originDiffID)
 			s.journalRunVerdict(ctx, meta, verdict, admitted)
 			if !admitted {
 				log.Printf("run-verdict: retry for conversation %d not admitted: %s", meta.conversationID, dropReason)

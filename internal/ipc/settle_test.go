@@ -299,7 +299,7 @@ func TestSettleRepairPromptUnit(t *testing.T) {
 		t.Error("block must EXCLUDE accepting legs")
 	}
 
-	prompt := settleRepairPrompt("THE ORIGINAL GOAL", "THE DIFF BODY", block)
+	prompt := settleRepairPrompt("THE ORIGINAL GOAL", "THE DIFF BODY", block, "/abs/run/worktree")
 	for _, want := range []string{
 		"THE ORIGINAL GOAL", "THE DIFF BODY",
 		"### reviewer rm2@test", "fix the off-by-one\n(second line)",
@@ -317,6 +317,25 @@ func TestSettleRepairPromptUnit(t *testing.T) {
 	commentsAt := strings.Index(prompt, block)
 	if !(goalAt < diffAt && diffAt < directiveAt && directiveAt < commentsAt) {
 		t.Error("section order must be goal → diff → demotion directive → grouped comments")
+	}
+
+	// The canonical-checkout declaration (#81/#83): the run's own absolute
+	// worktree path, verbatim, opening the prompt BEFORE the goal fence —
+	// an agent that never scrolls still sees it.
+	wtAt := strings.Index(prompt, "/abs/run/worktree")
+	if wtAt < 0 {
+		t.Error("prompt missing the canonical worktree path")
+	} else if goalAt := strings.Index(prompt, "THE ORIGINAL GOAL"); wtAt > goalAt {
+		t.Error("worktree section must precede the goal fence")
+	}
+	for _, want := range []string{
+		"make ALL edits and stage ALL changes there",
+		"earlier runs of this same task: treat them as read-only",
+		"Your diff is extracted from your own checkout only",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("worktree section missing %q", want)
+		}
 	}
 
 	// The locked boundaries, pinned exactly.

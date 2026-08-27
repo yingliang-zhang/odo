@@ -2615,7 +2615,7 @@ func TestLandSealRefusesLateAdmission(t *testing.T) {
 	// startFollowupRunLocked's caller holds s.mu (startFollowupRun is
 	// the locking entry) — take it here exactly as a drain would.
 	rig.server.mu.Lock()
-	admitted, reason := rig.server.startFollowupRunLocked(convID, 0, []string{"late steer"}, nil, false)
+	admitted, reason := rig.server.startFollowupRunLocked(convID, 0, []string{"late steer"}, nil, false, 0)
 	rig.server.mu.Unlock()
 	if admitted || reason != "land_sealed" {
 		t.Fatalf("startFollowupRunLocked after seal = (%v, %q), want (false, land_sealed)", admitted, reason)
@@ -2626,7 +2626,7 @@ func TestLandSealRefusesLateAdmission(t *testing.T) {
 	// sweep (startReviseRun takes s.mu itself). The refusal must land
 	// BEFORE the evidence-before-action journaling: no repair
 	// user_message may exist afterwards.
-	admitted, reason = rig.server.startReviseRun(ctx, d, 2, d.ID, "LATE GOAL", "patchsha", "", nil, "REPAIR PROMPT", settleNeedsFixes)
+	admitted, reason = rig.server.startReviseRun(ctx, d, 2, d.ID, "LATE GOAL", "patchsha", "", nil, "REPAIR PREVDIFF", "REPAIR FEEDBACK", settleNeedsFixes)
 	if admitted || reason != "land_sealed" {
 		t.Fatalf("startReviseRun after seal = (%v, %q), want (false, land_sealed)", admitted, reason)
 	}
@@ -2635,7 +2635,7 @@ func TestLandSealRefusesLateAdmission(t *testing.T) {
 		t.Fatalf("list events: %v", err)
 	}
 	for _, ev := range evs {
-		if ev.Type == store.EventUserMessage && strings.Contains(string(ev.Payload), "REPAIR PROMPT") {
+		if ev.Type == store.EventUserMessage && strings.Contains(string(ev.Payload), "LATE GOAL") {
 			t.Fatal("a sealed revise attempt still journaled its repair user_message")
 		}
 	}
