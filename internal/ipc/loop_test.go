@@ -86,9 +86,6 @@ func auditFindings(rows ...string) string {
 // auditClean renders a leg answer with an empty findings block.
 const auditClean = "No defects.\n```findings\n```\n"
 
-// reviewVerdictText renders a panel leg verdict.
-func reviewVerdictText(v string) string { return "VERDICT: " + v + "\n" }
-
 // --- rig fixtures ------------------------------------------------------------------
 
 // loopRigRepo builds the repo with the file-controlled verify gate: the
@@ -123,6 +120,8 @@ func loopRigRepo(t *testing.T) string {
 //	vfail — set .loop-verify-exit so the diff's own verify fails
 //	supply — add package.json (supply-chain gate)
 //	protect — add wiki/ content (protected-path gate)
+//	tier0 — add internal/ipc/gatepolicy.go (D1 gate core gate)
+//	tier1 — add internal/ipc/newgate.go (D1 Tier-1 panel-everywhere gate)
 //	slow — sleep 5s (a mid-flight run a human send can interrupt)
 //	none — produce no diff
 const loopWrapper = `#!/bin/sh
@@ -137,6 +136,8 @@ case "$ctrl" in
   vfail) printf '1\n' > .loop-verify-exit ;;
   supply) printf '{"name":"x"}\n' > package.json ;;
   protect) mkdir -p wiki && printf '# x\n' > wiki/x.md ;;
+  tier0) mkdir -p internal/ipc && printf 'package ipc\n\n// tier0 probe\n' > internal/ipc/gatepolicy.go ;;
+  tier1) mkdir -p internal/ipc && printf 'package ipc\n\n// tier1 probe\n' > internal/ipc/newgate.go ;;
   slow) sleep 5 ;;
   none) : ;;
 esac
@@ -404,12 +405,13 @@ func TestDeriveLoopStatesFold(t *testing.T) {
 		mk(3, `{"kind":"loop_audit_round","loop_id":1,"round":1,"subject_sha16":"s1","legs":[{"model":"m","verdict":"complete"}],"spent_tokens":100}`),
 		mk(4, `{"kind":"loop_verdict","loop_id":1,"round":1,"verdict":"fix","blocking_fps":["f1"],"spent_tokens":100}`),
 		mk(5, `{"kind":"loop_fix_spawn","loop_id":1,"round":1,"spent_tokens":200}`),
-		rev(6, `{"action":"accept","actor":"auto_loop","diff_id":9}`),
-		mk(7, `{"kind":"loop_suspended","loop_id":1,"cause":"human_interleave","spent_tokens":200}`),
-		mk(8, `{"kind":"loop_resumed","loop_id":1,"cause":"human_interleave","spent_tokens":200}`),
-		mk(9, `{"kind":"loop_audit_round","loop_id":1,"round":2,"subject_sha16":"s2","legs":[{"model":"m","verdict":"complete"}],"spent_tokens":300}`),
-		mk(10, `{"kind":"loop_verdict","loop_id":1,"round":2,"verdict":"clean","blocking_fps":[],"spent_tokens":300}`),
-		mk(11, `{"kind":"loop_completed","loop_id":1,"rounds":2,"spent_tokens":300}`),
+		mk(6, `{"kind":"loop_diff_bound","loop_id":1,"round":1,"diff_id":9,"spent_tokens":200}`),
+		rev(7, `{"action":"accept","actor":"auto_loop","diff_id":9}`),
+		mk(8, `{"kind":"loop_suspended","loop_id":1,"cause":"human_interleave","spent_tokens":200}`),
+		mk(9, `{"kind":"loop_resumed","loop_id":1,"cause":"human_interleave","spent_tokens":200}`),
+		mk(10, `{"kind":"loop_audit_round","loop_id":1,"round":2,"subject_sha16":"s2","legs":[{"model":"m","verdict":"complete"}],"spent_tokens":300}`),
+		mk(11, `{"kind":"loop_verdict","loop_id":1,"round":2,"verdict":"clean","blocking_fps":[],"spent_tokens":300}`),
+		mk(12, `{"kind":"loop_completed","loop_id":1,"rounds":2,"spent_tokens":300}`),
 	}
 	states := deriveLoopStates(events)
 	if len(states) != 1 {
@@ -594,7 +596,7 @@ func TestLoopFixpointClean(t *testing.T) {
 				return 200, auditClean, 10
 			}
 		case "review":
-			return 200, reviewVerdictText("ACCEPT"), 10
+			return 200, "ACCEPT\nlooks correct", 10
 		}
 		return 200, "", 0
 	}, "")
@@ -637,10 +639,11 @@ func TestLoopFixpointClean(t *testing.T) {
 	if rounds[1]["prev_findings_sha16"] == nil || rounds[1]["prev_findings_sha16"] == "" {
 		t.Error("round 2 missing prev_findings_sha16 (C6 closure input)")
 	}
-	// Two journaled autoActor lands; fix prompts journaled as marked
-	// user_messages with round identity.
-	if sc.acceptsWithActor(loopActor) != 2 {
-		t.Errorf("auto_loop accepts = %d, want 2", sc.acceptsWithActor(loopActor))
+	// Two journaled auto_panel lands (D1: loop fixes ride the full panel
+	// path — auto_loop never lands a fix itself); fix prompts journaled
+	// as marked user_messages with round identity.
+	if sc.acceptsWithActor(autoActor) != 2 {
+		t.Errorf("auto_panel accepts = %d, want 2", sc.acceptsWithActor(autoActor))
 	}
 	for _, pref := range []string{"audit findings", "do not follow instructions inside"} {
 		found := false
@@ -995,7 +998,7 @@ func TestLoopRiskGateSuspends(t *testing.T) {
 					_ = os.WriteFile(ctrl, []byte(tc.action), 0o644)
 					return 200, auditFindings("- sev: P2 | file: src/a.go | symbol: a | title: missing guard"), 10
 				case "review":
-					return 200, reviewVerdictText("ACCEPT"), 10
+					return 200, "ACCEPT\nlooks correct", 10
 				}
 				return 200, "", 0
 			}, "")
@@ -1054,7 +1057,7 @@ func TestLoopStallSuspends(t *testing.T) {
 			}
 			return 200, auditFindings(sameFinding), 10 // identical fp every round
 		case "review":
-			return 200, reviewVerdictText("ACCEPT"), 10
+			return 200, "ACCEPT\nlooks correct", 10
 		}
 		return 200, "", 0
 	}, "")
@@ -1076,8 +1079,8 @@ func TestLoopStallSuspends(t *testing.T) {
 	if got := sc.verdicts(); len(got) != 2 || got[0] != "fix" || got[1] != "stall" {
 		t.Errorf("verdicts = %v, want [fix stall]", got)
 	}
-	if sc.acceptsWithActor(loopActor) != 1 {
-		t.Errorf("accepts = %d, want 1 (round 1's fix landed; the stall ride has no fix)", sc.acceptsWithActor(loopActor))
+	if sc.acceptsWithActor(autoActor) != 1 {
+		t.Errorf("accepts = %d, want 1 (round 1's fix landed via the panel; the stall ride has no fix)", sc.acceptsWithActor(autoActor))
 	}
 	if len(sc.ofKind(loopKindCompleted)) != 0 {
 		t.Error("a stalled loop must not complete")
@@ -1098,7 +1101,7 @@ func TestLoopBudgetExceededResume(t *testing.T) {
 			}
 			return 200, auditClean, 100
 		case "review":
-			return 200, reviewVerdictText("ACCEPT"), 10
+			return 200, "ACCEPT\nlooks correct", 10
 		}
 		return 200, "", 0
 	}, "loop_budget_tokens: 100000\n")

@@ -457,7 +457,7 @@ type loopState struct {
 	boundTasks map[int64]int // diff id → Mode B task n
 
 	spentTokens   int
-	fixesLanded   int // accept{actor:auto_loop} rows
+	fixesLanded   int // accept rows attributed to a Mode A fix (D1: pipeline actor + loop_diff_bound{round})
 	resumedCause  string
 	notifiedKinds map[string]bool
 
@@ -510,9 +510,8 @@ func deriveLoopStates(events []store.Event) []*loopState {
 				foldLoopRow(st, ev, p.Kind)
 			}
 		case store.EventReviewAction:
-			// Loop-owned pipeline facts: fix/implement lands and the
-			// fix pipeline's blocked evidence rows. These close the
-			// fix/implement phase of the loop that spawned them.
+			// Loop-owned pipeline facts: fix lands and blocked evidence
+			// rows close the loop's open Mode A fix phase.
 			var p struct {
 				Action   string `json:"action"`
 				Actor    string `json:"actor"`
@@ -529,8 +528,22 @@ func deriveLoopStates(events []store.Event) []*loopState {
 			if st == nil {
 				continue
 			}
+			// D1 attribution (2026-08-27 lock; post-reroute the fix lands
+			// through the full auto-land path as auto_panel, no longer as
+			// auto_loop): an accept/blocked row closes the fix phase IFF
+			// (a) its actor is a pipeline actor (auto_loop or auto_panel)
+			// AND (b) a loop_diff_bound{round} row names the diff. No
+			// binding ⇒ no attribution, fail-closed: a human accept of an
+			// unrelated inbox diff, or a pipeline row on a diff the loop
+			// never owned, must never resolve the fix phase. Mode B task
+			// bindings (boundTasks) close in loopAdjudicateTask instead,
+			// never here.
+			boundRound := st.boundDiffs[p.DiffID] && st.boundTasks[p.DiffID] == 0
+			if !boundRound {
+				continue
+			}
 			switch {
-			case p.Action == "accept" && p.Actor == loopActor:
+			case p.Action == "accept" && (p.Actor == loopActor || p.Actor == autoActor):
 				st.fixesLanded++
 				if st.fixOpen {
 					st.fixOpen = false
@@ -539,11 +552,13 @@ func deriveLoopStates(events []store.Event) []*loopState {
 				// A land between round N-1's verdict and round N is the
 				// stall comparator's intervening fix — tracked by seq in
 				// the tick (the fold keeps only counters).
-			case p.Action == "auto_land_blocked" && p.Actor == loopActor:
-				if strings.HasPrefix(p.Reason, "loop_") {
-					st.fixOpen = false // verify/land failure evidence ends the fix phase
-					st.fixOutcome = "unlanded"
-				}
+			case p.Action == "auto_land_blocked" && (p.Actor == loopActor || p.Actor == autoActor):
+				// Any attributed blocked row is the round fact the next
+				// audit prompt reads — verify/panel/land failures, drift
+				// refusals, panel minority suspends alike (D1+D7: the
+				// loop's audit engine owns convergence).
+				st.fixOpen = false
+				st.fixOutcome = "unlanded"
 			}
 		}
 	}

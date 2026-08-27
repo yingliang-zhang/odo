@@ -67,7 +67,8 @@ describe("deriveLoopStates", () => {
       loop(4, { kind: "loop_audit_round", loop_id: 3, mode: "audit", round: 1 }),
       loop(5, { kind: "loop_verdict", loop_id: 3, mode: "audit", round: 1, verdict: "fix" }),
       loop(6, { kind: "loop_fix_spawn", loop_id: 3, mode: "audit", round: 1, findings_count: 2, prompt_tokens_est: 8000, spent_tokens: 8100 }),
-      ev(7, "review_action", { action: "accept", actor: "auto_loop", diff_id: 21 }),
+      loop(7, { kind: "loop_diff_bound", loop_id: 3, mode: "audit", round: 1, diff_id: 21 }),
+      ev(8, "review_action", { action: "accept", actor: "auto_loop", diff_id: 21 }),
     ]);
     expect(st.fixesLanded).toBe(1);
     expect(st.fixOpen).toBe(false);
@@ -75,16 +76,32 @@ describe("deriveLoopStates", () => {
     expect(st.phase).toBe("auditing round 2");
   });
 
-  it("auto_land_blocked{loop_*} closes the phase unlanded", () => {
+  it("bound auto_land_blocked closes the phase unlanded (D1: any reason)", () => {
     const [st] = deriveLoopStates([
       started(3),
       loop(4, { kind: "loop_audit_round", loop_id: 3, mode: "audit", round: 1 }),
       loop(5, { kind: "loop_verdict", loop_id: 3, mode: "audit", round: 1, verdict: "fix" }),
       loop(6, { kind: "loop_fix_spawn", loop_id: 3, mode: "audit", round: 1 }),
-      ev(7, "review_action", { action: "auto_land_blocked", actor: "auto_loop", diff_id: 21, reason: "loop_verify_failed" }),
+      loop(7, { kind: "loop_diff_bound", loop_id: 3, mode: "audit", round: 1, diff_id: 21 }),
+      ev(8, "review_action", { action: "auto_land_blocked", actor: "auto_panel", diff_id: 21, reason: "verify_failed" }),
     ]);
     expect(st.fixOpen).toBe(false);
     expect(st.fixOutcome).toBe("unlanded");
+  });
+
+  it("an accept naming no bound diff does NOT attribute (D1: fail-closed)", () => {
+    const [st] = deriveLoopStates([
+      started(3),
+      loop(4, { kind: "loop_audit_round", loop_id: 3, mode: "audit", round: 1 }),
+      loop(5, { kind: "loop_verdict", loop_id: 3, mode: "audit", round: 1, verdict: "fix" }),
+      loop(6, { kind: "loop_fix_spawn", loop_id: 3, mode: "audit", round: 1 }),
+      // No loop_diff_bound row for diff 21 — a human accept of an
+      // unrelated inbox diff must never resolve the fix phase.
+      ev(7, "review_action", { action: "accept", actor: "auto_panel", diff_id: 21 }),
+    ]);
+    expect(st.fixesLanded).toBe(0);
+    expect(st.fixOpen).toBe(true);
+    expect(st.fixOutcome).toBe("");
   });
 
   it("pipeline rows attribute to the newest live loop only", () => {
@@ -95,7 +112,8 @@ describe("deriveLoopStates", () => {
       loop(6, { kind: "loop_audit_round", loop_id: 5, mode: "audit", round: 1 }),
       loop(7, { kind: "loop_verdict", loop_id: 5, mode: "audit", round: 1, verdict: "fix" }),
       loop(8, { kind: "loop_fix_spawn", loop_id: 5, mode: "audit", round: 1 }),
-      ev(9, "review_action", { action: "accept", actor: "auto_loop", diff_id: 30 }),
+      loop(9, { kind: "loop_diff_bound", loop_id: 5, mode: "audit", round: 1, diff_id: 30 }),
+      ev(10, "review_action", { action: "accept", actor: "auto_loop", diff_id: 30 }),
     ]);
     expect(states[0].status).toBe("completed");
     expect(states[0].fixOutcome).toBe("");
@@ -259,6 +277,8 @@ describe("loopPhase render tokens", () => {
         fixOpen: false,
         fixOutcome: "",
         fixesLanded: 0,
+        boundDiffs: new Set<number>(),
+        boundTasks: new Map<number, number>(),
         spentTokens: 0,
         notifiedKinds: [],
         terminalKinds: [],

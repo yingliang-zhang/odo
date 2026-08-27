@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/git"
@@ -393,8 +392,12 @@ func (s *Server) runAuditRound(loopID, conversationID int64, st *loopState, even
 }
 
 // loopStallCheck implements C5's two tripwires, armed only when a fix
-// LANDED between the previous round's verdict and this round (a verify-
-// failed round that never landed must not read as stall, V6).
+// LANDED between the previous round's verdict and this round (a fix that
+// never landed must not read as stall, V6). D1 (2026-08-27): the land is
+// detected with the same attribution rule as the fold — a pipeline actor
+// (auto_loop or, post-reroute, auto_panel) AND a loop_diff_bound{round}
+// row naming the accepted diff — so an unrelated panel land mid-loop
+// cannot arm the comparator.
 func (s *Server) loopStallCheck(events []store.Event, st *loopState, subjectSHA string, blockingFPS []string, thisRoundSeq int) (bool, string) {
 	if len(st.rounds) < 2 {
 		return false, ""
@@ -408,8 +411,13 @@ func (s *Server) loopStallCheck(events []store.Event, st *loopState, subjectSHA 
 		var p struct {
 			Action string `json:"action"`
 			Actor  string `json:"actor"`
+			DiffID int64  `json:"diff_id"`
 		}
-		if jsonUnmarshalOK(ev.Payload, &p) && p.Action == "accept" && p.Actor == loopActor {
+		if !jsonUnmarshalOK(ev.Payload, &p) || p.Action != "accept" {
+			continue
+		}
+		if (p.Actor == loopActor || p.Actor == autoActor) && st.boundDiffs != nil &&
+			st.boundDiffs[p.DiffID] && st.boundTasks[p.DiffID] == 0 {
 			fixLanded = true
 		}
 	}
@@ -720,22 +728,41 @@ func (s *Server) loopNoDiffAfterRun(ctx context.Context, meta *runMeta, verdict 
 	}, s.loopSpent(ctx, meta.conversationID, meta.loopID))
 }
 
-// loopFixPipeline is the Mode A fix round's landing path (V6): risk gate
-// (protected paths / supply-chain class → suspend, the only coherent
-// state for an unabsorbable fix) → runVerifyGate verbatim → journaled
-// autoActor land. Verify/land failures journal blocked evidence rows
-// (never suspends) and the next audit round re-audits.
+// loopFixPipeline is the Mode A fix round's landing path (D1, the
+// 2026-08-27 control-plane hardening lock; replaces the V6 verify-only
+// landing). Classification order, hard-suspends first:
+//  1. drift latch → auto_land_blocked{reason:"gate_policy_drift"} (a
+//     latched daemon lands nothing — the blocked row is the round fact);
+//  2. memory prefixes → loop_suspended{cause:"risk:protected_path"};
+//  3. Tier-0 gate core → loop_suspended{cause:"risk:gate_core"} (human-
+//     only: editing a Tier-0 file IS an exemption grant, so the only
+//     coherent loop state for it is suspension);
+//  4. supply-chain class → loop_suspended{cause:"risk:supply_chain"};
+//  5. everything else — Tier-1 gate sources included — rides the FULL
+//     auto-land path VERBATIM (C8 inherit-never-fork, the Mode B
+//     precedent): verify gate + panel + the attestation executor.
+//
+// The V6 runVerifyGate + handleDiffAction(loopActor) verify-only landing
+// path is DELETED: a gate fix now lands only behind its judges — the
+// judged never rewrites its own judge without its judges — and an
+// ordinary fix gets exactly the same canon every other diff gets.
 func (s *Server) loopFixPipeline(ctx context.Context, meta *runMeta, d store.Diff) {
 	spent := s.loopSpent(ctx, meta.conversationID, meta.loopID)
+	if s.gateDrift {
+		s.journalFixBlocked(ctx, meta, d.ID, "gate_policy_drift",
+			"gate policy drift latched at boot — no pipeline lands until a human runs 'odo gate re-pin', commits both files, and restarts the daemon")
+		return
+	}
 	diffText := ""
 	if data, err := os.ReadFile(d.PathOnDisk); err == nil {
 		diffText = string(data)
 	}
 	paths, perr := git.PatchPaths(d.PathOnDisk)
-	// V5 protected-path gate.
 	if perr == nil {
+		// Memory prefixes (.odo/, wiki/) — ADR-0003 invariant 1, the
+		// deepest class. Tier 0 of the D1 boundary — human-only.
 		for _, p := range paths {
-			if isProtectedPath(p) {
+			if isMemoryPath(p) {
 				payload := map[string]interface{}{
 					"cause":  "risk:protected_path",
 					"detail": "the fix diff touches protected path " + p + " — land it manually, then /loop resume",
@@ -743,6 +770,17 @@ func (s *Server) loopFixPipeline(ctx context.Context, meta *runMeta, d store.Dif
 				if diffText != "" {
 					mountRiskReceipt(payload, riskReceiptKeys(diffText))
 				}
+				s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, loopModeAudit, loopKindSuspended, payload, spent)
+				return
+			}
+		}
+		for _, p := range paths {
+			if isGateTier0Path(p) {
+				payload := map[string]interface{}{
+					"cause":  "risk:gate_core",
+					"detail": "the fix diff touches Tier-0 gate core " + p + " (human-only — no pipeline landing path exists) — land it manually, then /loop resume",
+				}
+				mountRiskReceipt(payload, riskReceiptKeys(diffText))
 				s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, loopModeAudit, loopKindSuspended, payload, spent)
 				return
 			}
@@ -767,17 +805,7 @@ func (s *Server) loopFixPipeline(ctx context.Context, meta *runMeta, d store.Dif
 		s.journalFixBlocked(ctx, meta, d.ID, "loop_unparseable_diff", perr.Error())
 		return
 	}
-	gate := runVerifyGate(ctx, s.projectRoot, meta.worktreePath, paths, "loop-"+strconv.FormatInt(meta.loopID, 10))
-	if !gate.ok {
-		// Advisory, never land-blocking (V6): the blocked row is the
-		// round fact the next audit prompt reads.
-		s.journalFixBlocked(ctx, meta, d.ID, "loop_"+gate.reason, gate.detail)
-		return
-	}
-	if _, err := s.handleDiffAction(ctx, d.ID, "accept", loopActor, ""); err != nil {
-		s.journalFixBlocked(ctx, meta, d.ID, "loop_land_failed", err.Error())
-		return
-	}
+	s.autoLand(ctx, d, meta.worktreePath, meta.goal, false, "")
 }
 
 // journalFixBlocked journals the fix pipeline's evidence row: the fix

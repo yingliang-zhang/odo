@@ -221,7 +221,13 @@ func classifyDiff(stat git.PatchStat, newTopDir bool, inScope map[string]bool) s
 		return "C0"
 	}
 	for _, f := range stat.Files {
-		if isProtectedPath(f.Path) {
+		// D1 guard (2026-08-27 lock): C0 is MEMORY-PREFIX-ONLY. Gate-source
+		// hits must NOT fold into C0 — under the structural Tier-1
+		// boundary nearly every daemon diff would mark C0 and the autonomy
+		// ladder stats would drown. Gate sources get their own gates
+		// (the panel Tier annotations + panelVerdictAttestsDiff), not an
+		// autonomy-class carve-out.
+		if isMemoryPath(f.Path) {
 			return "C0"
 		}
 	}

@@ -166,6 +166,16 @@ type Server struct {
 	runs   map[string]*runMeta // adapter runID -> meta
 	byConv map[int64]string    // conversationID -> adapter runID (active run)
 
+	// gateDrift is the D1 drift latch (gatepolicy.go): set once per boot by
+	// checkGatePolicy BEFORE any recovery can fire a landing pipeline (and
+	// re-checkable by tests via the same call). While true, autoLand,
+	// loopFixPipeline, and the settle ladder (reachable only through
+	// autoLand) refuse with auto_land_blocked{reason:"gate_policy_drift"}
+	// — fail-closed until a human re-pins and restarts. Boot writes
+	// happen-before every pipeline goroutine spawn (NewServer ordering),
+	// so the field needs no lock.
+	gateDrift bool
+
 	// W6 (ADR-0005): the parked-goal FIFOs, conversationID -> seq-ordered
 	// goals. The journal is the authority (user_message{park:true} minus
 	// run_prompt{goal_seqs}/parked_goal_dropped consumption); this is the
@@ -497,6 +507,14 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// per boot, single-threaded by construction; the runtime resolve IPC
 	// and the apply-path retry convergence take memMu instead.
 	s.replayMemoryJournal(context.Background())
+	// D1 (2026-08-27 control-plane hardening lock): the Tier-0 drift latch
+	// — pinned gate-policy bytes vs the on-disk files. BEFORE the
+	// recoveries below: parked-goal dequeues spawn runs, loop recovery
+	// fires pipelines, and recoverPendingDiffs re-fires auto-land — every
+	// one consults s.gateDrift. Gate-less projects (arbitrary user repos)
+	// skip by construction; journal rows land only on existing
+	// conversations.
+	s.checkGatePolicy(context.Background())
 	// W6: recover the durable parked-goal queues from the journal and
 	// dequeue for free conversations — at daemon startup, after the store
 	// is open and before serving (NewServer is the only touchable init
@@ -3457,20 +3475,30 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 		//   (1) memory paths (.odo/, wiki/) — invariant 1, refused for
 		//       EVERY actor, human Accept included (the click still lands
 		//       an agent-produced patch into daemon-owned content).
-		//   (2) protectedGateFiles — a non-human actor (autoActor, loopActor,
-		//       …) may land them ONLY behind panel evidence:
-		//       panelVerdictAttestsDiff requires a journaled UNANIMOUS
-		//       verdict row (consensus "accept"; the settle ladder's
-		//       majority verdict lost attestation power in the 2026-08-22
-		//       security cut) whose patch_sha16 matches the exact bytes
-		//       being landed — the judged never modifies its own judge
-		//       without its judges.
-		//       The human Accept click stays the unconditional escape.
+		//   (2) gate sources (the D1 two-tier structural boundary,
+		//       gatepolicy.go):
+		//       - Tier-0 (gatepolicy.go, gate_manifest.json) — human-only:
+		//         a non-human actor (autoActor, loopActor, …) gets a hard
+		//         error naming the file, panel attestation INCLUDED — a
+		//         panel judging a policy edit is downstream of the policy
+		//         it judges (circular). The diff stays pending.
+		//       - Tier-1 (internal/ipc|store|git|moa|adapter/ prefixes,
+		//         root CLI) — a non-human actor may land them ONLY behind
+		//         panel evidence: panelVerdictAttestsDiff requires a
+		//         journaled UNANIMOUS verdict row (consensus "accept"; the
+		//         settle ladder's majority verdict lost attestation power
+		//         in the 2026-08-22 security cut) whose patch_sha16
+		//         matches the exact bytes being landed — the judged never
+		//         modifies its own judge without its judges.
+		//       The human Accept click stays the unconditional escape for
+		//       both tiers.
 		patchPaths, gerr := git.PatchPaths(d.PathOnDisk)
 		if gerr == nil {
 			perr := rejectMemoryPaths(patchPaths)
 			if perr == nil && actor != "" {
-				if g, hit := gateSourceHit(patchPaths); hit && !s.panelVerdictAttestsDiff(ctx, d) {
+				if t0, hit := gateTier0Hit(patchPaths); hit {
+					perr = fmt.Errorf("gate core %q is human-only (Tier-0): no pipeline actor may land it, unanimous panel attestation included — editing a Tier-0 file IS an exemption grant; a human Accept (no actor) is the only path", t0)
+				} else if g, hit := gateSourceHit(patchPaths); hit && !s.panelVerdictAttestsDiff(ctx, d) {
 					perr = fmt.Errorf("gate source %q may auto-land only behind a journaled unanimous panel verdict on these exact patch bytes (moa_review consensus accept with matching patch_sha16); a human Accept is the alternative", g)
 				}
 			}
@@ -5511,39 +5539,32 @@ func (s *Server) handleSearchEvents(ctx context.Context, req Request) (Response,
 // worktrees) and wiki/ (epoch notes, topics, index.md — derived artifacts
 // owned by the daemon, not the agent).
 //
-// Self-improving safety extension (2026-08-15, tri-model 3/3): the gate
-// mechanism source files are also protected — autoland.go, autonomy.go,
-// learner.go, review.go, settle.go, ledger.go, risk.go, contradiction.go,
-// design_moa.go. These files implement the auto-land and self-improving
-// gates. 2026-08-20 user doctrine supersedes "must never auto-land":
-// their diffs route through the full verify+panel pipeline like any
-// other, annotated as gate-source for the panel, and land only behind
-// panelVerdictAttestsDiff — a journaled UNANIMOUS verdict bound to the
-// exact patch bytes (2026-08-22 cut: the settle ladder's majority_accept
-// verdict never attests gate sources; the judged still never modifies
-// its own judge without its judges, and the human Accept click stays the
-// unconditional escape).
-//
-// Case-insensitive: macOS APFS/HFS+ resolve .ODO/ and Wiki/ identically.
-var protectedGateFiles = map[string]bool{
-	"internal/ipc/autoland.go":      true,
-	"internal/ipc/autonomy.go":      true,
-	"internal/ipc/learner.go":       true,
-	"internal/ipc/review.go":        true,
-	"internal/ipc/settle.go":        true,
-	"internal/ipc/ledger.go":        true,
-	"internal/ipc/risk.go":          true,
-	"internal/ipc/contradiction.go": true,
-	"internal/ipc/design_moa.go":    true,
-	"internal/ipc/skills_gate.go":   true,
+// Self-improving safety extension (2026-08-15, tri-model 3/3; restructured
+// 2026-08-27 by the D1 control-plane hardening lock): gate-source files —
+// the reviewing pipeline itself — are protected too. D1 replaced the
+// hand-written 10-file protectedGateFiles map with the structural boundary
+// in gatepolicy.go (Tier-0 human-only files + Tier-1 directory prefixes;
+// all 10 legacy entries are covered by the ipc prefix). 2026-08-20 user
+// doctrine supersedes "must never auto-land": a Tier-1 diff routes through
+// the full verify+panel pipeline like any other, annotated as gate-source
+// for the panel, and lands only behind panelVerdictAttestsDiff — a
+// journaled UNANIMOUS verdict bound to the exact patch bytes (2026-08-22
+// cut: the settle ladder's majority_accept verdict never attests gate
+// sources; the judged still never modifies its own judge without its
+// judges, and the human Accept click stays the unconditional escape).
+// Tier-0 diffs never auto-land at all.
+func isProtectedPath(p string) bool {
+	return isMemoryPath(p) || isGateSourcePath(p)
 }
 
-func isProtectedPath(p string) bool {
+// isMemoryPath reports whether p lives under the daemon-owned memory
+// prefixes (.odo/ and wiki/). Case-insensitive: macOS APFS/HFS+ resolve
+// .ODO/ and Wiki/ identically. This is ALSO the autonomy ladder's C0
+// predicate — the D1 guard: gate-source hits must NOT widen C0, or every
+// daemon diff would mark C0 and pollute the ladder stats.
+func isMemoryPath(p string) bool {
 	lp := strings.ToLower(p)
-	if strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/") {
-		return true
-	}
-	return protectedGateFiles[lp]
+	return strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/")
 }
 
 // rejectMemoryPaths is layer (1) of the accept-time guard inside
@@ -5555,18 +5576,20 @@ func isProtectedPath(p string) bool {
 // pre-image side is guarded as well as the post-image side.
 func rejectMemoryPaths(paths []string) error {
 	for _, f := range paths {
-		if lp := strings.ToLower(f); strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/") {
+		if isMemoryPath(f) {
 			return fmt.Errorf("diff touches protected path %q (invariant 1: agents never write memory)", f)
 		}
 	}
 	return nil
 }
 
-// gateSourceHit returns the first patch path that is a protected gate
-// source file (protectedGateFiles only — NOT the memory prefix), or "".
+// gateSourceHit returns the first patch path that is a gate source file
+// (the D1 structural predicate — Tier-0 AND Tier-1; NOT the memory
+// prefixes), or "". Callers pass both patch sides (git.PatchPaths), so a
+// rename out of a protected prefix is gate-source on both sides.
 func gateSourceHit(paths []string) (string, bool) {
 	for _, f := range paths {
-		if protectedGateFiles[strings.ToLower(f)] {
+		if isGateSourcePath(f) {
 			return f, true
 		}
 	}

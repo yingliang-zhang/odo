@@ -1088,7 +1088,10 @@ func TestRejectProtectedPathsCaseFold(t *testing.T) {
 }
 
 // TestIsProtectedPathCaseFold (Hole 3): isProtectedPath must match
-// case-insensitively to prevent macOS APFS bypass.
+// case-insensitively to prevent macOS APFS bypass. D1 (2026-08-27):
+// the structural gate-source boundary makes ALL of internal/ipc/
+// protected (Tier-1) — including server.go and protocol.go, previously
+// exempt under the 10-file hand-written list.
 func TestIsProtectedPathCaseFold(t *testing.T) {
 	cases := []struct {
 		path string
@@ -1101,7 +1104,12 @@ func TestIsProtectedPathCaseFold(t *testing.T) {
 		{".Odo/x", true},
 		{"WIKI/y", true},
 		{".oDo/config", true},
-		{"src/main.go", false},
+		{"src/main.go", false},                     // subdir main.go, not the root CLI entry
+		{"main.go", true},                          // the root CLI entry is Tier-1 (ruling ①)
+		{"cmd/tool/main.go", true},                 // the standalone cmd/ tree is Tier-1
+		{"cmd_todo_test.go", false},                // root cmd_*.go are NOT gate source (D1 pin)
+		{"internal/modelspec/modelspec.go", false}, // deliberately unprotected (timeouts/budgets only)
+		{"gui/src/App.tsx", false},                 // deliberately unprotected
 		{"README.md", false},
 		{".odo", false}, // no trailing slash — not a path under .odo/
 		{"wiki", false}, // same
@@ -1116,8 +1124,11 @@ func TestIsProtectedPathCaseFold(t *testing.T) {
 		{"internal/ipc/contradiction.go", true},
 		{"internal/ipc/design_moa.go", true},
 		{"internal/ipc/skills_gate.go", true},
-		{"internal/ipc/server.go", false}, // hosts isProtectedPath but also 4000+ lines of handler code
-		{"internal/ipc/protocol.go", false},
+		{"internal/ipc/server.go", true},
+		{"internal/ipc/protocol.go", true},
+		{"internal/ipc/gatepolicy.go", true}, // Tier-0 ⊂ gate source
+		{"internal/ipc/gate_manifest.json", true},
+		{"INTERNAL/IPC/SERVER.GO", true}, // case fold held over the whole surface
 	}
 	for _, tc := range cases {
 		if got := isProtectedPath(tc.path); got != tc.want {

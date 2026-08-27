@@ -51,8 +51,10 @@ func main() {
 	// with flag sinks; `odo unretract <note>` (M17 F3) and the rules-audit
 	// sinks are the WRITE CLIs — they journal via the store's own write
 	// open; `odo retract <note>` (2026-08-22) joins them as the human
-	// resolution of a contradiction candidate. Any other invocation
-	// without a subcommand runs the daemon.
+	// resolution of a contradiction candidate; `odo gate re-pin`
+	// (2026-08-27 D1) is the human re-acknowledgment of the Tier-0 gate
+	// files (rewrites the pinned manifest, never commits). Any other
+	// invocation without a subcommand runs the daemon.
 	if args := flag.Args(); len(args) > 0 {
 		switch args[0] {
 		case "wiki":
@@ -75,6 +77,8 @@ func main() {
 			os.Exit(runUnretractCLI(args[1:]))
 		case "retract":
 			os.Exit(runRetractCLI(args[1:]))
+		case "gate":
+			os.Exit(runGateCLI(args[1:]))
 		case "models":
 			os.Exit(runModelsCLI(args[1:]))
 		case "preview-setup":

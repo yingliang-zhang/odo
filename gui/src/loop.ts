@@ -23,6 +23,11 @@ import type { OdoEvent } from "./types";
 // The daemon stamps loop rows and loop-owned pipeline rows with this
 // actor (loop_journal.go loopActor).
 const LOOP_ACTOR = "auto_loop";
+// AUTO_ACTOR is the auto-land panel pipeline actor (loop_journal.go
+// autoActor): post-D1 a Mode A fix lands through the full auto-land
+// path as auto_panel, so fold attribution must accept both actors —
+// gated by the loop_diff_bound{round} row (never by wall-clock).
+const AUTO_ACTOR = "auto_panel";
 
 // Kinds that end a loop's autonomous operation (design lock: the
 // notification watcher fires on first sight of any of these per loop).
@@ -79,7 +84,13 @@ export interface LoopState {
   awaitingFixSpawn: boolean; // latest verdict fix, no fix spawn yet
   fixOpen: boolean; // a fix spawn has no accept/blocked/suspend after
   fixOutcome: string; // "landed" | "unlanded" | "" (open)
-  fixesLanded: number; // accept{actor:auto_loop} rows
+  fixesLanded: number; // accept rows attributed to a Mode A fix (D1 mirror)
+  // D1 attribution (loop_journal.go parity): the drain-journaled
+  // loop⇄diff map. An accept/blocked review row closes the Mode A fix
+  // phase only when its diff is round-bound here — no binding, no
+  // attribution (fail-closed). Task bindings resolve in the task fold.
+  boundDiffs: Set<number>;
+  boundTasks: Map<number, number>;
   spentTokens: number; // cumulative ledger (max wins)
   notifiedKinds: string[]; // journaled loop_notified receipts (V11 dedup)
   terminalKinds: string[]; // first-sight set of LOOP_TERMINAL_KINDS seen
@@ -143,6 +154,8 @@ function foldLoopStarted(ev: OdoEvent, id: number): LoopState {
     fixOpen: false,
     fixOutcome: "",
     fixesLanded: 0,
+    boundDiffs: new Set<number>(),
+    boundTasks: new Map<number, number>(),
     spentTokens: p.spent_tokens ?? 0,
     notifiedKinds: [],
     terminalKinds: [],
@@ -233,6 +246,17 @@ function foldLoopRow(st: LoopState, ev: OdoEvent, kind: string): void {
       st.fixOpen = true;
       st.fixOutcome = "";
       break;
+    case "loop_diff_bound": {
+      // P1 #13 / D1: the drain-journaled loop⇄diff binding (parity with
+      // the Go foldSwitch — every bound id accumulates).
+      const diffID = p.diff_id ?? 0;
+      if (diffID > 0) {
+        st.boundDiffs.add(diffID);
+        const t = p.task ?? 0;
+        if (t >= 1) st.boundTasks.set(diffID, t);
+      }
+      break;
+    }
     case "loop_design_lock": {
       const t = p.task ?? 0;
       if (t >= 1 && t <= st.tasks.length) {
@@ -297,17 +321,24 @@ export function deriveLoopStates(events: readonly OdoEvent[]): LoopState[] {
       const p = ev.payload ?? {};
       const st = newestLiveLoop(order);
       if (st == null) continue;
-      if (p.action === "accept" && p.actor === LOOP_ACTOR) {
+      // D1 attribution parity (loop_journal.go): an accept/blocked row
+      // closes the Mode A fix phase IFF (a) the actor is a pipeline actor
+      // (auto_loop or, post-reroute, auto_panel) AND (b) a
+      // loop_diff_bound{round} row names the diff. No binding ⇒ no
+      // attribution, fail-closed — a human accept of an unrelated inbox
+      // diff never resolves the fix phase. Task bindings resolve in the
+      // task adjudication lane, never here.
+      const pipelineActor = p.actor === LOOP_ACTOR || p.actor === AUTO_ACTOR;
+      const diffID = p.diff_id ?? 0;
+      const boundRound = st.boundDiffs.has(diffID) && !st.boundTasks.has(diffID);
+      if (!pipelineActor || !boundRound) continue;
+      if (p.action === "accept") {
         st.fixesLanded += 1;
         if (st.fixOpen) {
           st.fixOpen = false;
           st.fixOutcome = "landed";
         }
-      } else if (
-        p.action === "auto_land_blocked" &&
-        p.actor === LOOP_ACTOR &&
-        (p.reason ?? "").startsWith("loop_")
-      ) {
+      } else if (p.action === "auto_land_blocked") {
         st.fixOpen = false;
         st.fixOutcome = "unlanded";
       }

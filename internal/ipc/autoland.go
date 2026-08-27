@@ -280,6 +280,18 @@ func (s *Server) maybeAutoLand(d store.Diff, worktreePath, goal string, runError
 // autoLand runs the full pipeline for one pending diff. Blocks journal and
 // return; only a unanimous panel after all gates calls handleDiffAction.
 func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal string, runErrored bool, runVerdict string) {
+	// D1 drift latch — the FIRST blocked-row gate, ahead of the arming
+	// silent-return: a latched daemon lands NOTHING through any pipeline
+	// (direct autoLand, loop pipelines, recoverPendingDiffs, and the
+	// settle ladder downstream), and the refusal must be journaled per
+	// attempt so the wedge is visible even on unarmed projects. Only the
+	// AutoApply-off kill switch above (in maybeAutoLand) outranks it —
+	// a disabled feature stays silent by design.
+	if s.gateDrift {
+		s.journalAutoLandBlocked(ctx, d, "gate_policy_drift",
+			"gate policy drift latched at boot (internal/ipc/gatepolicy.go vs internal/ipc/gate_manifest.json) — no pipeline lands until a human runs 'odo gate re-pin', commits both files, and restarts the daemon", nil, "")
+		return
+	}
 	// M20 arming gate — FIRST, before any journal write, git probe, or
 	// verify spend: a prefs.md without a review: line means no panel can
 	// exist, so the pipeline is UNARMED and exits SILENT (same posture as
@@ -755,10 +767,12 @@ func pipelineTerminalDiffIDs(events []store.Event) map[int64]bool {
 //     impossible or structurally invalid. Memory paths (.odo/, wiki/)
 //     can never land — the executor refuses them for EVERY actor, the
 //     human click included, so a panel would attest bytes landing is
-//     impossible for. Supply-chain files (manifests/lockfiles) are
-//     single-line RCE vectors diff review structurally cannot audit;
-//     .odo-verify self-modification would additionally be the verify
-//     oracle attesting itself.
+//     impossible for. The D1 Tier-0 gate core (gatepolicy.go,
+//     gate_manifest.json) is human-only — no panel verdict can land it,
+//     so the check blocks pre-panel and saves the spend. Supply-chain
+//     files (manifests/lockfiles) are single-line RCE vectors diff review
+//     structurally cannot audit; .odo-verify self-modification would
+//     additionally be the verify oracle attesting itself.
 //   - RISK ANNOTATIONS (returned notes, never a block): everything a
 //     reviewer CAN audit — protected gate source files, new top-level
 //     directories, net *_test.go assertion loss. Each note is a
@@ -774,15 +788,21 @@ func (s *Server) autoLandCheck(d store.Diff) (reason, detail string, annotations
 	}
 	// Double-layer with the executor (handleDiffAction re-checks): the
 	// pre-panel check saves the panel spend and journals the clearer
-	// reason. Gate sources split off here: isProtectedPath covers BOTH
-	// memory paths (hard block) and gate source files (annotation).
+	// reason. Three classes: memory paths (hard block — unmendable), the
+	// D1 Tier-0 gate core (hard block — human-only, no panel verdict can
+	// ever land it), Tier-1 gate sources (annotation — attestable).
 	for _, p := range paths {
-		if lp := strings.ToLower(p); strings.HasPrefix(lp, ".odo/") || strings.HasPrefix(lp, "wiki/") {
+		if isMemoryPath(p) {
 			return "protected_path", p, nil
 		}
 	}
 	for _, p := range paths {
-		if protectedGateFiles[strings.ToLower(p)] {
+		if isGateTier0Path(p) {
+			return "gate_core_path", "gate core " + p + " is Tier-0 (human-only): no pipeline landing path exists, unanimous panel attestation included — a human Accept is required", nil
+		}
+	}
+	for _, p := range paths {
+		if isGateSourcePath(p) {
 			annotations = append(annotations, "gate source touched: "+p+" — this diff modifies the reviewing pipeline itself and lands on a unanimous panel verdict with no human click; score ANY weakening of gates, unanimity, or the verify oracle as REJECT")
 		}
 	}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "protected_prefixes": [
+    "internal/ipc/",
+    "internal/store/",
+    "internal/git/",
+    "internal/moa/",
+    "internal/adapter/"
+  ],
+  "tier0_files": [
+    "internal/ipc/gatepolicy.go",
+    "internal/ipc/gate_manifest.json"
+  ],
+  "tier0_sha16": {
+    "internal/ipc/gate_manifest.json": "",
+    "internal/ipc/gatepolicy.go": "9a50844aca394c6e"
+  },
+  "pinned_at": "2026-08-27T12:37:49Z",
+  "pinned_by": "human"
+}
