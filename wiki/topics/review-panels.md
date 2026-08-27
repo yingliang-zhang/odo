@@ -1,0 +1,13 @@
+# Review Panel Semantics (MoA)
+
+- Panel = 3 MoA legs (kimi-k3, glm-5.2, deepseek-v4-flash) run synchronously with ≤16 tool rounds each; minute-level chat silence is by design; answers are raw per-leg concatenation with no consolidator — divergence is the product, and a complete-looking synthesis deceives more than raw legs (main-epoch-8) (main-epoch-14)
+- Objective-anchor fix (schema v3): review prompts anchored to the session's latest user message, causing false "objective mismatch" rejections (#34); `diffs.goal` now stored at `InsertDiff` (revise-chain products inherit the chain head's goal byte-exact), `diffGoal()` falls back to `originGoal` for legacy NULL rows, all four consumers switched (main-epoch-17) (main-epoch-18)
+- Settlement doctrine: divergent verdicts including `panel_mixed` enter the repair ladder instead of instant auto-reject; if divergence persists past the round cap, strict majority (>½ accepts) decides, else suspend for human (main-epoch-19)
+- Majority valve only fires at the terminal round; its only reachable composition is {2 accept, 1 needs_fixes} since a reject leg auto-rejects before the ladder and an infra leg blocks before evaluation (main-epoch-21)
+- Truncated legs invalidate the majority valve (fail-closed): explicit abstention in the cap-count loop plus construction-side `reviewVerdict` forcing truncated→needs_fixes (main-epoch-20) (main-epoch-21)
+- Gate-source diffs require unanimous panel attestation since 2026-08-22; the majority valve has no attestation power and gate diffs route to `ladder_suspended` with human accept as fallback (main-epoch-14) (main-epoch-41)
+- `panelVerdictAttestsDiff` byte-binds the verdict to landing bytes via `patch_sha16`; attestation whitelist accepts `consensus:"accept"` only and the `majority_accept` attestation path was deleted (UI-epoch-11) (main-epoch-14)
+- Panel legs, `reviewWithModel`, and the /vision//preview funnels all carry outer `WithTimeout(s.legTimeout(model))` deadlines — previously unbounded (main-epoch-15)
+- Single-judge degradation: with one review model configured the panel is unarmed with a once-per-daemon-lifetime `single_judge_panel` advisory, replacing silent unanimous pass (main-epoch-15)
+- Panel charges must be triaged against source before acting: deepseek's `sameAutoDistillList` comparator finding was valid (fixed with duplicate-id tests) while its memo/Lstat charges were refuted; glm's three rejections of #41 were all refuted by callsite audit before the manual land landed (main-epoch-33) (main-epoch-27)
+- Accept-path integrity: all accept paths (autoland ×2, settle, loop_run, manual IPC) funnel through `handleDiffAction` — no staged-gate bypass exists (main-epoch-33)

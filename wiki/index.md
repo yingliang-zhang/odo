@@ -1,13 +1,14 @@
 # Project Wiki Index
 
 ## Topics
-- Auto-Land Governance & Settlement Policy → topics/auto-land-governance.md
-- Diff & Worktree Lifecycle Safety → topics/diff-worktree-lifecycle.md
-- Memory Distill Crash Recovery → topics/memory-crash-recovery.md
-- Auto-Distill Scheduler & Daily-Cap Circuit Breaker → topics/auto-distill-scheduler.md
-- Daemon Deployment & Staleness Doctrine → topics/daemon-deployment.md
-- Security Containment & Sandbox → topics/security-containment.md
-- E2E Flake Root-Cause Patterns → topics/e2e-flake-patterns.md
-- GUI Architecture & Performance → topics/gui-performance.md
-- Journal & Store Integrity → topics/journal-store-integrity.md
-- Review Adjudication Methodology → topics/review-adjudication.md
+- Auto-Land Pipeline & Diff Governance → topics/auto-land-pipeline.md
+- Review Panel Semantics (MoA) → topics/review-panels.md
+- Gate-Source & Protected-Path Policy → topics/gate-source-policy.md
+- Memory Apply, Recovery & Replay → topics/memory-recovery-replay.md
+- Memory Distillation Pipeline (Scheduler & Auto-Guards) → topics/memory-distillation.md
+- Deployment & Daemon Binary Lifecycle → topics/deployment.md
+- Journal & SQLite Store → topics/journal-store.md
+- Security Guards (Paths, Symlinks, External Fetch) → topics/security-guards.md
+- Run, Workstream & Loop Lifecycle → topics/run-lifecycle.md
+- GUI Performance & UX → topics/gui-performance.md
+- E2E & Test Infrastructure → topics/test-infrastructure.md

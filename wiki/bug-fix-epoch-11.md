@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # P3 Memory Hygiene Fixes: Heal-Row Window Exclusion + Paged Journal Replay
 
 Date: 2026-08-26. Base: main `ff2f121`. Diff lives **uncommitted** in odo worktree `.odo/worktrees/6a8eba13-b8e39f721ac4` (6 files, +568/−143). Main untouched as of writing.

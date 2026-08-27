@@ -1,0 +1,11 @@
+# Deployment & Daemon Binary Lifecycle
+
+- Deployment doctrine: replace the binary first, then kill the daemon ("write-then-kill") — atomic cp-to-temp + mv at both `<project>/odo` and `~/.odo/bin/odo`, sha three-way parity, `go version -m` vcs.revision == HEAD verified post-restart; `ensure_daemon_running` resurrects with whatever binary is on disk so swap order is load-bearing (main-epoch-27) (main-epoch-31) (main-epoch-33)
+- Recurring incident class — stale daemon binary misjudging pipeline state: a #27-era daemon auto-rejected #36 under abolished rules (v3 migration never ran in-process); a 22h-stale daemon meant an accepted auto-gate existed only as source; a pre-#52 daemon could not enforce #52's daemon-side heal semantics (main-epoch-21) (UI-epoch-10) (main-epoch-41) (main-epoch-12)
+- Post-restart verification checklist: old PID gone, new PID spawned by GUI, binary revision == HEAD at both install paths, socket healthy (`odo journal tail` live), and log silence during serving is NOT evidence of death (serving produces no per-request lines) (main-epoch-41) (main-epoch-33)
+- Deploy staleness self-check shipped: binary mtime >5min older than `git.HeadCommitTime` produces a log-only WARNING (main-epoch-14)
+- Daemon graceful exit SIGKILLs in-flight agents (`main.go:193`); detached resurrect scripts proved unreliable — GUI full restart is the real restart path (main-epoch-41)
+- GUI redeploy chain: worktree commit → FF merge to main → `npm run tauri:build` → `ditto` replace `/Applications/Odo.app` → restart app; GUI-only changes skip the daemon rebuild (UI-epoch-7) (main-epoch-8)
+- Old-binary CLI trap: running an old binary with a worktree cwd hangs daemon bootstrap after "refusing to register worktree path"; the #17 registry guard is proven live, but the hang is an unfixed defect (main-epoch-27) (main-epoch-7)
+- Three deployed layers can drift independently: project daemon, `~/.odo/bin/odo` (hermes), and `/Applications/Odo.app` GUI bundle — rebuilt in one trip to avoid double rebuilds (main-epoch-12) (UI-epoch-11)
+- Per-project stores are unaffected by binary swaps; hermes-agent restart remains a user decision because restart kills its sessions (main-epoch-41) (UI-epoch-11)

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # `revise_product_missing`: loud drain failure + canonical worktree prompts (odo epoch 13)
 
 Bug fix for the revise-ladder wedge — a repair run staging its work in a sibling worktree produced a forever-silent `pending` origin diff. Status: implemented, staged as pending diff #85, not yet landed.
