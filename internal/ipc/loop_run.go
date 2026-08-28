@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/git"
 	"github.com/yingliang-zhang/odo/internal/store"
 	"github.com/yingliang-zhang/odo/internal/worktree"
@@ -550,7 +552,8 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 	if task > 0 {
 		rowKind, mode = loopKindTaskSpawn, loopModeTasks
 	}
-	if _, err := s.journalLoop(ctx, conversationID, loopID, mode, rowKind, spawnRow, spent); err != nil {
+	spawnEv, err := s.journalLoop(ctx, conversationID, loopID, mode, rowKind, spawnRow, spent)
+	if err != nil {
 		return false, "journal_spawn: " + err.Error()
 	}
 
@@ -603,6 +606,7 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 		loopKind:       kind,
 		loopRound:      round,
 		loopTask:       task,
+		loopSpawnSeq:   spawnEv.Seq,
 	}) {
 		_ = ad.Cancel(ctx, runID)
 		_ = s.mgr.Remove(wtPath)
@@ -631,12 +635,120 @@ func (s *Server) journalLoopDiffBound(ctx context.Context, meta *runMeta, diffID
 	s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, mode, loopKindDiffBound, payload, s.loopSpent(ctx, meta.conversationID, meta.loopID))
 }
 
+// journalLoopRunUsage journals the D3 measured-cost receipt for a
+// drained loop run, BEFORE the pipeline branch: the OMP session
+// transcript's per-message usage blocks summed LLM-free by
+// adapter.SessionUsage (steering mid-run rides the same transcript —
+// true cost). covers_spawn_seq pins the phase's spawn row whose
+// prompt_tokens_est the fold's estPending rule RETIRES (0 when unknown
+// — pre-D3 runMeta — the fold then matches by round/task). The row's
+// stamped spent_tokens = loopSpent(...) − pending est + measured spend
+// so journal and fold agree (C1: the fold is the truth).
+//
+// Everything here is best-effort fail-SOFT: a non-OMP adapter or a
+// missing transcript journals usage_available:false + reason and the
+// spawn's estimate stays pending ("usage pending" — never fabricated
+// numbers). Journaled unconditionally — a stale drain's run cost real
+// tokens too; only enforcement gates on liveness.
+func (s *Server) journalLoopRunUsage(ctx context.Context, meta *runMeta) {
+	payload := map[string]interface{}{
+		"kind_run":         meta.loopKind,
+		"run_id":           meta.runID,
+		"covers_spawn_seq": meta.loopSpawnSeq,
+	}
+	mode := loopModeAudit
+	if meta.loopKind == "implement" {
+		mode = loopModeTasks
+		payload["task"] = meta.loopTask
+	} else if meta.loopRound > 0 {
+		payload["round"] = meta.loopRound
+	}
+
+	// The fold-read once, BY LOOP ID (a stale drain's loop may be
+	// suspended — loopActiveState's live-loop lookup doesn't fit):
+	// prev-spend and the estPending mirror for the writer's C1 stamp.
+	prev := 0
+	var st *loopState
+	if events, err := s.store.ListEvents(ctx, meta.conversationID, 0); err == nil {
+		if st = findLoopByID(deriveLoopStates(events), meta.loopID); st != nil {
+			prev = st.spentTokens
+		}
+	} else {
+		log.Printf("loop: usage receipt fold (loop %d, conv %d): %v", meta.loopID, meta.conversationID, err)
+	}
+	reason := ""
+	usage, ok := adapter.Usage{}, false
+	if ad, found := s.adapterNamed(meta.adapter); found && ad != nil {
+		if _, isOMP := ad.(*adapter.OMP); !isOMP {
+			reason = "non-OMP adapter: no session transcript contract"
+		}
+	}
+	if reason == "" {
+		usage, ok = adapter.SessionUsage(filepath.Join(s.mgr.StateDir(), "sessions", meta.runID))
+		if !ok {
+			reason = "no session transcript (missing JSONL or no usage records)"
+		}
+	}
+	if !ok {
+		payload["usage_available"] = false
+		payload["reason"] = reason
+		s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, mode, loopKindRunUsage, payload, prev)
+		return
+	}
+	payload["usage_available"] = true
+	payload["input_tokens"] = usage.InputTokens
+	payload["output_tokens"] = usage.OutputTokens
+	payload["cache_read_tokens"] = usage.CacheReadTokens
+	payload["cache_write_tokens"] = usage.CacheWriteTokens
+	payload["cost_usd"] = usage.CostUSD
+	// The writer's half of C1, the SAME arithmetic foldRunUsage applies:
+	// retire the covered spawn's pending estimate + any prior receipt,
+	// add the measured spend — journaled stamp and re-derived fold agree
+	// on first write, duplicates, and the covers=0 fallback alike.
+	spent := prev
+	if st != nil {
+		s := meta.loopSpawnSeq
+		if s <= 0 {
+			s = st.spawnSeqFor(meta.loopRound, meta.loopTask)
+		}
+		spent -= st.estPending[s] + st.usageBySpawn[s]
+	}
+	spent += usage.SpentTokens
+	s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, mode, loopKindRunUsage, payload, spent)
+}
+
+// loopDrainBudgetSuspend is D3's fail-closed enforcement: with the
+// usage receipt journaled, the fold's TRUE spend is checked BEFORE the
+// pipeline spends verify+panel — over budget suspends instead of
+// landing (/loop resume budget=N raises the cap; no ctl change).
+// Returns true when the loop suspended. Resolved phases report false:
+// a stale drain must not stamp a second suspension row over the
+// journal-authored next step.
+func (s *Server) loopDrainBudgetSuspend(ctx context.Context, meta *runMeta) bool {
+	st, _, err := s.loopActiveState(ctx, meta.conversationID)
+	if err != nil || st == nil || st.id != meta.loopID || !st.active() {
+		return false
+	}
+	if st.budgetTokens <= 0 || st.spentTokens <= st.budgetTokens {
+		return false
+	}
+	s.journalLoopBestEffort(ctx, meta.conversationID, meta.loopID, fmtLoopMode(st), loopKindBudgetExceeded, map[string]interface{}{
+		"budget_tokens": st.budgetTokens,
+		"projected":     st.spentTokens,
+	}, st.spentTokens)
+	return true
+}
+
 // loopPipelineAfterRun is drainRun's terminal-tail branch for
 // loop-provenance runs (C1: the marker skips maybeAutoLand; the loop's
 // own pipeline runs instead, under loopWG).
 func (s *Server) loopPipelineAfterRun(meta *runMeta, d store.Diff, verdict string) {
 	ctx := context.Background()
 	defer s.fireLoopTick(meta.conversationID)
+	// D3: the measured-cost receipt lands FIRST, before any other
+	// terminal-tail row — the run's true executor spend is the fact every
+	// later branch reads (a stale drain cost real tokens too).
+	s.journalLoopRunUsage(ctx, meta)
 	// Bind the drained diff to its loop phase FIRST (P1 #13). Journaled
 	// even when the fold moved on (a stale drain): the binding is pure
 	// provenance — attribution gates and the boot recovery's exclusion
@@ -662,6 +774,14 @@ func (s *Server) loopPipelineAfterRun(meta *runMeta, d store.Diff, verdict strin
 			"cause":  "run_tainted",
 			"detail": detail,
 		}, s.loopSpent(ctx, meta.conversationID, meta.loopID))
+		return
+	}
+	// D3 enforcement: with the usage receipt folded, the TRUE spend is
+	// checked BEFORE autoLand — over budget suspends instead of spending
+	// verify+panel (fail-closed; /loop resume budget=N raises the cap).
+	// A tainted run never reaches here: its run_tainted suspension is the
+	// more specific truth and a respawn re-checks at spawn time.
+	if s.loopDrainBudgetSuspend(ctx, meta) {
 		return
 	}
 	if meta.loopKind == "implement" {
@@ -702,6 +822,9 @@ func (s *Server) loopDrainActive(ctx context.Context, meta *runMeta) bool {
 // automatic re-spawn rides the next /loop resume). The caller holds s.mu;
 // journaling is store-only, same posture as journalRunVerdict.
 func (s *Server) loopNoDiffAfterRun(ctx context.Context, meta *runMeta, verdict string) {
+	// D3: a no-diff run cost real tokens too — the receipt lands before
+	// the suspension row so the fold's ledger stays true on resume.
+	s.journalLoopRunUsage(ctx, meta)
 	if !s.loopDrainActive(ctx, meta) {
 		return
 	}

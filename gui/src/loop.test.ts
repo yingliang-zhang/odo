@@ -50,6 +50,53 @@ describe("deriveLoopStates", () => {
     expect(st.phase).toBe("auditing round 3");
   });
 
+  // D3 (control-plane hardening lock) — Go parity with
+  // TestFoldUsageCoversEstimate / TestUsageRowIdempotent: the drain's
+  // measured usage REPLACES the spawn's prompt estimate (never adds on
+  // top), cache_read is journaled but never budgeted, and duplicate
+  // receipts fold to the identical cumulative (newest per spawn wins).
+  it("usage receipt replaces the spawn estimate (never double-counts)", () => {
+    const [st] = deriveLoopStates([
+      started(3),
+      loop(4, { kind: "loop_fix_spawn", loop_id: 3, mode: "audit", round: 1, prompt_tokens_est: 1000, spent_tokens: 1000 }),
+      loop(5, {
+        kind: "loop_run_usage", loop_id: 3, mode: "audit", kind_run: "fix", round: 1,
+        run_id: "r1", covers_spawn_seq: 4, usage_available: true,
+        input_tokens: 4000, output_tokens: 100, cache_read_tokens: 9000, cache_write_tokens: 100,
+        cost_usd: 0.05, spent_tokens: 4200, // stamp: 1000 - 1000 + 4200
+      }),
+    ]);
+    expect(st.spentTokens).toBe(4200); // not 5200; cache_read excluded
+    expect(st.estPending.size).toBe(0);
+  });
+
+  it("duplicate usage receipts fold idempotently (newest wins)", () => {
+    const usage = (seq: number, cost: number) =>
+      loop(seq, {
+        kind: "loop_run_usage", loop_id: 3, mode: "audit", kind_run: "fix", round: 1,
+        run_id: "r1", covers_spawn_seq: 4, usage_available: true,
+        input_tokens: 4000, output_tokens: 100, cache_read_tokens: 0, cache_write_tokens: 100,
+        cost_usd: cost, spent_tokens: 4200,
+      });
+    const [st] = deriveLoopStates([
+      started(3),
+      loop(4, { kind: "loop_fix_spawn", loop_id: 3, mode: "audit", round: 1, prompt_tokens_est: 1000, spent_tokens: 1000 }),
+      usage(5, 0.05),
+      usage(6, 0.05), // exact duplicate (re-fold): identical cumulative
+    ]);
+    expect(st.spentTokens).toBe(4200);
+  });
+
+  it("usage_available:false leaves the estimate pending", () => {
+    const [st] = deriveLoopStates([
+      started(3),
+      loop(4, { kind: "loop_fix_spawn", loop_id: 3, mode: "audit", round: 1, prompt_tokens_est: 1000, spent_tokens: 1000 }),
+      loop(5, { kind: "loop_run_usage", loop_id: 3, mode: "audit", kind_run: "fix", round: 1, run_id: "r1", covers_spawn_seq: 4, usage_available: false, reason: "no session transcript", spent_tokens: 1000 }),
+    ]);
+    expect(st.spentTokens).toBe(1000); // the estimate stands
+    expect(st.estPending.get(4)).toBe(1000);
+  });
+
   it("verdict fix marks the round and waits for the fix spawn only once", () => {
     const [st] = deriveLoopStates([
       started(3),
@@ -279,6 +326,10 @@ describe("loopPhase render tokens", () => {
         fixesLanded: 0,
         boundDiffs: new Set<number>(),
         boundTasks: new Map<number, number>(),
+        estPending: new Map<number, number>(),
+        usageBySpawn: new Map<number, number>(),
+        spawnRound: new Map<number, number>(),
+        spawnTask: new Map<number, number>(),
         spentTokens: 0,
         notifiedKinds: [],
         terminalKinds: [],

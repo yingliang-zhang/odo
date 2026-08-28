@@ -35,6 +35,19 @@ package ipc
 //	            subject_too_large | seed_blocked | restart_mid_run |
 //	            human_interleave | round_cap | design_infra |
 //	            settle_blocked | spawn_failed
+//	loop_run_usage{run_id, kind_run: fix|implement, round?|task?,
+//	            covers_spawn_seq, usage_available, reason?,
+//	            input_tokens, output_tokens, cache_read_tokens,
+//	            cache_write_tokens, cost_usd}
+//	            D3 measured executor cost, journaled at drain BEFORE the
+//	            pipeline branch. covers_spawn_seq names the phase's spawn
+//	            row whose prompt_tokens_est it REPLACES (the fold's
+//	            estPending rule: spent -= est, spent += input+output+
+//	            cache_write; cache_read is journaled, never budgeted).
+//	            usage_available:false + reason is the fail-soft row
+//	            (non-OMP adapter, missing transcript) — the estimate
+//	            stays pending, no replacement. Duplicate rows per
+//	            covers_spawn_seq fold newest-wins (idempotent).
 //	loop_completed{rounds, fixes_landed}
 //	loop_stopped{detail?}
 //	loop_budget_exceeded{spent_tokens, budget_tokens, projected}
@@ -45,8 +58,10 @@ package ipc
 // Common keys on every daemon-written row: kind, loop_id (seq of the
 // loop_started row), mode (audit|tasks|tasks_final — later rows of a
 // tasks loop flip to tasks_final once the task list drains), actor
-// "auto_loop", spent_tokens (cumulative: Σ leg output_tokens + spawn
-// prompt estimates, re-derivable by the fold). Rows written from the
+// "auto_loop", spent_tokens (cumulative: Σ leg output_tokens + leg/
+// proposal/consolidator request estimates + spawn prompt estimates with
+// each measured loop_run_usage REPLACING its spawn's estimate,
+// re-derivable by the fold). Rows written from the
 // GUI's loop_ctl carry origin:"loop_ctl" and no actor (a human click).
 //
 // Mode A fix lands journal through handleDiffAction as review_action
@@ -90,6 +105,7 @@ const (
 	loopKindVerdict        = "loop_verdict"
 	loopKindFixSpawn       = "loop_fix_spawn"
 	loopKindDiffBound      = "loop_diff_bound"
+	loopKindRunUsage       = "loop_run_usage"
 	loopKindSuspended      = "loop_suspended"
 	loopKindCompleted      = "loop_completed"
 	loopKindStopped        = "loop_stopped"
@@ -249,9 +265,14 @@ func (s *Server) loopRunAdapterLocked() (adapter.Adapter, string) {
 // --- spending ledger ---------------------------------------------------------
 
 // loopRowSpend is one row's contribution to the loop's cumulative
-// spend: per-leg wire receipts carry output_tokens; run spawns stamp a
-// prompt estimate (chars/4). The GUI reads the latest row's spent_tokens;
-// the fold re-derives the cumulative from any journal prefix.
+// spend: per-leg wire receipts carry output_tokens plus the input-side
+// request estimate (request_bytes/4 — D3); run spawns stamp a prompt
+// estimate (chars/4 — folded ONLY until the drain's loop_run_usage
+// receipt replaces it with the measured input+output+cache_write, the
+// fold's estPending rule). cache_read rides the usage row but is
+// deliberately NOT budgeted (recorded, near-free). The GUI reads the
+// latest row's spent_tokens; the fold re-derives the cumulative from
+// any journal prefix.
 func loopRowSpend(payload map[string]interface{}) int {
 	// Normalize through JSON first: journal-time payloads carry CONCRETE
 	// slices ([]auditLegResult, []DesignProposal) which a
@@ -285,6 +306,9 @@ func loopRowSpend(payload map[string]interface{}) int {
 			if v, ok := m["output_tokens"].(float64); ok {
 				total += int(v)
 			}
+			if v, ok := m["request_bytes"].(float64); ok {
+				total += int(v) / 4 // input-side request estimate (D3)
+			}
 		}
 	}
 	// The design row's consolidator block carries its own output tokens.
@@ -292,9 +316,23 @@ func loopRowSpend(payload map[string]interface{}) int {
 		if v, ok := c["output_tokens"].(float64); ok {
 			total += int(v)
 		}
+		if v, ok := c["request_bytes"].(float64); ok {
+			total += int(v) / 4 // input-side request estimate (D3)
+		}
 	}
 	if v, ok := p["prompt_tokens_est"].(float64); ok {
 		total += int(v)
+	}
+	// D3 usage receipt: the measured executor spend a spawn's estimate
+	// is REPLACED by (the fold subtracts the pending estimate; this is
+	// the added half — output_tokens was already counted above).
+	if p["usage_available"] == true {
+		if v, ok := p["input_tokens"].(float64); ok {
+			total += int(v)
+		}
+		if v, ok := p["cache_write_tokens"].(float64); ok {
+			total += int(v)
+		}
 	}
 	return total
 }
@@ -456,8 +494,20 @@ type loopState struct {
 	boundDiffs map[int64]bool
 	boundTasks map[int64]int // diff id → Mode B task n
 
-	spentTokens   int
-	fixesLanded   int // accept rows attributed to a Mode A fix (D1: pipeline actor + loop_diff_bound{round})
+	spentTokens int
+	// D3 measured-cost fold (the estPending rule): a spawn row's
+	// prompt_tokens_est stays in the cumulative ONLY until its covering
+	// loop_run_usage receipt lands; the receipt then subtracts the
+	// pending estimate and adds the measured input+output+cache_write.
+	// usageBySpawn dedups duplicate receipts per covers_spawn_seq
+	// (newest wins — a re-fold over the same journal yields the identical
+	// cumulative). spawnRound/spawnTask resolve a receipt whose
+	// covers_spawn_seq is 0 (unknown) by its round/task keys.
+	estPending    map[int]int // spawn seq → prompt_tokens_est awaiting its receipt
+	usageBySpawn  map[int]int // spawn seq → latest receipt's folded spend
+	spawnRound    map[int]int // spawn seq → Mode A round
+	spawnTask     map[int]int // spawn seq → Mode B task n
+	fixesLanded   int         // accept rows attributed to a Mode A fix (D1: pipeline actor + loop_diff_bound{round})
 	resumedCause  string
 	notifiedKinds map[string]bool
 
@@ -617,9 +667,14 @@ func foldLoopStarted(ev store.Event, id int64) *loopState {
 
 // foldLoopRow folds one subsequent loop_event row into st.
 func foldLoopRow(st *loopState, ev store.Event, kind string) {
-	spent := jsonInt(ev.Payload, "spent_tokens")
-	if spent > st.spentTokens {
-		st.spentTokens = spent
+	// The journaled stamp is monotonic cumulative (max wins) — EXCEPT on
+	// loop_run_usage rows, where the fold itself performs the estPending
+	// replacement (a measured cost can be LOWER than the estimate it
+	// retires, and the stamp-max would resurrect the stale estimate).
+	if kind != loopKindRunUsage {
+		if spent := jsonInt(ev.Payload, "spent_tokens"); spent > st.spentTokens {
+			st.spentTokens = spent
+		}
 	}
 	st.lastKind, st.lastSeq = kind, ev.Seq
 	switch kind {
@@ -706,6 +761,7 @@ func foldLoopRow(st *loopState, ev store.Event, kind string) {
 		st.fixOpen = true
 		st.fixOutcome = ""
 		st.fixSpawnSeq = ev.Seq
+		st.trackSpawn(ev, jsonInt(ev.Payload, "round"), 0)
 	case loopKindDiffBound:
 		// P1 #13: the loop⇄diff binding row (drain-journaled). A fix
 		// respawn after restart binds a second diff for the same round —
@@ -734,6 +790,7 @@ func foldLoopRow(st *loopState, ev store.Event, kind string) {
 			st.tasks[t-1].spawned = true
 			st.tasks[t-1].designLockSeq = 0
 		}
+		st.trackSpawn(ev, 0, t)
 	case loopKindTaskDone:
 		t := jsonInt(ev.Payload, "task")
 		if t >= 1 && t <= len(st.tasks) {
@@ -749,7 +806,85 @@ func foldLoopRow(st *loopState, ev store.Event, kind string) {
 		if k != "" {
 			st.notifiedKinds[k] = true
 		}
+	case loopKindRunUsage:
+		st.foldRunUsage(ev)
 	}
+}
+
+// trackSpawn records one spawn row's estimate + phase keys for the D3
+// estPending rule (lazy maps, boundDiffs precedent).
+func (st *loopState) trackSpawn(ev store.Event, round, task int) {
+	if round > 0 {
+		if st.spawnRound == nil {
+			st.spawnRound = map[int]int{}
+		}
+		st.spawnRound[ev.Seq] = round
+	}
+	if task > 0 {
+		if st.spawnTask == nil {
+			st.spawnTask = map[int]int{}
+		}
+		st.spawnTask[ev.Seq] = task
+	}
+	if est := jsonInt(ev.Payload, "prompt_tokens_est"); est > 0 {
+		if st.estPending == nil {
+			st.estPending = map[int]int{}
+		}
+		st.estPending[ev.Seq] = est
+	}
+}
+
+// spawnSeqFor resolves a usage receipt whose covers_spawn_seq is 0
+// (unknown) to the NEWEST spawn of its round/task — the fallback match
+// the lock specifies for receipts the writer couldn't pin.
+func (st *loopState) spawnSeqFor(round, task int) int {
+	best := 0
+	for s, r := range st.spawnRound {
+		if round > 0 && r == round && s > best {
+			best = s
+		}
+	}
+	for s, t := range st.spawnTask {
+		if task > 0 && t == task && s > best {
+			best = s
+		}
+	}
+	return best
+}
+
+// foldRunUsage folds one drain-side loop_run_usage receipt (D3): the
+// covered spawn's estimate comes OUT of the cumulative, the measured
+// input+output+cache_write goes IN (cache_read journaled, never
+// budgeted). usage_available:false rows touch nothing — the estimate
+// stays pending (fail-soft; a crash before the tail behaves the same).
+// Duplicate receipts per spawn fold newest-wins: subtract the prior
+// receipt's spend before adding the new one, so a re-fold over the same
+// journal yields the identical cumulative.
+func (st *loopState) foldRunUsage(ev store.Event) {
+	if !jsonBool(ev.Payload, "usage_available") {
+		return
+	}
+	usage := jsonInt(ev.Payload, "input_tokens") +
+		jsonInt(ev.Payload, "output_tokens") +
+		jsonInt(ev.Payload, "cache_write_tokens")
+	s := jsonInt(ev.Payload, "covers_spawn_seq")
+	if s <= 0 {
+		s = st.spawnSeqFor(jsonInt(ev.Payload, "round"), jsonInt(ev.Payload, "task"))
+	}
+	if s <= 0 {
+		// No spawn row to retire the estimate from (partial journal):
+		// fold the measured spend plainly — it is the additive truth.
+		st.spentTokens += usage
+		return
+	}
+	st.spentTokens -= st.estPending[s]
+	delete(st.estPending, s)
+	st.spentTokens -= st.usageBySpawn[s]
+	if st.usageBySpawn == nil {
+		st.usageBySpawn = map[int]int{}
+	}
+	st.usageBySpawn[s] = usage
+	st.spentTokens += usage
 }
 
 // allTasksDone reports whether every Mode B task reached a terminal
@@ -794,6 +929,17 @@ func jsonInt(payload []byte, key string) int {
 	}
 	f, _ := m[key].(float64)
 	return int(f)
+}
+
+// jsonBool decodes a payload boolean (absent reads false, zero-value
+// discipline of the other fold readers).
+func jsonBool(payload []byte, key string) bool {
+	var m map[string]interface{}
+	if !jsonUnmarshalOK(payload, &m) {
+		return false
+	}
+	b, _ := m[key].(bool)
+	return b
 }
 
 func jsonStrList(payload []byte, key string) []string {

@@ -18,7 +18,7 @@
 // never drive GUI state (infra streak, hold severity, seed diffs) stay
 // daemon-owned and are deliberately not folded here.
 
-import type { OdoEvent } from "./types";
+import type { EventPayload, OdoEvent } from "./types";
 
 // The daemon stamps loop rows and loop-owned pipeline rows with this
 // actor (loop_journal.go loopActor).
@@ -85,13 +85,24 @@ export interface LoopState {
   fixOpen: boolean; // a fix spawn has no accept/blocked/suspend after
   fixOutcome: string; // "landed" | "unlanded" | "" (open)
   fixesLanded: number; // accept rows attributed to a Mode A fix (D1 mirror)
+  // D3 measured-cost fold parity (loop_journal.go estPending rule): a
+  // spawn row's prompt_tokens_est stays in the cumulative ONLY until its
+  // covering loop_run_usage receipt lands; the receipt subtracts the
+  // pending estimate and adds the measured input+output+cache_write.
+  // usageBySpawn dedups duplicate receipts per covers_spawn_seq (newest
+  // wins — identical cumulative on re-fold); spawnRound/spawnTask
+  // resolve a receipt whose covers_spawn_seq is 0 by round/task.
+  estPending: Map<number, number>;
+  usageBySpawn: Map<number, number>;
+  spawnRound: Map<number, number>;
+  spawnTask: Map<number, number>;
   // D1 attribution (loop_journal.go parity): the drain-journaled
   // loop⇄diff map. An accept/blocked review row closes the Mode A fix
   // phase only when its diff is round-bound here — no binding, no
   // attribution (fail-closed). Task bindings resolve in the task fold.
   boundDiffs: Set<number>;
   boundTasks: Map<number, number>;
-  spentTokens: number; // cumulative ledger (max wins)
+  spentTokens: number; // cumulative ledger (max wins; usage rows replace)
   notifiedKinds: string[]; // journaled loop_notified receipts (V11 dedup)
   terminalKinds: string[]; // first-sight set of LOOP_TERMINAL_KINDS seen
   lastKind: string;
@@ -119,6 +130,48 @@ export function loopPhase(st: LoopState): string {
 // drains (the chip buckets on it).
 export function loopMode(st: LoopState): string {
   return st.mode === "tasks" && st.finalAudit ? "tasks_final" : st.mode;
+}
+
+// trackSpawn records one spawn row's estimate + phase keys for the D3
+// estPending rule (Go parity with loop_journal.go trackSpawn).
+function trackSpawn(st: LoopState, ev: OdoEvent, round: number, task: number): void {
+  if (round > 0) st.spawnRound.set(ev.seq, round);
+  if (task > 0) st.spawnTask.set(ev.seq, task);
+  const est = ev.payload?.prompt_tokens_est ?? 0;
+  if (est > 0) st.estPending.set(ev.seq, est);
+}
+
+// spawnSeqFor resolves a usage receipt whose covers_spawn_seq is 0
+// (unknown) to the NEWEST spawn of its round/task — the lock's fallback
+// match (Go parity).
+function spawnSeqFor(st: LoopState, round: number, task: number): number {
+  let best = 0;
+  if (round > 0) for (const [s, r] of st.spawnRound) if (r === round && s > best) best = s;
+  if (task > 0) for (const [s, t] of st.spawnTask) if (t === task && s > best) best = s;
+  return best;
+}
+
+// foldRunUsage folds one drain-side loop_run_usage receipt (D3, Go
+// parity): the covered spawn's estimate comes OUT of the cumulative, the
+// measured input+output+cache_write goes IN (cache_read journaled,
+// never budgeted). usage_available:false rows touch nothing (fail-soft —
+// the estimate stays pending). Duplicate receipts per spawn fold
+// newest-wins: the identical cumulative on re-fold.
+function foldRunUsage(st: LoopState, p: EventPayload): void {
+  if (p.usage_available !== true) return;
+  const usage = (p.input_tokens ?? 0) + (p.output_tokens ?? 0) + (p.cache_write_tokens ?? 0);
+  let s = p.covers_spawn_seq ?? 0;
+  if (s <= 0) s = spawnSeqFor(st, p.round ?? 0, p.task ?? 0);
+  if (s <= 0) {
+    // No spawn to retire (partial journal): plain additive truth.
+    st.spentTokens += usage;
+    return;
+  }
+  st.spentTokens -= st.estPending.get(s) ?? 0;
+  st.estPending.delete(s);
+  st.spentTokens -= st.usageBySpawn.get(s) ?? 0;
+  st.usageBySpawn.set(s, usage);
+  st.spentTokens += usage;
 }
 
 // newestFoldLoop parity: review_action pipeline rows attribute to the
@@ -156,6 +209,10 @@ function foldLoopStarted(ev: OdoEvent, id: number): LoopState {
     fixesLanded: 0,
     boundDiffs: new Set<number>(),
     boundTasks: new Map<number, number>(),
+    estPending: new Map<number, number>(),
+    usageBySpawn: new Map<number, number>(),
+    spawnRound: new Map<number, number>(),
+    spawnTask: new Map<number, number>(),
     spentTokens: p.spent_tokens ?? 0,
     notifiedKinds: [],
     terminalKinds: [],
@@ -169,8 +226,14 @@ function foldLoopStarted(ev: OdoEvent, id: number): LoopState {
 // same-named Go function — same status transitions, same fix tracking).
 function foldLoopRow(st: LoopState, ev: OdoEvent, kind: string): void {
   const p = ev.payload ?? {};
-  const spent = p.spent_tokens ?? 0;
-  if (spent > st.spentTokens) st.spentTokens = spent;
+  // Stamp max-wins EXCEPT on loop_run_usage (Go parity): the fold
+  // performs the estPending replacement itself there — a measured cost
+  // can be LOWER than the estimate it retires, and a max would resurrect
+  // the stale estimate.
+  if (kind !== "loop_run_usage") {
+    const spent = p.spent_tokens ?? 0;
+    if (spent > st.spentTokens) st.spentTokens = spent;
+  }
   st.lastKind = kind;
   st.lastSeq = ev.seq;
   // First-sight tracking for the notification watcher (V11): the closed
@@ -245,6 +308,7 @@ function foldLoopRow(st: LoopState, ev: OdoEvent, kind: string): void {
       st.awaitingFixSpawn = false;
       st.fixOpen = true;
       st.fixOutcome = "";
+      trackSpawn(st, ev, p.round ?? 0, 0);
       break;
     case "loop_diff_bound": {
       // P1 #13 / D1: the drain-journaled loop⇄diff binding (parity with
@@ -270,8 +334,12 @@ function foldLoopRow(st: LoopState, ev: OdoEvent, kind: string): void {
         st.tasks[t - 1].spawned = true;
         st.tasks[t - 1].designLockSeq = 0;
       }
+      trackSpawn(st, ev, 0, t);
       break;
     }
+    case "loop_run_usage":
+      foldRunUsage(st, p);
+      break;
     case "loop_task_done": {
       const t = p.task ?? 0;
       if (t >= 1 && t <= st.tasks.length) {
@@ -376,6 +444,7 @@ const KIND_SHORT: Record<string, string> = {
   loop_completed: "completed",
   loop_stopped: "stopped",
   loop_budget_exceeded: "budget exceeded",
+  loop_run_usage: "run usage",
   loop_recovered: "recovered",
   loop_resumed: "resumed",
   loop_notified: "notified",
@@ -410,6 +479,12 @@ export function loopEventLabel(ev: OdoEvent): { label: string; title: string } {
       break;
     case "loop_budget_exceeded":
       extra = ` · ${p.spent_tokens ?? 0}/${p.budget_tokens ?? 0}`;
+      break;
+    case "loop_run_usage":
+      extra =
+        p.usage_available === true
+          ? ` · ${(p.input_tokens ?? 0) + (p.output_tokens ?? 0) + (p.cache_write_tokens ?? 0)} tok measured`
+          : ` · usage pending (${p.reason ?? "no transcript"})`;
       break;
     case "loop_completed":
       extra = ` · rounds ${p.rounds ?? 0} · fixes ${p.fixes_landed ?? 0}`;

@@ -234,6 +234,18 @@ export interface EventPayload {
   findings_count?: number; // loop_audit_round / loop_fix_spawn actionable findings
   budget?: number; // loop_resumed's optional budget raise
   prompt_tokens_est?: number; // spawn-time prompt estimate (chars/4)
+  // D3 loop_run_usage receipt (internal/ipc/loop_journal.go contract):
+  // the drain's measured executor cost. covers_spawn_seq pins the spawn
+  // row whose estimate the fold retires (0 ⇒ match by round/task);
+  // usage_available:false + reason is the fail-soft row (estimate stays
+  // pending). cache_read is journaled, never budgeted.
+  kind_run?: string;
+  run_id?: string;
+  covers_spawn_seq?: number;
+  usage_available?: boolean; // (reason? rides the shared review_action key above)
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  cost_usd?: number;
   // Read-only run/verify log (tri-model right sidebar gap): moa_review rows
   // from the auto-land pipeline carry the verify that attested the landing —
   // the command and its capped output tail (previously prompt-ephemeral

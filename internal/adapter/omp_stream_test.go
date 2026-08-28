@@ -299,3 +299,71 @@ func TestStreamTerminalError(t *testing.T) {
 		t.Errorf("error message = %q", msg)
 	}
 }
+
+// TestSessionUsageFixture pins D3's measured-cost extractor against a
+// live-shape transcript fixture: assistant-message usage blocks sum
+// exactly (input/output/cacheRead/cacheWrite per record, cost.total at
+// 6dp), the budgeted spend is input+output+cacheWrite (cacheRead is a
+// recorded near-free hit, never budgeted), and a transcript carrying no
+// usage blocks fails soft (ok=false — never fabricated numbers).
+func TestSessionUsageFixture(t *testing.T) {
+	msg := func(role, usage string) string {
+		u := ""
+		if usage != "" {
+			u = ",\"usage\":" + usage
+		}
+		return "{\"type\":\"message\",\"message\":{\"role\":\"" + role +
+			"\",\"content\":[{\"type\":\"text\",\"text\":\"x\"}]" + u + "}}\n"
+	}
+
+	dir := t.TempDir()
+	// Two assistant turns in one file, a third in a second session file
+	// (compaction overlay splits); a user row and a malformed line ride
+	// along and must not pollute the sums.
+	transcript := msg("user", "") +
+		msg("assistant", `{"input":1000,"output":200,"cacheRead":700,"cacheWrite":100,"totalTokens":2000,"cost":{"input":0.001,"output":0.0005,"cacheRead":0,"cacheWrite":0.0002,"total":0.0017}}`) +
+		"not json at all\n" +
+		msg("assistant", `{"input":2000,"output":300,"cacheRead":0,"cacheWrite":0,"totalTokens":2300,"cost":{"input":0.002,"output":0.0008,"cacheRead":0,"cacheWrite":0,"total":0.0028}}`) +
+		msg("assistant", "{}") // assistant row without usage: ignored
+	transcript2 := msg("assistant", `{"input":4000,"output":600,"cacheRead":999,"cacheWrite":200,"totalTokens":5799,"cost":{"input":0.004,"output":0.001,"cacheRead":0.0005,"cacheWrite":0,"total":0.0055}}`)
+	if err := os.WriteFile(filepath.Join(dir, "session-a.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session-b.jsonl"), []byte(transcript2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u, ok := SessionUsage(dir)
+	if !ok {
+		t.Fatal("usage-bearing transcript: ok=false")
+	}
+	want := Usage{
+		InputTokens:      7000,
+		OutputTokens:     1100,
+		CacheReadTokens:  1699,
+		CacheWriteTokens: 300,
+		CostUSD:          0.01, // 0.0017 + 0.0028 + 0.0055, pinned at 6dp
+		SpentTokens:      8400, // input+output+cacheWrite; cacheRead excluded
+	}
+	if u != want {
+		t.Errorf("sums = %+v, want %+v", u, want)
+	}
+
+	t.Run("no usage records fails soft", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte(msg("user", "")+msg("assistant", "")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if u, ok := SessionUsage(dir); ok || u != (Usage{}) {
+			t.Errorf("usage-free transcript = (%+v, %v), want (zero, false)", u, ok)
+		}
+	})
+
+	t.Run("missing transcript fails soft", func(t *testing.T) {
+		if u, ok := SessionUsage(filepath.Join(t.TempDir(), "no-such-dir")); ok || u != (Usage{}) {
+			t.Errorf("missing dir = (%+v, %v), want (zero, false)", u, ok)
+		}
+		if u, ok := SessionUsage(t.TempDir()); ok || u != (Usage{}) {
+			t.Errorf("empty dir = (%+v, %v), want (zero, false)", u, ok)
+		}
+	})
+}

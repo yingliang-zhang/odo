@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1006,6 +1007,91 @@ func parseSessionJSONL(r *ompRun) []AgentEvent {
 	}
 
 	return events
+}
+
+// Usage is one OMP run's measured token ledger (D3, the 2026-08-27
+// control-plane hardening lock): the sum over every assistant-message
+// `usage` block in the run's session JSONL — the REAL executor cost the
+// loop budget constrains, replacing the spawn-row chars/4 estimate.
+// SpentTokens (= input+output+cache_write) is the budgeted quantity;
+// CacheReadTokens rides the receipt but is never budgeted (a cache hit
+// is near-free work already billed at input time). CostUSD is Σ
+// cost.total rounded to 6dp. Keys match the journaled receipt payload
+// one-to-one so the ipc layer merges it directly.
+type Usage struct {
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+	SpentTokens      int     `json:"spent_tokens"`
+}
+
+// SessionUsage measures a finished run's real token cost by summing the
+// per-assistant-message usage blocks across the session dir's *.jsonl
+// transcripts. LLM-free and deterministic. The shape is
+// live-transcript-verified (omp --mode json sessions):
+//
+//	message.usage = {input, output, cacheRead, cacheWrite, totalTokens,
+//	                 cost{input, output, cacheRead, cacheWrite, total}}
+//
+// ok=false means no measurement exists — missing dir, no *.jsonl, or no
+// usage records (a non-JSON-mode run, a crashed stub). Fail-soft: the
+// caller journals usage_available:false and NEVER fabricates numbers.
+func SessionUsage(sessionDir string) (Usage, bool) {
+	matches, err := filepath.Glob(filepath.Join(sessionDir, "*.jsonl"))
+	if err != nil || len(matches) == 0 {
+		return Usage{}, false
+	}
+	var u Usage
+	found := false
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.Contains(line, "\"usage\"") {
+				continue
+			}
+			var entry struct {
+				Message struct {
+					Role  string `json:"role"`
+					Usage *struct {
+						Input       int `json:"input"`
+						Output      int `json:"output"`
+						CacheRead   int `json:"cacheRead"`
+						CacheWrite  int `json:"cacheWrite"`
+						TotalTokens int `json:"totalTokens"`
+						Cost        struct {
+							Total float64 `json:"total"`
+						} `json:"cost"`
+					} `json:"usage"`
+				} `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				continue
+			}
+			mu := entry.Message.Usage
+			if entry.Message.Role != "assistant" || mu == nil {
+				continue
+			}
+			found = true
+			u.InputTokens += mu.Input
+			u.OutputTokens += mu.Output
+			u.CacheReadTokens += mu.CacheRead
+			u.CacheWriteTokens += mu.CacheWrite
+			u.CostUSD += mu.Cost.Total
+		}
+	}
+	if !found {
+		return Usage{}, false
+	}
+	// 6dp: below one-millionth of a dollar the float noise is meaningless.
+	u.CostUSD = math.Round(u.CostUSD*1e6) / 1e6
+	u.SpentTokens = u.InputTokens + u.OutputTokens + u.CacheWriteTokens
+	return u, true
 }
 
 // Cancel implements Adapter: SIGKILL the run's process group (wrapper + omp).

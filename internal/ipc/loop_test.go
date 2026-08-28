@@ -124,6 +124,12 @@ func loopRigRepo(t *testing.T) string {
 //	tier1 — add internal/ipc/newgate.go (D1 Tier-1 panel-everywhere gate)
 //	slow — sleep 5s (a mid-flight run a human send can interrupt)
 //	none — produce no diff
+//
+// D3: $LOOP_STUB_USAGE_CTRL (a file path) arms the measured-cost
+// receipt — when non-empty, the wrapper copies the file's JSONL content
+// into the run's --session-dir as session.jsonl and TRUNCATES the ctrl
+// (one-shot: exactly the next run gets a usage transcript; omit or
+// leave empty for the usage_available:false fail-soft path).
 const loopWrapper = `#!/bin/sh
 output_file="$3"
 ctrl="$(cat "$LOOP_STUB_CTRL" 2>/dev/null || echo none)"
@@ -141,6 +147,17 @@ case "$ctrl" in
   slow) sleep 5 ;;
   none) : ;;
 esac
+usage_ctrl="${LOOP_STUB_USAGE_CTRL:-}"
+if [ -n "$usage_ctrl" ] && [ -s "$usage_ctrl" ]; then
+  sdir=""; prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--session-dir" ]; then sdir="$a"; fi
+    prev="$a"
+  done
+  if [ -n "$sdir" ]; then
+    cp "$usage_ctrl" "$sdir/session.jsonl" && : > "$usage_ctrl"
+  fi
+fi
 printf 'did work\n' > "$output_file"
 exit 0
 `
@@ -449,6 +466,73 @@ func TestDeriveLoopStatesFold(t *testing.T) {
 	}
 	if st.status != "active" {
 		t.Errorf("resume: status %q", st.status)
+	}
+}
+
+// TestFoldUsageCoversEstimate pins D3's estPending rule (the double-count
+// killer): a spawn row's prompt_tokens_est stays in the cumulative ONLY
+// until its covering loop_run_usage receipt lands — then spent = the
+// MEASURED input+output+cacheWrite, never est+usage. cache_read rides
+// the receipt journaled but is never budgeted. The writer stamps the
+// same cumulative the fold derives (C1: fold is the truth).
+func TestFoldUsageCoversEstimate(t *testing.T) {
+	mk := func(seq int, payload string) store.Event {
+		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
+	}
+	st := deriveLoopStates([]store.Event{
+		mk(1, `{"kind":"loop_started","mode":"audit","base":"abc","max_rounds":10,"budget_tokens":2000000,"spent_tokens":0}`),
+		mk(4, `{"kind":"loop_fix_spawn","loop_id":1,"round":1,"prompt_tokens_est":1000,"spent_tokens":1000}`),
+		// Writer-side stamp: 1000 - 1000 + (4000+100+100) = 4200.
+		mk(5, `{"kind":"loop_run_usage","loop_id":1,"round":1,"run_id":"r1","covers_spawn_seq":4,"usage_available":true,"input_tokens":4000,"output_tokens":100,"cache_read_tokens":9000,"cache_write_tokens":100,"cost_usd":0.05,"spent_tokens":4200}`),
+	})[0]
+	if st.spentTokens != 4200 {
+		t.Errorf("covered estimate: spent = %d, want 4200 (not 5200 — the estimate must be RETIRED)", st.spentTokens)
+	}
+	if len(st.estPending) != 0 {
+		t.Errorf("estPending = %v, want empty (the receipt covered it)", st.estPending)
+	}
+
+	// covers_spawn_seq 0 (unknown): the fold resolves the spawn by its
+	// round key (task key for Mode B) — same replacement.
+	st = deriveLoopStates([]store.Event{
+		mk(1, `{"kind":"loop_started","mode":"audit","base":"abc","max_rounds":10,"budget_tokens":2000000,"spent_tokens":0}`),
+		mk(4, `{"kind":"loop_fix_spawn","loop_id":1,"round":1,"prompt_tokens_est":1000,"spent_tokens":1000}`),
+		mk(5, `{"kind":"loop_run_usage","loop_id":1,"round":1,"run_id":"r1","covers_spawn_seq":0,"usage_available":true,"input_tokens":4000,"output_tokens":100,"cache_write_tokens":100,"spent_tokens":4200}`),
+	})[0]
+	if st.spentTokens != 4200 {
+		t.Errorf("round-fallback match: spent = %d, want 4200", st.spentTokens)
+	}
+
+	// usage_available:false (fail-soft): nothing folds, the estimate
+	// stays pending ("usage pending" — a crash before the tail looks the
+	// same).
+	st = deriveLoopStates([]store.Event{
+		mk(1, `{"kind":"loop_started","mode":"audit","base":"abc","max_rounds":10,"budget_tokens":2000000,"spent_tokens":0}`),
+		mk(4, `{"kind":"loop_fix_spawn","loop_id":1,"round":1,"prompt_tokens_est":1000,"spent_tokens":1000}`),
+		mk(5, `{"kind":"loop_run_usage","loop_id":1,"round":1,"run_id":"r1","covers_spawn_seq":4,"usage_available":false,"reason":"no session transcript","spent_tokens":1000}`),
+	})[0]
+	if st.spentTokens != 1000 || st.estPending[4] != 1000 {
+		t.Errorf("fail-soft row: spent = %d pending = %v, want 1000 + pending estimate", st.spentTokens, st.estPending)
+	}
+}
+
+// TestUsageRowIdempotent pins the duplicate-receipt rule: two usage rows
+// covering the same spawn fold newest-wins — a journal re-fold (the
+// bootstrap replay) yields the identical cumulative, not usage×2.
+func TestUsageRowIdempotent(t *testing.T) {
+	mk := func(seq int, payload string) store.Event {
+		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
+	}
+	const usageRow = `{"kind":"loop_run_usage","loop_id":1,"round":1,"run_id":"r1","covers_spawn_seq":4,"usage_available":true,"input_tokens":4000,"output_tokens":100,"cache_write_tokens":100,"cost_usd":0.05,"spent_tokens":4200}`
+	events := []store.Event{
+		mk(1, `{"kind":"loop_started","mode":"audit","base":"abc","max_rounds":10,"budget_tokens":2000000,"spent_tokens":0}`),
+		mk(4, `{"kind":"loop_fix_spawn","loop_id":1,"round":1,"prompt_tokens_est":1000,"spent_tokens":1000}`),
+		mk(5, usageRow),
+	}
+	single := deriveLoopStates(events)[0].spentTokens
+	double := deriveLoopStates(append(events, mk(6, usageRow)))[0].spentTokens
+	if single != 4200 || double != single {
+		t.Errorf("duplicate receipts: single = %d, double = %d, want equal 4200", single, double)
 	}
 }
 
@@ -813,6 +897,37 @@ func TestLoopRowSpendConcreteSlices(t *testing.T) {
 	if got := loopRowSpend(decoded); got != 10 {
 		t.Errorf("journal-decoded row: spend = %d, want 10", got)
 	}
+
+	// D3: per-leg/proposal/consolidator request_bytes/4 input estimates
+	// fold beside the output receipts (floored per entry).
+	if got := loopRowSpend(map[string]interface{}{"legs": []auditLegResult{
+		{Model: "rm1@test", OutputTokens: 100, RequestBytes: 400},
+		{Model: "rm2@test", OutputTokens: 54, RequestBytes: 8},
+	}}); got != 256 { // 100+400/4 + 54+8/4
+		t.Errorf("legs with request estimates: spend = %d, want 256", got)
+	}
+	if got := loopRowSpend(map[string]interface{}{
+		"proposals":    []DesignProposal{{Model: "rm1@test", OutputTokens: 10, RequestBytes: 40}},
+		"consolidator": map[string]interface{}{"output_tokens": 5, "request_bytes": 16},
+	}); got != 29 { // 10+40/4 + 5+16/4
+		t.Errorf("design row with request estimates: spend = %d, want 29", got)
+	}
+
+	// D3 usage receipt: measured input+output+cacheWrite folds (output
+	// counted by the shared top-level reader — no double count);
+	// cache_read is journaled but NEVER budgeted; a usage_available:false
+	// fail-soft row contributes nothing.
+	if got := loopRowSpend(map[string]interface{}{
+		"kind": "loop_run_usage", "usage_available": true,
+		"input_tokens": 4100, "output_tokens": 100, "cache_write_tokens": 100, "cache_read_tokens": 999,
+	}); got != 4300 {
+		t.Errorf("usage receipt: spend = %d, want 4300 (cacheRead excluded)", got)
+	}
+	if got := loopRowSpend(map[string]interface{}{
+		"kind": "loop_run_usage", "usage_available": false, "reason": "no session transcript",
+	}); got != 0 {
+		t.Errorf("fail-soft usage row: spend = %d, want 0", got)
+	}
 }
 
 // TestLoopImplementerAdapterPinned pins P1 (V12): with loop_implementer
@@ -1114,13 +1229,15 @@ func TestLoopBudgetExceededResume(t *testing.T) {
 	})
 	// P1 (C12) end to end: the round row's spend includes Σ leg
 	// output_tokens (120000) — zero meant the concrete-slice assertion
-	// ate every leg's receipt.
+	// ate every leg's receipt. D3 adds each leg's request_bytes/4 input
+	// estimate on top (stub-body-dependent, so asserted as a floor here;
+	// exact per-leg math lives in TestLoopRowSpendConcreteSlices).
 	rounds := sc.ofKind(loopKindAuditRound)
 	if len(rounds) != 1 {
 		t.Fatalf("audit rounds = %d, want 1", len(rounds))
 	}
-	if got, _ := rounds[0]["spent_tokens"].(float64); int(got) != 3*legTokens {
-		t.Errorf("round spent_tokens = %v, want %d (Σ leg output_tokens)", rounds[0]["spent_tokens"], 3*legTokens)
+	if got, _ := rounds[0]["spent_tokens"].(float64); int(got) < 3*legTokens {
+		t.Errorf("round spent_tokens = %v, want >= %d (Σ leg output_tokens + request estimates)", rounds[0]["spent_tokens"], 3*legTokens)
 	}
 	if st := sc.states[sc.loopID()]; st.status != "suspended" || st.cause != "budget_exceeded" {
 		t.Fatalf("fold = %+v, want suspended budget_exceeded", st)
@@ -1143,6 +1260,123 @@ func TestLoopBudgetExceededResume(t *testing.T) {
 	}
 	if got, _ := resumed[0]["budget"].(float64); int(got) != 500000 {
 		t.Errorf("resume budget = %v, want 500000", resumed[0]["budget"])
+	}
+}
+
+// TestBudgetUsesExecutorSpend pins D3's enforcement end to end: the
+// drain-side usage receipt (measured 90k, replacing the spawn's prompt
+// estimate) on top of the panel's 30k crosses loop_budget_tokens — the
+// loop suspends loop_budget_exceeded BEFORE autoLand spends verify+panel
+// (fail-closed; zero moa_review/accept rows for the fix diff), and the
+// journaled cumulative, the fold, and the receipt stamp all agree (C1).
+func TestBudgetUsesExecutorSpend(t *testing.T) {
+	// The stub wrapper plants this transcript into the fix run's session
+	// dir (one-shot): spent = 89000+500+500 = 90000; cacheRead journaled
+	// but never budgeted; cost rounds to 6dp (1.234568).
+	transcript := `{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"fix"}],"usage":{"input":89000,"output":500,"cacheRead":7000,"cacheWrite":500,"totalTokens":97500,"cost":{"input":1.0,"output":0.2,"cacheRead":0.03,"cacheWrite":0.004567,"total":1.234567891}}}}` + "\n"
+	usageCtrl := filepath.Join(t.TempDir(), "usage_ctrl")
+	if err := os.WriteFile(usageCtrl, []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOP_STUB_USAGE_CTRL", usageCtrl)
+
+	var ctrl string
+	rig, ret := loopRig(t, func(kind string, n int, model string) (int, string, int) {
+		switch kind {
+		case "audit":
+			_ = os.WriteFile(ctrl, []byte("fix1"), 0o644)                                                      // arm the fix run's diff action
+			return 200, auditFindings("- sev: P2 | file: src/a.go | symbol: a | title: missing guard"), 10_000 // panel 3×10k = 30k
+		case "review":
+			return 200, "ACCEPT\nlooks correct", 10 // must NEVER be reached
+		}
+		return 200, "", 0
+	}, "loop_budget_tokens: 100000\n")
+	ctrl = ret
+	convID := loopBoot(t, rig)
+	base := gitOut(t, rig.root, "rev-parse", "HEAD")
+	gitIn(t, rig.root, "commit", "--allow-empty", "-m", "work")
+	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/loop audit base=" + base})
+
+	// The fix run spawns off round 1's blocking finding; polls drive its
+	// drain (the loop's terminal tail runs there).
+	waitLoop(t, rig.store, convID, "fix spawn", func(sc loopScan) bool {
+		return len(sc.ofKind(loopKindFixSpawn)) == 1
+	})
+	pollDone(t, rig, convID)
+	sc := waitLoop(t, rig.store, convID, "budget breaker at drain", func(sc loopScan) bool {
+		return len(sc.ofKind(loopKindBudgetExceeded)) == 1
+	})
+	// The trip happened at DRAIN, not spawn time: the fix run exists
+	// (spawn admitted — est projection passed) and its usage receipt was
+	// journaled FIRST in the same tail.
+	spawns := sc.ofKind(loopKindFixSpawn)
+	if len(spawns) != 1 {
+		t.Fatalf("fix spawns = %d, want 1 (drain-time trip, not the spawn-time breaker)", len(spawns))
+	}
+	usageRows := sc.ofKind(loopKindRunUsage)
+	if len(usageRows) != 1 {
+		t.Fatalf("usage receipts = %d, want 1", len(usageRows))
+	}
+	u := usageRows[0]
+	if u["usage_available"] != true || fmt.Sprint(u["kind_run"]) != "fix" {
+		t.Errorf("receipt availability/kind_run = %v/%v", u["usage_available"], u["kind_run"])
+	}
+	for k, want := range map[string]float64{"input_tokens": 89000, "output_tokens": 500, "cache_write_tokens": 500, "cache_read_tokens": 7000} {
+		if got, _ := u[k].(float64); got != want {
+			t.Errorf("receipt %s = %v, want %v", k, u[k], want)
+		}
+	}
+	if got, _ := u["cost_usd"].(float64); got != 1.234568 {
+		t.Errorf("receipt cost_usd = %v, want 1.234568 (6dp)", u["cost_usd"])
+	}
+	if got, _ := u["covers_spawn_seq"].(float64); got <= 0 {
+		t.Errorf("covers_spawn_seq = %v, want > 0 (pinned to the spawn row)", u["covers_spawn_seq"])
+	}
+	// C1 triple agreement: journaled receipt stamp == budget row's
+	// projected == the fold's derived cumulative == spawn−est+measured.
+	spawnSpent, _ := spawns[0]["spent_tokens"].(float64)
+	spawnEst, _ := spawns[0]["prompt_tokens_est"].(float64)
+	budgetRow := sc.ofKind(loopKindBudgetExceeded)[0]
+	projected, _ := budgetRow["projected"].(float64)
+	stamp, _ := u["spent_tokens"].(float64)
+	folded := float64(sc.states[sc.loopID()].spentTokens)
+	if want := spawnSpent - spawnEst + 90000; stamp != want || projected != want || folded != want {
+		t.Errorf("C1 agreement: stamp=%v projected=%v fold=%v, want %v (spawn %v − est %v + measured 90000)",
+			stamp, projected, folded, want, spawnSpent, spawnEst)
+	}
+	if st := sc.states[sc.loopID()]; st.status != "suspended" || st.cause != "budget_exceeded" {
+		t.Errorf("fold = status %q cause %q, want suspended/budget_exceeded", st.status, st.cause)
+	}
+	// autoLand never entered: no panel, no land spend, no accept — the
+	// fix diff sits pending for the human / a raised-budget resume.
+	for _, r := range sc.review {
+		if a := fmt.Sprint(r["action"]); a == "moa_review" || a == "auto_land_started" {
+			t.Errorf("pipeline spend row %v present though the loop suspended before autoLand", a)
+		}
+	}
+	if sc.acceptsWithActor(autoActor) != 0 {
+		t.Errorf("accepts = %d, want 0 (nothing landed)", sc.acceptsWithActor(autoActor))
+	}
+	if got := sc.blockedReasonsLoop(); len(got) != 0 {
+		t.Errorf("blocked rows = %v, want none (the loop suspend row carries the fact)", got)
+	}
+	// Journal-first ordering: the receipt precedes the breaker's row.
+	kinds := sc.kinds()
+	usageIdx, budgetIdx := -1, -1
+	for i, k := range kinds {
+		switch k {
+		case loopKindRunUsage:
+			if usageIdx < 0 {
+				usageIdx = i
+			}
+		case loopKindBudgetExceeded:
+			if budgetIdx < 0 {
+				budgetIdx = i
+			}
+		}
+	}
+	if usageIdx < 0 || budgetIdx < 0 || usageIdx > budgetIdx {
+		t.Errorf("row order: usage at %d, budget at %d — receipt must land first", usageIdx, budgetIdx)
 	}
 }
 

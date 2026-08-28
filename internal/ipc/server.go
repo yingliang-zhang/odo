@@ -131,6 +131,11 @@ type runMeta struct {
 	loopKind  string
 	loopRound int
 	loopTask  int
+	// loopSpawnSeq: the seq of this run's loop_fix_spawn/loop_task_spawn
+	// row — the D3 drain receipt's covers_spawn_seq, the key the fold's
+	// estPending rule retires the prompt estimate under. 0 when unknown
+	// (a pre-D3 runMeta); the fold then matches by round/task.
+	loopSpawnSeq int
 	// refusalDetail: drainRun's registration fail-fast records WHY the
 	// run's diff was refused instead of registered (today only: protected
 	// memory paths). loopNoDiffAfterRun upgrades its cause/detail to
