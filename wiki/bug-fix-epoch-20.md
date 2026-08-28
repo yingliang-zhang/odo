@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Fix: TestRevertEpoch failure (diff #92 D4 memory revert, revise round)
 
 ## Context

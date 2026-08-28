@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D4 Control-Plane Hardening: Memory Write Contract + Flag Consumer
 
 ## Context

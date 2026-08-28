@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Epoch 21: D6 Diversity Gate Re-application & U1 UI Layout Hardening
 
 ## D6 — Design-MoA diversity gate (Go, accepted)

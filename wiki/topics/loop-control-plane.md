@@ -1,0 +1,12 @@
+# Loop Pipeline & Control Plane
+
+- D3 token ledger: a spawn row's `prompt_tokens_est` stays pending until its covering `loop_run_usage` row lands, then the fold swaps estimate for measured usage (newest per spawnSeq wins, idempotent; `covers_spawn_seq=0` falls back to round/task matching) (bug-fix-epoch-15)
+- Measured usage = Σ per-assistant-message `usage{input,output,cacheRead,cacheWrite,cost.total}` from run JSONL under `.odo/sessions/<runID>/`; budgeted = input+output+cacheWrite; cacheRead is journaled but NOT budgeted; missing transcript ⇒ fail-soft `usage_available:false` journal, never fabricated (bug-fix-epoch-15, bug-fix-epoch-16)
+- Over-budget enforcement: after a usage row lands, `spent > budget` journals `loop_budget_exceeded` and suspends BEFORE `autoLand` (fail-closed, tainted rows keep their more specific reason first) (bug-fix-epoch-15)
+- D5 finding identity v4: fingerprint = `sha16(norm(file)|norm(symbol)|category[|rule|])` with title/evidence/expected/actual demoted to mutable description (most-severe sighting wins, never hashed) — model wording drift no longer creates phantom findings; old v3 FPs stay as historical identifiers, no rewrite (bug-fix-epoch-16)
+- Per-leg FP dedup runs BEFORE cross-leg union; `Legs` counts distinct legs; additive `leg_ids` align to the journaled `legs[]` positions (perLeg made position-preserving) for falsifiability (bug-fix-epoch-16)
+- Loop Mode A reroute (D1): Tier-0 hit suspends as `loop_suspended{cause:"risk:gate_core"}`; Tier-1 goes through the standard `autoLand` panel verbatim (inherit-never-fork, C8) — the verify-only landing path was deleted; fold attribution and the stall comparator are both gated on the `loop_diff_bound` binding, fail-closed without it (bug-fix-epoch-14)
+- C0 purity: autonomy `classifyDiff` stays memory-prefix-ONLY; gate-source hits are never folded into the autonomy ladder (bug-fix-epoch-14)
+- Loop admission atomicity: fold + `loop_started` journal append happen in one critical section with an in-lock re-fold (early fold kept as fast-reject hint); a 4-goroutine single-winner test pins it under `-race` (main-epoch-15)
+- `panelProg` is a per-consult batch-group slice; defer removes only its own batch and poll snapshots merge — concurrent panels no longer show Done > Total or mixed legs (main-epoch-38)
+- Open: loop spawn `prompt_tokens_est` still uses chars/4 (same underestimate family that the 87K-breaker `estimatePromptTokens` fix addressed with 1-token-per-non-ASCII-rune); margin-rule unification deferred to a separate diff (main-epoch-23)

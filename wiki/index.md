@@ -2,11 +2,12 @@
 
 ## Topics
 - Auto-Land Pipeline & Diff Governance → topics/auto-land-pipeline.md
-- Panel Review & Settlement Doctrine → topics/panel-review-doctrine.md
-- Memory Distill, Journal & Crash Recovery → topics/memory-distill-recovery.md
-- Path Containment & Security Guards → topics/security-containment.md
-- Daemon Lifecycle, Deployment & Binary Hygiene → topics/daemon-deployment.md
-- Testing & Verify Gate Reliability → topics/testing-verify-reliability.md
+- Panel Review & Verdict Policy → topics/panel-verdict-policy.md
+- Memory Distillation & Auto-Distill → topics/memory-distill.md
+- Memory Write Governance (D4) → topics/memory-governance.md
+- Path Security & Symlink Containment → topics/symlink-containment.md
+- Worktree, Workstream & Run Lifecycle → topics/run-lifecycle.md
+- Loop Pipeline & Control Plane → topics/loop-control-plane.md
 - GUI Architecture & Performance → topics/gui-performance.md
-- Control-Plane Hardening & Loop Subsystem → topics/control-plane-hardening.md
-- Store Schema & Journal Contracts → topics/store-journal-schema.md
+- Verify Gate & Test Determinism → topics/test-determinism.md
+- Daemon Deployment & Reliability → topics/daemon-deployment.md
