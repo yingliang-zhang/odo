@@ -237,33 +237,39 @@ func (sc settleScan) memoryCauses() []string {
 	return out
 }
 
-// TestSettlementClass pins the four-outcome fold over consensusVerdict
-// semantics: needs_fixes reaches the ladder ONLY with zero rejects; any
-// reject keeps direction-doubt out of the revise loop.
+// TestSettlementClass pins the outcome fold over consensusVerdict
+// semantics: needs_fixes reaches the ladder ONLY with zero rejects; the
+// reject zone splits by D7 family independence — a direction kill needs
+// ≥2 reject legs from ≥2 distinct model families; anything short is a
+// minority suspend.
 func TestSettlementClass(t *testing.T) {
-	mk := func(verdicts ...string) []ReviewResult {
-		out := make([]ReviewResult, len(verdicts))
-		for i, v := range verdicts {
-			out[i] = ReviewResult{Model: fmt.Sprintf("m%d@t", i), Verdict: v}
+	// Each entry "model:verdict" — the family rides the model label.
+	mk := func(pairs ...string) []ReviewResult {
+		out := make([]ReviewResult, len(pairs))
+		for i, pv := range pairs {
+			parts := strings.SplitN(pv, ":", 2)
+			out[i] = ReviewResult{Model: parts[0], Verdict: parts[1]}
 		}
 		return out
 	}
 	cases := []struct {
-		name     string
-		verdicts []string
-		want     string
+		name  string
+		panel []string
+		want  string
 	}{
-		{"unanimous accept", []string{"accept", "accept", "accept"}, "accept"},
-		{"unanimous reject", []string{"reject", "reject", "reject"}, "reject_unanimous"},
-		{"one reject is mixed", []string{"accept", "reject", "accept"}, "reject_mixed"},
-		{"two rejects still mixed", []string{"reject", "reject", "needs_fixes"}, "reject_mixed"},
-		{"zero rejects + one needs_fixes", []string{"accept", "accept", "needs_fixes"}, "needs_fixes"},
-		{"zero rejects + all needs_fixes", []string{"needs_fixes", "needs_fixes", "needs_fixes"}, "needs_fixes"},
+		{"unanimous accept", []string{"k1-a:accept", "g2-b:accept", "d3-c:accept"}, "accept"},
+		{"unanimous reject, distinct families", []string{"k1-a:reject", "g2-b:reject", "d3-c:reject"}, "reject_independent"},
+		{"one reject is a minority", []string{"m1-x:accept", "k1-a:reject", "m2-y:accept"}, "reject_minority"},
+		{"two rejects, distinct families", []string{"k1-a:reject", "d3-c:reject", "m2-y:needs_fixes"}, "reject_independent"},
+		{"two rejects, one family is a minority", []string{"k1-a:reject", "k1-b:reject", "m2-y:accept"}, "reject_minority"},
+		{"unanimous reject of a single-family panel is a minority", []string{"k1-a:reject", "k1-b:reject"}, "reject_minority"},
+		{"zero rejects + one needs_fixes", []string{"m1-x:accept", "m2-y:accept", "d3-c:needs_fixes"}, "needs_fixes"},
+		{"zero rejects + all needs_fixes", []string{"m1-x:needs_fixes", "m2-y:needs_fixes", "d3-c:needs_fixes"}, "needs_fixes"},
 		{"empty panel", nil, "needs_fixes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reviews := mk(tc.verdicts...)
+			reviews := mk(tc.panel...)
 			if got := settlementClass(consensusVerdict(reviews), reviews); got != tc.want {
 				t.Errorf("settlementClass = %q, want %q", got, tc.want)
 			}
@@ -271,15 +277,52 @@ func TestSettlementClass(t *testing.T) {
 	}
 
 	t.Run("infra leg detection", func(t *testing.T) {
-		if panelInfraLeg(mk("accept", "needs_fixes")) {
+		if panelInfraLeg(mk("m1-x:accept", "m2-y:needs_fixes")) {
 			t.Error("clean panel flagged infra")
 		}
-		reviews := mk("accept", "needs_fixes")
+		reviews := mk("m1-x:accept", "m2-y:needs_fixes")
 		reviews[1].Infra = true
 		if !panelInfraLeg(reviews) {
 			t.Error("transport-failed leg not flagged infra — the error would masquerade as dissent")
 		}
 	})
+}
+
+// TestSettlementMinority pins the D7 verdict policy boundary at the class
+// level: exactly one reject leg, or ≥2 reject legs of ONE model family,
+// folds to reject_minority (suspend for human triage); corroboration
+// needs ≥2 reject legs from ≥2 distinct families. Provider labels never
+// count as families — label diversity is not model diversity.
+func TestSettlementMinority(t *testing.T) {
+	mk := func(pairs ...string) []ReviewResult {
+		out := make([]ReviewResult, len(pairs))
+		for i, pv := range pairs {
+			parts := strings.SplitN(pv, ":", 2)
+			out[i] = ReviewResult{Model: parts[0], Verdict: parts[1]}
+		}
+		return out
+	}
+	class := func(pairs ...string) string {
+		reviews := mk(pairs...)
+		return settlementClass(consensusVerdict(reviews), reviews)
+	}
+
+	// Exactly 1 reject leg ⇒ minority, however the rest voted.
+	if got := class("k1-a:reject", "g2-b:accept"); got != "reject_minority" {
+		t.Errorf("1 reject = %q, want reject_minority", got)
+	}
+	// ≥2 rejects, all one family ⇒ minority (correlated by construction).
+	if got := class("t9s/kimi-k3@one:reject", "kimi-k3@two:reject", "kimi-k3@three:reject"); got != "reject_minority" {
+		t.Errorf("same-family rejects = %q, want reject_minority (provider labels are not families)", got)
+	}
+	// ≥2 rejects, ≥2 distinct families ⇒ independent (auto-reject path).
+	if got := class("t9s/kimi-k3@one:reject", "deepseek-v4@two:reject"); got != "reject_independent" {
+		t.Errorf("distinct-family rejects = %q, want reject_independent", got)
+	}
+	// A mixed vote with independent corroboration still auto-rejects.
+	if got := class("k1-a:reject", "d2-b:reject", "g3-c:accept"); got != "reject_independent" {
+		t.Errorf("corroborated split = %q, want reject_independent", got)
+	}
 }
 
 // TestSettleRepairPromptUnit pins the repair-prompt contract (test 8):
@@ -414,18 +457,120 @@ func TestSettleUnanimousRejectAutoRejects(t *testing.T) {
 	}
 }
 
-// TestSettleMixedRejectAutoRejects (M20): a split verdict with ≥1 reject
-// is direction doubt — the same auto-reject resolution as the unanimous
-// case (blocked panel_mixed evidence row first), never a pending park.
-func TestSettleMixedRejectAutoRejects(t *testing.T) {
+// TestMinoritySuspends (D7): a minority reject — exactly 1 reject leg,
+// or ≥2 rejects all of one model family — SUSPENDS for human triage
+// instead of auto-rejecting: blocked panel_minority_reject evidence row
+// (consensus_verdict: reject_minority, repanel_count journaled from the
+// prior-row ledger), transcript advisory, NO reject row, NO chain
+// supersede — the diff stays PENDING. A repeat evaluation journals the
+// next repanel_count (the recovery's bound input).
+func TestMinoritySuspends(t *testing.T) {
+	cases := []struct {
+		name    string
+		models  string // prefs review: line value
+		rejects map[string]bool
+	}{
+		{"single_reject_leg", "k1-a@test, g2-b@test", map[string]bool{"g2-b": true}},
+		{"same_family_rejects", "k1-a@test, k1-b@test, k1-c@test", map[string]bool{"k1-a": true, "k1-b": true, "k1-c": true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			writePrefs(t, home, "review: "+tc.models+"\n")
+			startPanelStub(t, func(call int64, model string) (int, string) {
+				if tc.rejects[model] {
+					return 200, "REJECT\nwrong layering for this codebase"
+				}
+				return 200, "ACCEPT\nlooks fine to me"
+			})
+
+			f := newAutonomyFixture(t)
+			root, sha := autolandRepo(t)
+			if err := os.WriteFile(filepath.Join(root, verifyCmdFile), []byte("echo PASS\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			s := &Server{store: f.st, projectRoot: root}
+			patch := patchSrc("README.md", 1, 1, false)
+			d := f.addDiff(t, "p.diff", patch)
+			d.BaseSHA = &sha
+
+			s.autoLand(context.Background(), d, root, "goal", false, "")
+
+			sc := scanSettle(t, f.st, f.c.ID)
+			if got := sc.blockedReasons(); len(got) != 1 || got[0] != "panel_minority_reject" {
+				t.Fatalf("blocked reasons = %v, want [panel_minority_reject]", got)
+			}
+			b := sc.blocked[0]
+			if b["consensus_verdict"] != "reject_minority" {
+				t.Errorf("consensus_verdict = %v, want reject_minority (the settlement class rides this row)", b["consensus_verdict"])
+			}
+			if b["repanel_count"] != float64(0) {
+				t.Errorf("repanel_count = %v, want 0 (first evaluation)", b["repanel_count"])
+			}
+			if b["patch_sha16"] != sha16([]byte(patch)) {
+				t.Errorf("blocked patch_sha16 = %v, want %s", b["patch_sha16"], sha16([]byte(patch)))
+			}
+			legs := len(strings.Split(tc.models, ","))
+			if reviews, _ := b["reviews"].([]interface{}); len(reviews) != legs {
+				t.Errorf("reviews attached = %d, want %d (the full dissent stays on the record)", len(reviews), legs)
+			}
+			if len(sc.advisories) != 1 || !strings.Contains(sc.advisories[0], "NOT auto-rejected") {
+				t.Errorf("advisories = %v, want one minority-suspend notice", sc.advisories)
+			}
+			// NO reject row, NO revise machinery — those ARE the suspend.
+			for _, p := range sc.reviewSeq {
+				if p["action"] == "reject" {
+					t.Errorf("reject row present (%v) — a minority suspend never auto-rejects", p)
+				}
+			}
+			if len(sc.rounds) != 0 || len(sc.markers) != 0 || len(sc.moaRows) != 0 {
+				t.Errorf("revise/land machinery fired on a minority: rounds=%v markers=%v moa=%v", sc.rounds, sc.markers, sc.moaRows)
+			}
+			got, err := f.st.GetDiff(context.Background(), d.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != store.DiffPending {
+				t.Errorf("diff status = %q, want pending (human triage owns the resolution)", got.Status)
+			}
+
+			// The ledger: the repeat evaluation (the restart recovery's
+			// re-fire, driven synchronously here) journals repanel_count=1.
+			s.autoLand(context.Background(), d, root, "goal", false, "")
+			sc = scanSettle(t, f.st, f.c.ID)
+			if got := sc.blockedReasons(); len(got) != 2 || got[1] != "panel_minority_reject" {
+				t.Fatalf("blocked reasons after re-fire = %v, want a second panel_minority_reject", got)
+			}
+			if sc.blocked[1]["repanel_count"] != float64(1) {
+				t.Errorf("repanel_count after re-fire = %v, want 1", sc.blocked[1]["repanel_count"])
+			}
+			if got, _ := f.st.GetDiff(context.Background(), d.ID); got.Status != store.DiffPending {
+				t.Errorf("diff status after re-fire = %q, want pending", got.Status)
+			}
+		})
+	}
+}
+
+// TestIndependentRejectAutoRejects (D7): corroboration — ≥2 reject legs
+// from ≥2 distinct model families — keeps the M20 auto-reject mechanics:
+// blocked evidence row first (the unanimity split keeps the reason
+// names), transcript advisory, pipeline reject row (actor auto_panel),
+// diff rejected. A split vote does not weaken corroborated direction
+// doubt.
+func TestIndependentRejectAutoRejects(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writePrefs(t, home, "review: rm1@test, rm2@test\n")
+	writePrefs(t, home, "review: k1-a@test, g2-b@test, d3-c@test\n")
 	startPanelStub(t, func(call int64, model string) (int, string) {
-		if model == "rm2" {
+		switch model {
+		case "k1-a":
 			return 200, "REJECT\nwrong layering for this codebase"
+		case "d3-c":
+			return 200, "REJECT\nthe approach violates the store contract"
+		default:
+			return 200, "ACCEPT\nlooks fine to me"
 		}
-		return 200, "ACCEPT\nlooks fine to me"
 	})
 
 	f := newAutonomyFixture(t)
@@ -443,15 +588,15 @@ func TestSettleMixedRejectAutoRejects(t *testing.T) {
 	if got := sc.blockedReasons(); len(got) != 1 || got[0] != "panel_mixed" {
 		t.Fatalf("blocked reasons = %v, want [panel_mixed]", got)
 	}
-	if len(sc.advisories) != 1 || !strings.Contains(sc.advisories[0], "split verdict") {
-		t.Errorf("advisories = %v, want one split-verdict auto-reject notice", sc.advisories)
+	if len(sc.advisories) != 1 || !strings.Contains(sc.advisories[0], "model families") {
+		t.Errorf("advisories = %v, want one corroborated auto-reject notice", sc.advisories)
 	}
 	got, err := f.st.GetDiff(context.Background(), d.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Status != store.DiffRejected {
-		t.Errorf("diff status = %q, want rejected", got.Status)
+		t.Errorf("diff status = %q, want rejected (corroborated direction doubt)", got.Status)
 	}
 	var rejects int
 	for _, p := range sc.reviewSeq {
@@ -464,6 +609,75 @@ func TestSettleMixedRejectAutoRejects(t *testing.T) {
 	}
 	if rejects != 1 {
 		t.Errorf("reject rows = %d, want 1", rejects)
+	}
+	// The patch file survives for forensics — only the queue entry closes.
+	if _, err := os.Stat(d.PathOnDisk); err != nil {
+		t.Errorf("patch file gone after auto-reject: %v", err)
+	}
+}
+
+// TestRepanelBounded (D7): the restart recovery's dedup set — a
+// panel_minority_reject blocked row is NON-terminal (one fresh panel per
+// boot) while repanel_count < panelMinorityRepanelMax, terminal at the
+// bound (the third evaluation's row parks the diff human-only). Every
+// other non-infra blocked outcome stays terminal on landing; panel_infra
+// stays retryable.
+func TestRepanelBounded(t *testing.T) {
+	ev := func(payload string) store.Event {
+		return store.Event{Type: store.EventReviewAction, Payload: json.RawMessage(payload)}
+	}
+	events := []store.Event{
+		// Retryable — below the repanel bound.
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_minority_reject","diff_id":1}`),                   // repanel_count absent ⇒ 0
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_minority_reject","diff_id":2,"repanel_count":1}`), // one re-panel spent
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_infra","diff_id":3}`),                             // infra: not a verdict
+		// Terminal — bound reached or an ordinary adjudicated outcome.
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_minority_reject","diff_id":4,"repanel_count":2}`), // parked human-only
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"panel_mixed","diff_id":5}`),
+		ev(`{"action":"auto_land_blocked","actor":"auto_panel","reason":"verify_failed","diff_id":6}`),
+	}
+	if panelMinorityRepanelMax != 2 {
+		t.Fatalf("panelMinorityRepanelMax = %d, want 2 (locked D7 bound)", panelMinorityRepanelMax)
+	}
+	terminal := pipelineTerminalDiffIDs(events)
+	for _, id := range []int64{1, 2, 3} {
+		if terminal[id] {
+			t.Errorf("diff %d terminal, want retryable (bounded re-panel or infra)", id)
+		}
+	}
+	for _, id := range []int64{4, 5, 6} {
+		if !terminal[id] {
+			t.Errorf("diff %d not terminal, want terminal", id)
+		}
+	}
+}
+
+// TestLoopFixMinorityUnlanded (D7 §6): a loop-bound fix whose panel
+// minority-suspends folds to fixOutcome "unlanded" — the same advisory
+// lane as verify failures; the loop's audit engine owns convergence (no
+// loop suspension). Fold-level, TestLoopFoldAttributesPanelLandedFix
+// pattern.
+func TestLoopFixMinorityUnlanded(t *testing.T) {
+	mk := func(seq int, payload string) store.Event {
+		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
+	}
+	rev := func(seq int, payload string) store.Event {
+		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(payload)}
+	}
+	rows := []store.Event{
+		mk(1, `{"kind":"loop_started","mode":"audit","base":"abc","max_rounds":10,"budget_tokens":1000,"hold_severity":"P2"}`),
+		mk(2, `{"kind":"loop_audit_round","loop_id":1,"round":1,"subject_sha16":"s1","legs":[{"model":"m","verdict":"complete"}]}`),
+		mk(3, `{"kind":"loop_verdict","loop_id":1,"round":1,"verdict":"fix"}`),
+		mk(4, `{"kind":"loop_fix_spawn","loop_id":1,"round":1}`),
+		mk(5, `{"kind":"loop_diff_bound","loop_id":1,"round":1,"diff_id":9}`),
+		rev(6, `{"action":"auto_land_blocked","actor":"auto_panel","diff_id":9,"reason":"panel_minority_reject","repanel_count":0}`),
+	}
+	st := deriveLoopStates(rows)[0]
+	if st.fixOpen || st.fixOutcome != "unlanded" {
+		t.Errorf("minority blocked row must resolve the fix unlanded: %+v", st)
+	}
+	if st.fixesLanded != 0 {
+		t.Errorf("fixesLanded = %d, want 0 — a suspend never lands", st.fixesLanded)
 	}
 }
 

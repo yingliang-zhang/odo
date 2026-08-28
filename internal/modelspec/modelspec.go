@@ -60,6 +60,22 @@ func basename(model string) string {
 	return model
 }
 
+// Family resolves a model id ("t9s/kimi-k3", "kimi-k3@test", "gpt-5.6")
+// to its vendor family: the basename's prefix before the first "-", else
+// the whole basename — "t9s/kimi-k3" → "kimi", "deepseek-v4-flash" →
+// "deepseek", unknown ⇒ the raw basename. Pure, LLM-free, case-folded.
+// The D7 settlement classes use it to tell a correlated same-family
+// dissent from an independent one (same model under two provider labels
+// must still read as ONE family); D6's diversity gate rides the same
+// identity. Exported for both.
+func Family(model string) string {
+	b := basename(strings.ToLower(model))
+	if i := strings.IndexByte(b, '-'); i > 0 {
+		return b[:i]
+	}
+	return b
+}
+
 // Lookup resolves the spec for a model id ("t9s/kimi-k3" or "kimi-k3"),
 // falling back to the conservative default for unknown models.
 func Lookup(model string) Spec {

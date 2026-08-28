@@ -94,13 +94,20 @@ package ipc
 //	unanimity       consensusVerdict == "accept" requires EVERY reviewer
 //	                 (the fail-open fix: a lone needs_fixes now blocks).
 //	visual class    REMOVED — GUI diffs land through the same unanimous-panel pipeline as daemon diffs; the panel verdict is sufficient.
-//	settlement      M18 (settle.go) → M20 verdict ownership: the four
-//	                 panel outcomes split — accept lands; unanimous
-//	                 reject AUTO-REJECTS {panel_unanimous_reject} and a
-//	                 split reject AUTO-REJECTS {panel_mixed} (evidence
-//	                 row carries the full dissent, transcript advisory
-//	                 fires, chain ancestors supersede; M18 parked them
-//	                 for a human the pipeline no longer assumes); an
+//	settlement      M18 (settle.go) → M20 verdict ownership → D7
+//	                 verdict policy: accept lands; a CORROBORATED
+//	                 reject — ≥2 reject legs from ≥2 distinct model
+//	                 families — AUTO-REJECTS {panel_unanimous_reject |
+//	                 panel_mixed} (evidence row carries the full
+//	                 dissent, transcript advisory fires, chain
+//	                 ancestors supersede; M18 parked them for a human
+//	                 the pipeline no longer assumes); a MINORITY
+//	                 reject — exactly 1 reject leg, or ≥2 rejects of
+//	                 one family — SUSPENDS {panel_minority_reject,
+//	                 repanel_count} for human triage (no reject row,
+//	                 the diff stays pending, one bounded re-panel per
+//	                 boot). Verify failures never join the reject set.
+//	                 An
 //	                 errored leg stays blocked-pending {panel_infra}
 //	                 (infra is not a verdict — recover-pending-diffs
 //	                 re-fires on restart); zero rejects + ≥1 needs_fixes
@@ -495,24 +502,35 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		return
 	}
 	switch settlementClass(cv, reviews) {
-	case "reject_unanimous", "reject_mixed":
-		// M20 auto-reject (panel owns resolution): a direction-level
-		// reject no longer parks the diff for a human — M18's "never
-		// auto-reject" posture assumed one. Evidence before action: the
-		// blocked row carries the full dissent (blocked-row-as-evidence
-		// precedent), the transcript advisory makes the resolution
-		// visible where the user reads, and the reject row itself names
-		// the pipeline as actor (streak-excluded in ComputeAutonomy,
-		// risk-attested like every resolution). The patch file stays on
-		// disk; the chain's older pending siblings retire as superseded
-		// (the chain is dead); the revised instruction is the re-entry.
+	case "reject_independent":
+		// D7 reject_independent (≥2 reject legs from ≥2 distinct model
+		// families) — M20 auto-reject mechanics, unchanged: a
+		// corroborated direction-level reject no longer parks the diff
+		// for a human — M18's "never auto-reject" posture assumed one.
+		// Evidence before action: the blocked row carries the full
+		// dissent (blocked-row-as-evidence precedent), the transcript
+		// advisory makes the resolution visible where the user reads,
+		// and the reject row itself names the pipeline as actor
+		// (streak-excluded in ComputeAutonomy, risk-attested like every
+		// resolution). The blocked reason keeps the unanimity split for
+		// journal-name stability; the classification itself stays in
+		// settlementClass. The patch file stays on disk; the chain's
+		// older pending siblings retire as superseded (the chain is
+		// dead); the revised instruction is the re-entry.
 		reason := "panel_unanimous_reject"
 		detail := "every reviewer rejected the direction; auto-rejected (the dissent is on this row; the patch stays on disk)"
 		advisory := "the auto-land panel unanimously rejected diff #%d — auto-rejected (the reasons are in the journal). Revise the instruction and resend if the direction should change."
-		if settlementClass(cv, reviews) == "reject_mixed" {
+		split := false
+		for _, r := range reviews {
+			if r.Verdict != "reject" {
+				split = true
+				break
+			}
+		}
+		if split {
 			reason = "panel_mixed"
-			detail = "at least one reviewer rejected the direction; auto-rejected (the dissent is on this row; the patch stays on disk)"
-			advisory = "the auto-land panel rejected diff #%d (split verdict — the reasons are in the journal); it was auto-rejected. Revise the instruction and resend if the direction should change."
+			detail = "reviewers from ≥2 model families rejected the direction; auto-rejected (the dissent is on this row; the patch stays on disk)"
+			advisory = "the auto-land panel rejected diff #%d (corroborated across model families — the reasons are in the journal); it was auto-rejected. Revise the instruction and resend if the direction should change."
 		}
 		s.journalAutoLandBlocked(ctx, d, reason, detail, reviews, cv)
 		s.journalRunAdvisory(ctx, d.ConversationID, fmt.Sprintf(advisory, d.ID))
@@ -523,6 +541,33 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		} else {
 			s.supersedeChain(ctx, d)
 		}
+		return
+	case "reject_minority":
+		// D7 reject_minority — exactly 1 reject leg, or ≥2 rejects all
+		// of one model family. A single voice (or one family's
+		// correlated voices) must not end the chain on a coin-flip:
+		// SUSPEND for human triage instead of auto-rejecting. The
+		// blocked row (full dissent attached, repanel_count journaled
+		// from the prior-row ledger) is the whole action — NO reject
+		// row, NO chain supersede; the diff stays PENDING and the inbox
+		// accept/reject click is the resolution. The row is non-
+		// terminal for the restart recovery (one fresh panel per boot
+		// until repanel_count reaches panelMinorityRepanelMax).
+		rejects := 0
+		for _, r := range reviews {
+			if r.Verdict == "reject" {
+				rejects++
+			}
+		}
+		detail := "one reviewer rejected the direction; a single dissenting leg has no auto-reject capacity (D7) — suspended for human triage (the dissent is on this row; the patch stays on disk; a daemon restart re-panels once)"
+		advisory := "the auto-land panel had a single REJECT on diff #%d — NOT auto-rejected (D7 verdict policy: one dissenting voice does not end the chain). Triage it in the inbox: accept or reject (the reasons are in the journal); a restart re-panels it once."
+		if rejects > 1 {
+			detail = fmt.Sprintf("%d reviewers rejected, all from one model family; a correlated dissent has no auto-reject capacity (D7) — suspended for human triage (the dissent is on this row; the patch stays on disk; a daemon restart re-panels once)", rejects)
+			advisory = fmt.Sprintf("the auto-land panel rejected diff #%%d (%d reject legs, all one model family) — NOT auto-rejected (D7 verdict policy: a same-family dissent is correlated). Triage it in the inbox: accept or reject (the reasons are in the journal); a restart re-panels it once.", rejects)
+		}
+		s.journalAutoLandBlockedExtra(ctx, d, "panel_minority_reject", detail, reviews, "reject_minority",
+			map[string]interface{}{"repanel_count": s.minorityRepanelCount(ctx, d)})
+		s.journalRunAdvisory(ctx, d.ConversationID, fmt.Sprintf(advisory, d.ID))
 		return
 	case "needs_fixes":
 		// Zero rejects + ≥1 needs_fixes: nobody said the direction is
@@ -601,7 +646,9 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 // panel_mixed row awaiting the human's reject click got a second full
 // panel. Diffs with a terminal pipeline row (pipelineTerminalDiffIDs)
 // are skipped; only panel_infra stays retryable (infra is not a verdict
-// — this re-fire IS its designed retry channel, the panelInfraLeg block).
+// — this re-fire IS its designed retry channel, the panelInfraLeg block)
+// and a D7 panel_minority_reject re-panels once per boot until its
+// repanel_count reaches panelMinorityRepanelMax.
 // Diffs owned by a non-terminal loop (seed + loop_diff_bound rows) are
 // likewise skipped (P1 #13): recoverLoops' tick is their retry channel,
 // and both firing together was the boot-time double-panel spend.
@@ -717,7 +764,17 @@ func strandedPendingDiffs(ctx context.Context, st *store.Store, rows []store.Pen
 //	                                          (run/verify gates, base
 //	                                          staleness, panel_mixed /
 //	                                          panel_unanimous_reject, the
-//	                                          ladder's revise_* stops)
+//	                                          ladder's revise_* stops) —
+//	                                          EXCEPT a D7
+//	                                          panel_minority_reject row
+//	                                          with repanel_count <
+//	                                          panelMinorityRepanelMax:
+//	                                          the recovery re-panels it
+//	                                          once per boot until the
+//	                                          count reaches the bound
+//	                                          (then the row turns
+//	                                          terminal and the diff parks
+//	                                          human-only)
 //	moa_review{actor:auto_panel}              the pre-land evidence row — a
 //	                                          land-failure race leaves the
 //	                                          diff pending but judged
@@ -729,7 +786,10 @@ func strandedPendingDiffs(ctx context.Context, st *store.Store, rows []store.Pen
 // NOT terminal, by design: auto_land_started / refresh_attempted are
 // breadcrumbs — a restart mid-pipeline leaves exactly those, and the diff
 // IS stranded. panel_infra is not a verdict: its designed resolution IS
-// the restart re-fire (autoLand, the panelInfraLeg block). Human-triggered
+// the restart re-fire (autoLand, the panelInfraLeg block). A D7
+// panel_minority_reject suspend is likewise retryable — bounded: it
+// re-panels once per boot until repanel_count reaches
+// panelMinorityRepanelMax, then parks human-only. Human-triggered
 // moa_review rows carry no actor and never dedup — the pipeline genuinely
 // has not run for that diff. Human accept/reject rows can't coexist with
 // a pending diff at all, and pipeline accept/reject rows only appear with
@@ -741,16 +801,21 @@ func pipelineTerminalDiffIDs(events []store.Event) map[int64]bool {
 			continue
 		}
 		var p struct {
-			Action string `json:"action"`
-			Actor  string `json:"actor"`
-			Reason string `json:"reason"`
-			DiffID int64  `json:"diff_id"`
+			Action       string `json:"action"`
+			Actor        string `json:"actor"`
+			Reason       string `json:"reason"`
+			DiffID       int64  `json:"diff_id"`
+			RepanelCount int    `json:"repanel_count"`
 		}
 		if !jsonUnmarshalOK(ev.Payload, &p) || p.DiffID == 0 {
 			continue
 		}
 		switch {
-		case p.Action == "auto_land_blocked" && p.Reason != "panel_infra":
+		case p.Action == "auto_land_blocked" && p.Reason != "panel_infra" &&
+			(p.Reason != "panel_minority_reject" || p.RepanelCount >= panelMinorityRepanelMax):
+			// D7: a minority suspend stays retryable (one re-panel per
+			// boot) until its ledger count reaches the bound; every other
+			// non-infra blocked reason is terminal on landing.
 		case p.Action == "moa_review" && p.Actor == autoActor:
 		case p.Action == "auto_revise_round":
 		default:
@@ -1242,19 +1307,26 @@ func (s *Server) journalAutoLandStarted(ctx context.Context, d store.Diff, stage
 	}
 }
 
-// journalAutoLandBlocked records one blocked auto-land attempt. Reviews
-// (attached when the panel ran) keep the dissent on the record; the
-// diff's patch sha16 rides every row (M18: the ladder's no-progress
+// journalAutoLandBlockedExtra records one blocked auto-land attempt.
+// Reviews (attached when the panel ran) keep the dissent on the record;
+// the diff's patch sha16 rides every row (M18: the ladder's no-progress
 // comparator and the audit's diff identity), best-effort — a row about an
 // unreadable patch simply omits it. fix-INT W5: the Guardian risk receipt
 // rides every blocked row too, classified from the same bytes
 // (risk_class/risk_evidence/risk_classifier; unreadable = all omitted).
-func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reason, detail string, reviews []ReviewResult, consensus string) {
+// journalAutoLandBlockedExtra is journalAutoLandBlocked with optional
+// additive payload keys (ADR-0002 discipline) — D7's repanel_count rides
+// the minority row only; every other blocked reason keeps its exact
+// byte shape (nil extra).
+func (s *Server) journalAutoLandBlockedExtra(ctx context.Context, d store.Diff, reason, detail string, reviews []ReviewResult, consensus string, extra map[string]interface{}) {
 	payload := map[string]interface{}{
 		"action":  "auto_land_blocked",
 		"diff_id": d.ID,
 		"actor":   autoActor,
 		"reason":  reason,
+	}
+	for k, v := range extra {
+		payload[k] = v
 	}
 	if data, err := os.ReadFile(d.PathOnDisk); err == nil {
 		payload["patch_sha16"] = sha16(data)
@@ -1272,6 +1344,12 @@ func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reaso
 	if _, err := s.store.AppendEvent(ctx, d.ConversationID, store.EventReviewAction, mustJSON(payload)); err != nil {
 		log.Printf("auto-land: journal blocked (%s) for diff %d: %v", reason, d.ID, err)
 	}
+}
+
+// journalAutoLandBlocked is the plain call shape every blocked reason
+// uses except D7's panel_minority_reject (which adds repanel_count).
+func (s *Server) journalAutoLandBlocked(ctx context.Context, d store.Diff, reason, detail string, reviews []ReviewResult, consensus string) {
+	s.journalAutoLandBlockedExtra(ctx, d, reason, detail, reviews, consensus, nil)
 }
 
 // truncMarker prefixes every trimmed record (journal details, verify

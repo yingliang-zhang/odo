@@ -52,3 +52,30 @@ func TestCompactThresholdTokens(t *testing.T) {
 		t.Error("unknown model must report ok=false")
 	}
 }
+
+// TestFamily pins the D7/D6 model-family identity: basename prefix before
+// the first "-", provider labels and case folded away, unknown models
+// kept raw. Label diversity is NOT model diversity.
+func TestFamily(t *testing.T) {
+	cases := []struct{ model, want string }{
+		{"t9s/kimi-k3", "kimi"},
+		{"kimi-k3@test", "kimi"}, // review-row label shape (model@provider)
+		{"T9S/Kimi-K3", "kimi"},  // case-folded
+		{"deepseek-v4-flash", "deepseek"},
+		{"gpt-5.6", "gpt"},
+		{"acme/pi-9", "pi"},
+		{"pm1", "pm1"},   // no dash: the raw basename is the family
+		{"-odd", "-odd"}, // leading dash: no prefix exists — raw basename
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := Family(tc.model); got != tc.want {
+			t.Errorf("Family(%q) = %q, want %q", tc.model, got, tc.want)
+		}
+	}
+	// Same model under two provider labels is ONE family (the diversity
+	// gate must not count label diversity as model diversity).
+	if Family("kimi-k3@alpha") != Family("kimi-k3@beta") {
+		t.Error("provider labels must not split a family")
+	}
+}

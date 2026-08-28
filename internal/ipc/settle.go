@@ -6,11 +6,13 @@ package ipc
 // every reviewer):
 //
 //	unanimous ACCEPT  → land (M16 behavior, untouched)
-//	unanimous REJECT  → auto_land_blocked{panel_unanimous_reject} +
-//	mixed (≥1 reject) → auto_land_blocked{panel_mixed} — and then BOTH
-//	                    auto-reject the diff (M20 amendment: the pipeline
-//	                    owns resolution; there is no guaranteed human on
-//	                    the other side of a pending row anymore. M18 parked
+//	reject_independent → ≥2 reject legs from ≥2 distinct model families
+//	                    (D7): auto_land_blocked{panel_unanimous_reject |
+//	                    panel_mixed} — the reason keeps the unanimity
+//	                    split for journal-name stability — + auto-reject
+//	                    the diff (M20: the pipeline owns resolution;
+//	                    there is no guaranteed human on the other side
+//	                    of a pending row anymore. M18 parked
 //	                    direction-rejected diffs for the human because "a
 //	                    diff is the user's work product"; the M20 posture:
 //	                    the panel IS the judgment, the full dissent rides
@@ -18,6 +20,22 @@ package ipc
 //	                    and the revised instruction is the re-entry path).
 //	                    Chain ancestors of a rejected product are
 //	                    superseded (the chain is dead).
+//	reject_minority   → exactly 1 reject leg, OR ≥2 rejects all of one
+//	                    model family (D7: a single voice — or one
+//	                    family's correlated voices — has no auto-reject
+//	                    capacity; a single-family panel can never
+//	                    auto-reject): auto_land_blocked{panel_minority_
+//	                    reject, consensus_verdict: reject_minority,
+//	                    repanel_count} + transcript advisory; NO reject
+//	                    row, NO supersede — the diff stays PENDING for
+//	                    human triage (inbox accept/reject). The row is
+//	                    non-terminal for the restart recovery: each boot
+//	                    re-panels it once, until repanel_count reaches
+//	                    panelMinorityRepanelMax and the diff parks
+//	                    human-only. Verify failures never enter the
+//	                    reject set — they stay in the blocked+revise
+//	                    lane (implementation evidence, not direction
+//	                    evidence).
 //	infra (any leg)   → auto_land_blocked{panel_infra} → human. A
 //	                    transport/auth/timeout failure is not a verdict:
 //	                    the round never validly completed, and it must not
@@ -79,9 +97,12 @@ package ipc
 //	                         reasons: panel_unanimous_reject, panel_mixed,
 //	                         panel_infra, repair_prompt_too_large,
 //	                         revise_no_progress, revise_ambiguous,
-//	                         revise_spawn_failed, ladder_suspended. Reason
-//	                         panel_disagreed is RETIRED (split into the
-//	                         settlement classes above).
+//	                         revise_spawn_failed, ladder_suspended; D7 adds
+//	                         panel_minority_reject — additive repanel_count
+//	                         key, and consensus_verdict carries the
+//	                         settlement CLASS ("reject_minority") on that
+//	                         row. Reason panel_disagreed is RETIRED (split
+//	                         into the settlement classes above).
 //	memory_update            layer:"auto_land", cause:ladder_suspended |
 //	                         ladder_resumed — the demotion ledger.
 //	user_message             the synthesized repair prompt, journaled
@@ -108,6 +129,7 @@ import (
 	"strings"
 
 	"github.com/yingliang-zhang/odo/internal/git"
+	"github.com/yingliang-zhang/odo/internal/modelspec"
 	"github.com/yingliang-zhang/odo/internal/store"
 	"github.com/yingliang-zhang/odo/internal/worktree"
 )
@@ -141,22 +163,41 @@ const (
 
 	// autoReviseLayer labels the ladder's memory_update rows.
 	autoReviseLayer = "auto_land"
+	// panelMinorityRepanelMax bounds D7's restart re-panels of a
+	// minority reject: a panel_minority_reject blocked row is
+	// NON-terminal for the restart recovery (one fresh panel per boot)
+	// while its repanel_count is below the bound; at the bound the row
+	// turns terminal and the diff parks human-only (the inbox still
+	// shows it).
+	panelMinorityRepanelMax = 2
 )
 
-// settlementClass folds a panel into the four locked outcomes. cv must be
+// settlementClass folds a panel into the locked outcomes. cv must be
 // consensusVerdict(reviews) — the tally semantics stay exactly where M16
-// put them; this only names the classes.
+// put them (any reject dominates the row's consensus key; every reviewer
+// accepting ⇒ accept); this only names the classes. D7 splits the reject
+// zone by FAMILY independence (modelspec.Family): a direction kill needs
+// corroboration — ≥2 reject legs from ≥2 distinct model families. One
+// dissenting leg, or ≥2 reject legs all of one family (correlated by
+// construction), is reject_minority — a suspend for human triage, never
+// an auto-reject; a single-family panel therefore has no auto-reject
+// capacity at all (fail-closed, visible).
 func settlementClass(cv string, reviews []ReviewResult) string {
 	switch cv {
 	case "accept":
 		return "accept"
 	case "reject":
+		rejects, families := 0, map[string]bool{}
 		for _, r := range reviews {
-			if r.Verdict != "reject" {
-				return "reject_mixed"
+			if r.Verdict == "reject" {
+				rejects++
+				families[modelspec.Family(r.Model)] = true
 			}
 		}
-		return "reject_unanimous"
+		if rejects >= 2 && len(families) >= 2 {
+			return "reject_independent"
+		}
+		return "reject_minority"
 	default:
 		return "needs_fixes"
 	}
@@ -173,6 +214,40 @@ func panelInfraLeg(reviews []ReviewResult) bool {
 		}
 	}
 	return false
+}
+
+// minorityRepanelCount counts diff d's prior panel_minority_reject
+// blocked rows — the D7 repanel ledger, journal-derived like the ladder
+// state (restart-proof, no in-memory mirror): the next minority blocked
+// row carries it as repanel_count, and pipelineTerminalDiffIDs parks
+// the diff when a row reaches panelMinorityRepanelMax. A journal read
+// failure returns the bound itself: an uncountable ledger fails
+// closed — the new row parks human-only instead of underwriting
+// unbounded restart re-panels.
+func (s *Server) minorityRepanelCount(ctx context.Context, d store.Diff) int {
+	events, err := s.store.ListEvents(ctx, d.ConversationID, 0)
+	if err != nil {
+		log.Printf("settle: repanel count scan for diff %d: %v (fail-closed to terminal)", d.ID, err)
+		return panelMinorityRepanelMax
+	}
+	n := 0
+	for _, ev := range events {
+		if ev.Type != store.EventReviewAction {
+			continue
+		}
+		var p struct {
+			Action string `json:"action"`
+			Reason string `json:"reason"`
+			DiffID int64  `json:"diff_id"`
+		}
+		if !jsonUnmarshalOK(ev.Payload, &p) {
+			continue
+		}
+		if p.Action == "auto_land_blocked" && p.Reason == "panel_minority_reject" && p.DiffID == d.ID {
+			n++
+		}
+	}
+	return n
 }
 
 // settleComments serializes every non-accept leg's comments, grouped by
