@@ -2809,7 +2809,7 @@ func TestReviewFanoutSharedClientBoundsInflight(t *testing.T) {
 	for i := range models {
 		models[i] = reviewModel{model: fmt.Sprintf("rm%d", i), provider: "test"}
 	}
-	reviews := rig.server.reviewFanout(context.Background(), models, "prompt")
+	reviews := rig.server.reviewFanout(context.Background(), models, "prompt", nil, "")
 	if len(reviews) != 8 {
 		t.Fatalf("legs = %d, want 8", len(reviews))
 	}

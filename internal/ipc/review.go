@@ -61,6 +61,11 @@ type reviewPromptInput struct {
 	// Each note is a daemon-derived fact the verdict must weigh —
 	// never agent-authored, and absent on the manual path.
 	riskNotes []string
+	// grounded (D2) adds the grounded leg's framing notice — only the
+	// fan-out's one grounded leg gets it; ungrounded legs' prompts stay
+	// byte-identical (grounded=false everywhere except the grounded
+	// variant).
+	grounded bool
 }
 
 // buildReviewPrompt assembles the grounded review input for both panel
@@ -75,6 +80,11 @@ func buildReviewPrompt(in reviewPromptInput) string {
 		b.WriteString("An unattended gate will land the following diff WITHOUT human review if and only if every reviewer accepts. Judge it strictly.\n\n")
 	} else {
 		b.WriteString("A human reviewer asked the panel to judge the following diff; the verdict is advisory and no automatic action follows it. Judge it strictly.\n\n")
+	}
+	if in.grounded {
+		b.WriteString("You are the panel's grounded leg. ")
+		b.WriteString(groundedReviewNotice)
+		b.WriteString("\n\n")
 	}
 	if in.goal != "" {
 		b.WriteString("The user's original instruction (the objective this diff claims to satisfy), verbatim:\n\"\"\"\n")

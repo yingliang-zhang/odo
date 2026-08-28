@@ -2826,12 +2826,21 @@ func TestReviewDiff(t *testing.T) {
 	if !ok1 || !ok2 {
 		t.Fatalf("stub captured bodies for %v, want both rm1 and rm2", [2]bool{ok1, ok2})
 	}
+	// D2: the first leg runs grounded (no grounded_reviewer: pref ⇒ the
+	// line's FIRST entry) — assert its receipts, then mask them for the
+	// pre-D2 shape pin (the stub answers in one round, so no tool calls).
+	g0 := rev.Reviews[0]
+	if !g0.Grounded || g0.ResolvedBy != "first" || g0.ScopeSHA16 == "" || g0.ScopeFiles == 0 ||
+		g0.ToolBudgetExhausted || g0.ReadBytes != 0 || len(g0.ToolCalls) != 0 {
+		t.Errorf("grounded receipts = %+v, want grounded/resolved_by/scope set, zero tool spend", g0)
+	}
+	g0.Grounded, g0.ResolvedBy, g0.ScopeSHA16, g0.ScopeFiles, g0.ScopeTruncated = false, "", "", 0, false
 	if want := (ReviewResult{Model: "rm1@test", Verdict: "accept", Comments: "Ship it.", BaseURL: moaSrv.URL,
-		RequestSHA16: sha16(b1), RequestBytes: len(b1)}); rev.Reviews[0] != want {
-		t.Errorf("review[0] = %+v, want %+v", rev.Reviews[0], want)
+		RequestSHA16: sha16(b1), RequestBytes: len(b1)}); !reflect.DeepEqual(g0, want) {
+		t.Errorf("review[0] = %+v, want %+v", g0, want)
 	}
 	if want := (ReviewResult{Model: "rm2@test", Verdict: "reject", Comments: "Needs tests.", ThinkingMD: "REJECT\n\nNeeds tests.", BaseURL: moaSrv.URL,
-		RequestSHA16: sha16(b2), RequestBytes: len(b2)}); rev.Reviews[1] != want {
+		RequestSHA16: sha16(b2), RequestBytes: len(b2)}); !reflect.DeepEqual(rev.Reviews[1], want) {
 		t.Errorf("review[1] = %+v, want %+v", rev.Reviews[1], want)
 	}
 

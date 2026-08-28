@@ -294,7 +294,16 @@ func (s *Server) runAuditRound(loopID, conversationID int64, st *loopState, even
 	}
 
 	client := s.sharedMoa()
-	legs := auditFanout(ctx, client, models, auditSystem, prompt)
+	// D2: one grounded audit leg per round, scoped to the subject diff's
+	// import neighborhood (PatchPathsText over the same bytes the legs
+	// judge); its system swaps the no-touch clause for the scoped-repo-
+	// reads clause, every other leg keeps auditSystem byte-identical.
+	ground := s.planGrounded(models, s.projectRoot, git.PatchPathsText(subject), nil)
+	groundedSystem := ""
+	if ground.ok {
+		groundedSystem = auditSystemGrounded()
+	}
+	legs := auditFanout(ctx, client, models, auditSystem, prompt, &ground, groundedSystem)
 	// Position-preserving (V4): perLeg[i] holds the journaled legs[i]'s
 	// findings (nil for degraded legs) so the union's leg_ids index the
 	// same fan-out array the round row carries.

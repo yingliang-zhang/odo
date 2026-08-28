@@ -301,7 +301,19 @@ type auditLegResult struct {
 	OutputTokens    int              `json:"output_tokens,omitempty"`
 	Escalations     []moa.Escalation `json:"escalations,omitempty"`
 	BaseURLScrubbed string           `json:"base_url_scrubbed"`
-	Findings        []finding        `json:"-"` // union input, not journaled per-leg
+	// D2 grounded-leg receipts (additive; identical contract to the
+	// ReviewResult block — grounded.go): absent on ungrounded legs;
+	// model-visible ⟺ logged holds for refusals too.
+	Grounded            bool            `json:"grounded,omitempty"`
+	ResolvedBy          string          `json:"resolved_by,omitempty"`
+	ToolCalls           []moa.ToolAudit `json:"tool_calls,omitempty"`
+	ToolCallsTruncated  bool            `json:"tool_calls_truncated,omitempty"`
+	ReadBytes           int             `json:"read_bytes,omitempty"`
+	ScopeSHA16          string          `json:"scope_sha16,omitempty"`
+	ScopeFiles          int             `json:"scope_files,omitempty"`
+	ScopeTruncated      bool            `json:"scope_truncated,omitempty"`
+	ToolBudgetExhausted bool            `json:"tool_budget_exhausted,omitempty"`
+	Findings            []finding       `json:"-"` // union input, not journaled per-leg
 }
 
 // auditSystem is the auditor role contract. Severity rubric P0–P3; the
@@ -315,6 +327,23 @@ const auditSystem = "You are an expert code auditor reviewing an accumulated dif
 	"Every row gets a category from the fixed set correctness | contract | security | resource | test-integrity | drift | other (append `| cat: <category>`; unknown or absent reads as `other`) and MAY cite a rule id (append `| rule: <id>` after the title).\n" +
 	"Report no defects with an EMPTY findings block (```findings\n```). Never omit the block — a missing block is unreadable output. " +
 	"Severity P3 rows are recorded but never block the loop. Do not review what the diff does not touch."
+
+// auditNoTouchClause is the fresh-context sentence D2 replaces on the
+// grounded audit leg — one swap, nowhere else in the system contract.
+const auditNoTouchClause = "Do not review what the diff does not touch."
+
+// auditGroundedClause replaces auditNoTouchClause on the grounded leg
+// only (the lock's scoped-repo-reads clause; the diff stays the subject,
+// repo reads stay scoped to its import neighborhood).
+const auditGroundedClause = "You have read-only tools over the repository, scoped to the diff's files " +
+	"and their one-hop import neighborhood — use them to check missed callers, interface/contract " +
+	"constraints, schema or generated-artifact drift, and cross-file invariants; every read is journaled."
+
+// auditSystemGrounded derives the grounded leg's system contract from
+// auditSystem; the ungrounded legs keep auditSystem byte-identical.
+func auditSystemGrounded() string {
+	return strings.Replace(auditSystem, auditNoTouchClause, auditGroundedClause, 1)
+}
 
 // auditPrompt assembles one round's prompt: the subject diff verbatim,
 // the previous round's union findings verbatim with the C6 closure
@@ -383,19 +412,75 @@ func auditLeg(ctx context.Context, client *moa.Client, m reviewModel, system, pr
 }
 
 // auditFanout runs every auditor leg in parallel, position-stable (the
-// reviewFanout shape; leg degradation never aborts the round).
-func auditFanout(ctx context.Context, client *moa.Client, models []reviewModel, system, prompt string) []auditLegResult {
+// reviewFanout shape; leg degradation never aborts the round). ground
+// designates the single grounded leg (D2): its system is groundedSystem
+// (auditSystemGrounded — generated lazily only when the plan is usable)
+// and it runs the scoped tool loop instead of a plain Query.
+func auditFanout(ctx context.Context, client *moa.Client, models []reviewModel, system, prompt string, ground *groundedPlan, groundedSystem string) []auditLegResult {
 	legs := make([]auditLegResult, len(models))
 	var wg sync.WaitGroup
 	for i, m := range models {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			legs[i] = auditLeg(ctx, client, m, system, prompt)
+			if ground != nil && i == ground.idx {
+				legs[i] = auditLegGrounded(ctx, client, m, groundedSystem, prompt, *ground)
+			} else {
+				legs[i] = auditLeg(ctx, client, m, system, prompt)
+			}
 		}()
 	}
 	wg.Wait()
 	return legs
+}
+
+// auditLegGrounded runs the D2 grounded audit leg: the same role contract
+// minus the no-touch clause, plus the scoped read-only tool loop. Client
+// errors verdict infra exactly like auditLeg (C4 precedence); the
+// receipts (audits, budget, scope) ride the result in every outcome —
+// even the degraded rows (an exhausted leg's refusals stay journaled).
+// An init failure degrades to a plain leg when the mode allows, else to
+// an infra leg (the gate-source fail-closed posture).
+func auditLegGrounded(ctx context.Context, client *moa.Client, m reviewModel, system, prompt string, plan groundedPlan) auditLegResult {
+	if !plan.ok {
+		if plan.required {
+			res := auditLegResult{Model: m.model + "@" + m.provider, Verdict: "infra", BaseURLScrubbed: scrubBaseURL(client.BaseURL)}
+			plan.receipts(&res)
+			return res
+		}
+		return auditLeg(ctx, client, m, auditSystem, prompt)
+	}
+	label := m.model + "@" + m.provider
+	res := auditLegResult{Model: label, BaseURLScrubbed: scrubBaseURL(client.BaseURL)}
+	plan.receipts(&res)
+	scoped := &scopedToolExecutor{inner: newFSToolExecutorRooted(plan.root), scope: plan.scope}
+	lctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(m.model))
+	defer cancel()
+	out, calls, err := client.QueryWithTools(lctx, m.model, system, prompt, moaFSTools(), scoped.Execute, groundedMaxRounds)
+	res.ToolCalls, res.ToolCallsTruncated = capToolAudits(calls)
+	res.ReadBytes = toolReadBytes(calls)
+	res.ToolBudgetExhausted = scoped.getExhausted()
+	if err != nil {
+		res.Verdict = "infra"
+		return res
+	}
+	res.RequestSHA16 = out.RequestSHA16
+	res.RequestBytes = out.RequestBytes
+	res.OutputTokens = out.OutputTokens
+	res.Escalations = out.Escalations
+	if out.Truncated {
+		res.Verdict = "truncated"
+		return res
+	}
+	findings, ok := parseFindingsBlock(out.Text)
+	if !ok {
+		res.Verdict = "parse_error"
+		return res
+	}
+	res.Verdict = "complete"
+	res.Findings = findings
+	res.FindingsCount = len(findings)
+	return res
 }
 
 // --- BYOF fix prompt (C7) -------------------------------------------------------

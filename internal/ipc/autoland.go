@@ -456,7 +456,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// lighter verify command (tsc + playwright instead of go test).
 	// M19: the gate itself is extracted as runVerifyGate (the /loop
 	// Mode A fix pipeline calls it verbatim).
-	verifyPaths, _ := git.PatchPaths(d.PathOnDisk)
+	verifyPaths, pathsErr := git.PatchPaths(d.PathOnDisk)
 	gate := runVerifyGate(ctx, s.projectRoot, worktreePath, verifyPaths, "diff-"+strconv.FormatInt(d.ID, 10))
 	if !gate.ok {
 		s.journalAutoLandBlocked(ctx, d, gate.reason, gate.detail, nil, "")
@@ -470,7 +470,7 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	}
 	verifyCmd, verifyTail := gate.cmd, gate.tail
 
-	prompt := buildReviewPrompt(reviewPromptInput{
+	promptIn := reviewPromptInput{
 		mode:       reviewPromptGate,
 		goal:       goal,
 		diffPath:   d.PathOnDisk,
@@ -479,17 +479,29 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		verifyTail: verifyTail,
 		verifyNote: "exit 0 (pass evidence present in the output tail)",
 		riskNotes:  riskNotes,
-	})
+	}
+	prompt := buildReviewPrompt(promptIn)
 	if est := len(prompt) / 4; est > autoLandMaxPromptTokens {
 		s.journalAutoLandBlocked(ctx, d, "prompt_too_large",
 			"prompt estimate "+strconv.Itoa(est)+" tokens > cap "+strconv.Itoa(autoLandMaxPromptTokens), nil, "")
 		return
 	}
 
+	// D2: exactly one leg of the fan-out runs grounded (scoped read-only
+	// repo tools over the diff's import neighborhood). The grounded
+	// prompt variant is built only when the plan is usable; every other
+	// leg keeps the byte-identical ungrounded prompt.
+	ground := s.planGrounded(models, s.projectRoot, verifyPaths, pathsErr)
+	groundedPrompt := ""
+	if ground.ok {
+		promptIn.grounded = true
+		groundedPrompt = buildReviewPrompt(promptIn)
+	}
+
 	// Second breadcrumb: the verify is attested, the fan-out below is the
 	// last silent stage (minutes under model latency).
 	s.journalAutoLandStarted(ctx, d, "panel", data)
-	reviews := s.reviewFanout(ctx, models, prompt)
+	reviews := s.reviewFanout(ctx, models, prompt, &ground, groundedPrompt)
 	cv := consensusVerdict(reviews)
 	// M18 settlement: an infra leg is not a verdict — the round never
 	// validly completed (fail closed, and it never ticks the ladder).
@@ -497,8 +509,15 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// failure resolves on the next pipeline trigger (recover-pending-diffs
 	// re-fires pending diffs at daemon start), never by discarding the diff.
 	if panelInfraLeg(reviews) {
-		s.journalAutoLandBlocked(ctx, d, "panel_infra",
-			"a review leg failed on transport/auth/timeout — infra failures are not verdicts", reviews, cv)
+		// D2: a degraded GROUNDED leg on a round that required grounding
+		// (gate-source diffs by default) journals its posture — the lock's
+		// fail-visible clause for a grounding that never ran.
+		var extra map[string]interface{}
+		if groundedLegDegraded(reviews) {
+			extra = map[string]interface{}{"grounding": "degraded"}
+		}
+		s.journalAutoLandBlockedExtra(ctx, d, "panel_infra",
+			"a review leg failed on transport/auth/timeout — infra failures are not verdicts", reviews, cv, extra)
 		return
 	}
 	switch settlementClass(cv, reviews) {
@@ -1439,15 +1458,27 @@ func pruneVerifyLogs(dir string) {
 // reviewFanout sends prompt to every model in parallel, collecting
 // position-stable verdicts (reviewWithModel degrades failures to
 // needs_fixes — never an accidental accept). Shared by review_diff and
-// the auto-land pipeline.
-func (s *Server) reviewFanout(ctx context.Context, models []reviewModel, prompt string) []ReviewResult {
+// the auto-land pipeline. ground designates the one grounded leg (D2 —
+// planGrounded's output; nil arms nothing): its prompt is groundedPrompt
+// (buildReviewPrompt's grounded variant) and its fail-posture rides the
+// plan — a required-but-init-failed grounding ships Infra so the round
+// fails closed, while a non-required init failure falls back to the
+// ordinary leg so the panel keeps the capacity it had pre-D2.
+func (s *Server) reviewFanout(ctx context.Context, models []reviewModel, prompt string, ground *groundedPlan, groundedPrompt string) []ReviewResult {
 	reviews := make([]ReviewResult, len(models))
 	var wg sync.WaitGroup
 	for i, m := range models {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reviews[i] = s.reviewWithModel(ctx, m, prompt)
+			switch {
+			case ground != nil && i == ground.idx && ground.ok:
+				reviews[i] = s.reviewWithModelGrounded(ctx, m, groundedPrompt, *ground)
+			case ground != nil && i == ground.idx && ground.required:
+				reviews[i] = ground.infraReview(m, s.sharedMoa())
+			default:
+				reviews[i] = s.reviewWithModel(ctx, m, prompt)
+			}
 		}()
 	}
 	wg.Wait()

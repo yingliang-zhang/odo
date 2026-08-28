@@ -411,6 +411,10 @@ type Server struct {
 	// here to drill a hanging leg in wall-clock time (receiptBreachForTest
 	// seam precedent: production never sets it).
 	legTimeoutForTest time.Duration
+	// D2 test seam (the legTimeoutForTest precedent): non-empty forces
+	// the grounded-leg plan into init failure with this string as the
+	// detail — production never sets it.
+	groundedInitFailForTest string
 	// P1 #10: ONE shared MoA client per Server. Per-leg NewClientFromEnv
 	// gave every leg a FRESH client, so the client's in-flight semaphore
 	// (moa defaultMaxInFlight=5) never contended — a skills/distill gate
@@ -4036,15 +4040,26 @@ func (s *Server) handleReviewDiff(ctx context.Context, req Request) (Response, e
 		return Response{}, errors.New("No review models configured.")
 	}
 
-	prompt := buildReviewPrompt(reviewPromptInput{
+	promptIn := reviewPromptInput{
 		mode:       reviewPromptAdvisory,
 		goal:       s.diffGoal(ctx, d),
 		diffPath:   d.PathOnDisk,
 		diffText:   string(content),
 		verifyNote: "not run — manual review_diff has no verify gate; the auto-land pipeline is the verified path",
 		runFacts:   s.latestRunVerdictFacts(ctx, d.ConversationID),
-	})
-	reviews := s.reviewFanout(ctx, models, prompt)
+	}
+	prompt := buildReviewPrompt(promptIn)
+	// D2: one grounded leg per fan-out — same plan as the auto-land
+	// gate (manual panels stay advisory; a degraded grounded leg reads
+	// needs_fixes here, it never blocks anything).
+	touched, pathsErr := git.PatchPaths(d.PathOnDisk)
+	ground := s.planGrounded(models, s.projectRoot, touched, pathsErr)
+	groundedPrompt := ""
+	if ground.ok {
+		promptIn.grounded = true
+		groundedPrompt = buildReviewPrompt(promptIn)
+	}
+	reviews := s.reviewFanout(ctx, models, prompt, &ground, groundedPrompt)
 
 	cv := consensusVerdict(reviews)
 	// patch_sha16 (M18 W2 item 4): attests the EXACT diff bytes the panel

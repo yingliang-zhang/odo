@@ -250,6 +250,38 @@ type ReviewResult struct {
 	// assembled request).
 	RequestSHA16 string `json:"request_sha16,omitempty"`
 	RequestBytes int    `json:"request_bytes,omitempty"`
+
+	// --- D2 grounded-leg receipts (additive; all absent on ungrounded
+	// legs) ---
+	// Grounded marks the fan-out's one grounded leg: the leg got
+	// read-only repo tools scoped to the diff and its one-hop import
+	// neighborhood (grounded.go). Its verdict weighs exactly like every
+	// other leg this wave — D2 grants no extra authority.
+	Grounded bool `json:"grounded,omitempty"`
+	// ResolvedBy records the grounded-model resolution: "prefs" (the
+	// grounded_reviewer: line named a model on the fan-out's line) or
+	// "first" (absent/unmatched ⇒ the line's first entry).
+	ResolvedBy string `json:"resolved_by,omitempty"`
+	// ToolCalls is the executed tool audit (cap groundedToolCallsCap,
+	// truncated flag set when more executed). Model-visible ⟺ logged
+	// holds for refusals too: an out-of-scope read rides here with its
+	// Error set.
+	ToolCalls          []moa.ToolAudit `json:"tool_calls,omitempty"`
+	ToolCallsTruncated bool            `json:"tool_calls_truncated,omitempty"`
+	// ReadBytes is the total tool-result bytes the leg was served (the
+	// groundedTotalBytes budget's spend).
+	ReadBytes int `json:"read_bytes,omitempty"`
+	// ScopeSHA16/ScopeFiles identify the computed allowlist (sorted
+	// file+dir entries); ScopeTruncated marks a scope computation that
+	// degraded to touched-only-plus-same-dir (a skipped import
+	// neighborhood is fail-visible, never silent).
+	ScopeSHA16     string `json:"scope_sha16,omitempty"`
+	ScopeFiles     int    `json:"scope_files,omitempty"`
+	ScopeTruncated bool   `json:"scope_truncated,omitempty"`
+	// ToolBudgetExhausted marks a leg whose grounded read budget tripped
+	// (the leg still owed a verdict; a missing verdict token degrades
+	// fail-closed as usual).
+	ToolBudgetExhausted bool `json:"tool_budget_exhausted,omitempty"`
 }
 
 // DesignProposal is one blind-sealed leg's outcome (R-W4 design_moa).
