@@ -117,6 +117,11 @@ func TestUnownedFoldGrowthMemoryPipelineRows(t *testing.T) {
 		{Seq: 5, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{"layer": "skills", "cause": "applied"}))},
 		{Seq: 6, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{"layer": "apply", "cause": "auto_apply_failed"}))},
 		{Seq: 7, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{"layer": "wiki", "cause": "commit"}))},
+		// D4 fold-authored rows: flag consumption/reject receipts (learner
+		// layer) and the scope hold (apply layer).
+		{Seq: 8, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{"layer": "learner", "cause": "flag_consumed", "flag_seq": 3}))},
+		{Seq: 9, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{"layer": "learner", "cause": "retract_proposal_rejected", "flag_seq": 3, "reason": "r"}))},
+		{Seq: 10, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{"layer": "apply", "cause": "scope_held_for_human", "epoch": 1}))},
 	}
 	if unownedFoldGrowth(owned, 0) {
 		t.Error("apply-side memory pipeline rows must not trip the supersession probe")
@@ -359,9 +364,13 @@ func TestDistillSweepsLegacyBatch(t *testing.T) {
 	}
 }
 
-// A refused auto-apply (user.md overflow) leaves the batch pending, marks
-// the epoch, and the next distill's sweep skips it instead of re-charging
-// the panel for a decision the files still can't take.
+// An oversized user.md rule batch is BOTH D4 cases at once: all-user.md
+// (the scope hold already refuses the gate) AND historically refused by
+// planUserApply's overflow. The D4 contract wins earlier — the sweep
+// never charges the panel a verdict for a file the auto path may never
+// write: zero panel calls, one scope_held_for_human row, user.md
+// unchanged, batch pending for human salvage, and the journaled hold
+// suppresses every later sweep (still zero spend).
 func TestDistillSweepSkipsRefusedBatch(t *testing.T) {
 	root := initRepo(t)
 	home := t.TempDir()
@@ -392,13 +401,18 @@ func TestDistillSweepSkipsRefusedBatch(t *testing.T) {
 	rig.pollUntilDone(t, convID)
 	rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
 
-	if got := atomic.LoadInt64(calls); got != 3 {
-		t.Fatalf("panel calls after distill 1 = %d, want 3 (the sweep's fan-out)", got)
+	// D4: the sweep holds the all-user.md batch BEFORE gating — no
+	// fan-out, no apply attempt, one journaled hold row.
+	if got := atomic.LoadInt64(calls); got != 0 {
+		t.Fatalf("panel calls after distill 1 = %d, want 0 (user.md never enters the gate)", got)
 	}
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
-	refused := memoryUpdatesByCause(t, events, "auto_apply_failed")
-	if len(refused) != 1 || refused[0]["epoch"] != float64(1) {
-		t.Fatalf("auto_apply_failed rows = %+v, want one epoch-1 row", refused)
+	held := memoryUpdatesByCause(t, events, "scope_held_for_human")
+	if len(held) != 1 || held[0]["epoch"] != float64(1) || held[0]["target"] != "user.md" || held[0]["proposal_index"] != float64(0) {
+		t.Fatalf("scope_held_for_human rows = %+v, want one epoch-1/user.md/proposal-0 row", held)
+	}
+	if refused := memoryUpdatesByCause(t, events, "auto_apply_failed"); len(refused) != 0 {
+		t.Fatalf("auto_apply_failed rows = %d, want 0 (the hold precedes any apply attempt)", len(refused))
 	}
 	if applies := payloadsByAction(t, events, "memory_apply"); len(applies) != 0 {
 		t.Fatalf("refused apply must leave no memory_apply marker, got %d", len(applies))
@@ -408,16 +422,16 @@ func TestDistillSweepSkipsRefusedBatch(t *testing.T) {
 	}
 	pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID})
 	if pend.Epoch != 1 || pend.Consumed {
-		t.Errorf("batch after refusal = epoch %d consumed %v, want epoch 1 pending", pend.Epoch, pend.Consumed)
+		t.Errorf("batch after hold = epoch %d consumed %v, want epoch 1 pending", pend.Epoch, pend.Consumed)
 	}
 
-	// Second distill: the refused marker holds the sweep off — zero new
-	// panel spend, batch left for human salvage.
+	// Second distill: the journaled hold suppresses the sweep — still
+	// zero panel spend, batch left for human salvage.
 	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt again"})
 	rig.pollUntilDone(t, convID)
 	rig.call(t, Request{Cmd: CmdDistill, ConversationID: convID})
-	if got := atomic.LoadInt64(calls); got != 3 {
-		t.Errorf("panel calls after distill 2 = %d, want still 3 (refused batch never re-gated)", got)
+	if got := atomic.LoadInt64(calls); got != 0 {
+		t.Errorf("panel calls after distill 2 = %d, want still 0 (held batch never re-gated)", got)
 	}
 	if pend := rig.call(t, Request{Cmd: CmdMemoryProposals, ConversationID: convID}); pend.Epoch != 0 {
 		t.Errorf("batch visibility after supersession = epoch %d, want 0", pend.Epoch)

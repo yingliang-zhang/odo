@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/ipc"
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -38,13 +39,19 @@ import (
 // withhold it (appendLedger fail-open precedent).
 //
 //	odo rules audit [--json]
+//	odo rules retract <text>    (D4: human resolution of retract candidates)
 
-const rulesAuditUsage = `usage: odo rules audit [--json]
-  audit         memory-rule outcome report over resolved diffs across ALL
-                conversations of the bound project (read-only scan;
-                flagged rules journal review_action{action:
-                "memory_audit_flag"} on main + a ledger.md section)
-  --json        machine-readable report (one JSON object)`
+const rulesAuditUsage = `usage: odo rules <audit|retract> [args]
+  audit [--json]  memory-rule outcome report over resolved diffs across ALL
+                  conversations of the bound project (read-only scan;
+                  flagged rules journal review_action{action:
+                  "memory_audit_flag"} on main + a ledger.md section)
+  --json          machine-readable report (one JSON object)
+  retract <text>  human-only rule retraction (D4): remove the ONE memory.md
+                  line containing <text> (fails on 0 or >1 matches), append
+                  a retraction record to memory-archive.md, and journal
+                  memory_update{layer:"memory", cause:"retract"} on main —
+                  the resolution path for retract_candidate rows.`
 
 // sinkFlags journals one memory_audit_flag per novel flagged rule on
 // main's active conversation, then appends the ledger section citing the
@@ -172,7 +179,8 @@ func renderRulesAuditHuman(r ipc.RulesAuditReport, sinkNote string) {
 	fmt.Println(sinkNote)
 }
 
-// runRulesCLI dispatches `odo rules <sub>`. Only `audit` exists (Wave 1).
+// runRulesCLI dispatches `odo rules <sub>`: the Wave-1 `audit` measure
+// step and the D4 `retract` human resolution for retract candidates.
 func runRulesCLI(args []string) int {
 	jsonOut := false
 	var positional []string
@@ -183,6 +191,9 @@ func runRulesCLI(args []string) int {
 		default:
 			positional = append(positional, a)
 		}
+	}
+	if len(positional) >= 1 && positional[0] == "retract" {
+		return runRulesRetractCLI(positional[1:])
 	}
 	if len(positional) != 1 || positional[0] != "audit" {
 		fmt.Fprintln(os.Stderr, rulesAuditUsage)
@@ -234,4 +245,132 @@ func runRulesCLI(args []string) int {
 	}
 	renderRulesAuditHuman(report, sinkNote)
 	return 0
+}
+
+// runRulesRetractCLI implements `odo rules retract <text>` (2026-08-28,
+// D4 ruling ④): the human resolution of a retract_candidate. Deletion-
+// class memory changes are never automatic — this command is the
+// recorded conscious act (ADR-0004): remove the ONE memory.md line
+// containing the text, append a retraction record to memory-archive.md
+// (no silent deletion, ADR-0003 inv 3), then journal
+// memory_update{layer:"memory", cause:"retract"} on main's conversation.
+// The match is fail-closed: zero or multiple matching lines refuse with
+// the count named. File writes precede the journal row (the apply
+// path's own order); a journal failure reports loudly with the files
+// already changed.
+func runRulesRetractCLI(args []string) int {
+	sub := strings.TrimSpace(strings.Join(args, " "))
+	if sub == "" {
+		fmt.Fprintln(os.Stderr, rulesAuditUsage)
+		return 2
+	}
+	ctx := context.Background()
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: resolve cwd: %v\n", err)
+		return 1
+	}
+	root, err := journalRoot(cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: %v\n", err)
+		return 1
+	}
+	memPath := filepath.Join(root, ".odo", "memory.md")
+	data, err := os.ReadFile(memPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: %v\n", err)
+		return 1
+	}
+	newContent, line, err := rulesRetractPlan(string(data), sub)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: %v\n", err)
+		return 1
+	}
+
+	// Writes: archive record first, memory.md last (the apply's order, so
+	// a crash window leaves the previous memory.md intact).
+	now := time.Now().UTC().Format(time.RFC3339)
+	arcPath := filepath.Join(root, ".odo", "memory-archive.md")
+	arc, _ := os.ReadFile(arcPath)
+	record := fmt.Sprintf("%s\n## %s — retracted by user (odo rules retract)\n%s\n",
+		strings.TrimRight(string(arc), "\n"), now, line)
+	if strings.HasPrefix(record, "\n") {
+		record = record[1:]
+	}
+	if err := os.WriteFile(arcPath, []byte(record), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: append archive: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(memPath, []byte(newContent), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: write memory.md: %v (archive record already appended)\n", err)
+		return 1
+	}
+
+	// Journal on main (the rules sink's lane). A failure reports loudly —
+	// the files ARE changed, the record must not stay silent.
+	st, err := store.Open(filepath.Join(root, ".odo", "journal.sqlite"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: journal open: %v — FILES ALREADY CHANGED (archive appended, memory.md updated); journal the retraction by hand\n", err)
+		return 1
+	}
+	defer st.Close()
+	p, err := st.GetProjectByRoot(ctx, root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: project: %v — FILES ALREADY CHANGED; journal by hand\n", err)
+		return 1
+	}
+	w, err := st.GetWorkstreamByName(ctx, p.ID, ipc.RulesAuditMainWorkstream)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: main workstream: %v — FILES ALREADY CHANGED; journal by hand\n", err)
+		return 1
+	}
+	c, err := st.GetActiveConversation(ctx, w.ID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: main conversation: %v — FILES ALREADY CHANGED; journal by hand\n", err)
+		return 1
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"layer":      "memory",
+		"cause":      "retract",
+		"detail":     fmt.Sprintf("retracted by user (odo rules retract): %q", sub),
+		"before_sha": sha16Note(data),
+		"after_sha":  sha16Note([]byte(newContent)),
+	})
+	ev, err := st.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, string(payload))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "odo rules retract: journal: %v — FILES ALREADY CHANGED; journal by hand\n", err)
+		return 1
+	}
+	fmt.Printf("retracted %q (memory_update seq %d on main conversation %d)\n  %s\n",
+		sub, ev.Seq, c.ID, line)
+	return 0
+}
+
+// rulesRetractPlan removes the ONE memory.md line containing sub,
+// fail-closed on zero or multiple matches, and returns the new content
+// plus the matched line (verbatim, for the archive record).
+func rulesRetractPlan(content, sub string) (string, string, error) {
+	if strings.TrimSpace(sub) == "" {
+		return "", "", fmt.Errorf("empty match text")
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	var kept []string
+	matched := ""
+	count := 0
+	for _, l := range lines {
+		if strings.Contains(l, sub) {
+			count++
+			matched = l
+			continue
+		}
+		kept = append(kept, l)
+	}
+	if count != 1 {
+		return "", "", fmt.Errorf("match text %q hits %d memory.md lines — must hit exactly one", sub, count)
+	}
+	out := strings.Join(kept, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	return out, matched, nil
 }

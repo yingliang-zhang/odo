@@ -261,12 +261,20 @@ func TestRulesAuditNoData(t *testing.T) {
 	}
 }
 
-// TestRulesAuditUsage rejects unknown subcommands.
+// TestRulesAuditUsage rejects unknown subcommands; the D4 dispatch keeps
+// retract text-only (multi-word match strings arrive as extra args).
 func TestRulesAuditUsage(t *testing.T) {
 	_, stderr, code := captureCLI(t, func() int {
 		return runRulesCLI([]string{"bogus"})
 	})
-	if code != 2 || !strings.Contains(stderr, "usage: odo rules audit") {
+	if code != 2 || !strings.Contains(stderr, "usage: odo rules <audit|retract>") {
 		t.Errorf("exit %d, stderr %q, want exit 2 + usage", code, stderr)
+	}
+	// `retract` without match text: same usage, exit 2.
+	_, stderr2, code2 := captureCLI(t, func() int {
+		return runRulesCLI([]string{"retract"})
+	})
+	if code2 != 2 || !strings.Contains(stderr2, "usage: odo rules <audit|retract>") {
+		t.Errorf("retract-no-args exit %d, stderr %q, want exit 2 + usage", code2, stderr2)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -470,7 +471,7 @@ func vetLearnerOutput(res *learnerResult, noteName, ownMem, projectRoot string, 
 // user.md promotion clause). proceduresOn (skillsDistillEnabled) appends
 // the M9 procedures contract; the prompt and the vet gate read the same
 // flag so the contract is never half-present.
-func learnerPrompt(noteName, noteContent, ownMem string, proceduresOn bool) string {
+func learnerPrompt(noteName, noteContent, ownMem string, proceduresOn bool, flagBlock string) string {
 	goal := "Extract behavior-shaping rules"
 	procsShape := ""
 	procsRule := ""
@@ -495,6 +496,11 @@ Rules:
 	b.WriteString(orEmpty(noteContent))
 	b.WriteString("\n\n=== CURRENT .odo/memory.md (this project) ===\n")
 	b.WriteString(orEmpty(ownMem))
+	// D4: rules-audit flags ride as trailing DATA (evidence, never
+	// instructions); empty when nothing is unconsumed.
+	if flagBlock != "" {
+		b.WriteString(flagBlock)
+	}
 	b.WriteString("\n")
 	return b.String()
 }
@@ -538,7 +544,13 @@ func skillsDistillEnabled() bool {
 //
 // epoch is the distilled note's epoch (conversation epoch BEFORE the
 // increment), so batch identity is `latest distill newEpoch − 1` (spec §5).
-func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int) (proposals []MemoryProposal, reaffirm []string, stats vetoStats, rec *moaReceipt, err error) {
+// D4: afc carries the rules-audit state distillCore collected — the
+// unconsumed memory_audit_flag rows ride the prompt as a DATA block and
+// journal flag_consumed once the one-shot carrying them parses; learner
+// entries citing "flag:<seq>" become retract-intent proposals after the
+// LLM-free vet (they must bypass the add-vet: a flagged rule IS present
+// in memory.md, so the dup drop would eat the citation).
+func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName, noteContent string, epoch int, afc auditFlagContext) (proposals []MemoryProposal, reaffirm []string, stats vetoStats, rec *moaReceipt, err error) {
 	fail := func(ferr error) {
 		_, _ = s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
 			"layer":  "learner",
@@ -557,13 +569,13 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 	// parsed text, never an action.
 	rawText := ""
 	if resolveVia("learner", "learner_via") == viaMoa {
-		rawText, rec, err = runMoaOneShot(ctx, s.sharedMoa(), "learner", learnerPrompt(noteName, noteContent, ownMem, procs))
+		rawText, rec, err = runMoaOneShot(ctx, s.sharedMoa(), "learner", learnerPrompt(noteName, noteContent, ownMem, procs, auditFlagPromptBlock(afc)))
 	} else {
 		ad := s.distillAdapter
 		if ad == nil {
 			ad = s.adapterFor("") // same fallback as runDistillAgent
 		}
-		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, procs), learnerTimeout)
+		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, procs, auditFlagPromptBlock(afc)), learnerTimeout)
 	}
 	if err != nil {
 		fail(fmt.Errorf("learner run: %w", err))
@@ -576,7 +588,42 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 		// attestable even though the answer failed to parse.
 		return nil, nil, vetoStats{}, rec, nil
 	}
+	// D4: the flags the prompt carried are now consumed — journal the
+	// receipt before anything below can return early.
+	s.journalFlagConsumed(ctx, conversationID, afc.flags)
+	// D4: lift flag citations out of the memory array BEFORE the add-vet —
+	// the cited rule is present in memory.md by design, so the add-vet's
+	// duplicate drop would eat the retract intent wholesale.
+	var flagRefs []pendingFlagRef
+	addMemory := res.Memory[:0]
+	for _, mp := range res.Memory {
+		if seq, ok := parseFlagRef(mp.Contradicts); ok {
+			flagRefs = append(flagRefs, pendingFlagRef{seq: seq, rule: mp.Rule})
+			continue
+		}
+		addMemory = append(addMemory, mp)
+	}
+	res.Memory = addMemory
 	proposals, procedures, reaffirm, stats := vetLearnerOutput(res, noteName, ownMem, s.projectRoot, procs)
+	// D4: each citation becomes a retract-intent proposal (journal-filled
+	// rule text) or a journaled rejection — never an apply.
+	seenFlags := map[int]bool{}
+	for _, fr := range flagRefs {
+		prop, reason := vetRetractIntent(fr, afc, ownMem, seenFlags)
+		if reason != "" {
+			if _, jerr := s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+				"layer":    "learner",
+				"cause":    "retract_proposal_rejected",
+				"flag_seq": fr.seq,
+				"rule":     fr.rule,
+				"reason":   reason,
+			})); jerr != nil {
+				log.Printf("distill: journal retract_proposal_rejected (flag seq %d): %v", fr.seq, jerr)
+			}
+			continue
+		}
+		proposals = append(proposals, prop)
+	}
 
 	// M9: compose SKILL.md for each surviving procedure. The daemon
 	// assembles the frontmatter — the LLM never produces YAML.

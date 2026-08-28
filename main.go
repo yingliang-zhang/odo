@@ -77,6 +77,8 @@ func main() {
 			os.Exit(runUnretractCLI(args[1:]))
 		case "retract":
 			os.Exit(runRetractCLI(args[1:]))
+		case "memory":
+			os.Exit(runMemoryCLI(args[1:]))
 		case "gate":
 			os.Exit(runGateCLI(args[1:]))
 		case "models":

@@ -181,6 +181,43 @@ func (s *Store) ListHealLedgerRows(ctx context.Context, projectID int64) ([]Even
 	return events, rows.Err()
 }
 
+// ListApplyRevertRows returns one lane's D4 rollback-family memory_update
+// rows — memory_update{layer:"apply", cause:"revert"} (the human
+// `odo memory revert <epoch>` receipt) and cause
+// "revert_suppressed_recovery" (the replay engine's suppression
+// visibility row) — in seq order. Reverts are lane-local like the epochs
+// they name, so the ledger folds per lane. LIKE filters follow the
+// markers.go convention: these rows are rare (at most one per human
+// rollback plus one suppression row per receipt layer), and the replay
+// engine's evaluate-time authority must never materialize a lane-sized
+// list to consult them.
+func (s *Store) ListApplyRevertRows(ctx context.Context, conversationID int64) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, conversation_id, seq, type, payload_json, created_at
+		 FROM events
+		 WHERE conversation_id = ? AND type = ?
+		   AND payload_json LIKE '%"layer":"apply"%'
+		   AND (payload_json LIKE '%"cause":"revert"%'
+		        OR payload_json LIKE '%"cause":"revert_suppressed_recovery"%')
+		 ORDER BY seq ASC`, conversationID, EventMemoryUpdate)
+	if err != nil {
+		return nil, fmt.Errorf("store: list apply revert rows: %w", err)
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var payload string
+		if err := rows.Scan(&e.ID, &e.ConversationID, &e.Seq, &e.Type, &payload, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: list apply revert rows: scan: %w", err)
+		}
+		e.Payload = json.RawMessage(payload)
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // SearchResult is one event match from SearchEvents, carrying the event
 // plus its workstream/conversation context for display.
 type SearchResult struct {

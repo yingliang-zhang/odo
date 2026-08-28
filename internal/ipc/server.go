@@ -4929,7 +4929,17 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	var stats vetoStats
 	var learnerRec *moaReceipt
 	if trigger == distillTriggerManual || learnerAutoEnabled() {
-		proposals, reaffirm, stats, learnerRec, _ = s.runLearner(ctx, c.ID, noteName, note, c.Epoch)
+		// D4: collect the lane's unconsumed rules-audit flags + the
+		// oscillation-frozen set for the learner prompt and the retract
+		// vet. Fail-soft like the sweep: a list error degrades to no
+		// flags, never stalls the fold.
+		var afc auditFlagContext
+		if afcEvents, ferr := s.store.ListEvents(ctx, c.ID, 0); ferr == nil {
+			afc = collectAuditFlagContext(afcEvents)
+		} else {
+			log.Printf("distill: audit flag collection: list events: %v", ferr)
+		}
+		proposals, reaffirm, stats, learnerRec, _ = s.runLearner(ctx, c.ID, noteName, note, c.Epoch, afc)
 	}
 
 	// Panel gate (M9 origins, now all targets): every proposal × every
@@ -5282,7 +5292,8 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 			// or wiki commit landing mid-fold must not abort it.
 			if jsonUnmarshalOK(ev.Payload, &p) && ((p.Layer == "note" && p.Cause == "retract") ||
 				(p.Layer == "note" && p.Cause == "contradiction_candidate") ||
-				(p.Layer == "learner" && (p.Cause == "failed" || p.Cause == "batch_superseded")) ||
+				(p.Layer == "learner" && (p.Cause == "failed" || p.Cause == "batch_superseded" ||
+					p.Cause == "flag_consumed" || p.Cause == "retract_proposal_rejected")) ||
 				p.Layer == "skills" || p.Layer == "memory" || p.Layer == "user" ||
 				p.Layer == "apply" || p.Layer == "ledger" || p.Layer == "wiki" ||
 				p.Layer == "curator" || p.Layer == "index" || p.Layer == "pins") {
@@ -6083,6 +6094,19 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, batch pendingBatch, accepted []bool, actor string) (Response, error) {
 	s.memMu.Lock()
 	defer s.memMu.Unlock()
+	// D4 scope assert (ruling ④): planUserApply is unreachable from the
+	// auto path — the hold in memory_autogate flips user.md proposals off
+	// BEFORE this core runs. Reaching here with an accepted user.md
+	// proposal is an invariant violation: fail closed (the caller
+	// journals auto_apply_failed, closing the batch out of the sweep)
+	// rather than write a human-only file a model verdict decided.
+	if actor == autoActor {
+		for i, p := range batch.proposals {
+			if accepted[i] && p.Target == "user.md" {
+				return Response{}, fmt.Errorf("apply_memory: auto path must never plan user.md (proposal %d bypassed the scope hold)", i)
+			}
+		}
+	}
 	// Single-writer re-check (2026-08-25 audit P1): every caller's
 	// pending/consumed probe ran UNLOCKED, so two consumers of the same
 	// batch (manual apply vs the auto sweep, or two distills) both passed
@@ -6113,6 +6137,7 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 	}
 	var acceptedRefs []MemoryAccept
 	var memAccepted []acceptedRule
+	var retractCands []MemoryProposal // D4: accepted deletion-class (never applied)
 	var userAccepted []acceptedUserRule
 	var skillWrites []skillWrite // M9: pre-computed skill file writes
 	for i, p := range batch.proposals {
@@ -6122,6 +6147,14 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 		acceptedRefs = append(acceptedRefs, MemoryAccept{Target: p.Target, Index: i})
 		switch p.Target {
 		case "memory.md":
+			if p.Intent == "retract" {
+				// D4 (ruling ④): a panel- or human-accepted retract
+				// intent NEVER writes — it emits a retract_candidate
+				// below for human resolution (apply_memory with a fresh
+				// contradicts proposal, or `odo rules retract`).
+				retractCands = append(retractCands, p)
+				continue
+			}
 			memAccepted = append(memAccepted, acceptedRule{
 				rule: p.Rule, evidence: p.Evidence, contradicts: p.Contradicts,
 			})
@@ -6353,6 +6386,23 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 			"layer":  "skills",
 			"cause":  "applied",
 			"detail": fmt.Sprintf("wrote %s", filepath.Base(sw.path)),
+		})); err != nil {
+			return Response{}, err
+		}
+	}
+	// D4: accepted retract intents surface as candidates (deletion-class
+	// memory changes stay human-committed). The row names the flagged rule,
+	// the cited flag seq, and the panel's consensus, so the human's
+	// resolution (apply_memory contradicts / `odo rules retract`) starts
+	// from the journaled evidence, not a re-read of the prompt.
+	for _, rc := range retractCands {
+		if _, err := s.store.AppendEvent(ctx, c.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":           "memory",
+			"cause":           "retract_candidate",
+			"rule":            rc.Rule,
+			"flag_seq":        rc.FlagSeq,
+			"panel_consensus": consensusVerdict(rc.Reviews),
+			"epoch":           batch.epoch,
 		})); err != nil {
 			return Response{}, err
 		}

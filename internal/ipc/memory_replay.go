@@ -52,6 +52,27 @@ package ipc
 // destroyed journal row has no replay source. No such path exists today;
 // this states the boundary rather than overclaiming "every conversation".
 //
+// D4 (2026-08-28): a journaled human rollback —
+// memory_update{layer:"apply", cause:"revert", epoch:N} (the `odo memory
+// revert` receipt) — RETIRES epoch N's receipts from the fold the moment
+// it lands. Without this the newest-receipt predicate would read the
+// reverted bytes (== the receipt's before-sha) as a mid-write crash and
+// "repair" the file back to the post-state on the next boot, silently
+// undoing the human's conscious act. Retirement is by epoch, in order:
+// the revert row necessarily follows the apply it reverts.
+//
+// The fold retirement only covers snapshots the fold SEES, so
+// evalMemReceipt re-consults the lane's revert ledger at evaluation
+// time (the terminal authority): the live passes fold a caller-taken
+// event snapshot, and a human revert landing between snapshot and
+// evaluation would otherwise be replayed over. The lookup is
+// fail-CLOSED — an error skips the recovery entirely (never re-apply
+// over a possible human revert). A suppressed evaluation journals one
+// memory_update{layer:"apply", cause:"revert_suppressed_recovery",
+// epoch, receipt_layer, receipt_seq} on the receipt's lane for
+// visibility, idempotently (the lane ledger doubles as the dedupe
+// record).
+//
 // Journal rows (the old cause:"recover" shape is kept for plain replay
 // and stays invisible to this fold — candidate receipts are only
 // memory_apply recovery blocks and pins pin receipts, plus the legacy
@@ -302,6 +323,28 @@ func (f *laneMemReceiptFold) feed(ev store.Event, kinds int) {
 		// Pins receipts carry whole bodies; propose rows are only consulted
 		// by the memory-layer merge, so pins-only callers skip the
 		// review_action family entirely here.
+	// D4: a journaled human rollback retires its epoch's receipts from
+	// the fold (the file header) — evaluated after the apply case so a
+	// same-fold order holds; the revert necessarily follows its apply.
+	case ev.Type == store.EventMemoryUpdate && kinds&replayApply != 0 && isMemRevertRow(ev.Payload):
+		var p struct {
+			Epoch int `json:"epoch"`
+		}
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			return
+		}
+		for layer, r := range f.cand {
+			if r.epoch == p.Epoch {
+				delete(f.cand, layer)
+			}
+		}
+		// Proposes the epoch could pair with are dead too (K3 hygiene):
+		// a reverted apply never merge-matches again.
+		for epoch := range f.proposeByEpoch {
+			if epoch == p.Epoch {
+				delete(f.proposeByEpoch, epoch)
+			}
+		}
 	case ev.Type == store.EventMemoryUpdate && kinds&replayPin != 0:
 		var p struct {
 			Layer     string `json:"layer"`
@@ -339,6 +382,16 @@ func (f *laneMemReceiptFold) feed(ev store.Event, kinds int) {
 			body:    p.Body,
 		}
 	}
+}
+
+// isMemRevertRow parses the D4 rollback receipt shape:
+// memory_update{layer:"apply", cause:"revert", epoch:N}.
+func isMemRevertRow(payload json.RawMessage) bool {
+	var p struct {
+		Layer string `json:"layer"`
+		Cause string `json:"cause"`
+	}
+	return json.Unmarshal(payload, &p) == nil && p.Layer == "apply" && p.Cause == "revert"
 }
 
 // parseLaneMemReceipts folds ONE lane's seq-ascending events into the
@@ -729,6 +782,50 @@ func (s *Server) retireSupersededConflicts(ctx context.Context, r memReceipt, sc
 	}
 }
 
+// applyRevertLedger is one lane's D4 rollback state at evaluation time:
+// reverted names the epochs the human rolled back (their receipts are
+// terminal — never restored, merged, or conflicted), journaled the
+// (epoch, receipt layer) pairs that already carry a
+// revert_suppressed_recovery row (the visibility journal's idempotence
+// record).
+type applyRevertLedger struct {
+	reverted  map[int]bool
+	journaled map[string]bool
+}
+
+// foldApplyRevertRows parses the rows ListApplyRevertRows returns. Rows
+// of any other shape parse out (the LIKE prefilter is exact on the
+// family's two causes, but the fold stays defensive).
+func foldApplyRevertRows(rows []store.Event) applyRevertLedger {
+	l := applyRevertLedger{reverted: map[int]bool{}, journaled: map[string]bool{}}
+	for _, ev := range rows {
+		if ev.Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Cause        string `json:"cause"`
+			Epoch        int    `json:"epoch"`
+			ReceiptLayer string `json:"receipt_layer"`
+		}
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			continue
+		}
+		switch p.Cause {
+		case "revert":
+			l.reverted[p.Epoch] = true
+		case "revert_suppressed_recovery":
+			l.journaled[revertSuppressionKey(p.Epoch, p.ReceiptLayer)] = true
+		}
+	}
+	return l
+}
+
+// revertSuppressionKey keys the suppression-visibility idempotence record:
+// one row per (epoch, receipt layer) per lane.
+func revertSuppressionKey(epoch int, layer string) string {
+	return fmt.Sprintf("%d/%s", epoch, layer)
+}
+
 // evalMemReceipt applies the newest-receipt predicate to one layer:
 // landed → nothing; disk at before (true mid-write crash) → replay the
 // journaled body (whole-file rewrite, or chunk append for the archive);
@@ -741,6 +838,48 @@ func (s *Server) retireSupersededConflicts(ctx context.Context, r memReceipt, sc
 // scope carries the caller's fold context (evalScope): conflict
 // retirement fires only under the project-wide authority.
 func (s *Server) evalMemReceipt(ctx context.Context, r memReceipt, scope evalScope) memReceiptEval {
+	// D4 evaluate-time authority (the file header): a reverted epoch is
+	// terminal. The fold retirement removes its receipts from snapshots
+	// taken AFTER the revert row journaled; this lookup covers the stale
+	// snapshot every live pass folds — a human `odo memory revert`
+	// landing between the caller's ListEvents and this evaluation would
+	// otherwise see its pre-image restored back to the post-state here.
+	// Fail-CLOSED: a lookup error skips the recovery outright (the next
+	// pass retries) — never re-apply over a possible human revert.
+	// Pins and legacy receipts carry epoch 0 and sit outside the revert
+	// scope (memory/archive applies), so they pay no query.
+	if r.epoch != 0 {
+		rows, err := s.store.ListApplyRevertRows(ctx, r.convID)
+		if err != nil {
+			log.Printf("memory replay: revert ledger lookup for %s (receipt seq %d, conversation %d): %v — skipping recovery (fail-closed over a possible human revert)",
+				r.layer, r.seq, r.convID, err)
+			return memReceiptEval{outcome: replayNone}
+		}
+		if ledger := foldApplyRevertRows(rows); ledger.reverted[r.epoch] {
+			if !ledger.journaled[revertSuppressionKey(r.epoch, r.layer)] {
+				// Visibility row on the receipt's OWN lane (the D4
+				// revert receipt's home — never the active-conversation
+				// hop journalHealRow takes, so the lane ledger above IS
+				// the exact idempotence record). Best-effort: a failed
+				// journal never weakens the suppression itself.
+				if _, jerr := s.store.AppendEvent(ctx, r.convID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+					"layer":         "apply",
+					"cause":         "revert_suppressed_recovery",
+					"epoch":         r.epoch,
+					"receipt_layer": r.layer,
+					"receipt_seq":   r.seq,
+					"detail": fmt.Sprintf("suppressed replay of reverted epoch %d (%s receipt seq %d) — the human revert is terminal",
+						r.epoch, r.layer, r.seq),
+				})); jerr != nil {
+					log.Printf("memory replay: journal revert_suppressed_recovery for %s epoch %d: %v (suppression still holds)",
+						r.layer, r.epoch, jerr)
+				}
+			}
+			log.Printf("memory replay: suppressed %s replay of reverted epoch %d (receipt seq %d, conversation %d) — the human revert is terminal",
+				r.layer, r.epoch, r.seq, r.convID)
+			return memReceiptEval{outcome: replayNone}
+		}
+	}
 	if r.legacy {
 		// Terminal landed boundary (a legacy file-first receipt newer
 		// than every replayable one): the write already landed via the

@@ -1845,7 +1845,7 @@ func TestDistillBatchSuperseded(t *testing.T) {
 // (cross-project content stops crossing the gateway). skillsDistillEnabled
 // on restores the procedures contract ALONE.
 func TestLearnerPromptContract(t *testing.T) {
-	def := learnerPrompt("main-epoch-1", "# Epoch 1\n\nnote body", "- Always run go test — cites: x; reaffirmed: 1", false)
+	def := learnerPrompt("main-epoch-1", "# Epoch 1\n\nnote body", "- Always run go test — cites: x; reaffirmed: 1", false, "")
 	for _, absent := range []string{`"procedures"`, `"user"`, "user.md", "SIBLING PROJECTS"} {
 		if strings.Contains(def, absent) {
 			t.Errorf("default prompt carries %q — the contract is gone by default:\n%s", absent, def)
@@ -1856,7 +1856,7 @@ func TestLearnerPromptContract(t *testing.T) {
 			t.Errorf("default prompt missing %q:\n%s", want, def)
 		}
 	}
-	on := learnerPrompt("main-epoch-1", "# Epoch 1\n\nnote body", "", true)
+	on := learnerPrompt("main-epoch-1", "# Epoch 1\n\nnote body", "", true, "")
 	if !strings.Contains(on, `"procedures"`) || !strings.Contains(on, "kebab-case") {
 		t.Errorf("opt-in prompt missing the procedures contract:\n%s", on)
 	}

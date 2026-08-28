@@ -212,6 +212,16 @@ type MemoryProposal struct {
 	Contradicts string         `json:"contradicts,omitempty"` // memory: contradicts existing rule; skills: "overwrites existing skill: <name>"
 	Projects    []string       `json:"projects,omitempty"`
 	Reviews     []ReviewResult `json:"reviews,omitempty"` // panel gate verdicts
+	// D4 (2026-08-28, ruling ④ Sol hybrid): Intent "retract" marks a
+	// deletion-class proposal the learner built from a rules-audit flag:
+	// Rule is the daemon-filled flagged rule text (journal truth, never
+	// the LLM's citation), FlagSeq the memory_audit_flag row it cites.
+	// Accepted retract intents are NEVER applied — the apply core journals
+	// memory_update{layer:"memory", cause:"retract_candidate"} instead and
+	// a human resolves (apply_memory contradicts / `odo rules retract`).
+	// Additive keys: legacy batches carry neither.
+	Intent  string `json:"intent,omitempty"`   // "" | "retract"
+	FlagSeq int    `json:"flag_seq,omitempty"` // memory_audit_flag seq (retract intent)
 }
 
 // ReviewResult is one model's verdict on a diff (MoA review fan-out).

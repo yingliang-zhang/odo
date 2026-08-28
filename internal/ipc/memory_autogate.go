@@ -28,6 +28,15 @@ import (
 // Both fail soft: errors journal and leave the batch pending; the distill
 // itself never fails on a memory-pipeline fault (learner/ledger
 // discipline).
+//
+// D4 (2026-08-28, ruling ④): user.md proposals NEVER take these paths —
+// the scope hold flips them to not-accepted and journals
+// memory_update{layer:"apply", cause:"scope_held_for_human"} BEFORE any
+// consume; an all-user.md batch stays pending forever (human territory,
+// never re-gated — the journaled hold suppresses the sweep), and the
+// apply core fails closed should an auto caller ever bypass the hold.
+// Accepted retract intents (intent:"retract") never write either — the
+// apply core emits retract_candidate rows for human resolution.
 
 // autoApplyProposals decides a freshly journaled batch from the reviews
 // riding each proposal and consumes it via the shared apply core.
@@ -50,6 +59,11 @@ func (s *Server) autoApplyProposals(ctx context.Context, c store.Conversation, b
 	}
 	batch := findPendingBatch(events)
 	if !batch.exists || batch.consumed || len(batch.proposals) != len(batchProposals) {
+		return
+	}
+	// D4 scope check, BEFORE any consume: user.md stays strictly
+	// human-written no matter what the panel said (ruling ④).
+	if s.holdUserScopeBatch(ctx, c.ID, batch, accepted) {
 		return
 	}
 	if _, err := s.applyResolvedBatch(ctx, c, batch, accepted, autoActor); err != nil {
@@ -96,6 +110,17 @@ func (s *Server) sweepPendingBatch(ctx context.Context, c store.Conversation, w 
 	if autoApplyRefused(events, batch.epoch) {
 		return // refused batch: human salvage territory (user.md overflow)
 	}
+	// D4 scope check (ruling ④): an all-user.md batch never enters the
+	// gate at all — hold it for the human (rows journaled once, deduped),
+	// then leave; the journaled hold makes every later sweep pass return
+	// here too, so a held batch never re-charges the panel (the
+	// autoApplyRefused discipline for a decision the files can't take).
+	if allUserScopeProposals(batch.proposals) {
+		if !userScopeHeldReported(events, batch.epoch) {
+			s.holdUserScopeBatch(ctx, c.ID, batch, nil)
+		}
+		return
+	}
 	accepted := make([]bool, len(batch.proposals))
 	if reviewsRideOn(batch.proposals, len(models)) {
 		// Gated at distill, never applied (crash before the post-fold
@@ -129,6 +154,11 @@ func (s *Server) sweepPendingBatch(ctx context.Context, c store.Conversation, w 
 		for i := range accepted {
 			accepted[i] = panelAccepts(allReviews[i], len(models))
 		}
+	}
+	// D4 scope check (mixed batch): the user.md proposals peel off for
+	// the human; the rest apply. A fully held batch ends here, pending.
+	if s.holdUserScopeBatch(ctx, c.ID, batch, accepted) {
+		return
 	}
 	if _, err := s.applyResolvedBatch(ctx, c, batch, accepted, autoActor); err != nil {
 		s.journalAutoApplyFailed(ctx, c.ID, batch.epoch, err)
@@ -167,6 +197,99 @@ func autoApplyRefused(events []store.Event, epoch int) bool {
 		}
 	}
 	return false
+}
+
+// allUserScopeProposals reports whether every proposal in the batch
+// targets user.md — the D4 human-only layer (ruling ④).
+func allUserScopeProposals(proposals []MemoryProposal) bool {
+	if len(proposals) == 0 {
+		return false
+	}
+	for _, p := range proposals {
+		if p.Target != "user.md" {
+			return false
+		}
+	}
+	return true
+}
+
+// userScopeHeldReported folds the hold rows for one epoch: a journaled
+// scope_held_for_human marks the batch as already diverted to the human,
+// so the sweep never re-gates it.
+func userScopeHeldReported(events []store.Event, epoch int) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != store.EventMemoryUpdate {
+			continue
+		}
+		var p struct {
+			Layer string `json:"layer"`
+			Cause string `json:"cause"`
+			Epoch int    `json:"epoch"`
+		}
+		if json.Unmarshal(events[i].Payload, &p) == nil &&
+			p.Layer == "apply" && p.Cause == "scope_held_for_human" && p.Epoch == epoch {
+			return true
+		}
+	}
+	return false
+}
+
+// holdUserScopeBatch diverts user.md proposals out of the auto path (D4,
+// ruling ④): each flips to not-accepted and journals
+// memory_update{layer:"apply", cause:"scope_held_for_human", target,
+// epoch, proposal_index, rule} — the rule text rides so the human can
+// salvage it into user.md by hand. Returns true when EVERY proposal was
+// held (the batch stays pending, human-only). Rows dedup per
+// (epoch, proposal_index) so a crash-and-retry never double-journals;
+// journal errors log and leave the batch pending for the next pass.
+func (s *Server) holdUserScopeBatch(ctx context.Context, conversationID int64, batch pendingBatch, accepted []bool) bool {
+	var held []int
+	for i, p := range batch.proposals {
+		if p.Target != "user.md" {
+			continue
+		}
+		held = append(held, i)
+		if accepted != nil {
+			accepted[i] = false
+		}
+	}
+	if len(held) == 0 {
+		return false
+	}
+	reported := map[int]bool{}
+	if events, err := s.store.ListEvents(ctx, conversationID, 0); err == nil {
+		for _, ev := range events {
+			if ev.Type != store.EventMemoryUpdate {
+				continue
+			}
+			var p struct {
+				Layer         string `json:"layer"`
+				Cause         string `json:"cause"`
+				Epoch         int    `json:"epoch"`
+				ProposalIndex int    `json:"proposal_index"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil && p.Layer == "apply" &&
+				p.Cause == "scope_held_for_human" && p.Epoch == batch.epoch {
+				reported[p.ProposalIndex] = true
+			}
+		}
+	}
+	for _, i := range held {
+		if reported[i] {
+			continue
+		}
+		if _, err := s.store.AppendEvent(ctx, conversationID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+			"layer":          "apply",
+			"cause":          "scope_held_for_human",
+			"target":         "user.md",
+			"epoch":          batch.epoch,
+			"proposal_index": i,
+			"rule":           batch.proposals[i].Rule,
+		})); err != nil {
+			log.Printf("distill: journal scope_held_for_human (epoch %d, proposal %d): %v", batch.epoch, i, err)
+		}
+	}
+	return len(held) == len(batch.proposals)
 }
 
 // journalAutoApplyFailed records a failed auto-decision consume (user.md
