@@ -213,9 +213,12 @@ const (
 	autoLandVerifyTailBytes = 8 * 1024
 
 	// autoLandVerifyTimeout caps one verify run. The daemon's own suite
-	// (~2 min) fits comfortably; a hanging build must not wedge the
-	// serialization mutex.
-	autoLandVerifyTimeout = 10 * time.Minute
+	// (~9 min: 532s measured 2026-08-27, 535s with diff #87's added
+	// tests) fits comfortably; a hanging build must not wedge the
+	// serialization mutex. Raised 10m→15m on 2026-08-28: the suite grew
+	// past 10m under daemon-side load and the default 600s go-test
+	// timeout panicked verify (diff #87).
+	autoLandVerifyTimeout = 15 * time.Minute
 	// verifyLogKeepBytes caps one persisted .odo/verify log (tail-biased:
 	// diagnostics sit at the end); verifyLogKeepCount bounds the directory.
 	verifyLogKeepBytes = 1 << 20
