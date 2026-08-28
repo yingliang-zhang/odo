@@ -1211,7 +1211,7 @@ func (s *Server) tickLoopTasks(ctx context.Context, conversationID int64, st *lo
 		return tickWait // finalAudit flips at the fold; the next pass audits
 	}
 	if t.designLockSeq > 0 {
-		return tickWait // human design gate (loop_design_gate auto never parks here)
+		return tickWait // human design gate — also where a D6-refused auto gate parks
 	}
 	if t.spawned {
 		// Implement run or its ladder is in flight — OR the pipeline was
@@ -1236,7 +1236,9 @@ func (s *Server) tickLoopTasks(ctx context.Context, conversationID int64, st *lo
 
 // launchLoopDesign starts the design goroutine for one task (design =
 // runDesignMoa; its completion journals loop_design_lock and either
-// spawns the implement run (gate auto) or parks for the human gate).
+// spawns the implement run (gate auto + D6 diversity admitted) or parks
+// for the human gate — the gate's default AND the diversity-refusal
+// fallback).
 // Ownership hands off from the calling tick to the goroutine.
 func (s *Server) launchLoopDesign(conversationID int64, st *loopState, t loopTask) tickResult {
 	s.loopWG.Add(1)
@@ -1253,7 +1255,9 @@ func (s *Server) launchLoopDesign(conversationID int64, st *loopState, t loopTas
 
 // runLoopDesign executes the design stage for one task. Fail-closed
 // (design_infra): every proposal leg failing or a consolidator error/
-// truncation suspends the loop.
+// truncation suspends the loop. Fail-closed the other way (D6): the
+// auto gate refuses an under-corroborated lock and parks the task at
+// the human gate instead of implementing it.
 func (s *Server) runLoopDesign(loopID, conversationID int64, st *loopState, t loopTask) {
 	ctx := context.Background()
 	goal := "# Task\n\n" + t.text + "\n\n(This task is one step of a sequential task pipeline; design for this step only, against the repository as it stands.)"
@@ -1281,14 +1285,31 @@ func (s *Server) runLoopDesign(loopID, conversationID int64, st *loopState, t lo
 		"design_sha16": sha16([]byte(out.lock)),
 		"proposals":    out.proposals,
 		"consolidator": out.consolidator,
+		"diversity":    out.diversity,
 	}
 	if out.droppedLegs > 0 {
 		payload["dropped_legs"] = out.droppedLegs
 	}
+	// D6 diversity gate: the auto gate admits only a lock backed by ≥2
+	// successful legs spanning ≥2 distinct model families — a single leg,
+	// or two legs of one family under different provider labels, is one
+	// correlation class wearing the audience's costume. Refusal journals
+	// the lock with auto_gate:"refused_diversity" and NEVER spawns: the
+	// fold's designLockSeq stays pending, indistinguishable from
+	// loop_design_gate: human (fail-closed to the stronger gate; the
+	// task is never skipped).
+	autoSpawn := false
+	if loopDesignGateAuto() {
+		if designGateAdmits(out.diversity) {
+			autoSpawn = true
+		} else {
+			payload["auto_gate"] = "refused_diversity"
+		}
+	}
 	s.spillField(payload, loopID, "design_lock", fmt.Sprintf("design-%d.md", t.n))
 	spent := st.spentTokens + loopRowSpend(payload)
 	s.journalLoopBestEffort(ctx, conversationID, loopID, loopModeTasks, loopKindDesignLock, payload, spent)
-	if loopDesignGateAuto() {
+	if autoSpawn {
 		s.spawnLoopImplement(ctx, conversationID, loopID, t, out.lock, sha16([]byte(out.lock)), false, "")
 	}
 }

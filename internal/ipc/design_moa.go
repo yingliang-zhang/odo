@@ -28,6 +28,7 @@ import (
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/moa"
+	"github.com/yingliang-zhang/odo/internal/modelspec"
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
@@ -109,6 +110,7 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 		"design_sha16": sha16([]byte(out.lock)),
 		"proposals":    out.proposals,
 		"consolidator": out.consolidator,
+		"diversity":    out.diversity,
 	}
 	if len(req.ContextFiles) > 0 {
 		payload["context_files"] = req.ContextFiles
@@ -124,13 +126,15 @@ func (s *Server) handleDesignMoa(ctx context.Context, req Request) (Response, er
 
 // designMoaOutcome is one runDesignMoa pass's products: the DESIGN LOCK
 // text, every leg's receipt (failed legs included — their text is dropped,
-// never consolidator input), the consolidator's wire receipt block, and
-// the dropped-leg count.
+// never consolidator input), the consolidator's wire receipt block, the
+// dropped-leg count, and the D6 diversity evidence over the successful
+// set.
 type designMoaOutcome struct {
 	lock         string
 	proposals    []DesignProposal
 	consolidator map[string]interface{}
 	droppedLegs  int
+	diversity    designDiversity
 }
 
 // runDesignMoa runs the Design-MoA pipeline verbatim (M19 extraction from
@@ -194,6 +198,10 @@ func runDesignMoa(ctx context.Context, opName, root, goal string, contextFiles [
 	if len(good) == 0 {
 		return designMoaOutcome{}, fmt.Errorf("%s: every proposal leg failed (%d legs)", opName, len(proposals))
 	}
+	// D6: the auto gate's evidence, computed over the successful set only
+	// (a failed leg is not an opinion). A single leg — or several legs of
+	// one family — is one correlation class, never a consensus.
+	diversity := designDiversityOf(good)
 
 	// Consolidator: ONE moa.Query on the orchestrator model — a synthesis,
 	// not a vote. Deadline policy is the R-W2/R-W3 one: one worst-case moa
@@ -223,7 +231,48 @@ func runDesignMoa(ctx context.Context, opName, root, goal string, contextFiles [
 			"escalations":   consolidated.Escalations,
 		},
 		droppedLegs: len(proposals) - len(good),
+		diversity:   diversity,
 	}, nil
+}
+
+// designDiversity is the D6 auto gate's evidence block, journaled on the
+// design_lock / loop_design_lock rows (additive payload key, ADR-0002
+// immune). legs_successful counts the legs that survived strict
+// truncation; distinct_families counts vendor families across them
+// (modelspec.Family — two provider labels for one model are ONE family);
+// distinct_endpoints counts scrubbed gateways; single_endpoint marks the
+// (usual) shape where every leg rode one gateway — honest about the
+// legs' independence being model-level only.
+type designDiversity struct {
+	LegsSuccessful    int  `json:"legs_successful"`
+	DistinctFamilies  int  `json:"distinct_families"`
+	DistinctEndpoints int  `json:"distinct_endpoints"`
+	SingleEndpoint    bool `json:"single_endpoint"`
+}
+
+// designDiversityOf computes the diversity evidence over the GOOD set
+// (successful legs only — a failed leg is not an opinion). Pure, LLM-free.
+func designDiversityOf(good []DesignProposal) designDiversity {
+	d := designDiversity{LegsSuccessful: len(good)}
+	families, endpoints := map[string]bool{}, map[string]bool{}
+	for _, p := range good {
+		if p.ModelFamily != "" {
+			families[p.ModelFamily] = true
+		}
+		endpoints[p.Endpoint] = true
+	}
+	d.DistinctFamilies = len(families)
+	d.DistinctEndpoints = len(endpoints)
+	d.SingleEndpoint = len(endpoints) <= 1
+	return d
+}
+
+// designGateAdmits is the D6 auto-gate predicate: an automated design
+// lock requires TWO independent legs — ≥2 successful spans ≥2 distinct
+// model families. Anything less stays pending for the human gate
+// (fail-closed to the stronger gate, never skip).
+func designGateAdmits(d designDiversity) bool {
+	return d.LegsSuccessful >= 2 && d.DistinctFamilies >= 2
 }
 
 // designLeg runs one blind proposal leg and folds the outcome into a
@@ -233,11 +282,13 @@ func runDesignMoa(ctx context.Context, opName, root, goal string, contextFiles [
 // (never consolidator input) and Truncated marks the cause.
 func designLeg(ctx context.Context, client *moa.Client, m reviewModel, system, prompt string, tools []moa.Tool, exec *fsToolExecutor) DesignProposal {
 	label := m.model + "@" + m.provider
+	endpoint := scrubBaseURL(client.BaseURL)
+	family := modelspec.Family(m.model)
 	lctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(m.model))
 	defer cancel()
 	res, calls, err := client.QueryWithTools(lctx, m.model, system, prompt, tools, exec.Execute, 0) // 0 → the client's 16-round cap
 	if err != nil {
-		return DesignProposal{Model: label, Error: err.Error(), ToolCalls: calls}
+		return DesignProposal{Model: label, Error: err.Error(), ToolCalls: calls, Endpoint: endpoint, ModelFamily: family}
 	}
 	p := DesignProposal{
 		Model:        label,
@@ -247,6 +298,8 @@ func designLeg(ctx context.Context, client *moa.Client, m reviewModel, system, p
 		Escalations:  res.Escalations,
 		RequestSHA16: res.RequestSHA16,
 		RequestBytes: res.RequestBytes,
+		Endpoint:     endpoint,
+		ModelFamily:  family,
 	}
 	if res.Truncated {
 		p.Truncated = true

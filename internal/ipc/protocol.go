@@ -314,6 +314,13 @@ type DesignProposal struct {
 	// when a body shipped.
 	RequestSHA16 string `json:"request_sha16,omitempty"`
 	RequestBytes int    `json:"request_bytes,omitempty"`
+	// D6 (design-MoA diversity gate): the endpoint the leg truly hit
+	// (scrubBaseURL — credential material stripped; when every leg shares
+	// one gateway the journal must say so) and the model's vendor family
+	// (modelspec.Family — label diversity is NOT model diversity: the
+	// same model under two provider labels is ONE opinion).
+	Endpoint    string `json:"endpoint,omitempty"`
+	ModelFamily string `json:"model_family,omitempty"`
 }
 
 // DiffInfo carries a diff record plus its file content to the client.

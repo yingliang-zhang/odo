@@ -10,7 +10,9 @@ package ipc
 //	loop_started{mode, base, max_rounds, budget_tokens, hold_severity,
 //	            auditors[], tasks?[], task_source?, file?, seed_diffs?[]}
 //	loop_design_lock{task, goal, goal_sha16, design_sha16, design_lock |
-//	            design_path, proposals[], consolidator{}, base_url_scrubbed}
+//	            design_path, proposals[], consolidator{}, diversity{},
+//	            auto_gate?: "refused_diversity" (D6: only when the auto
+//	            gate refuses; the lock parks at the human gate)}
 //	loop_task_spawn{task, task_sha16, design_sha16, amended?,
 //	            design_lock | design_path, goal_seqs?, prompt_tokens_est,
 //	            origin:"loop_ctl"?}

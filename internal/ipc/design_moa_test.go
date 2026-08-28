@@ -432,3 +432,230 @@ func TestDesignMoaTruncationFailClosed(t *testing.T) {
 		}
 	})
 }
+
+// --- D6 (design-MoA diversity gate) ------------------------------------------------
+
+// d6Mux answers design legs + the consolidator (the fixtures live in
+// loop_test.go: kind sniffing keys on the system prompts).
+func d6Mux(kind string, n int, model string) (int, string, int) {
+	switch kind {
+	case "design":
+		return 200, "PROPOSAL FROM " + model, 10
+	case "consolidator":
+		return 200, "# DESIGN LOCK\n\nConsolidated by " + model + ".\n", 10
+	}
+	return 200, "", 0
+}
+
+// d6LoopRig boots a tasks-loop rig whose review line + design gate the
+// test controls (loopRig's review line is fixed) with
+// loop_design_gate: auto armed.
+func d6LoopRig(t *testing.T, reviewLine string, mux loopMux) *testRig {
+	t.Helper()
+	root := loopRigRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, reviewLine+"\nauto_apply: main\norchestrator: orch-m3k@test\nloop_design_gate: auto\n")
+	startLoopMuxStub(t, mux)
+	ctrlPath := filepath.Join(t.TempDir(), "loop_stub_ctrl")
+	setLoopStubAction(t, ctrlPath, "none")
+	t.Setenv("LOOP_STUB_CTRL", ctrlPath)
+	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, loopWrapper))
+	rig := startRig(t, root)
+	t.Cleanup(func() { rig.stop(t) })
+	return rig
+}
+
+// d6Diversity decodes a journaled design_lock row's diversity block.
+func d6Diversity(row map[string]interface{}) (legs, fams, eps int, single bool) {
+	dv, _ := row["diversity"].(map[string]interface{})
+	num := func(k string) int {
+		f, _ := dv[k].(float64)
+		return int(f)
+	}
+	return num("legs_successful"), num("distinct_families"), num("distinct_endpoints"), dv["single_endpoint"] == true
+}
+
+// d6PendingGate asserts the fold's exact human-gate state: a design lock
+// is pending, the task is not spawned/done, and the loop is active.
+func d6PendingGate(t *testing.T, sc loopScan) {
+	t.Helper()
+	st := sc.states[sc.loopID()]
+	if st == nil || len(st.tasks) != 1 {
+		t.Fatalf("fold = %+v, want one tasks-loop with one task", st)
+	}
+	task := st.tasks[0]
+	if task.designLockSeq == 0 || task.spawned || task.done {
+		t.Errorf("fold task = %+v, want a pending human design gate (designLockSeq set, not spawned, not done)", task)
+	}
+	if st.status != "active" {
+		t.Errorf("loop status = %q, want active (a refusal parks, never suspends or skips)", st.status)
+	}
+}
+
+// TestRunDesignMoaDiversityGate pins the D6 auto gate over the /loop
+// tasks path: same model family under two provider labels is ONE
+// correlation class (refused); two families pass; a single leg never
+// auto-implements.
+func TestRunDesignMoaDiversityGate(t *testing.T) {
+	// refusedFlow drives the loop to its design row and pins: the
+	// auto_gate refusal rides the lock row, the diversity block matches,
+	// no implement spawns, and the fold parks at the human gate.
+	refusedFlow := func(t *testing.T, reviewLine string, wantLegs, wantFams int, wantFamilies []string) {
+		rig := d6LoopRig(t, reviewLine, d6Mux)
+		convID := loopBoot(t, rig)
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID,
+			Text: "/loop tasks 1. design the widget"})
+		sc := waitLoop(t, rig.store, convID, "design lock journaled", func(sc loopScan) bool {
+			return len(sc.ofKind(loopKindDesignLock)) == 1
+		})
+		lock := sc.ofKind(loopKindDesignLock)[0]
+		if lock["auto_gate"] != "refused_diversity" {
+			t.Errorf("auto_gate = %v, want refused_diversity", lock["auto_gate"])
+		}
+		legs, fams, eps, single := d6Diversity(lock)
+		if legs != wantLegs || fams != wantFams || eps != 1 || !single {
+			t.Errorf("diversity = {%d legs, %d fams, %d eps, single:%v}, want {%d, %d, 1, true}",
+				legs, fams, eps, single, wantLegs, wantFams)
+		}
+		props, _ := lock["proposals"].([]interface{})
+		if len(props) != wantLegs {
+			t.Fatalf("journaled proposals = %d, want %d", len(props), wantLegs)
+		}
+		for i, wantFam := range wantFamilies {
+			pr, _ := props[i].(map[string]interface{})
+			if pr["model_family"] != wantFam {
+				t.Errorf("proposal[%d] model_family = %v, want %q", i, pr["model_family"], wantFam)
+			}
+			if ep, _ := pr["endpoint"].(string); !strings.HasPrefix(ep, "http://127.0.0.1:") {
+				t.Errorf("proposal[%d] endpoint = %v, want the scrubbed stub gateway", i, pr["endpoint"])
+			}
+		}
+		d6PendingGate(t, sc)
+		loopQuiet(t, rig.store, convID, 500*time.Millisecond, "implement spawned despite the diversity refusal",
+			func(sc loopScan) bool { return len(sc.ofKind(loopKindTaskSpawn)) != 0 })
+		// Clean teardown: stop the parked loop.
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "/loop stop"})
+		waitLoop(t, rig.store, convID, "stopped", func(sc loopScan) bool {
+			return len(sc.ofKind(loopKindStopped)) == 1
+		})
+	}
+
+	t.Run("two legs one family: refused (label diversity is not model diversity)", func(t *testing.T) {
+		refusedFlow(t, "review: kimi-k3@t9s, kimi-9x@other", 2, 1, []string{"kimi", "kimi"})
+	})
+
+	t.Run("one leg: refused (a single success is no consensus)", func(t *testing.T) {
+		refusedFlow(t, "review: kimi-k3@t9s", 1, 1, []string{"kimi"})
+	})
+
+	t.Run("two legs two families: admitted and auto-implemented", func(t *testing.T) {
+		rig := d6LoopRig(t, "review: kimi-k3@t9s, deepseek-v4-flash@t9s", d6Mux)
+		convID := loopBoot(t, rig)
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID,
+			Text: "/loop tasks 1. design the widget"})
+		sc := waitLoop(t, rig.store, convID, "implement spawn", func(sc loopScan) bool {
+			return len(sc.ofKind(loopKindTaskSpawn)) == 1
+		})
+		lock := sc.ofKind(loopKindDesignLock)[0]
+		if _, refused := lock["auto_gate"]; refused {
+			t.Errorf("auto_gate = %v, want NO auto_gate key on an admitted lock", lock["auto_gate"])
+		}
+		legs, fams, eps, single := d6Diversity(lock)
+		if legs != 2 || fams != 2 || eps != 1 || !single {
+			t.Errorf("diversity = {%d, %d, %d, single:%v}, want {2, 2, 1, true}", legs, fams, eps, single)
+		}
+		// The implement run follows the spawn; the IPC poll drives the
+		// drain (ctrl none → no diff → fix_no_diff suspension) so
+		// teardown never closes the store mid-journal.
+		pollDone(t, rig, convID)
+		waitLoop(t, rig.store, convID, "post-drain adjudication", func(sc loopScan) bool {
+			return len(sc.causes()) == 1 && sc.causes()[0] == "fix_no_diff"
+		})
+	})
+}
+
+// TestAutoGateFallsBackToHuman pins the refusal's end-to-end contract:
+// the parked state is EXACTLY the loop_design_gate: human state (the
+// human gate consumes it via loop_ctl approve_design and only then does
+// the implement run spawn), and the manual /design_moa handler is
+// unchanged — one leg still emits a lock, diversity block journaled for
+// visibility only.
+func TestAutoGateFallsBackToHuman(t *testing.T) {
+	t.Run("refused diversity: pending gate consumed by the human gate", func(t *testing.T) {
+		rig := d6LoopRig(t, "review: kimi-k3@t9s", d6Mux)
+		convID := loopBoot(t, rig)
+		rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID,
+			Text: "/loop tasks 1. design the widget"})
+		sc := waitLoop(t, rig.store, convID, "design lock journaled", func(sc loopScan) bool {
+			return len(sc.ofKind(loopKindDesignLock)) == 1
+		})
+		if lock := sc.ofKind(loopKindDesignLock)[0]; lock["auto_gate"] != "refused_diversity" {
+			t.Fatalf("auto_gate = %v, want refused_diversity", lock["auto_gate"])
+		}
+		d6PendingGate(t, sc)
+		if len(sc.ofKind(loopKindTaskSpawn)) != 0 {
+			t.Fatal("implement spawned despite the refusal")
+		}
+
+		// The human gate (loop_ctl approve_design) consumes exactly the
+		// pending designLockSeq — the state must be indistinguishable
+		// from loop_design_gate: human.
+		rig.call(t, Request{Cmd: CmdLoopCtl, ConversationID: convID, Action: "approve_design"})
+		sc = waitLoop(t, rig.store, convID, "implement spawn after approval", func(sc loopScan) bool {
+			return len(sc.ofKind(loopKindTaskSpawn)) == 1
+		})
+		st := sc.states[sc.loopID()]
+		if st == nil || len(st.tasks) != 1 || !st.tasks[0].spawned || st.tasks[0].designLockSeq != 0 {
+			t.Errorf("post-approval fold = %+v, want spawned with the gate cleared", st)
+		}
+		// The IPC poll drives the drain (ctrl none → no diff →
+		// fix_no_diff) so teardown never closes the store mid-journal.
+		pollDone(t, rig, convID)
+		waitLoop(t, rig.store, convID, "post-drain adjudication", func(sc loopScan) bool {
+			return len(sc.causes()) == 1 && sc.causes()[0] == "fix_no_diff"
+		})
+	})
+
+	t.Run("manual design_moa with one leg still locks (visibility only)", func(t *testing.T) {
+		root := initRepo(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("ODO_OMP_WRAPPER", writeStub(t, stubWrapper))
+		srv, _, _ := startDesignMoaStub(t, map[string]string{
+			"kimi-k3":  "PROPOSAL FROM THE LONE LEG",
+			"orch-m3k": "# DESIGN LOCK\n\nThe lone leg's design.\n",
+		}, nil, 0)
+		t.Setenv("MOA_BASE_URL", srv.URL)
+		t.Setenv("SUDO_CODING_KEY", "test-key")
+		writePrefs(t, home, "design_via: moa\nreview: kimi-k3@t9s\norchestrator: orch-m3k@test\n")
+		rig := startRig(t, root)
+		defer rig.stop(t)
+		boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+
+		resp := rig.call(t, Request{
+			Cmd: CmdDesignMoa, ProjectRoot: root, ConversationID: boot.Conversation.ID, Goal: "Design it.",
+		})
+		if resp.DesignLock != "# DESIGN LOCK\n\nThe lone leg's design.\n" {
+			t.Fatalf("manual path must still lock on one leg; design_lock = %q", resp.DesignLock)
+		}
+		if len(resp.DesignProposals) != 1 {
+			t.Fatalf("proposals = %d, want 1", len(resp.DesignProposals))
+		}
+		p := resp.DesignProposals[0]
+		if p.ModelFamily != "kimi" || p.Endpoint != srv.URL {
+			t.Errorf("proposal = family %q endpoint %q, want kimi @ %s", p.ModelFamily, p.Endpoint, srv.URL)
+		}
+		ev := designLockEvent(t, rig, boot.Conversation.ID)
+		if ev == nil {
+			t.Fatal("no design_lock row journaled")
+		}
+		legs, fams, eps, single := d6Diversity(ev)
+		if legs != 1 || fams != 1 || eps != 1 || !single {
+			t.Errorf("diversity = {%d, %d, %d, single:%v}, want {1, 1, 1, true}", legs, fams, eps, single)
+		}
+		if _, gated := ev["auto_gate"]; gated {
+			t.Errorf("auto_gate = %v present on the manual path — the gate only exists under loop_design_gate: auto", ev["auto_gate"])
+		}
+	})
+}
