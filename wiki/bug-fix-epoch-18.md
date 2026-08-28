@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D2 — Repo-Grounded Reviewer Leg (Control-Plane Hardening)
 
 Implementation of **D2 [P1] Repo-grounded reviewer leg** from `docs/design/control-plane-hardening-lock.md` (binding spec) in the `odo` repo (Go; `internal/moa`, `internal/ipc`). Prior legs D1/D3/D5/D7 landed (914a82f, d0f0a5c, 8adc8d9, fdd282a) and were not reworked; `gatepolicy.go` / `gate_manifest.json` / `.odo-verify` untouched. Work done in an assigned worktree.

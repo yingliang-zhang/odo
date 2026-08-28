@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D3: Real Executor Token Ledger (Control-Plane Hardening)
 
 ## Context

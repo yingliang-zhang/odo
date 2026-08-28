@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Control-Plane Hardening: D3 Re-Apply and D5 Finding Identity v4
 
 Session covering two pipeline tasks against the binding spec `docs/design/control-plane-hardening-lock.md` (repo `~/Projects/odo`): re-applying the proven-but-blocked D3 token-usage-ledger diff, then implementing D5.

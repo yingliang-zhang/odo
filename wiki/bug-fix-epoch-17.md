@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D7 Verdict Policy Implementation (Control-Plane Hardening)
 
 Implementation of **D7 [P1] Verdict policy** from `docs/design/control-plane-hardening-lock.md` (binding spec, ruling ③ = K3 general settle table). D1/D3/D5 already landed (914a82f, d0f0a5c, 8adc8d9) and were not reworked. Tier-0 (`gatepolicy.go`, `gate_manifest.json`) and `.odo-verify` untouched.
