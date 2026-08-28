@@ -31,7 +31,10 @@
   /* M9 Phase 1: top bar + status bar + right panel geometry */
   --topbar-height: 38px;
   --statusbar-height: 26px;
-  --panel-width: 380px;
+  /* U2.3: was 380px — the tab strip measured 419–457px scrollWidth there,
+     so the ‹ › arrows were the resting state; 420 fits past it. Drag and
+     odo-panel-width persistence still win over this default. */
+  --panel-width: 420px;
   /* Belt D: semantic colors lifted out of literals so the light theme can
      re-theme every surface by overriding this block alone. Values below
      are the previous hardcoded dark-theme colors. */
@@ -554,7 +557,7 @@ body {
    retractions, ledger failures) live top-right of the main area — out of
    the sidebar — and auto-dismiss after 10s. Below the modal/palette
    overlays (z-index 100+) but above the chat surface AND the context
-   panel's ≤999px overlay (z-90 — U1.5). */
+   panel's chat-width-driven overlay (z-90 — U1.5). */
 .toast-viewport {
   position: absolute;
   top: 12px;
@@ -967,6 +970,14 @@ body {
    (ToolTicker, run-status strip, fold chip) stay full-width. */
 :root {
   --chat-column-width: 1100px;
+}
+/* U2.4: reading-measure cap on CHAT BUBBLE prose only. The 1100px column
+   stays (tables/code/diffs use it); prose blocks stop at 72ch so long
+   paragraphs stay readable. pre/table/code are exempt by omission from
+   the selector; WikiBrowser markdown (.wiki-content) lives outside
+   .bubble-text on purpose and keeps its own measure. */
+.bubble .bubble-text :where(p, li, ul, ol, blockquote, h1, h2, h3, h4) {
+  max-inline-size: 72ch;
 }
 
 /* .badge base + .badge-accept/-reject/-other stay: LedgerPanel still
@@ -1537,8 +1548,7 @@ mark {
 /* .context-panel/.panel-resize/.panel-head/.panel-tabs/.panel-tab(+.active)/
    .panel-tab-badge/.panel-body deleted (Phase 7; .panel-close went with the
    in-header close X, replaced by the TopBar toggle): Tailwind
-   utilities + CVA Button in ContextPanel.tsx; the <1000px overlay media
-   query is expressed as max-[999px]: utilities there. Class names survive
+   utilities + CVA Button in ContextPanel.tsx. Class names survive
    as inert e2e/identity hooks. @keyframes panel-in stays (shared entrance
    motion). .panel-empty stays below — shared with App.tsx/SkillsPanel.tsx. */
 .panel-empty {
@@ -1553,9 +1563,10 @@ mark {
   padding: 16px;
 }
 
-/* M9 Phase 6 responsive overlay rule deleted (Phase 7): now max-[999px]:
-   utilities on .context-panel in ContextPanel.tsx (z-index 90, below the
-   settings overlay at 100). */
+/* M9 Phase 6 responsive overlay rule deleted (Phase 7); max-[999px]:
+   utilities on .context-panel carried it until U2.1 replaced the
+   window-width breakpoint with the measured-chat-width overlay
+   (ContextPanel.tsx, z-index 90 — below the settings overlay at 100). */
 
 /* ---------- M9 Phase 5: StatusBar badges + adapter ----------
 

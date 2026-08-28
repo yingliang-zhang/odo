@@ -45,6 +45,7 @@ import StatusBar from "./components/StatusBar";
 import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
+import { usePanelOverlay } from "./panel_overlay";
 import { notifyRunDone, notifyLoopTerminal } from "./notify";
 import {
   captureSwitchSnapshot,
@@ -287,6 +288,14 @@ export default function App() {
   // P1a: the poll loop reads the active tab through a ref (the interval
   // callback closes over the boot cycle, not the render cycle).
   const panelTabRef = useRef<PanelTab>("changes");
+  // U2.1: the panel's docked↔overlay posture follows the MEASURED chat
+  // width (ResizeObserver on .app-main, 560/600px hysteresis) — the old
+  // max-[999px] window-width breakpoint is deleted; one mechanism only.
+  // The element arrives via callback ref because the tree below is gated
+  // behind the `booted` early-return: a useRef read at first commit is
+  // null and would never re-subscribe when <main> finally mounts.
+  const [appMainEl, setAppMainEl] = useState<HTMLElement | null>(null);
+  const panelOverlay = usePanelOverlay(appMainEl, panelOpenRef);
   // M9 P2: track previous pending-diff count for genuine 0→1 transition,
   // and a bootstrap latch so the first poll after applyBootstrap doesn't
   // auto-open the panel on pre-existing pending diffs.
@@ -2052,7 +2061,7 @@ export default function App() {
         />
       )}
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} initialActionId={paletteInitialAction} />}
-      <main className="app-main">
+      <main className="app-main" ref={setAppMainEl}>
         {/* Toast viewport: the transient chips the sidebar used to host,
             plus sidebar confirmations. Click-through opens the panel the
             toast is about; every toast auto-dismisses after TOAST_MS. */}
@@ -2178,6 +2187,7 @@ export default function App() {
       </main>
       <ContextPanel
         open={panelOpen}
+        overlay={panelOverlay}
         activeTab={panelTab}
         onTabChange={openTab}
         changesBadge={diffs.length > 0 ? diffs.length : undefined}

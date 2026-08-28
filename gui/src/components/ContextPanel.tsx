@@ -8,12 +8,21 @@ import { ChevronLeft, ChevronRight, GitCompareArrows, FileText, MapPin, BookOpen
 import type { PointerEvent as ReactPointerEvent } from "react";
 import RunGroupBoundary from "./RunGroupBoundary";
 import { cn } from "../lib/utils";
+import {
+  PANEL_MIN_WIDTH,
+  PANEL_WIDTH_KEY,
+  dragMaxPanelWidth,
+  readStoredPanelWidth,
+} from "../panel_overlay";
 
 export type PanelTab = "changes" | "review" | "wiki" | "memory" | "ledger" | "skills";
 
 interface Props {
   open: boolean;
   activeTab: PanelTab;
+  // U2.1: measured chat width (App's usePanelOverlay) picked the overlay
+  // posture — fixed over the chat + scrim, instead of docked in the grid.
+  overlay?: boolean;
   onTabChange: (tab: PanelTab) => void;
   // Badge counts for each tab (null/undefined = no badge)
   changesBadge?: number;
@@ -38,6 +47,7 @@ const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
 export default function ContextPanel({
   open,
   activeTab,
+  overlay = false,
   onTabChange,
   changesBadge,
   reviewBadge,
@@ -46,9 +56,24 @@ export default function ContextPanel({
   ledgerBadge,
   children,
 }: Props) {
-  const MIN_WIDTH = 280;
-  const MAX_WIDTH = 600;
-  const [panelWidth, setPanelWidth] = useState(380);
+  // U2.2/U2.3: width persists to localStorage (clamped on read); the
+  // default is 420px — at 380 the tab strip overflowed at rest (the
+  // finding-8 measurements below), making the ‹ › arrows the resting state.
+  // MIN/MAX are the static CSS range; the drag itself clamps harder at
+  // runtime (dragMaxPanelWidth keeps the chat ≥400px).
+  const MIN_WIDTH = PANEL_MIN_WIDTH;
+  const [panelWidth, setPanelWidth] = useState(readStoredPanelWidth);
+  useEffect(() => {
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth));
+    } catch {
+      /* sidebar-collapse persistence pattern — ignore quota errors */
+    }
+  }, [panelWidth]);
+  // U2.1 drag clamp: min(MAX, window − sidebar − 400). Reads the live
+  // sidebar width (240/48px) so a collapsed rail buys the panel room.
+  const dragMax = () =>
+    dragMaxPanelWidth(window.innerWidth, document.querySelector<HTMLElement>(".sidebar")?.offsetWidth ?? 0);
   const dragRef = useRef<{ startX: number; startW: number; lastX: number } | null>(null);
   const rafRef = useRef<number | null>(null);
   useEffect(
@@ -130,7 +155,7 @@ export default function ContextPanel({
       if (!cur) return;
       // Grip is on the left edge of a right-docked panel: dragging left
       // (clientX decreases) must widen the panel.
-      setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, cur.startW + (cur.startX - cur.lastX))));
+      setPanelWidth(Math.min(dragMax(), Math.max(MIN_WIDTH, cur.startW + (cur.startX - cur.lastX))));
     });
   };
   const onResizePointerUp = () => {
@@ -142,7 +167,7 @@ export default function ContextPanel({
       rafRef.current = null;
     }
     dragRef.current = null;
-    if (d) setPanelWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, d.startW + (d.startX - d.lastX))));
+    if (d) setPanelWidth(Math.min(dragMax(), Math.max(MIN_WIDTH, d.startW + (d.startX - d.lastX))));
   };
 
   const badges: Record<PanelTab, number | null | undefined> = {
@@ -155,16 +180,29 @@ export default function ContextPanel({
   };
 
   return (
+    <>
+      {overlay && (
+        // U2.1 scrim: dims the body row under the floating panel. It is
+        // deliberately click-THROUGH (the audit's scrim is a posture
+        // signal, not a modal — the chat stays interactive); the existing
+        // ⌘J / TopBar toggle / Esc close the panel. z-89 sits under the
+        // panel (90) and the toast viewport (95, U1.5).
+        <div
+          className="panel-scrim pointer-events-none fixed inset-x-0 top-[var(--topbar-height)] bottom-[var(--statusbar-height)] z-[89] bg-black/20"
+          aria-hidden="true"
+        />
+      )}
     <aside
       className={cn(
         "context-panel w-[var(--panel-width)] min-w-[280px] max-w-[720px]",
         "flex flex-col min-h-0 bg-[var(--bg-raised,var(--bg))]",
         "border-l border-[var(--stroke-tertiary)] overflow-hidden relative",
         "animate-[panel-in_0.2s_var(--ease-out)]",
-        // Below 1000px the panel overlays the chat (was @media max-width 999px).
-        "max-[999px]:fixed max-[999px]:top-[var(--topbar-height)] max-[999px]:right-0",
-        "max-[999px]:bottom-[var(--statusbar-height)] max-[999px]:z-[90]",
-        "max-[999px]:shadow-[-4px_0_12px_rgba(0,0,0,0.3)]",
+        // U2.1: overlay posture is decided by the measured chat width in
+        // App.tsx (usePanelOverlay), NOT a window-width media breakpoint
+        // (that selector is deleted), so there is one mechanism only.
+        overlay &&
+          "fixed top-[var(--topbar-height)] right-0 bottom-[var(--statusbar-height)] z-[90] shadow-[-4px_0_12px_rgba(0,0,0,0.3)]",
       )}
       aria-label="Context panel"
       style={{ "--panel-width": `${panelWidth}px` } as React.CSSProperties}
@@ -271,5 +309,6 @@ export default function ContextPanel({
         </RunGroupBoundary>
       </div>
     </aside>
+    </>
   );
 }

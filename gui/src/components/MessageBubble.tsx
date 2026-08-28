@@ -100,7 +100,7 @@ function recallTooltip(recall: RecallItem[]): string {
 
 // ui/message-stream (Hermes-parity): hover affordances on content bubbles —
 // copy the raw message text (top-right) and a small timestamp (in a bottom
-// strip the bubble reserves via pb-[26px], so no layout shift on reveal).
+// strip the bubble reserves via pb-[20px]— just over the .bubble-time true ~18px footprint (U2.5), so no layout shift on reveal).
 // State lives per-rendered event: CopyBubbleButton is a component, not a
 // render closure, so the feedback flip survives the memo without prop drill.
 function CopyBubbleButton({ text }: { text: string }) {
@@ -154,7 +154,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
   switch (event.type) {
     case "user_message":
       body = (
-        <div className="bubble bubble-user group/bubble relative self-end bg-accent-user text-white flex flex-col rounded-[12px_12px_4px_12px] shadow-[0_1px_2px_rgba(0,0,0,0.25)] max-w-[82%] px-3.5 pt-2.5 pb-[26px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+        <div className="bubble bubble-user group/bubble relative self-end bg-accent-user text-white flex flex-col rounded-[12px_12px_4px_12px] shadow-[0_1px_2px_rgba(0,0,0,0.25)] max-w-[82%] px-3.5 pt-2.5 pb-[20px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <CopyBubbleButton text={p.text ?? ""} />
           <div className="bubble-text">{highlightText(p.text ?? "", highlight, "u")}</div>
           {p.steer && (
@@ -198,7 +198,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
 
     case "agent_text":
       body = (
-        <div className="bubble bubble-agent group/bubble relative w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-bg-raised text-[var(--agent-text)] border border-stroke-secondary rounded-[12px_12px_12px_4px] shadow-[0_1px_2px_rgba(0,0,0,0.18)] px-3.5 pt-2.5 pb-[26px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+        <div className="bubble bubble-agent group/bubble relative w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-bg-raised text-[var(--agent-text)] border border-stroke-secondary rounded-[12px_12px_12px_4px] shadow-[0_1px_2px_rgba(0,0,0,0.18)] px-3.5 pt-2.5 pb-[20px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <CopyBubbleButton text={p.text ?? ""} />
           <div className="bubble-text">
             <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />

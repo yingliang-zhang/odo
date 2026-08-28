@@ -484,7 +484,7 @@ describe("U1 app.css contract", () => {
     expect(findRule(rules, ":focus-visible:not([role=\"dialog\"])")).toBeDefined();
   });
 
-  it("U1.5: toasts stack above the ≤999px panel overlay (z-90)", () => {
+  it("U1.5: toasts stack above the chat-width-driven panel overlay (z-90)", () => {
     const rules = appCssRules();
     expect(Number(findRule(rules, ".toast-viewport")?.style.getPropertyValue("z-index"))).toBe(95);
   });
