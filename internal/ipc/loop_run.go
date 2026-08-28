@@ -295,12 +295,15 @@ func (s *Server) runAuditRound(loopID, conversationID int64, st *loopState, even
 
 	client := s.sharedMoa()
 	legs := auditFanout(ctx, client, models, auditSystem, prompt)
-	var perLeg [][]finding
+	// Position-preserving (V4): perLeg[i] holds the journaled legs[i]'s
+	// findings (nil for degraded legs) so the union's leg_ids index the
+	// same fan-out array the round row carries.
+	perLeg := make([][]finding, len(legs))
 	completeLegs := 0
-	for _, l := range legs {
+	for i, l := range legs {
 		if l.Verdict == "complete" {
 			completeLegs++
-			perLeg = append(perLeg, l.Findings)
+			perLeg[i] = l.Findings
 		}
 	}
 	union := unionFindings(perLeg)

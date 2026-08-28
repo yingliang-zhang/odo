@@ -397,6 +397,147 @@ func TestUnionFindings(t *testing.T) {
 	}
 }
 
+// TestFindingFingerprintV4 pins D5's identity change: file+symbol+category
+// (+ optional rule) is the fingerprint; title/evidence wording is mutable
+// description and must never fork a phantom finding.
+func TestFindingFingerprintV4(t *testing.T) {
+	base := finding{Severity: "P2", File: "a.go", Symbol: "f", Title: "races the resume", Category: "contract"}
+	fp := findingFingerprint(base)
+	// Same file/symbol/cat, different title wording ⇒ same FP (V3 hashed
+	// the title; V4 must not).
+	reworded := base
+	reworded.Title = "completely different wording about the same race"
+	if got := findingFingerprint(reworded); got != fp {
+		t.Errorf("title rewording forked the FP: %s vs %s", got, fp)
+	}
+	// Severity never enters identity either (unchanged from V3).
+	resev := base
+	resev.Severity = "P0"
+	if got := findingFingerprint(resev); got != fp {
+		t.Errorf("severity forked the FP: %s vs %s", got, fp)
+	}
+	// Category IS identity: a different category splits the finding.
+	diffcat := base
+	diffcat.Category = "security"
+	if got := findingFingerprint(diffcat); got == fp {
+		t.Error("different category must fork the FP")
+	}
+	// Unknown/absent category normalizes to other.
+	if got := findingFingerprint(finding{File: "a.go", Symbol: "f", Category: "madeup"}); got != findingFingerprint(finding{File: "a.go", Symbol: "f", Category: "other"}) {
+		t.Error("unknown category must fold to other")
+	}
+	// The optional rule splits sightings when cited.
+	ruled := base
+	ruled.Rule = "C6"
+	if got := findingFingerprint(ruled); got == fp {
+		t.Error("cited rule must fork the FP")
+	}
+	// Rule whitespace edges don't fork.
+	ruledLoose := base
+	ruledLoose.Rule = " C6 "
+	if got := findingFingerprint(ruledLoose); got != findingFingerprint(ruled) {
+		t.Error("rule padding must not fork the FP")
+	}
+}
+
+// TestUnionPerLegDedup pins D5's counting change: each leg is deduped by
+// FP before leg support is counted (same-leg re-citations can't inflate
+// Legs), and leg_ids names the supporting fan-out positions.
+func TestUnionPerLegDedup(t *testing.T) {
+	mk := func(sev, title string) finding {
+		f := finding{Severity: sev, File: "a.go", Symbol: "f", Title: title, Category: "contract"}
+		f.FP = findingFingerprint(f)
+		return f
+	}
+	// One leg cites the same FP twice at different severities ⇒ ONE
+	// supporter, kept at its most severe sighting.
+	oneLeg := unionFindings([][]finding{{mk("P3", "mild wording"), mk("P2", "severe wording")}})
+	if len(oneLeg) != 1 {
+		t.Fatalf("same-leg duplicate escaped the union: n=%d want 1", len(oneLeg))
+	}
+	if oneLeg[0].Legs != 1 || fmt.Sprint(oneLeg[0].LegIDs) != "[0]" {
+		t.Errorf("same-leg support = legs %d ids %v, want 1 leg [0]", oneLeg[0].Legs, oneLeg[0].LegIDs)
+	}
+	if oneLeg[0].Severity != "P2" || oneLeg[0].Title != "severe wording" {
+		t.Errorf("per-leg dedup must keep the most severe sighting: %+v", oneLeg[0])
+	}
+	// Two legs ⇒ Legs=2 with both positions; max severity across legs wins.
+	twoLegs := unionFindings([][]finding{{mk("P3", "mild wording")}, {mk("P1", "worst wording")}})
+	if len(twoLegs) != 1 || twoLegs[0].Legs != 2 || fmt.Sprint(twoLegs[0].LegIDs) != "[0 1]" {
+		t.Fatalf("two-leg support = %+v, want 1 finding legs 2 ids [0 1]", twoLegs[0])
+	}
+	if twoLegs[0].Severity != "P1" || twoLegs[0].Title != "worst wording" {
+		t.Errorf("cross-leg max-wins: %+v", twoLegs[0])
+	}
+}
+
+// TestParseBackwardCompat pins the mixed-window contract: old 4-field
+// rows parse with cat=other, and the new optional cat/rule fields parse
+// and normalize additively.
+func TestParseBackwardCompat(t *testing.T) {
+	old := "- sev: P2 | file: internal/ipc/loop.go | symbol: tickLoop | title: budget check races resume"
+	f, ok := parseFindingsBlock(auditFindings(old))
+	if !ok || len(f) != 1 {
+		t.Fatalf("old row: ok=%v n=%d", ok, len(f))
+	}
+	if f[0].Category != "other" || f[0].Rule != "" {
+		t.Errorf("old 4-field row must parse cat=other, no rule: %+v", f[0])
+	}
+	// New shape: cat + rule + status all ride.
+	f, ok = parseFindingsBlock(auditFindings(
+		"- sev: P1 | file: b.go | symbol: gate | cat: security | title: policy bypass | rule: SEC-7 | status: still_open",
+	))
+	if !ok || len(f) != 1 {
+		t.Fatalf("new row: ok=%v n=%d", ok, len(f))
+	}
+	got := f[0]
+	if got.Category != "security" || got.Rule != "SEC-7" || got.Status != "still_open" || got.Title != "policy bypass" {
+		t.Errorf("new-shape parse: %+v", got)
+	}
+	// Unknown category folds to other; resolved closure still drops the row.
+	f, ok = parseFindingsBlock(auditFindings(
+		"- sev: P3 | file: c.go | symbol: nit | cat: madeup | title: x | status: resolved",
+	))
+	if !ok || len(f) != 0 {
+		t.Errorf("resolved-with-cat must drop: ok=%v n=%d", ok, len(f))
+	}
+	f, ok = parseFindingsBlock(auditFindings(
+		"- sev: P3 | file: c.go | symbol: nit | cat: madeup | title: x",
+	))
+	if !ok || len(f) != 1 || f[0].Category != "other" {
+		t.Errorf("unknown cat must fold to other: ok=%v %+v", ok, f)
+	}
+}
+
+// TestUpgradeBoundaryNoFalseStall pins the v3→v4 migration guard: round
+// 1's blocking_fps are v3 strings, round 2's are v4 strings for the SAME
+// logical findings after a landed fix. The changed FP set must read as
+// new findings for one round — never as an unchanged-set stall.
+func TestUpgradeBoundaryNoFalseStall(t *testing.T) {
+	st := &loopState{
+		rounds: []loopRound{
+			{seq: 2, round: 1, subjectSHA16: "s1", blockingFPS: []string{"v3fp-of-finding-a"}},
+			{seq: 4, round: 2, subjectSHA16: "s2"},
+		},
+		boundDiffs: map[int64]bool{9: true},
+	}
+	events := []store.Event{
+		{Seq: 3, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"accept","actor":"auto_loop","diff_id":9}`)},
+	}
+	stall, why := (&Server{}).loopStallCheck(events, st, "s2", []string{"v4fp-of-finding-a"}, 5)
+	if stall {
+		t.Errorf("boundary FP change must not stall: %q", why)
+	}
+	// The armed comparator still works when the set truly is unchanged
+	// (the upgrade only moves FPs, it does not disarm C5).
+	prevV4 := append([]loopRound(nil), st.rounds...)
+	prevV4[0].blockingFPS = []string{"v4fp-of-finding-a"}
+	stall, _ = (&Server{}).loopStallCheck(events, &loopState{rounds: prevV4, boundDiffs: st.boundDiffs}, "s2", []string{"v4fp-of-finding-a"}, 5)
+	if !stall {
+		t.Error("unchanged blocking set across a landed fix must still stall (C5 intact)")
+	}
+}
+
 func TestBlockingFindingsHoldGate(t *testing.T) {
 	mk := func(sev string) finding {
 		return finding{Severity: sev, File: "a.go", Symbol: "f", Title: "t"}
