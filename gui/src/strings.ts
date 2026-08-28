@@ -52,6 +52,8 @@ export interface Strings {
     promptCompositionLabel: string;
     reviewPanelLabel: string;
     reviewPanelReadonlyTitle: string;
+    overflowLabel: string;
+    overflowTitle: string;
   };
   steerQueue: {
     title: (n: number) => string;
@@ -113,6 +115,8 @@ export const en: Strings = {
     promptCompositionLabel: "Prompt composition",
     reviewPanelLabel: "Review panel",
     reviewPanelReadonlyTitle: "review panel — read-only (⌘, to change)",
+    overflowLabel: "Hidden status items",
+    overflowTitle: "hidden by overflow — live values; rows navigate",
   },
   steerQueue: {
     title: (n) => (n === 1 ? "Queued steer · 1" : `Queued steers · ${n}`),

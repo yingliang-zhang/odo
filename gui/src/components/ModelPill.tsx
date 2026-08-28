@@ -71,6 +71,9 @@ export default function ModelPill({ projectRoot, currentModel, onModelChanged }:
               "rounded-[var(--radius-md)] text-[var(--text-dim)] text-xs",
               "px-2 py-1 cursor-pointer hover:text-[var(--text)] hover:border-[var(--accent)]",
               "data-[state=open]:text-[var(--text)] data-[state=open]:border-[var(--accent)]",
+              // U1.4: keyboard-focus visibility per the CVA Button
+              // convention (was suppressed by the old blanket outline kill).
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-user)]",
             )}
             title={`Coding model: ${model}`}
             aria-label={`Coding model: ${shortLabel}`}

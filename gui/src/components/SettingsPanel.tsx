@@ -238,7 +238,9 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
       unwrap(await updateSettings(settings, projectRoot ?? undefined));
       setSavedToast(true);
       clearTimeout(toastTimer.current ?? undefined);
-      toastTimer.current = setTimeout(() => setSavedToast(false), SAVED_TOAST_MS);
+      // @types/node (commit 3cc0ae0) makes the bare setTimeout resolve to
+      // NodeJS.Timeout; toastTimer is a DOM number handle — window-qualify.
+      toastTimer.current = window.setTimeout(() => setSavedToast(false), SAVED_TOAST_MS);
       onSaved?.();
     } catch (err) {
       setError(`save failed: ${errorMessage(err)}`);

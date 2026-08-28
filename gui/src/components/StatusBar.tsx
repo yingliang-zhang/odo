@@ -2,7 +2,8 @@
 // and run indicator. Absorbs everything System-ish that used to weigh down
 // the sidebar.
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import type { ReactNode } from "react";
 import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { cn } from "../lib/utils";
@@ -128,7 +129,11 @@ const METER_TIERS = [
 // .auto-land-chip.is-landed) remain in app.css and, being unlayered, win
 // over these layered utilities exactly as they won over the old rules.
 const STATUS_BADGE =
-  "status-badge inline-flex cursor-pointer items-center gap-[3px] whitespace-nowrap rounded border border-border bg-transparent px-[5px] py-px font-mono text-[10px] leading-[1.4] text-text-dim tabular-nums hover:border-text-dim hover:bg-bg-input hover:text-text";
+  "status-badge inline-flex shrink-0 cursor-pointer items-center gap-[3px] whitespace-nowrap rounded border border-border bg-transparent px-[5px] py-px font-mono text-[length:var(--text-micro)] leading-[1.4] text-text-dim tabular-nums hover:border-text-dim hover:bg-bg-input hover:text-text";
+// U1.2: 10px → micro token, via the length: escape — twMerge reads the bare
+// text-micro theme utility as a COLOR class and would drop it next to
+// text-text-dim (same convention as CTX_POP_TITLE below). U1.1: shrink-0 —
+// chips never compress; overflow is resolved by the priority fold.
 
 // Clickable popover rows — was .bg-run-row/.bg-run-name/.bg-run-state.
 const BG_RUN_ROW =
@@ -154,6 +159,109 @@ const CTX_LAYER =
 const OMP_BAR_FILL =
   "omp-bar-fill h-full rounded-[2px] transition-[width] duration-300 ease-[ease]";
 
+// ---------- U1.1 (ui-layout-lock): StatusBar hide-by-priority overflow ----------
+
+// Hide order, FIRST → LAST (design lock): read-only telemetry leaves before
+// anything the user can act on. Ties inside a rank break by DOM order.
+export const OVERFLOW_RANK = {
+  ctx: 0,
+  omp: 1,
+  panel: 2,
+  running: 3,
+  pipeline: 3,
+  finished: 4,
+  bgruns: 4,
+  diffs: 5,
+  wiki: 5,
+  memory: 5,
+} as const;
+export type ChipKey = keyof typeof OVERFLOW_RANK;
+export interface ChipMeasure {
+  key: ChipKey;
+  width: number; // last measured px, cached — a display:none chip reports 0
+}
+
+// Fold instruction handed to every chip: NEVER unmount on overflow — a
+// hidden chip is display:none (chip-hidden marker + hidden utility), so its
+// derivation keeps flowing and the e2e `.status-badge` hooks stay attached.
+// Panel dissent on diff #97: classify via the token-exact `chip-hidden`
+// marker (classList.contains) — a substring match on "hidden" also hits the
+// running chip's `overflow-hidden` utility.
+interface ChipFold {
+  key: ChipKey;
+  hidden: boolean;
+}
+
+// Live values the +N popover cannot derive by itself (they are computed
+// inside the chips — the pipeline flash clock, the omp fetch).
+interface PipelineSummary {
+  label: string;
+  count: number;
+  phase: PipelinePhase;
+}
+interface OmpSummary {
+  providers: number;
+  grievances: number;
+  unavailable: boolean;
+}
+
+// Measured chip widths: dynamic string-keyed cache (chips appear/vanish
+// with state), keyed by the ChipKey union — Partial<Record>, not Map.
+type ChipWidthCache = Partial<Record<ChipKey, number>>;
+
+const EMPTY_SET: ReadonlySet<ChipKey> = new Set();
+const CHIP_GAP_PX = 8; // footer gap-2, per zone item (spacer→first + between)
+const FACT_GAP_PX = 8; // session-fact button ↔ flex-1 spacer
+const STATUSBAR_PAD_PX = 12; // footer px-3, per side
+const MORE_CHIP_ESTIMATE = 46; // +N chip px until the real one renders + measures
+
+// Pure engine — exported as the unit-test seam. Given the px available to
+// the chip zone (footer content box minus the fact button and its gap), the
+// measured chip widths and the +N width, greedily fold by (rank, DOM order)
+// until the remaining chips + gaps + the +N chip fit. Deterministic in both
+// directions: widening `available` empties the returned set (rebound).
+export function computeHiddenChipKeys(
+  chips: readonly ChipMeasure[],
+  available: number,
+  moreChipWidth: number,
+): Set<ChipKey> {
+  const order = chips
+    .map((c, domIndex) => ({ ...c, domIndex }))
+    .sort((a, b) => OVERFLOW_RANK[a.key] - OVERFLOW_RANK[b.key] || a.domIndex - b.domIndex);
+  const hidden = new Set<ChipKey>();
+  const fits = (): boolean => {
+    let items = 0;
+    let widths = 0;
+    for (const c of chips) {
+      if (hidden.has(c.key)) continue;
+      items += 1;
+      widths += c.width;
+    }
+    if (hidden.size > 0) {
+      items += 1; // the +N chip itself takes zone space
+      widths += moreChipWidth;
+    }
+    if (items === 0) return true;
+    return widths + CHIP_GAP_PX * items <= available;
+  };
+  for (const c of order) {
+    if (fits()) break;
+    hidden.add(c.key);
+  }
+  return hidden;
+}
+
+// Turn duration shared by the running chip and its +N row.
+function formatTurnDuration(now: number, startedAt: number): string {
+  const secs = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// Non-actionable +N rows: same chrome as clickable rows, inert cursor/hover.
+const OVERFLOW_ROW_STATIC = cn(BG_RUN_ROW, "cursor-default hover:bg-transparent");
+
 // Wave B #5: context-pressure ring — the journaled byte total of the last
 // prompt vs the coding model's context window (window tokens × ~4
 // bytes/token, an estimate, hence "~"). Click expands the journaled
@@ -168,10 +276,12 @@ function ContextMeter({
   snapshot,
   codingModel,
   liveDelta = 0,
+  fold,
 }: {
   snapshot: PromptSnapshot;
   codingModel: string | null;
   liveDelta?: number;
+  fold: ChipFold;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -192,7 +302,8 @@ function ContextMeter({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={cn(STATUS_BADGE, "ctx-meter gap-1", tier.cls, tier.color)}
+          data-chip={fold.key}
+          className={cn(STATUS_BADGE, "ctx-meter gap-1", tier.cls, tier.color, fold.hidden && "chip-hidden hidden")}
           title={`Context: ${formatBytes(liveBytes)} of ~${formatTokens(windowBytes / BYTES_PER_TOKEN)} window${codingModel ? ` (${codingModel})` : ""}${liveDelta > 0 ? " · ~live estimate" : ""} — click for composition`}
           aria-haspopup="dialog"
           aria-expanded={open}
@@ -288,7 +399,7 @@ function ContextMeter({
 // Wave B #9: review-panel chip — a read-only composition peek for the
 // MoA-default-on posture. Edits belong to SettingsPanel; the chip only
 // ever shows what the daemon's review list holds.
-function PanelChip({ models }: { models: PanelModel[] }) {
+function PanelChip({ models, fold }: { models: PanelModel[]; fold: ChipFold }) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -296,7 +407,8 @@ function PanelChip({ models }: { models: PanelModel[] }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={cn(STATUS_BADGE, "panel-chip")}
+          data-chip={fold.key}
+          className={cn(STATUS_BADGE, "panel-chip", fold.hidden && "chip-hidden hidden")}
           title={`Review panel: ${models.map((m) => m.model).join(", ")} — composition set in Settings`}
           aria-haspopup="dialog"
           aria-expanded={open}
@@ -384,9 +496,13 @@ const PHASE_ROW_TINT: Partial<Record<PipelinePhase, string>> = {
 function PipelineChip({
   states,
   onOpenReview,
+  fold,
+  onSummaryChange,
 }: {
   states: PipelineState[];
   onOpenReview: () => void;
+  fold: ChipFold;
+  onSummaryChange?: (s: PipelineSummary | null) => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -408,17 +524,33 @@ function PipelineChip({
   const visible = states.filter(
     (s) => s.phase !== "landed" || (s.landedUntil ?? 0) > now,
   );
-  if (visible.length === 0) return null;
-  const dominant = visible.reduce((a, b) =>
-    PIPELINE_PRIORITY[a.phase] <= PIPELINE_PRIORITY[b.phase] ? a : b,
-  );
+  const dominant =
+    visible.length === 0
+      ? null
+      : visible.reduce((a, b) =>
+          PIPELINE_PRIORITY[a.phase] <= PIPELINE_PRIORITY[b.phase] ? a : b,
+        );
+
+  // Spill the dominant summary for the +N overflow row (the chip stays
+  // mounted — and ticking — while display:none'd). Primitive deps only:
+  // `dominant` is a fresh object identity every render.
+  useEffect(() => {
+    onSummaryChange?.(
+      dominant == null
+        ? null
+        : { label: pipelineLabel(dominant), count: visible.length, phase: dominant.phase },
+    );
+  }, [onSummaryChange, dominant?.phase, dominant?.diffId, visible.length]);
+
+  if (dominant == null) return null;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={cn(STATUS_BADGE, "auto-land-chip gap-1", `is-${dominant.phase}`, PHASE_CHIP_TINT[dominant.phase])}
+          data-chip={fold.key}
+          className={cn(STATUS_BADGE, "auto-land-chip gap-1", `is-${dominant.phase}`, PHASE_CHIP_TINT[dominant.phase], fold.hidden && "chip-hidden hidden")}
           title={visible.map((s) => `diff ${s.diffId}: ${pipelineLabel(s)}`).join(" · ")}
           aria-haspopup="dialog"
           aria-expanded={open}
@@ -483,7 +615,15 @@ function formatResetsAt(resetsAt: number): string {
   return `resets in ${mins}m`;
 }
 
-function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
+function OmpUsageChip({
+  projectRoot,
+  fold,
+  onSummaryChange,
+}: {
+  projectRoot: string | null;
+  fold: ChipFold;
+  onSummaryChange?: (s: OmpSummary | null) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<OmpUsageMerged | null>(null);
   const [loading, setLoading] = useState(false);
@@ -526,12 +666,18 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
   const hasData = reports.length > 0 || grievances != null;
   const hasErrors = (data?.errors?.length ?? 0) > 0 || error != null;
   const unavailable = !hasData && hasErrors;
+  // Spill the chip summary for the +N overflow row — the chip stays mounted
+  // (and fetching) while display:none'd. Primitive deps only.
+  useEffect(() => {
+    onSummaryChange?.({ providers: reports.length, grievances: grievanceCount, unavailable });
+  }, [onSummaryChange, reports.length, grievanceCount, unavailable]);
 
   if (unavailable && !open) {
     return (
       <button
         type="button"
-        className={cn(STATUS_BADGE, "omp-usage-chip omp-unavailable gap-1 opacity-60")}
+        data-chip={fold.key}
+        className={cn(STATUS_BADGE, "omp-usage-chip omp-unavailable gap-1 opacity-60", fold.hidden && "chip-hidden hidden")}
         title="OMP stats unavailable"
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -548,14 +694,15 @@ function OmpUsageChip({ projectRoot }: { projectRoot: string | null }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={cn(STATUS_BADGE, "omp-usage-chip gap-1")}
+          data-chip={fold.key}
+          className={cn(STATUS_BADGE, "omp-usage-chip gap-1", fold.hidden && "chip-hidden hidden")}
           title={`OMP: ${reports.length} provider${reports.length !== 1 ? "s" : ""}${grievanceCount > 0 ? ` · ${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}` : ""} — click for details`}
           aria-haspopup="dialog"
           aria-expanded={open}
         >
         <Activity size={11} aria-hidden="true" />
         OMP{reports.length > 0 && ` · ${reports.length}p`}
-        {grievanceCount > 0 && <span className="omp-grievance-badge ml-[2px] rounded-sm bg-err-surface px-1 text-[9px] font-semibold leading-[14px] text-err-surface-text" aria-label={`${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}`}>{grievanceCount}</span>}
+        {grievanceCount > 0 && <span className="omp-grievance-badge ml-[2px] rounded-sm bg-err-surface px-1 text-[length:var(--text-nano)] font-semibold leading-[14px] text-err-surface-text" aria-label={`${grievanceCount} grievance${grievanceCount !== 1 ? "s" : ""}`}>{grievanceCount}</span>}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -671,10 +818,254 @@ export default function StatusBar({
   const startedFlash = (bgNotice?.started.length ?? 0) > 0;
   const finished = bgNotice?.finished ?? [];
 
+  // ---------- U1.1 overflow engine ----------
+  // The footer is width-stable (app-shell column child, shrink-0), so its
+  // clientWidth is a trustworthy available-width signal. measureOverflow
+  // reads it — never the chips row, which is content-adaptive and would
+  // self-lock (hiding a chip narrows the row → hides more → no rebound).
+  const footerRef = useRef<HTMLElement | null>(null);
+  const factRef = useRef<HTMLButtonElement | null>(null);
+  const chipWidthsRef = useRef<ChipWidthCache>({});
+  const [hiddenChips, setHiddenChips] = useState<ReadonlySet<ChipKey>>(EMPTY_SET);
+  const hiddenChipsRef = useRef<ReadonlySet<ChipKey>>(EMPTY_SET);
+  const moreWidthRef = useRef(MORE_CHIP_ESTIMATE);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [pipelineSummary, setPipelineSummary] = useState<PipelineSummary | null>(null);
+  const [ompSummary, setOmpSummary] = useState<OmpSummary | null>(null);
+
+  // Chips the fold can touch, in DOM order (tie-break inside a rank).
+  const chipKeys: ChipKey[] = [];
+  if (agentRunning) chipKeys.push("running");
+  if (finished.length > 0) chipKeys.push("finished");
+  if (backgroundRuns.length > 0) chipKeys.push("bgruns");
+  if (lastPrompt != null) chipKeys.push("ctx");
+  if (reviewPanel.length > 0) chipKeys.push("panel");
+  if (pipelineStates.length > 0) chipKeys.push("pipeline");
+  chipKeys.push("omp"); // always renders — degrades to "unavailable"
+  if (pendingDiffs > 0) chipKeys.push("diffs");
+  if (wikiNoteCount != null && wikiNoteCount > 0) chipKeys.push("wiki");
+  if (pendingMemoryProposals > 0) chipKeys.push("memory");
+
+  const foldChip = (key: ChipKey): ChipFold => ({ key, hidden: hiddenChips.has(key) });
+  // Token-exact fold class for the chips rendered inline below.
+  const chipCls = (key: ChipKey): string | undefined =>
+    hiddenChips.has(key) ? "chip-hidden hidden" : undefined;
+
+  const measureOverflow = (): void => {
+    const footer = footerRef.current;
+    if (footer == null) return;
+    for (const key of chipKeys) {
+      // display:none reports 0 — a folded chip keeps its cached width.
+      if (hiddenChipsRef.current.has(key)) continue;
+      const el = footer.querySelector<HTMLElement>(`[data-chip="${key}"]`);
+      if (el != null && el.offsetWidth > 0) chipWidthsRef.current[key] = el.offsetWidth;
+    }
+    // The +N chip's own width converges from the estimate once rendered.
+    const moreEl = footer.querySelector<HTMLElement>("[data-chip-more]");
+    if (moreEl != null && moreEl.offsetWidth > 0) moreWidthRef.current = moreEl.offsetWidth;
+    // Available chip-zone width: footer content box minus the session-fact
+    // button (post-shrink — it truncates itself before chips overflow) and
+    // its spacer gap.
+    const available =
+      footer.clientWidth - STATUSBAR_PAD_PX * 2 - (factRef.current?.offsetWidth ?? 0) - FACT_GAP_PX;
+    const next = computeHiddenChipKeys(
+      chipKeys.map((key) => ({ key, width: chipWidthsRef.current[key] ?? 0 })),
+      available,
+      moreWidthRef.current,
+    );
+    const prev = hiddenChipsRef.current;
+    if (next.size !== prev.size || [...next].some((k) => !prev.has(k))) setHiddenChips(next);
+  };
+  const measureRef = useRef(measureOverflow);
+  useEffect(() => {
+    measureRef.current = measureOverflow;
+    hiddenChipsRef.current = hiddenChips;
+  });
+
+  // ResizeObserver + debounced re-measure — the ContextPanel tabsOverflow
+  // pattern; the footer tracks window width.
+  useEffect(() => {
+    const footer = footerRef.current;
+    if (footer == null || typeof ResizeObserver !== "function") return;
+    let debounce: number | undefined;
+    const ro = new ResizeObserver(() => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => measureRef.current(), 50);
+    });
+    ro.observe(footer);
+    return () => {
+      ro.disconnect();
+      window.clearTimeout(debounce);
+    };
+  }, []);
+  // Post-render recheck (same posture as tabsOverflow): chip widths move
+  // with content — counts tick, the meter's pct widens — without any resize.
+  useEffect(() => {
+    measureRef.current();
+  });
+
+  const liveDelta = lastPrompt != null && agentRunning ? estimateLiveDelta(events, lastPrompt.seq) : 0;
+
+  // +N overflow rows — one entry per hidden chip, DOM order, live values.
+  // Rows for actionable chips navigate exactly like the chip itself does.
+  const closeOverflow = (): void => setOverflowOpen(false);
+  const overflowRow = (key: ChipKey): ReactNode => {
+    switch (key) {
+      case "running":
+        return (
+          <div key={key} className={OVERFLOW_ROW_STATIC}>
+            <LoaderCircle size={11} className="spin" aria-hidden />
+            <span className={BG_RUN_NAME}>running</span>
+            {turnStartedAt != null && (
+              <span className={BG_RUN_STATE}>{formatTurnDuration(now, turnStartedAt)}</span>
+            )}
+          </div>
+        );
+      case "finished":
+        return (
+          <div key={key} className={OVERFLOW_ROW_STATIC} role="status">
+            <Check size={11} aria-hidden />
+            <span className={BG_RUN_NAME}>{finished.join(", ")}</span>
+            <span className={BG_RUN_STATE}>finished</span>
+          </div>
+        );
+      case "bgruns":
+        return backgroundRuns.map((run) => (
+          <button
+            key={`${key}-${run.id}`}
+            type="button"
+            className={BG_RUN_ROW}
+            onClick={() => {
+              closeOverflow();
+              onJumpWorkstream(run.id);
+            }}
+          >
+            <span className={WS_DOT_BG} aria-hidden="true" />
+            <span className={BG_RUN_NAME} title={run.name}>{run.name}</span>
+            <span className={BG_RUN_STATE}>still running</span>
+          </button>
+        ));
+      case "ctx": {
+        const windowBytes = contextWindowTokens(codingModel) * BYTES_PER_TOKEN;
+        const liveBytes = (lastPrompt?.bytes ?? 0) + liveDelta;
+        const pct = Math.min(999, Math.round((liveBytes / windowBytes) * 100));
+        const tier = METER_TIERS.find((t) => pct < t.max)!;
+        return (
+          <div key={key} className={OVERFLOW_ROW_STATIC}>
+            <Gauge size={11} className={tier.color} aria-hidden />
+            <span className={cn(BG_RUN_NAME, tier.color)}>~{pct}% of context</span>
+            <span className={BG_RUN_STATE}>{formatBytes(liveBytes)}</span>
+          </div>
+        );
+      }
+      case "panel":
+        return (
+          <div key={key} className={OVERFLOW_ROW_STATIC} title={reviewPanel.map((m) => m.model).join(", ")}>
+            <Boxes size={11} aria-hidden />
+            <span className={BG_RUN_NAME}>Panel ×{reviewPanel.length}</span>
+            <span className={cn(BG_RUN_STATE, "max-w-[140px] truncate")}>{reviewPanel.map((m) => m.model).join(", ")}</span>
+          </div>
+        );
+      case "pipeline": {
+        const count = pipelineSummary?.count ?? pipelineStates.length;
+        return (
+          <button
+            key={key}
+            type="button"
+            className={cn(BG_RUN_ROW, "auto-land-row")}
+            onClick={() => {
+              closeOverflow();
+              onBadgeClick("review");
+            }}
+          >
+            <span className={cn("auto-land-row-icon inline-flex shrink-0", pipelineSummary != null && PHASE_ROW_TINT[pipelineSummary.phase])} aria-hidden="true">
+              {pipelineIcon(pipelineSummary?.phase ?? "in_flight")}
+            </span>
+            <span className={BG_RUN_NAME}>{pipelineSummary?.label ?? "pipeline"}</span>
+            {count > 1 && <span className={BG_RUN_STATE}>×{count}</span>}
+          </button>
+        );
+      }
+      case "omp":
+        return (
+          <div key={key} className={OVERFLOW_ROW_STATIC}>
+            <Activity size={11} aria-hidden />
+            {ompSummary?.unavailable === true ? (
+              <span className={BG_RUN_NAME}>OMP unavailable</span>
+            ) : (
+              <>
+                <span className={BG_RUN_NAME}>
+                  OMP{(ompSummary?.providers ?? 0) > 0 ? ` · ${ompSummary?.providers}p` : ""}
+                </span>
+                {(ompSummary?.grievances ?? 0) > 0 && (
+                  <span
+                    className="omp-grievance-badge ml-[2px] rounded-sm bg-err-surface px-1 text-[length:var(--text-nano)] font-semibold leading-[14px] text-err-surface-text"
+                    aria-label={`${ompSummary?.grievances} grievance${ompSummary?.grievances !== 1 ? "s" : ""}`}
+                  >
+                    {ompSummary?.grievances}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        );
+      case "diffs":
+        return (
+          <button
+            key={key}
+            type="button"
+            className={BG_RUN_ROW}
+            onClick={() => {
+              closeOverflow();
+              onBadgeClick("changes");
+            }}
+          >
+            <GitCompareArrows size={11} aria-hidden />
+            <span className={BG_RUN_NAME}>{pendingDiffs} pending diff{pendingDiffs > 1 ? "s" : ""}</span>
+          </button>
+        );
+      case "wiki":
+        return (
+          <button
+            key={key}
+            type="button"
+            className={BG_RUN_ROW}
+            onClick={() => {
+              closeOverflow();
+              onBadgeClick("wiki");
+            }}
+          >
+            <FileText size={11} aria-hidden />
+            <span className={BG_RUN_NAME}>{wikiNoteCount} wiki notes</span>
+          </button>
+        );
+      case "memory":
+        return (
+          <button
+            key={key}
+            type="button"
+            className={BG_RUN_ROW}
+            onClick={() => {
+              closeOverflow();
+              onBadgeClick("memory");
+            }}
+          >
+            <MapPin size={11} aria-hidden />
+            <span className={BG_RUN_NAME}>{pendingMemoryProposals} pending memory proposals</span>
+          </button>
+        );
+    }
+  };
+
   return (
-    <footer className="app-statusbar flex h-[var(--statusbar-height)] shrink-0 items-center gap-2 border-t border-stroke-tertiary bg-[var(--statusbar-bg)] px-3 font-mono text-micro text-text-dim tabular-nums">
+    // overflow-hidden: the fold, not a scrollbar, resolves contention (U1.1).
+    <footer
+      ref={footerRef}
+      className="app-statusbar flex h-[var(--statusbar-height)] shrink-0 items-center gap-2 overflow-hidden border-t border-stroke-tertiary bg-[var(--statusbar-bg)] px-3 font-mono text-micro text-text-dim tabular-nums"
+    >
       {/* Left: session facts — click to copy project root path */}
       <button
+        ref={factRef}
         type="button"
         className="status-item status-fact-btn inline-flex max-w-[min(40vw,360px)] cursor-pointer items-center gap-[3px] rounded bg-transparent px-1 transition-[background-color] duration-150 hover:bg-bg-input"
         title={pathCopied ? "Copied!" : projectRoot ? `Click to copy: ${projectRoot}` : "No project loaded"}
@@ -701,22 +1092,20 @@ export default function StatusBar({
       {/* Center-right: run indicators — foreground spinner, then the
           background chip (the only surface for runs outside the view). */}
       {agentRunning && (
-        <span className="status-item status-run inline-flex items-center gap-[3px] overflow-hidden text-ellipsis whitespace-nowrap text-accent-user">
+        <span
+          data-chip="running"
+          className={cn("status-item status-run inline-flex shrink-0 items-center gap-[3px] overflow-hidden text-ellipsis whitespace-nowrap text-accent-user", chipCls("running"))}
+        >
           <LoaderCircle size={11} className="spin" aria-hidden /> running
           {turnStartedAt != null && (
             <span className="status-turn-duration tabular-nums text-text-dim">
-              {(() => {
-                const secs = Math.max(0, Math.floor((now - turnStartedAt) / 1000));
-                const m = Math.floor(secs / 60);
-                const s = secs % 60;
-                return ` ${m}:${s.toString().padStart(2, "0")}`;
-              })()}
+              {` ${formatTurnDuration(now, turnStartedAt)}`}
             </span>
           )}
         </span>
       )}
       {finished.length > 0 && (
-        <span className={cn(STATUS_BADGE, "bg-flash-done")} role="status">
+        <span data-chip="finished" className={cn(STATUS_BADGE, "bg-flash-done", chipCls("finished"))} role="status">
           <Check size={11} /> {finished.join(", ")} finished
         </span>
       )}
@@ -725,7 +1114,8 @@ export default function StatusBar({
           <PopoverTrigger asChild>
             <button
               type="button"
-              className={cn(STATUS_BADGE, "status-bg-runs", startedFlash && "bg-flash-new")}
+              data-chip="bgruns"
+              className={cn(STATUS_BADGE, "status-bg-runs", startedFlash && "bg-flash-new", chipCls("bgruns"))}
               title={`Background runs: ${backgroundRuns.map((r) => r.name).join(", ")} — click to list`}
               aria-haspopup="menu"
               aria-expanded={runsOpen}
@@ -766,24 +1156,35 @@ export default function StatusBar({
         <ContextMeter
           snapshot={lastPrompt}
           codingModel={codingModel}
-          liveDelta={agentRunning ? estimateLiveDelta(events, lastPrompt.seq) : 0}
+          liveDelta={liveDelta}
+          fold={foldChip("ctx")}
         />
       )}
-      {reviewPanel.length > 0 && <PanelChip models={reviewPanel} />}
+      {reviewPanel.length > 0 && <PanelChip models={reviewPanel} fold={foldChip("panel")} />}
       {/* Auto-land pipeline: between the panel peek and the actionable
           badges; derivation hands over only currently-visible states, so
           "any states" IS the render gate (design lock). */}
       {pipelineStates.length > 0 && (
-        <PipelineChip states={pipelineStates} onOpenReview={() => onBadgeClick("review")} />
+        <PipelineChip
+          states={pipelineStates}
+          onOpenReview={() => onBadgeClick("review")}
+          fold={foldChip("pipeline")}
+          onSummaryChange={setPipelineSummary}
+        />
       )}
       {/* P2 (OMP stats): read-only provider usage + grievances chip.
           Lazy fetch on open, 60s poll, degrades to "unavailable". */}
-      <OmpUsageChip projectRoot={projectRoot} />
+      <OmpUsageChip
+        projectRoot={projectRoot}
+        fold={foldChip("omp")}
+        onSummaryChange={setOmpSummary}
+      />
       {/* Right: clickable badges */}
       {pendingDiffs > 0 && (
         <button
           type="button"
-          className={STATUS_BADGE}
+          data-chip="diffs"
+          className={cn(STATUS_BADGE, chipCls("diffs"))}
           aria-label={`${pendingDiffs} pending diff${pendingDiffs > 1 ? "s" : ""}`}
           title={`${pendingDiffs} pending diff${pendingDiffs > 1 ? "s" : ""}`}
           onClick={() => onBadgeClick("changes")}
@@ -794,7 +1195,8 @@ export default function StatusBar({
       {wikiNoteCount != null && wikiNoteCount > 0 && (
         <button
           type="button"
-          className={STATUS_BADGE}
+          data-chip="wiki"
+          className={cn(STATUS_BADGE, chipCls("wiki"))}
           aria-label={`${wikiNoteCount} wiki notes`}
           title={`${wikiNoteCount} wiki notes`}
           onClick={() => onBadgeClick("wiki")}
@@ -805,13 +1207,45 @@ export default function StatusBar({
       {pendingMemoryProposals > 0 && (
         <button
           type="button"
-          className={STATUS_BADGE}
+          data-chip="memory"
+          className={cn(STATUS_BADGE, chipCls("memory"))}
           aria-label={`${pendingMemoryProposals} pending memory proposals`}
           title={`${pendingMemoryProposals} pending memory proposals`}
           onClick={() => onBadgeClick("memory")}
         >
           <MapPin size={11} /> {pendingMemoryProposals}
         </button>
+      )}
+      {/* U1.1: folded chips collapse into one +N chip. Click → the same
+          interaction pattern as every other StatusBar popover; rows mirror
+          the hidden chips with live values and navigate where the chip would. */}
+      {hiddenChips.size > 0 && (
+        <Popover open={overflowOpen} onOpenChange={setOverflowOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              data-chip-more
+              className={cn(STATUS_BADGE, "status-overflow-chip")}
+              aria-label={strings.statusbar.overflowLabel}
+              title={strings.statusbar.overflowLabel}
+              aria-haspopup="dialog"
+              aria-expanded={overflowOpen}
+            >
+              +{hiddenChips.size}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            side="top"
+            align="end"
+            sideOffset={6}
+            role="dialog"
+            aria-label={strings.statusbar.overflowLabel}
+            className="runs-menu status-overflow-popover min-w-[220px]"
+          >
+            <div className={CTX_POP_TITLE}>{strings.statusbar.overflowTitle}</div>
+            {chipKeys.filter((k) => hiddenChips.has(k)).map((k) => overflowRow(k))}
+          </PopoverContent>
+        </Popover>
       )}
     </footer>
   );

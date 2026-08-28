@@ -62,6 +62,9 @@
      named for the role the text plays, not a t-shirt size. Body lands on
      15px — the macOS "content text" size — with the rest of the scale
      following. */
+  /* U1.2: 10px for badges that must read smaller than micro (grievance
+     count, queue "next" tag). */
+  --text-nano: 10px;
   --text-micro: 11px;
   --text-caption: 12px;
   --text-label: 13px;
@@ -205,11 +208,13 @@
   outline-offset: 1px;
 }
 
-/* The composer draws its OWN focus treatment (border-color on the wrapper) —
-   the generic ring painted a second inner blue rectangle around the textarea
-   (specificity 0,2,0 beat Tailwind's outline-none utility). */
-.chat-input :focus,
-.chat-input :focus-visible {
+/* The composer draws its OWN focus treatment (border-color on the wrapper).
+   U1.4: the blanket descendant kill also suppressed the ModelPill trigger's
+   and menu items' :focus-visible ring, leaving keyboard focus invisible
+   inside .chat-input — scope the kill to the textarea alone.
+   .chat-input textarea:focus (0,2,1) still beats the generic
+   :focus-visible:not([role="dialog"]) ring (0,2,0) on the textarea. */
+.chat-input textarea:focus {
   outline: none;
 }
 
@@ -252,19 +257,18 @@ body {
 
 .mono {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-caption);
 }
 
 .dim {
   color: var(--text-dim);
 }
 
-.truncate {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 160px;
-}
+/* U1.3 (ui-layout-lock): global .truncate deleted — the unlayered
+   max-width:160px silently capped every consumer (StatusBar identity lost to
+   160px, menu rows clipped). Tailwind's layered truncate utility supplies
+   overflow/ellipsis/nowrap; explicit caps live only where a cap is wanted
+   (slash/mention menu rows: max-w-[220px] in ChatSurface.tsx). */
 
 /* ---------- Shell layout ---------- */
 
@@ -353,7 +357,7 @@ body {
   border: none;
   color: var(--text-dim);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-caption);
   cursor: pointer;
   padding: 3px 8px;
   border-radius: var(--radius-md);
@@ -549,12 +553,13 @@ body {
 /* Transient confirmations (distill/curate/pin, learner updates,
    retractions, ledger failures) live top-right of the main area — out of
    the sidebar — and auto-dismiss after 10s. Below the modal/palette
-   overlays (z-index 100+) but above the chat surface. */
+   overlays (z-index 100+) but above the chat surface AND the context
+   panel's ≤999px overlay (z-90 — U1.5). */
 .toast-viewport {
   position: absolute;
   top: 12px;
   right: 16px;
-  z-index: 90;
+  z-index: 95;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -888,7 +893,7 @@ body {
   border: 1px solid var(--warn);
   border-radius: 8px;
   color: var(--warn);
-  font-size: 9px;
+  font-size: var(--text-nano);
   font-weight: 700;
   line-height: 1;
   padding: 2px 5px;
@@ -1061,7 +1066,7 @@ body {
   border: none;
   color: var(--text-dim);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-label);
   padding: 6px 14px;
   cursor: pointer;
 }
@@ -1151,7 +1156,7 @@ body {
    content styles (.settings-title, inspector, fields) stay. */
 .settings-title {
   margin: 0 0 18px;
-  font-size: 17px;
+  font-size: var(--text-heading);
   font-weight: 600;
 }
 

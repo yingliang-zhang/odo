@@ -1739,7 +1739,7 @@ function ChatSurface({
           </div>
         )}
         <form
-          className="chat-input relative flex items-end gap-2 rounded-lg border border-stroke-secondary bg-bg-input py-1.5 pr-1.5 pl-3.5 shadow-soft transition-[border-color] duration-[180ms] ease-[var(--ease-standard)] focus-within:border-[var(--stroke-primary)]"
+          className="chat-input relative flex items-end gap-2 rounded-lg border border-stroke-secondary bg-bg-input py-1.5 pr-1.5 pl-3.5 shadow-soft transition-[border-color] duration-[180ms] ease-[var(--ease-standard)] focus-within:border-[color-mix(in_srgb,var(--accent-user)_55%,transparent)]"
           onSubmit={handleSubmit}
         >
           {atMenu && (
@@ -1768,7 +1768,7 @@ function ChatSurface({
                   )}
                   <span className="at-label whitespace-nowrap">{item.label}</span>
                   {item.detail != null && (
-                    <span className="at-detail truncate text-caption text-text-dim">{item.detail}</span>
+                    <span className="at-detail max-w-[220px] truncate text-caption text-text-dim">{item.detail}</span>
                   )}
                 </button>
               ))}
@@ -1796,7 +1796,7 @@ function ChatSurface({
                     }}
                   >
                     <span className="slash-cmd min-w-[70px] font-semibold whitespace-nowrap text-accent-user">{c.cmd}</span>
-                    <span className="slash-desc truncate text-caption text-text-dim">{c.desc}</span>
+                    <span className="slash-desc max-w-[220px] truncate text-caption text-text-dim">{c.desc}</span>
                   </button>
                 ))}
             </div>

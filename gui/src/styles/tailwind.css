@@ -93,6 +93,7 @@
   --spacing: 0.25rem;
 
   /* Type scale — map to existing semantic tokens */
+  --text-nano: var(--text-nano);
   --text-micro: var(--text-micro);
   --text-caption: var(--text-caption);
   --text-label: var(--text-label);
