@@ -12,6 +12,11 @@ func TestLookupTable(t *testing.T) {
 		{"kimi-k3", 350000, 65536, 32768, 0.90}, // bare id resolves too
 		{"t9s/deepseek-v4-flash", 1000000, 65536, 32768, 0.60},
 		{"glm-5.2", 1000000, 65536, 16384, 0.35},
+		// glm-5.3 mirrors the Hermes orchestrator profile (2026-08-29):
+		// 500K window at the global 0.35 compression ratio → 175K trigger,
+		// thinking budget aligned with the other thinking models.
+		{"glm-5.3", 500000, 65536, 32768, 0.35},
+		{"t9s/glm-5.3", 500000, 65536, 32768, 0.35}, // prefixed id resolves too
 	}
 	for _, tc := range cases {
 		s := Lookup(tc.model)
@@ -39,6 +44,8 @@ func TestCompactThresholdTokens(t *testing.T) {
 		{"t9s/kimi-k3", 315000},
 		{"t9s/deepseek-v4-flash", 600000},
 		{"glm-5.2", 350000},
+		// glm-5.3: 0.35 × 500K (the Hermes profile's window) = 175K.
+		{"glm-5.3", 175000},
 	}
 	for _, tc := range cases {
 		got, ok := CompactThresholdTokens(tc.model)

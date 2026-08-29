@@ -45,6 +45,13 @@ var table = map[string]Spec{
 	"kimi-k3":           {ContextWindow: 350000, CompactRatio: 0.90, MaxOutput: 65536, MaxTokens: 32768},
 	"deepseek-v4-flash": {ContextWindow: 1000000, CompactRatio: 0.60, MaxOutput: 65536, MaxTokens: 32768},
 	"glm-5.2":           {ContextWindow: 1000000, CompactRatio: 0.35, MaxOutput: 65536, MaxTokens: 16384},
+	// glm-5.3 mirrors the Hermes orchestrator profile (2026-08-29): window
+	// 500K (profile config.template.yaml), compaction trigger 0.35 → 175K
+	// (global compression.threshold, same ratio glm-5.2 carries), thinking
+	// budget starts at 32768 like the other thinking models (glm-5.2's
+	// 16384 start predates the measured thinking-trace burn; moa escalates
+	// ×2 up to MaxOutput on stop_reason=max_tokens either way).
+	"glm-5.3": {ContextWindow: 500000, CompactRatio: 0.35, MaxOutput: 65536, MaxTokens: 32768},
 }
 
 // fallback applies to models absent from the table. CompactRatio is the
