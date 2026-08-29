@@ -833,16 +833,31 @@ export function makePollResponse(convId: number, afterSeq?: number): PollEventsR
   };
 }
 
-export function makeSearchResults(query: string): SearchEventsResponse {
+// P1.1: daemon-faithful search — project-scoped (the requested root's
+// conversations only), workstream identity resolved through the real
+// conversation→workstream join, newest-first (store.SearchEvents order).
+export function makeSearchResults(query: string, projectRoot?: string): SearchEventsResponse {
   const lower = query.toLowerCase();
+  const root = projectRoot != null && projectRoot in workstreams ? projectRoot : projects[0].root;
+  const wsList = workstreams[root] ?? [];
+  const wsById = new Map(wsList.map((w) => [w.id, w]));
+  const convIds = new Set(
+    Object.values(conversations)
+      .filter((c) => wsById.has(c.workstream_id))
+      .map((c) => c.id),
+  );
   const results: SearchResult[] = events
-    .filter(e => JSON.stringify(e.payload).toLowerCase().includes(lower))
-    .map(e => ({
-      event: e,
-      workstream_id: 1,
-      workstream_name: "main",
-      conversation_id: e.conversation_id,
-    }));
+    .filter(e => convIds.has(e.conversation_id) && JSON.stringify(e.payload).toLowerCase().includes(lower))
+    .map(e => {
+      const ws = wsById.get(conversations[e.conversation_id]?.workstream_id ?? 0);
+      return {
+        event: e,
+        workstream_id: ws?.id ?? 0,
+        workstream_name: ws?.name ?? "?",
+        conversation_id: e.conversation_id,
+      };
+    })
+    .sort((a, b) => b.event.created_at.localeCompare(a.event.created_at));
   return { ok: true, search_results: results };
 }
 

@@ -7,11 +7,17 @@ import {
   type ReactNode,
 } from "react";
 import { Dialog, DialogContent } from "./ui/dialog";
+import { snippetFor, type JournalHit } from "../journal_search";
+import { SLOT } from "../slots";
 
 // Belt B (⌘K): fuzzy action launcher over a Radix Dialog (Phase 5).
 // Two modes: the action list (filter by substring, arrows navigate, Enter
 // runs) and prompt mode for actions that need a text argument (New
 // Workstream name, Pin text) — Enter submits the text.
+// P1.1: a typed-only "Journal search" group joins the action list whenever
+// the query reaches 2 chars — App owns the search_events fan-out and hands
+// results down as props; the palette only renders rows and reports picks
+// (read-only; the journal stays the only index).
 
 export interface PaletteAction {
   id: string;
@@ -33,6 +39,16 @@ interface Props {
   // M11 D2: when set, the palette opens straight into prompt mode for this
   // action (⌘N → new-workstream name entry).
   initialActionId?: string;
+  // P1.1 journal group props (all optional; absent = group never renders).
+  // Called with every query change (raw, untrimmed); the parent debounces.
+  onQueryChange?: (query: string) => void;
+  // Results for the current query; null = nothing returned yet. An empty
+  // array is a completed empty search (renders "No journal matches").
+  journal?: JournalHit[] | null;
+  journalLoading?: boolean;
+  // Enter/click on a journal row; the trimmed query rides along so App can
+  // prefill ⌘F with it.
+  onPickJournal?: (hit: JournalHit, query: string) => void;
 }
 
 // Handlers surface failures through App's error banner; the palette just
@@ -46,7 +62,15 @@ function execute(action: PaletteAction, text: string) {
   }
 }
 
-export default function CommandPalette({ actions, onClose, initialActionId }: Props) {
+export default function CommandPalette({
+  actions,
+  onClose,
+  initialActionId,
+  onQueryChange,
+  journal = null,
+  journalLoading = false,
+  onPickJournal,
+}: Props) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [promptFor, setPromptFor] = useState<PaletteAction | null>(null);
@@ -57,6 +81,22 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
     const q = query.trim().toLowerCase();
     return q === "" ? actions : actions.filter((a) => a.name.toLowerCase().includes(q));
   }, [actions, query]);
+
+  // The journal group is typed-only: under 2 chars the daemon never sees
+  // the keystrokes, and prompt mode is action-argument entry, not search.
+  const journalActive = promptFor === null && query.trim().length >= 2;
+  const journalHits = journalActive ? (journal ?? []) : [];
+
+  // One selection index spans actions then journal rows. Disabled actions
+  // stay non-selectable; journal rows never disable.
+  type Entry = { kind: "action"; action: PaletteAction } | { kind: "hit"; hit: JournalHit };
+  const entries = useMemo<Entry[]>(
+    () => [
+      ...filtered.map((action) => ({ kind: "action" as const, action })),
+      ...journalHits.map((hit) => ({ kind: "hit" as const, hit })),
+    ],
+    [filtered, journalHits],
+  );
 
   // Every filter change restarts selection at the top of the list.
   useEffect(() => setSelected(0), [query]);
@@ -84,14 +124,25 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
     execute(action, "");
   };
 
+  const pickJournal = (hit: JournalHit) => {
+    onClose();
+    onPickJournal?.(hit, query.trim());
+  };
+
+  const runEntry = (entry: Entry) => {
+    if (entry.kind === "action") runAction(entry.action);
+    else pickJournal(entry.hit);
+  };
+
   // Wrap-around navigation that skips disabled entries.
   const step = (delta: number) => {
     setSelected((i) => {
-      if (filtered.length === 0) return 0;
+      if (entries.length === 0) return 0;
       let next = i;
-      for (let n = 0; n < filtered.length; n++) {
-        next = (next + delta + filtered.length) % filtered.length;
-        if (!filtered[next].disabled) return next;
+      for (let n = 0; n < entries.length; n++) {
+        next = (next + delta + entries.length) % entries.length;
+        const e = entries[next];
+        if (e.kind !== "action" || !e.action.disabled) return next;
       }
       return i;
     });
@@ -118,17 +169,18 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
         execute(action, text);
         return;
       }
-      const action = filtered[Math.min(selected, filtered.length - 1)];
-      if (action) runAction(action);
+      const entry = entries[Math.min(selected, entries.length - 1)];
+      if (entry) runEntry(entry);
     }
   };
 
-  const clampedSelected = Math.min(selected, Math.max(0, filtered.length - 1));
+  const clampedSelected = Math.min(selected, Math.max(0, entries.length - 1));
 
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
       <DialogContent
         aria-label="Command palette"
+        data-slot={SLOT.palette}
         // Esc always closes — even from prompt mode. Pre-migration App's
         // window-level palette gate fired alongside the palette's own
         // listener, so a bare Esc closed the whole palette regardless of
@@ -146,16 +198,23 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
           type="text"
           className="palette-input"
           value={promptFor !== null ? promptText : query}
-          onChange={(e) =>
-            promptFor !== null ? setPromptText(e.target.value) : setQuery(e.target.value)
-          }
+          onChange={(e) => {
+            if (promptFor !== null) setPromptText(e.target.value);
+            else {
+              setQuery(e.target.value);
+              onQueryChange?.(e.target.value);
+            }
+          }}
           onKeyDown={handleKeyDown}
           placeholder={promptFor !== null ? promptFor.prompt : "Type a command…"}
           aria-label={promptFor !== null ? promptFor.name : "Command palette"}
         />
         {promptFor === null && (
           <div className="palette-list" role="listbox" aria-label="Actions">
-            {filtered.length === 0 && <div className="palette-empty">No matching actions</div>}
+            {filtered.length === 0 && !journalActive && <div className="palette-empty">No matching actions</div>}
+            {filtered.length === 0 && journalActive && journalHits.length === 0 && !journalLoading && journal !== null && (
+              <div className="palette-empty">No matching actions</div>
+            )}
             {filtered.map((action, i) => (
               <button
                 type="button"
@@ -174,6 +233,38 @@ export default function CommandPalette({ actions, onClose, initialActionId }: Pr
                 )}
               </button>
             ))}
+            {journalActive && (
+              <div className="palette-journal-group" role="group" aria-label="Journal search">
+                <div className="palette-group-label text-text-dim">Journal search</div>
+                {journalLoading && journalHits.length === 0 && (
+                  <div className="palette-empty">Searching the journal…</div>
+                )}
+                {!journalLoading && journalHits.length === 0 && journal !== null && (
+                  <div className="palette-empty">No journal matches</div>
+                )}
+                {journalHits.map((hit, j) => {
+                  const idx = filtered.length + j;
+                  return (
+                    <button
+                      type="button"
+                      key={`${hit.root}:${hit.result.event.conversation_id}:${hit.result.event.seq}`}
+                      role="option"
+                      aria-selected={idx === clampedSelected}
+                      className={`palette-item palette-journal-row${idx === clampedSelected ? " selected" : ""}`}
+                      onMouseEnter={() => setSelected(idx)}
+                      onClick={() => pickJournal(hit)}
+                    >
+                      <span className="palette-name palette-journal-snippet">
+                        {snippetFor(hit.result.event.payload, query)}
+                      </span>
+                      <span className="palette-journal-meta">
+                        {hit.projectName} · {hit.result.workstream_name} · {hit.result.event.type}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </DialogContent>

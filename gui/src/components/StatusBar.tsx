@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { cn } from "../lib/utils";
+import { SLOT } from "../slots";
 import {
   BYTES_PER_TOKEN,
   contextWindowTokens,
@@ -1061,6 +1062,7 @@ export default function StatusBar({
     // overflow-hidden: the fold, not a scrollbar, resolves contention (U1.1).
     <footer
       ref={footerRef}
+      data-slot={SLOT.statusbar}
       className="app-statusbar flex h-[var(--statusbar-height)] shrink-0 items-center gap-2 overflow-hidden border-t border-stroke-tertiary bg-[var(--statusbar-bg)] px-3 font-mono text-micro text-text-dim tabular-nums"
     >
       {/* Left: session facts — click to copy project root path */}

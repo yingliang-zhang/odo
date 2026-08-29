@@ -8,6 +8,7 @@ import { ChevronLeft, ChevronRight, GitCompareArrows, FileText, MapPin, BookOpen
 import type { PointerEvent as ReactPointerEvent } from "react";
 import RunGroupBoundary from "./RunGroupBoundary";
 import { cn } from "../lib/utils";
+import { SLOT } from "../slots";
 import {
   PANEL_MIN_WIDTH,
   PANEL_WIDTH_KEY,
@@ -247,7 +248,7 @@ export default function ContextPanel({
             <ChevronLeft size={12} />
           </button>
         )}
-        <div className="panel-tabs flex gap-px flex-1 min-w-0 overflow-x-auto" role="tablist" ref={tabsRef}>
+        <div className="panel-tabs flex gap-px flex-1 min-w-0 overflow-x-auto" role="tablist" ref={tabsRef} data-slot={SLOT.panelTabs}>
           {TABS.map((tab) => {
             const count = badges[tab.id];
             const isActive = activeTab === tab.id;

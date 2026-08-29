@@ -5,6 +5,7 @@ import { basename } from "../files";
 import { loopEventLabel } from "../loop";
 import type { OdoEvent, RecallItem } from "../types";
 import Markdown, { highlightText } from "./Markdown";
+import { looksLikeUnifiedDiff, ToolDiffView } from "./DiffViewer";
 import { Badge } from "./ui/badge";
 
 // Display limits for tool call/result rendering (K3 F3: named consts
@@ -297,6 +298,10 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       const clamped = resultBytes > RESULT_CLAMP
         ? resultText.slice(0, RESULT_CLAMP) + `\n… (${(resultBytes - RESULT_CLAMP).toLocaleString()} more chars)`
         : resultText;
+      // P1.4: a unified-diff body renders as compact read-only hunks (the
+      // DiffViewer parser) instead of a monospaced <pre> dump — accept/
+      // reject stays in the Changes tab; the copy button keeps the raw.
+      const resultIsDiff = looksLikeUnifiedDiff(resultText);
       body = (
         <div className="bubble bubble-tool self-start bg-transparent text-text-dim font-mono text-caption px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <details>
@@ -307,7 +312,11 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
                 {resultBytes > 0 && <span className="tool-result-size text-text-dim text-[10px]"> · {(resultBytes > 1024 ? `${(resultBytes / 1024).toFixed(1)} KB` : `${resultBytes} B`)}</span>}
               </code>
             </summary>
-            <pre className="mt-1.5 max-h-[240px] overflow-auto bg-bg-raised border border-border rounded-sm p-2">{highlightText(clamped, highlight, "tb")}</pre>
+            {resultIsDiff ? (
+              <ToolDiffView text={resultText} />
+            ) : (
+              <pre className="mt-1.5 max-h-[240px] overflow-auto bg-bg-raised border border-border rounded-sm p-2">{highlightText(clamped, highlight, "tb")}</pre>
+            )}
             {resultBytes > RESULT_CLAMP && (
               <button
                 type="button"

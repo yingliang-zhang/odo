@@ -41,6 +41,8 @@ import ModelPill from "./ModelPill";
 import { ChatSkeleton } from "./LoadingInline";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
+import { diffFilesChanged, looksLikeUnifiedDiff } from "./DiffViewer";
+import { SLOT } from "../slots";
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
 // minute ("35s").
@@ -121,6 +123,9 @@ interface Props {
   onModelChanged?: () => void;
   // Skeleton: show content-shaped placeholder while conversation loads.
   loading?: boolean;
+  // P1.4: run-headers with journaled diffs carry a "N files changed" chip —
+  // click opens the Changes tab (App wires openPanelTab("changes")).
+  onOpenChanges?: () => void;
 }
 
 // Utilities replacing the deleted .auto-distill-chip CSS rule (inline-flex
@@ -375,7 +380,7 @@ function formatStatsWithTokens(stats: TurnStats): string {
 // the payload later carries billed usage (input_tokens/output_tokens),
 // the strip upgrades to tokens + tok/s — byte-only rows never show a
 // fabricated rate.
-function RunHeader({ group }: { group: RunGroup }) {
+function RunHeader({ group, onOpenChanges }: { group: RunGroup; onOpenChanges?: () => void }) {
   const start = group.start;
   if (!start) return null;
   const toolCalls = group.events.filter((e) => e.type === "agent_tool_call").length;
@@ -396,6 +401,18 @@ function RunHeader({ group }: { group: RunGroup }) {
   const doneMs = done ? Date.parse(done.created_at) : NaN;
   const showDuration = done !== undefined && !Number.isNaN(startMs) && !Number.isNaN(doneMs);
   const stats = deriveTurnStats(start, group.events, done);
+  // P1.4: journaled tool results that ARE unified diffs — the run's true
+  // file-changed count, zero IPC (read-only; accept/reject stays in the
+  // Changes tab this chip opens).
+  const changedFiles = new Set<string>();
+  for (const e of group.events) {
+    if (e.type !== "agent_tool_result") continue;
+    const r = e.payload?.result;
+    const text = typeof r === "string" ? r : r != null ? JSON.stringify(r) : "";
+    if (text !== "" && looksLikeUnifiedDiff(text)) {
+      for (const f of diffFilesChanged(text)) changedFiles.add(f);
+    }
+  }
   return (
     <div className="run-header mt-3.5 flex items-baseline gap-2 border-t border-stroke-tertiary px-1 pt-2 pb-0.5 text-caption text-text-dim tabular-nums">
       <span
@@ -436,6 +453,16 @@ function RunHeader({ group }: { group: RunGroup }) {
               ? ` · in ${formatBytes(stats.inputBytes)} · out ${formatBytes(stats.outputBytes)}`
               : ` · out ${formatBytes(stats.outputBytes)}`}
         </span>
+      )}
+      {changedFiles.size > 0 && onOpenChanges != null && (
+        <button
+          type="button"
+          className="run-files-chip ml-1 cursor-pointer rounded border-none bg-accent-user/10 px-1.5 py-px text-[10px] font-medium text-accent-user hover:bg-accent-user/20"
+          title="Tool results modified these files — review in the Changes tab"
+          onClick={onOpenChanges}
+        >
+          {changedFiles.size} file{changedFiles.size === 1 ? "" : "s"} changed
+        </button>
       )}
     </div>
   );
@@ -501,6 +528,7 @@ function ChatSurface({
   autoDistillBlocked,
   distillInFlight = false,
   onDisarmAutoDistill,
+  onOpenChanges,
   distillLocked = false,
   projectRoot = null,
   onTodoChanged,
@@ -1582,7 +1610,7 @@ function ChatSurface({
               resetKey={String(conversationId ?? "none") + ":" + String(group.start?.seq ?? "preamble") + ":" + String(group.events.length)}
             >
             <div className="run-group mx-auto flex w-full max-w-[var(--chat-column-width,100%)] flex-col gap-2.5">
-              <RunHeader group={group} />
+              <RunHeader group={group} onOpenChanges={onOpenChanges} />
               {(() => {
                 const items = runRenderItems(group.events);
                 return items.map((item, itemIdx) => {
@@ -1662,6 +1690,7 @@ function ChatSurface({
         </div>
       )}
       <div
+        data-slot={SLOT.composer}
         className={cn(
           "chat-composer flex shrink-0 flex-col gap-1.5 border-t border-stroke-tertiary bg-bg-raised px-4 pt-2.5 pb-2",
           dragOver && "drag-over shadow-[inset_0_0_0_2px_var(--accent-user)]",

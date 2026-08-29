@@ -1543,6 +1543,26 @@ mark {
   flex-shrink: 0;
 }
 
+/* P1.1 journal-search group: section label + the hit's provenance meta
+   (project · workstream · type). Rows reuse .palette-item chrome. */
+.palette-group-label {
+  padding: 6px 10px 2px;
+  font-size: var(--text-micro, 11px);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.palette-journal-meta {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-left: auto;
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- M9 Phase 1: Context Panel (right side) ---------- */
 
 /* .context-panel/.panel-resize/.panel-head/.panel-tabs/.panel-tab(+.active)/

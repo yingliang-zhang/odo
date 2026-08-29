@@ -28,6 +28,7 @@ import {
   resumeParkedGoal,
   dropParkedGoal,
   dropQueuedSteer,
+  searchEvents,
   sendMessage,
   unwrap,
 } from "./api";
@@ -40,6 +41,7 @@ import MemoryPanel from "./components/MemoryPanel";
 import ReviewInbox from "./components/ReviewInbox";
 import SkillsPanel from "./components/SkillsPanel";
 import SettingsPanel from "./components/SettingsPanel";
+import ShortcutsPanel from "./components/ShortcutsPanel";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import TopBar from "./components/TopBar";
@@ -60,6 +62,9 @@ import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
 import type { AutoDistillCapResume, AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PanelProgress, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, StrandedOp, Workstream } from "./types";
 import { strings } from "./strings";
+import { comboFor, isEditableTarget, matchKeyEvent } from "./keybinds";
+import { mergeHits, type JournalHit } from "./journal_search";
+import { summarizeError } from "./errors";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -201,6 +206,15 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // P1.3: ⌘/ shortcuts panel — read-only render of keybinds.ts.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  // P1.1 palette journal search: the palette owns its input; this mirrors
+  // the live query so ONE debounced fan-out searches every registered
+  // project's journal (read-only search_events, no new IPC).
+  const [journalQuery, setJournalQuery] = useState("");
+  const [journalHits, setJournalHits] = useState<JournalHit[] | null>(null);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const journalSeqRef = useRef(0);
   // M11 D2: ⌘N opens palette in new-workstream prompt mode directly.
   const [paletteInitialAction, setPaletteInitialAction] = useState<string | undefined>(undefined);
   // Fold chip's "Open note": selects a specific note in the wiki browser.
@@ -1294,33 +1308,43 @@ export default function App() {
         (document.activeElement as HTMLElement | null)?.blur();
         return;
       }
-      if (!(e.metaKey || e.ctrlKey)) return;
-      switch (e.key.toLowerCase()) {
-        case "b":
+      // P1.3: mod-combo dispatch consumes the keybinds.ts registry — one
+      // table drives this switch, the ⌘/ shortcuts panel, and the palette's
+      // hint strings. Registry rows without a handler here (send-message)
+      // are composer-owned and fall through untouched.
+      const kb = matchKeyEvent(e);
+      if (kb == null) return;
+      if (!kb.allowedInInput && isEditableTarget(e.target)) return;
+      switch (kb.id) {
+        case "toggle-sidebar":
           e.preventDefault();
           setSidebarCollapsed((v) => !v);
           break;
-        case "j":
+        case "toggle-panel":
           e.preventDefault();
           setPanelOpen((v) => !v);
           break;
-        case ",":
+        case "open-settings":
           e.preventDefault();
           setSettingsOpen(true);
           break;
-        case "f":
+        case "search-chat":
           e.preventDefault();
           setSearchOpen(true);
           break;
-        case "k":
+        case "open-palette":
           e.preventDefault();
           setPaletteOpen(true);
           setPaletteInitialAction(undefined);
           break;
-        case "n":
+        case "new-workstream":
           e.preventDefault();
           setPaletteOpen(true);
           setPaletteInitialAction("new-workstream");
+          break;
+        case "open-shortcuts":
+          e.preventDefault();
+          setShortcutsOpen(true);
           break;
       }
     };
@@ -1437,6 +1461,68 @@ export default function App() {
       }
     },
     [workstream, workstreams, project?.root_path, activeProjectRoot, applyBootstrap, resetProjectAggregates, refreshPendingCounts],
+  );
+
+  // P1.1 journal search fan-out: one debounced (250 ms) read-only
+  // search_events per registered project, merged newest-first with the
+  // project tagged on each hit. Stale responses are dropped by seq — a
+  // palette keystroke during flight never lands out of order. Failures
+  // degrade to that project contributing zero rows (never the banner —
+  // palette search is ambient).
+  useEffect(() => {
+    const q = journalQuery.trim();
+    if (q.length < 2 || !paletteOpen) {
+      if (!paletteOpen) setJournalQuery("");
+      setJournalHits(null);
+      setJournalLoading(false);
+      return;
+    }
+    setJournalLoading(true);
+    const seq = ++journalSeqRef.current;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const buckets = await Promise.all(
+          projects.map(async (p): Promise<JournalHit[]> => {
+            try {
+              const resp = await searchEvents(q, p.root);
+              return (resp.search_results ?? []).map((result) => ({
+                root: p.root,
+                projectName: p.name,
+                result,
+              }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        if (seq !== journalSeqRef.current) return;
+        setJournalHits(mergeHits(buckets));
+        setJournalLoading(false);
+      })();
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [journalQuery, paletteOpen, projects]);
+
+  // P1.1 Enter on a hit: one-flight foreign switch (the Sidebar.tsx:374-382
+  // path — root + workstream in a single bootstrap roundtrip when the hit
+  // belongs to another project), then open ⌘F prefilled with the query so
+  // the row's context is one keystroke away. Switch failures surface in
+  // the error banner inside handleSwitchWorkstream; search stays closed.
+  const handlePickJournal = useCallback(
+    async (hit: JournalHit, query: string) => {
+      journalSeqRef.current++;
+      setJournalHits(null);
+      setJournalQuery("");
+      setJournalLoading(false);
+      const foreign = hit.root !== (projectRootRef.current ?? null);
+      if (foreign) await handleSwitchWorkstream(hit.result.workstream_id, hit.root);
+      else await handleSwitchWorkstream(hit.result.workstream_id);
+      setSearchQuery(query);
+      setSearchOpen(true);
+    },
+    [handleSwitchWorkstream],
   );
 
   // M11 P1: full re-bootstrap against another registry project — every
@@ -1646,6 +1732,10 @@ export default function App() {
       setMemoryFocus((prev) => ({ tab: memSubTab ?? "proposals", n: (prev?.n ?? 0) + 1 }));
     }
   }, [openTab]);
+
+  // P1.4 run-header "N files changed" chip → Changes tab. Stable ref —
+  // ChatSurface is memo'd and this rides its prop list every poll tick.
+  const handleOpenChanges = useCallback(() => openPanelTab("changes"), [openPanelTab]);
 
   // Fold chip's "Open note": pivot to the wiki tab and focus the folded
   // epoch's note there.
@@ -1884,9 +1974,12 @@ export default function App() {
   // manual dismiss / unmount clear it the same way.
   // Guard: don't auto-dismiss bootstrap failures — if the daemon is
   // unreachable, the error must persist so the user can retry.
+  // P1.5: a errors.ts-summarized banner is STICKY — classified failures
+  // wait for the explicit ×, never the 10 s fade.
   useEffect(() => {
     if (error === null) return;
     if (!booted) return; // bootstrap error — keep it visible
+    if (summarizeError(error) !== null) return; // sticky (P1.5)
     const timer = window.setTimeout(() => setError(null), ERROR_BANNER_MS);
     return () => clearTimeout(timer);
   }, [error, booted]);
@@ -1905,7 +1998,8 @@ export default function App() {
       id: "new-workstream",
       name: "New Workstream",
       icon: <Plus size={14} />,
-      shortcut: "⌘N",
+      // P1.3: hints render from the registry, never a literal string.
+      shortcut: comboFor("new-workstream"),
       prompt: "Workstream name…",
       onRun: async (name) => {
         try {
@@ -1948,7 +2042,7 @@ export default function App() {
       id: "open-settings",
       name: "Open Settings",
       icon: <Settings size={14} />,
-      shortcut: "⌘,",
+      shortcut: comboFor("open-settings"),
       onRun: () => setSettingsOpen(true),
     },
     ...(agentRunning
@@ -1957,7 +2051,7 @@ export default function App() {
             id: "cancel-run",
             name: "Cancel Run",
             icon: <Square size={14} />,
-            shortcut: "Esc",
+            shortcut: comboFor("cancel-run"),
             onRun: () => handleCancel(),
           } satisfies PaletteAction,
         ]
@@ -1966,21 +2060,21 @@ export default function App() {
       id: "toggle-sidebar",
       name: "Toggle Sidebar",
       icon: <ChevronLeft size={14} />,
-      shortcut: "⌘B",
+      shortcut: comboFor("toggle-sidebar"),
       onRun: () => setSidebarCollapsed((v) => !v),
     },
     {
       id: "toggle-panel",
       name: "Toggle Context Panel",
       icon: <Columns size={14} />,
-      shortcut: "⌘J",
+      shortcut: comboFor("toggle-panel"),
       onRun: () => setPanelOpen((v) => !v),
     },
     {
       id: "search-chat",
       name: "Search Chat",
       icon: <Search size={14} />,
-      shortcut: "⌘F",
+      shortcut: comboFor("search-chat"),
       onRun: () => setSearchOpen(true),
     },
   ];
@@ -2060,7 +2154,18 @@ export default function App() {
           onSaved={() => void refreshSettings()}
         />
       )}
-      {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} initialActionId={paletteInitialAction} />}
+      {paletteOpen && (
+        <CommandPalette
+          actions={paletteActions}
+          onClose={() => setPaletteOpen(false)}
+          initialActionId={paletteInitialAction}
+          onQueryChange={setJournalQuery}
+          journal={journalHits}
+          journalLoading={journalLoading}
+          onPickJournal={(hit, query) => void handlePickJournal(hit, query)}
+        />
+      )}
+      {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
       <main className="app-main" ref={setAppMainEl}>
         {/* Toast viewport: the transient chips the sidebar used to host,
             plus sidebar confirmations. Click-through opens the panel the
@@ -2123,19 +2228,31 @@ export default function App() {
             </button>
           ))}
         </div>
-        {error && (
-          <div className="error-banner" role="alert">
-            <span>{error}</span>
-            <button
-              type="button"
-              className="dismiss-btn"
-              aria-label="Dismiss error"
-              onClick={() => setError(null)}
-            >
-              <X size={14} />
-            </button>
-          </div>
-        )}
+        {error && (() => {
+          // P1.5 (errors.ts): classified failures render summary + action
+          // with the raw string preserved on hover (title), and stay up
+          // until the explicit × — "sticky". Unclassified strings keep the
+          // legacy raw render (+ 10 s auto-dismiss, per the effect above).
+          const classified = summarizeError(error);
+          return (
+            <div className="error-banner" role="alert" data-sticky={classified !== null ? "true" : undefined}>
+              <span title={classified !== null ? error : undefined}>
+                {classified !== null ? classified.summary : error}
+                {classified?.action != null && (
+                  <span className="error-action opacity-80"> — {classified.action}</span>
+                )}
+              </span>
+              <button
+                type="button"
+                className="dismiss-btn"
+                aria-label="Dismiss error"
+                onClick={() => setError(null)}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          );
+        })()}
         <ChatSurface
           events={events}
           agentRunning={agentRunning}
@@ -2154,6 +2271,7 @@ export default function App() {
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
           onSearchClose={handleSearchClose}
+          onOpenChanges={handleOpenChanges}
           // M12: the composer chip discloses the daemon's auto-distill
           // state for the active conversation; the lock covers MANUAL
           // distill only — an auto distill is send-cancelled, it never

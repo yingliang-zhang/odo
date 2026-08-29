@@ -8,6 +8,7 @@ import FileRefContextMenu from "./FileRefContextMenu";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
+import { SLOT } from "../slots";
 import type { AutonomyReport, Diff, ReviewResult } from "../types";
 
 interface Props {
@@ -103,7 +104,8 @@ function diffFilePath(line: string): string | null {
 // D0: one navigable file inside a multi-file diff. `lineIndex` targets the
 // `diff --git` line (falling back to the `+++` header) so a chip click can
 // scroll straight to the file's section.
-interface DiffFileSegment {
+// Export edge: P1.4's ToolDiffView reuses this walk (no second parser).
+export interface DiffFileSegment {
   path: string;
   lineIndex: number;
   adds: number;
@@ -111,11 +113,8 @@ interface DiffFileSegment {
   status: "add" | "del" | "mod" | "rename";
 }
 
-// Walk the full (untruncated) diff once, splitting it into per-file segments
-// at each `--- a/…` / `+++ b/…` header pair; content `+`/`-` lines accrue to
-// the current segment (headers never count). Status is inferred from which
 // header read `/dev/null` and whether the old/new paths differ.
-function parseFileSegments(lines: string[]): DiffFileSegment[] {
+export function parseFileSegments(lines: string[]): DiffFileSegment[] {
   const segments: DiffFileSegment[] = [];
   let current: DiffFileSegment | null = null;
   let oldPath: string | null = null;
@@ -633,6 +632,7 @@ function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, age
 
   return (
     <section
+      data-slot={SLOT.diffCard}
       className={cn(
         "diff-card flex flex-col border-t border-border bg-bg-raised",
         hasReject &&
@@ -961,6 +961,83 @@ function DiffViewer({ diff, onAccept, onReject, projectRoot, onSendComments, age
     </section>
   );
 }
+
+// ---------- P1.4: tool-result inline diffs ----------
+
+// Cheap gate before any parse: a result "contains a unified diff" when it
+// carries a `diff --git` line, or a bare `--- a/x` / `+++ b/x` header pair
+// (tools that emit patch bodies without the git preamble). Both forms are
+// anchored at line starts — a "+"/"-" mid-line never false-positives.
+const DIFF_GIT_RE = /(^|\n)diff --git /;
+const DIFF_HDR_RE = /(^|\n)--- (?:a\/)?\S[\s\S]*?\n\+\+\+ /;
+export function looksLikeUnifiedDiff(text: string): boolean {
+  return DIFF_GIT_RE.test(text) || DIFF_HDR_RE.test(text);
+}
+
+// Distinct file paths touched by one diff text (run-header chip count).
+export function diffFilesChanged(text: string): string[] {
+  return parseFileSegments(text.split("\n")).map((s) => s.path);
+}
+
+// Compact read-only hunk view for a tool event whose RESULT text is a
+// unified diff (P1.4). Reuses parseFileSegments — the same parser behind
+// the Changes tab — so statuses/adds/dels never drift between surfaces.
+// Accept/Reject stays on the real DiffViewer; this view is journal-borne.
+function ToolDiffView({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const segments = parseFileSegments(lines);
+  if (segments.length === 0) return null;
+  return (
+    <div className="tool-diff mt-1.5 flex flex-col gap-1.5">
+      {segments.map((seg, segIdx) => {
+        // Payload lines only: drop the git preamble and ---/+++ headers;
+        // keep `@@` hunk markers and the +/- payload.
+        const end = segIdx + 1 < segments.length ? segments[segIdx + 1].lineIndex : lines.length;
+        const rows: { line: string; cls: string }[] = [];
+        for (let i = seg.lineIndex; i < end; i++) {
+          const l = lines[i];
+          if (l.startsWith("diff --git") || l.startsWith("index ") || NEW_FILE_RE.test(l) || OLD_FILE_RE.test(l)) continue;
+          if (l.trim() === "") continue;
+          rows.push({ line: l, cls: lineClass(l) });
+        }
+        return (
+          <div
+            key={`${seg.path}:${seg.lineIndex}`}
+            className="tool-diff-file overflow-hidden rounded-sm border border-border bg-bg-raised"
+          >
+            <div className="tool-diff-path flex items-center gap-1.5 border-b border-border px-2 py-1 text-[10px]">
+              <span className={cn("tool-diff-status inline-block size-1.5 rounded-full", STATUS_DOT[seg.status])} aria-hidden />
+              <span className="font-medium text-text">{seg.path}</span>
+              <span className="ml-auto tabular-nums text-text-dim">
+                +{seg.adds} −{seg.dels}
+              </span>
+            </div>
+            <div className="tool-diff-hunks max-h-[200px] overflow-auto px-2 py-0.5">
+              {rows.map((r, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    r.cls,
+                    "overflow-x-auto whitespace-pre break-normal leading-[1.5]",
+                    r.cls.endsWith("diff-add") && "bg-diff-add-bg text-diff-add-text",
+                    r.cls.endsWith("diff-del") && "bg-diff-del-bg text-diff-del-text",
+                    r.cls.endsWith("diff-hunk") && "text-text-dim italic",
+                  )}
+                >
+                  {r.line}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      <div className="tool-diff-note text-[10px] text-text-dim">
+        read-only — review and accept in the Changes tab
+      </div>
+    </div>
+  );
+}
+export { ToolDiffView };
 
 // Keep-alive panel (tri-review P2 #5, 2026-08-24): App keeps this
 // component mounted under the ContextPanel `hidden` tabs and hands it

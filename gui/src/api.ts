@@ -60,6 +60,7 @@ import type {
   ResolveHealConflictResponse,
   ReviewDiffResponse,
   SendMessageRequest,
+  SearchEventsResponse,
   SendMessageResponse,
   Settings,
   UpdateSettingsRequest,
@@ -489,6 +490,12 @@ export async function contradictions(
     conversationId,
     projectRoot: projectRoot ?? null,
   }));
+}
+
+// E P2 / P1.1: read-only journal search across the project's active
+// workstreams; the daemon owns the index (journal stays the only one).
+export function searchEvents(text: string, projectRoot?: string): Promise<SearchEventsResponse> {
+  return invoke<SearchEventsResponse>("search_events", { text, projectRoot: projectRoot ?? null });
 }
 
 // Daemon-level failures arrive with ok:false; transport failures (invoke

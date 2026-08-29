@@ -511,7 +511,10 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- Search ----------
     case "search_events": {
-      return fx.makeSearchResults(args?.text ?? "");
+      return fx.makeSearchResults(
+        args?.text ?? "",
+        typeof args?.projectRoot === "string" ? args.projectRoot : fx.projects[0].root,
+      );
     }
 
     // ---------- M8 Skills ----------

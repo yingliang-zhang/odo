@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { KEYBINDS, comboFor } from "../src/keybinds";
 
 // Keyboard shortcuts: ⌘B (sidebar), ⌘J (panel), ⌘K (palette), ⌘N (new workstream),
 // ⌘, (settings), ⌘F (search), Esc (close overlays).
@@ -83,4 +84,34 @@ test("⌘J toggles panel", async ({ page }) => {
 
   await page.keyboard.press("Meta+j");
   await expect(page.locator(".context-panel")).toBeHidden();
+});
+
+// P1.3 (docs/design/adoption-lock.md): the keybind registry is the one
+// table behind the ⌘/ panel and the palette's hint strings — the panel
+// literally renders KEYBINDS import-for-import.
+
+test("⌘/ opens the shortcuts panel listing every registry row; Esc closes it", async ({ page }) => {
+  await page.keyboard.press("Meta+/");
+  const panel = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+  await expect(panel).toBeVisible();
+
+  // One row per registry entry, each carrying its live display combo.
+  await expect(panel.locator(".shortcut-row")).toHaveCount(KEYBINDS.length);
+  await expect(panel).toContainText("Toggle sidebar");
+  await expect(panel).toContainText("⌘B");
+  await expect(panel).toContainText("Cancel run");
+  await expect(panel).toContainText("Esc");
+
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+});
+
+test("palette hints render live comboFor(id) strings from the registry", async ({ page }) => {
+  await page.keyboard.press("Meta+k");
+  const sidebarAction = page.locator(".palette-item", { hasText: "Toggle Sidebar" });
+  await expect(sidebarAction).toContainText(comboFor("toggle-sidebar")!);
+  const settingsAction = page.locator(".palette-item", { hasText: "Open Settings" });
+  await expect(settingsAction).toContainText(comboFor("open-settings")!);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".palette-overlay")).toBeHidden();
 });
