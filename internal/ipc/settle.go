@@ -153,7 +153,12 @@ const (
 	// The diff cap was raised from 32KB to 64KB (2026-08-15): a 35KB
 	// diff like R-W4 (Design-MoA) hit the old cap and blocked repair
 	// unnecessarily. Modern models handle 64KB+ context comfortably.
-	settleDiffCapBytes     = 64 * 1024
+	// Raised to 128KB (2026-08-29): P1 adoption-lock diffs bundle five
+	// items (~95KB); a cap below the real artifact size just routes
+	// multi-item diffs to the human without adding fidelity — the cap
+	// exists to prevent truncation-hallucination, not to size-limit
+	// scope. Comments cap unchanged (feedback is naturally small).
+	settleDiffCapBytes     = 128 * 1024
 	settleCommentsCapBytes = 16 * 1024
 	// settleGoalCapBytes caps the origin goal riding into the repair
 	// prompt. The lock's 32KB is about the prompt bundle: an uncapped

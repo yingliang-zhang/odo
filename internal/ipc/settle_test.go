@@ -381,9 +381,11 @@ func TestSettleRepairPromptUnit(t *testing.T) {
 		}
 	}
 
-	// The locked boundaries, pinned exactly.
-	if settleMaxReviseRounds != 2 || settleDiffCapBytes != 64*1024 || settleCommentsCapBytes != 16*1024 {
-		t.Errorf("caps drifted: rounds=%d diff=%d comments=%d (locked at 2 / 64K / 16K)",
+	// The locked boundaries, pinned exactly. (Diff cap 128KB, 2026-08-29:
+	// raised from 64K — P1 adoption diffs bundle ~95KB; the cap prevents
+	// truncation-hallucination, it does not size-limit scope.)
+	if settleMaxReviseRounds != 2 || settleDiffCapBytes != 128*1024 || settleCommentsCapBytes != 16*1024 {
+		t.Errorf("caps drifted: rounds=%d diff=%d comments=%d (locked at 2 / 128K / 16K)",
 			settleMaxReviseRounds, settleDiffCapBytes, settleCommentsCapBytes)
 	}
 }
@@ -700,10 +702,10 @@ func TestSettleRepairPromptTooLarge(t *testing.T) {
 		return f, &Server{store: f.st, projectRoot: root}, d, root
 	}
 
-	t.Run("previous diff over 32KB", func(t *testing.T) {
+	t.Run("previous diff over cap", func(t *testing.T) {
 		var b strings.Builder
-		b.WriteString("diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go\n@@ -1 +1,4001 @@\n")
-		for i := range 4000 {
+		b.WriteString("diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go\n@@ -1 +1,6201 @@\n")
+		for i := range 6200 {
 			fmt.Fprintf(&b, "+pad line %05d......\n", i)
 		}
 		patch := b.String()

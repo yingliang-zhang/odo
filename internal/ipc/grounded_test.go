@@ -340,8 +340,11 @@ func TestGroundedBudget(t *testing.T) {
 		if rr.Verdict != "needs_fixes" || !strings.Contains(rr.Comments, "exceeded 8 rounds") {
 			t.Errorf("degraded leg = %q (%s), want needs_fixes naming the 8-round wall", rr.Verdict, rr.Comments)
 		}
-		if rr.Infra {
-			t.Error("Infra = true on a non-required degrade — an over-reading model is not a transport failure")
+		// 2026-08-29 (P1 diff #101 lesson): tool-loop exhaustion IS infra
+		// regardless of posture — the leg's reasoning machinery failed
+		// before it could judge, so its verdict is not direction evidence.
+		if !rr.Infra {
+			t.Error("Infra = false on loop exhaustion — a burned-out tool loop is not a judgment")
 		}
 		if got := len(rr.ToolCalls); got != 7 {
 			t.Errorf("tool_calls = %d, want 7 (every executed round journaled; the refused 8th round executed nothing)", got)

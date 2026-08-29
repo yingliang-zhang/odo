@@ -548,11 +548,21 @@ func (s *Server) reviewWithModelGrounded(ctx context.Context, m reviewModel, pro
 		ToolBudgetExhausted: scoped.getExhausted(),
 	}
 	if err != nil {
-		// Fail-closed degradation: Infra exactly when the mode required
-		// grounding (panelInfraLeg then fails the whole round closed).
+		// Fail-closed degradation. Tool-loop exhaustion is an INFRA
+		// failure regardless of the required posture: the review leg's
+		// reasoning machinery failed before it could judge the diff, so
+		// its verdict is not direction evidence (P1 diff #101, 2026-08-29:
+		// a gui-only diff's grounded leg burned 8 rounds and its
+		// synthesized needs_fixes was counted as real dissent, cascading
+		// the diff into a repair-cap block). Infra = required OR a loop
+		// exhaustion; init/transport failures keep Infra = required only
+		// (they may be posture-specific). panelInfraLeg then parks the
+		// round blocked-pending {panel_infra} — recovered on the next
+		// pipeline trigger, never by discarding the diff.
+		loopExhausted := strings.Contains(err.Error(), "tool loop exceeded")
 		rr.Verdict = "needs_fixes"
 		rr.Comments = "grounded review failed: " + err.Error()
-		rr.Infra = plan.required
+		rr.Infra = plan.required || loopExhausted
 		return rr
 	}
 	v := reviewVerdict(label, res.Text, res.Truncated)
