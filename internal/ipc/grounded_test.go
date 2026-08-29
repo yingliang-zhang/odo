@@ -334,11 +334,12 @@ func TestGroundedBudget(t *testing.T) {
 		plan := groundedPlanFor(t, s, root, []string{"sub/a.go"})
 		rr := s.reviewWithModelGrounded(context.Background(), reviewModel{model: "rmG", provider: "test"}, "review this diff", plan)
 
-		// maxRounds = 8 executes 7 tool rounds and refuses the 8th (the
-		// post that would START the 9th API turn never leaves); with no
-		// verdict token the existing fail-closed degradation applies.
-		if rr.Verdict != "needs_fixes" || !strings.Contains(rr.Comments, "exceeded 8 rounds") {
-			t.Errorf("degraded leg = %q (%s), want needs_fixes naming the 8-round wall", rr.Verdict, rr.Comments)
+		// maxRounds = 16 (user ruling, 2026-08-29; was 8) executes 15
+		// tool rounds and refuses the 16th (the post that would START
+		// the 17th API turn never leaves); with no verdict token the
+		// existing fail-closed degradation applies.
+		if rr.Verdict != "needs_fixes" || !strings.Contains(rr.Comments, "exceeded 16 rounds") {
+			t.Errorf("degraded leg = %q (%s), want needs_fixes naming the 16-round wall", rr.Verdict, rr.Comments)
 		}
 		// 2026-08-29 (P1 diff #101 lesson): tool-loop exhaustion IS infra
 		// regardless of posture — the leg's reasoning machinery failed
@@ -346,8 +347,8 @@ func TestGroundedBudget(t *testing.T) {
 		if !rr.Infra {
 			t.Error("Infra = false on loop exhaustion — a burned-out tool loop is not a judgment")
 		}
-		if got := len(rr.ToolCalls); got != 7 {
-			t.Errorf("tool_calls = %d, want 7 (every executed round journaled; the refused 8th round executed nothing)", got)
+		if got := len(rr.ToolCalls); got != 15 {
+			t.Errorf("tool_calls = %d, want 15 (every executed round journaled; the refused 16th round executed nothing)", got)
 		}
 		if rr.ToolBudgetExhausted {
 			t.Error("tool_budget_exhausted = true with tiny reads — only the byte cap may set it")

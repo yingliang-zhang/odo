@@ -62,8 +62,15 @@ import (
 
 const (
 	// groundedMaxRounds bounds the grounded leg's tool loop (the
-	// client's hard ceiling is maxToolRounds = 16; the lock fixes 8).
-	groundedMaxRounds = 8
+	// client's hard ceiling is maxToolRounds = 16). Raised 8 → 16
+	// (user ruling, 2026-08-29): K3 — the panel's only grounded leg —
+	// burned the 8-round wall three times in a row (#101, #102 r1,
+	// #105 r1), each time as an infra round parked for a restart
+	// re-fire. K3's grounded behavior is to keep reading files in the
+	// diff's import neighborhood; the shorter cap converted a working
+	// reviewer into a recurring infra event. 16 gives the leg the
+	// client's full budget; the byte caps below still bound the spend.
+	groundedMaxRounds = 16
 	// groundedTotalBytes caps the cumulative tool-result bytes one
 	// grounded leg may be served across all rounds.
 	groundedTotalBytes = 256 * 1024
