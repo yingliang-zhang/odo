@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # U1 Re-implementation After Diff #97 Auto-Rejection
 
 ## Context

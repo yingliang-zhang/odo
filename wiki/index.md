@@ -1,13 +1,13 @@
 # Project Wiki Index
 
 ## Topics
-- Auto-Land Pipeline & Diff Governance → topics/auto-land-pipeline.md
-- Panel Review & Verdict Policy → topics/panel-verdict-policy.md
-- Memory Distillation & Auto-Distill → topics/memory-distill.md
-- Memory Write Governance (D4) → topics/memory-governance.md
-- Path Security & Symlink Containment → topics/symlink-containment.md
-- Worktree, Workstream & Run Lifecycle → topics/run-lifecycle.md
-- Loop Pipeline & Control Plane → topics/loop-control-plane.md
-- GUI Architecture & Performance → topics/gui-performance.md
-- Verify Gate & Test Determinism → topics/test-determinism.md
-- Daemon Deployment & Reliability → topics/daemon-deployment.md
+- Auto-Land Pipeline & Diff Lifecycle → topics/auto-land-pipeline.md
+- Review Panel & Verdict Governance → topics/panel-governance.md
+- Memory Distill, Replay & Recovery → topics/memory-distill-recovery.md
+- Control-Plane Hardening Program (D1–D7) → topics/control-plane-hardening.md
+- Verify Gate & Test Infrastructure → topics/verify-test-infrastructure.md
+- GUI Architecture & Performance → topics/gui-architecture-performance.md
+- GUI Feature Locks (U1/U2 & Adoption Lock) → topics/gui-feature-locks.md
+- Security Containment & Path Guards → topics/security-containment.md
+- Deployment & Daemon Lifecycle → topics/deployment-daemon-lifecycle.md
+- Concurrency & Race Hardening → topics/concurrency-race-hardening.md

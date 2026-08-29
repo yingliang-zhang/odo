@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D6 Design-MoA Diversity Gate (Control-Plane Hardening)
 
 Final item of the control-plane hardening wave per `docs/design/control-plane-hardening-lock.md`. Enforces: the auto design gate requires ≥2 successful legs from ≥2 distinct model families; otherwise the design lock is journaled but stays pending for the human gate. D1–D5/D7 landed previously and were not reworked. Tier-0 files (`gatepolicy.go`, `gate_manifest.json`) and `.odo-verify` untouched.

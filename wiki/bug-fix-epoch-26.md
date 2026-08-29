@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Adoption Lock P1 Implementation (odo GUI)
 
 Session implemented P1.1–P1.5 of `docs/design/adoption-lock.md` in the odo repo (worktree at `dd74425`), scoped strictly to `gui/src/**` and `gui/e2e/**`. P2/P3 explicitly untouched (no preview changes, Runs tab, perf harness, theme cascade, esc registry).

@@ -1,0 +1,9 @@
+# Control-Plane Hardening Program (D1–D7)
+
+- D1 replaced the 10-file hand-written protectedGateFiles map with a structural two-tier policy: Tier-0 (gatepolicy.go + gate_manifest.json) is human-only with a startup sha16 drift latch that fail-closes autoLand/settle/loopFix via gate_policy_drift; Tier-1 prefixes make gate membership structural; odo gate re-pin is human-only (bug-fix-epoch-14)
+- D1: git.PatchPaths includes pre-image paths so renames out of protected prefixes are gate-source on both sides; C0 autonomy classification stays memory-prefix-only so gate hits never pollute the autonomy ladder (bug-fix-epoch-14)
+- D1 Mode A reroute: loop gate-source fixes must pass the full autoLand panel path (C8 inherit-never-fork); the verify-only landing path for loop fixes was deleted; fold attribution requires a loop_diff_bound binding, fail-closed (bug-fix-epoch-14)
+- D3: loop budgets constrain real executor cost — summed per-assistant-message usage from run session JSONL; budgeted = input+output+cache_write while cacheRead is journaled but not budgeted; usage rows supersede pending spawn-row estimates in the fold (C1 fold is truth) and GUI mirrors the identical rule (bug-fix-epoch-15, bug-fix-epoch-16)
+- D5: finding fingerprints v4 = sha16(norm(file)|norm(symbol)|category[|rule]) with title/evidence/expected/actual demoted to un-hashed description; per-leg dedup runs before cross-leg fold; migration is append-only so old v3 fingerprints stay historical (bug-fix-epoch-16)
+- D2, D4, D6, D7 complete the lock (see panel-governance and memory-distill-recovery); every hardening diff kept Tier-0 files and .odo-verify untouched by discipline (bug-fix-epoch-16)
+- Verify capacity fix prerequisite for D3 landing: go test got an explicit -timeout=14m in verify after a ~535s suite died at the default 600s (human commit 8edcbb9) (bug-fix-epoch-16)
