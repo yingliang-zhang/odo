@@ -2626,7 +2626,7 @@ func TestLandSealRefusesLateAdmission(t *testing.T) {
 	// sweep (startReviseRun takes s.mu itself). The refusal must land
 	// BEFORE the evidence-before-action journaling: no repair
 	// user_message may exist afterwards.
-	admitted, reason = rig.server.startReviseRun(ctx, d, 2, d.ID, "LATE GOAL", "patchsha", "", nil, "REPAIR PREVDIFF", "REPAIR FEEDBACK", settleNeedsFixes)
+	admitted, reason = rig.server.startReviseRun(ctx, d, 2, d.ID, "LATE GOAL", "patchsha", "", nil, settleDiffInput{text: "REPAIR PREVDIFF"}, "REPAIR FEEDBACK", settleNeedsFixes)
 	if admitted || reason != "land_sealed" {
 		t.Fatalf("startReviseRun after seal = (%v, %q), want (false, land_sealed)", admitted, reason)
 	}
