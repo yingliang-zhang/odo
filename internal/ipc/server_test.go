@@ -360,7 +360,10 @@ func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	}
 
 	done := rig.pollUntilDone(t, convID)
-	if got, want := fmt.Sprint(eventTypes(done.Events)), "[agent_text agent_done]"; got != want {
+	// D9-W3a (additive): the drained run tails one fail-soft run_usage
+	// receipt behind agent_done (stub transcripts carry no usage
+	// records); run_usage_test.go pins its payload + exactly-once.
+	if got, want := fmt.Sprint(eventTypes(done.Events)), "[agent_text agent_done memory_update]"; got != want {
 		t.Fatalf("journaled agent events = %s, want %s", got, want)
 	}
 	if done.Diff == nil {
@@ -402,8 +405,10 @@ func TestVisibleLoopAcceptRejectRestore(t *testing.T) {
 	if boot2.Conversation == nil || boot2.Conversation.ID != convID {
 		t.Fatalf("bootstrap after restart: conversation = %+v, want id %d", boot2.Conversation, convID)
 	}
+	// Run 1's D9-W3a receipt sits between agent_done and the accept's
+	// review_action (drain tail precedes any review row).
 	if got, want := fmt.Sprint(eventTypes(boot2.Events)),
-		"[user_message agent_text agent_done review_action]"; got != want {
+		"[user_message agent_text agent_done memory_update review_action]"; got != want {
 		t.Errorf("restored events = %s, want %s", got, want)
 	}
 	if boot2.Diff == nil || boot2.Diff.Status != store.DiffAccepted {
@@ -477,7 +482,10 @@ func TestNoDiffRunRetiresWorktree(t *testing.T) {
 	}
 
 	done := rig.pollUntilDone(t, convID)
-	if got, want := fmt.Sprint(eventTypes(done.Events)), "[agent_text agent_done]"; got != want {
+	// D9-W3a (additive): the drained run tails one fail-soft run_usage
+	// receipt behind agent_done (stub transcripts carry no usage
+	// records); run_usage_test.go pins its payload + exactly-once.
+	if got, want := fmt.Sprint(eventTypes(done.Events)), "[agent_text agent_done memory_update]"; got != want {
 		t.Fatalf("journaled agent events = %s, want %s", got, want)
 	}
 	if done.Diff != nil {

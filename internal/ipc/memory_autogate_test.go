@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 )
@@ -335,11 +336,34 @@ func TestDistillSweepsLegacyBatch(t *testing.T) {
 	if got := atomic.LoadInt64(calls); got != 6 {
 		t.Errorf("panel calls = %d, want 6 (sweep 3 + new batch 3)", got)
 	}
-	mem := readFileStr(t, filepath.Join(root, ".odo", "memory.md"))
-	for _, rule := range []string{"Run the full ipc suite after every landing.", "Rebase the later diff before reviewing it."} {
-		if !strings.Contains(mem, rule) {
-			t.Errorf("memory.md missing swept/auto-applied rule %q:\n%s", rule, mem)
+	// The swept batch's completion signal is the memory.md content
+	// itself — await it with a deadline instead of assuming the distill
+	// response and the file write share a clock (the D9-W3a run_usage
+	// receipt legitimately delays the sweep window boundary).
+	wantRules := []string{
+		"Run the full ipc suite after every landing.",
+		"Rebase the later diff before reviewing it.",
+	}
+	mem := ""
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if data, err := os.ReadFile(filepath.Join(root, ".odo", "memory.md")); err == nil {
+			mem = string(data)
 		}
+		ok := true
+		for _, rule := range wantRules {
+			if !strings.Contains(mem, rule) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("memory.md missing swept/auto-applied rules %q after 10s:\n%s", wantRules, mem)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
 	gates := payloadsByAction(t, events, "memory_gate")

@@ -268,15 +268,21 @@ func TestLearnerProposesJournaled(t *testing.T) {
 	}
 
 	// The propose event is journaled before the distill marker, and a
-	// successful learner means no learner-failure memory_update. The
-	// post-marker wiki auto-commit row is the one legitimate memory_update
-	// in this stream (the pipeline commits its own note now).
+	// successful learner means no learner-failure memory_update. Two
+	// memory_update rows are legitimate in this stream: the D9-W3a
+	// fail-soft run_usage receipt at the run's drain tail (stub
+	// transcripts carry no usage records; run_usage_test.go pins its
+	// payload + exactly-once) and the post-marker wiki auto-commit row
+	// (the pipeline commits its own note now).
 	proposeIdx, distillIdx := -1, -1
 	for i, ev := range events {
 		if ev.Type == store.EventMemoryUpdate {
 			var mu map[string]interface{}
 			_ = json.Unmarshal(ev.Payload, &mu)
 			if mu["layer"] == "wiki" && mu["cause"] == "commit" {
+				continue
+			}
+			if mu["layer"] == "run_usage" {
 				continue
 			}
 			t.Errorf("unexpected memory_update event at seq %d: %s", ev.Seq, ev.Payload)

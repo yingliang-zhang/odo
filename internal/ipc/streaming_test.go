@@ -106,7 +106,10 @@ func TestStreamingVisibleLoopPreview(t *testing.T) {
 	if previewText != "Creating hello.txt." {
 		t.Errorf("preview text = %q, want %q", previewText, "Creating hello.txt.")
 	}
-	if got, want := fmt.Sprint(events), "[user_message agent_text agent_done]"; got != want {
+	// D9-W3a (additive): the drained run tails one fail-soft run_usage
+	// receipt behind agent_done (stub transcripts carry no usage
+	// records); run_usage_test.go pins its payload + exactly-once.
+	if got, want := fmt.Sprint(events), "[user_message agent_text agent_done memory_update]"; got != want {
 		t.Errorf("journaled sequence = %s, want %s", got, want)
 	}
 }
