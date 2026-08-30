@@ -545,6 +545,123 @@ export interface AutonomyStatusResponse {
   error?: string;
   autonomy?: AutonomyReport;
 }
+// ---------- D9-W3: learning control plane (pure observability) ----------
+
+// The 16 episode outcome keys, exactly as the daemon's `learning_status`
+// fold always emits them (zero-filled, never key-elided — the explicit
+// fields pin that). `episode_totals` reuses this shape: the same keys
+// summed over ALL journal episodes, not just the returned window.
+export interface LearningOutcomeRow {
+  accepted: number;
+  rejected: number;
+  weak_rejected: number;
+  auto_accepted: number;
+  auto_rejected: number;
+  verify_failed: number;
+  panel_mixed: number;
+  panel_minority_reject: number;
+  revise_rounds_spawned: number;
+  revise_landed: number;
+  ladder_suspended: number;
+  revise_no_progress: number;
+  agent_errors: number;
+  false_stops: number;
+  no_texts: number;
+  human_reverts: number;
+}
+
+// Outcome-context counters. panel_infra/blocked_other/diff_less_terminals/
+// attribution_lost share the outcomes' always-emitted guarantee (zeroed);
+// attribution_lost = raw human outcomes whose send/terminal predates the
+// episode window (honest window-boundary reconciliation).
+// memory_free_outcomes (attributed outcomes with no memory block in play)
+// is emitted ONLY when >0, hence optional.
+export interface LearningContextRow {
+  panel_infra: number;
+  blocked_other: number;
+  diff_less_terminals: number;
+  attribution_lost: number;
+  memory_free_outcomes?: number;
+}
+
+// Token/cost usage of the episode's distill call; available=false means
+// the harness reported no usage block (the numeric fields are zeroes).
+export interface LearningUsageRow {
+  available: boolean;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  cost_usd: number;
+}
+
+// One journaled learning episode (per-distill outcome accounting over a
+// journal window). `episodes` arrives newest-first, capped at 50.
+export interface LearningEpisodeRow {
+  seq: number;
+  conversation_id: number;
+  workstream: string;
+  epoch: number;
+  window: { first_seq: number; last_seq: number };
+  outcomes: LearningOutcomeRow;
+  context: LearningContextRow;
+  flags_emitted: number[];
+  usage: LearningUsageRow;
+  verify_ms_total: number;
+  distill_ms: number;
+}
+
+// One flagged rule from the rules audit fold (D9-W3 is the FIRST flag
+// surface — MemoryPanel never landed one). verdict is "harmful" (reject
+// pressure past thresholds) or "effective".
+export interface LearningFlagRow {
+  seq: number;
+  rule: string;
+  verdict: "harmful" | "effective" | (string & {});
+  injections: number;
+  rejects: number;
+  reject_conversations: number;
+}
+
+// The audit thresholds the flags cleared — surfaced verbatim so the GUI
+// never re-derives the gate.
+export interface LearningFlagThresholds {
+  min_injections: number;
+  min_rejects: number;
+  min_reject_conversations: number;
+  rate_factor: number;
+}
+
+// One candidate-lifecycle row. W3 ships an EMPTY list (nothing writes
+// candidates yet); the shape locks now so W4's writer needs no GUI change.
+export interface LearningCandidateRow {
+  artifact_hash: string; // 64-hex content address; GUI shows the first 12
+  version: number;
+  scope: string; // e.g. "project:memory"
+  stage: string; // candidate|shadow|canary|project_active|...
+  created_seq: number;
+  created_at: string; // RFC 3339
+  invalid: boolean; // hash-chain unresolvable ⇒ fold marks invalid, refuses transitions
+}
+
+// Daemon-folded learning report (single fold; the GUI renders, never
+// re-folds — dual-fold skew is a locked failure mode).
+export interface LearningStatus {
+  project_root: string;
+  journal: string;
+  episodes: LearningEpisodeRow[];
+  episode_count: number;
+  episode_totals: LearningOutcomeRow;
+  flags: LearningFlagRow[];
+  flag_thresholds: LearningFlagThresholds;
+  candidates: LearningCandidateRow[];
+}
+
+export interface LearningStatusResponse {
+  ok: boolean;
+  error?: string;
+  learning?: LearningStatus;
+}
 
 // Daemon-managed project settings (daemon `get_settings` / `update_settings`).
 export interface Settings {

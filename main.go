@@ -73,6 +73,8 @@ func main() {
 			os.Exit(runAutonomyCLI(args[1:]))
 		case "rules":
 			os.Exit(runRulesCLI(args[1:]))
+		case "learning":
+			os.Exit(runLearningCLI(args[1:]))
 		case "unretract":
 			os.Exit(runUnretractCLI(args[1:]))
 		case "retract":

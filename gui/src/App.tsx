@@ -38,6 +38,7 @@ import ContextPanel from "./components/ContextPanel";
 import { PANEL_TAB_IDS, type PanelTab } from "./contrib";
 import { ESC_PRIORITY, dispatchEscape, useEscLayer } from "./esc-registry";
 import DiffViewer from "./components/DiffViewer";
+import LearningPanel from "./components/LearningPanel";
 import LedgerPanel from "./components/LedgerPanel";
 import MemoryPanel from "./components/MemoryPanel";
 import ReviewInbox from "./components/ReviewInbox";
@@ -2634,6 +2635,19 @@ export default function App() {
               target={previewTarget}
               projectRoot={project?.root_path ?? null}
               active={panelTab === "preview"}
+            />
+          )}
+        </div>
+        <div hidden={panelTab !== "learning"}>
+          {mountedPanelTabs.has("learning") && (
+            // D9-W3 (learning control plane, pure observability):
+            // project-scoped read-only fold — no conversation gate
+            // (episodes/flags span conversations), keyed by project like
+            // SkillsPanel so a project switch remounts and refetches.
+            <LearningPanel
+              key={project?.root_path ?? "default"}
+              projectRoot={project?.root_path ?? null}
+              active={panelTab === "learning"}
             />
           )}
         </div>

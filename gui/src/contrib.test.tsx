@@ -19,7 +19,7 @@ globalThis.ResizeObserver ??= class {
 HTMLElement.prototype.setPointerCapture = () => {};
 
 describe("PANEL_CONTRIBUTIONS", () => {
-  it("declares exactly the 8 shipped panels, in strip order", () => {
+  it("declares exactly the 9 shipped panels, in strip order", () => {
     expect(PANEL_TAB_IDS).toEqual([
       "changes",
       "review",
@@ -29,6 +29,8 @@ describe("PANEL_CONTRIBUTIONS", () => {
       "ledger",
       "runs",
       "preview",
+      // D9-W3: learning control-plane observability tab, appended last.
+      "learning",
     ]);
   });
 
@@ -59,6 +61,7 @@ describe("PANEL_CONTRIBUTIONS", () => {
       ledger: undefined,
       runs: undefined,
       preview: undefined,
+      learning: undefined,
     });
   });
 

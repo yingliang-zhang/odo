@@ -26,6 +26,7 @@ import {
   Eye,
   FileText,
   GitCompareArrows,
+  GraduationCap,
   History,
   Inbox,
   MapPin,
@@ -77,6 +78,9 @@ const CONTRIBUTIONS = [
   // P2.1: file/URL preview surface (read_file text + sandboxed localhost
   // live frame).
   { id: "preview", title: "Preview", icon: Eye },
+  // D9-W3 (learning control plane, pure observability): the first-ever
+  // flagged-rules surface + episode/candidate fold (daemon learning_status).
+  { id: "learning", title: "Learning", icon: GraduationCap },
 ] as const satisfies readonly PanelContribution[];
 
 // Exported AS the const tuple (not widened to PanelContribution[]): strip/

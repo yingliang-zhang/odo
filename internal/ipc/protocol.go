@@ -113,6 +113,11 @@ const (
 	// the stranded body; Dismiss records the decision without touching
 	// files. Both journal heal_resolved (2026-08-26 memory-replay doctrine).
 	CmdResolveHealConflict = "resolve_heal_conflict"
+	// D9-W3: learning_status returns the daemon's single learning fold —
+	// learning_episode rows, memory_audit_flag rows (the first flag
+	// surface), and the candidate stage list — for the Memory panel's
+	// Learning tab. The GUI renders this payload and never re-folds.
+	CmdLearningStatus = "learning_status"
 )
 
 // Request is one command line on the socket.
@@ -470,6 +475,9 @@ type Response struct {
 	Path string `json:"path,omitempty"`
 	// autonomy_status: the rung-0 observability snapshot (M15 O-1).
 	Autonomy *AutonomyReport `json:"autonomy,omitempty"`
+	// learning_status: the D9-W3 learning fold (episodes + audit flags +
+	// candidate stages).
+	Learning *LearningStatusReport `json:"learning,omitempty"`
 	// R-W4 (design_moa): the consolidated DESIGN LOCK document plus every
 	// leg's proposal/metadata ("proposals" is already the memory_proposals
 	// wire key, hence design_proposals).

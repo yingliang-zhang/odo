@@ -457,9 +457,16 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 	// M19: the gate itself is extracted as runVerifyGate (the /loop
 	// Mode A fix pipeline calls it verbatim).
 	verifyPaths, pathsErr := git.PatchPaths(d.PathOnDisk)
+	// D9-W3a (additive): the gate's wall time rides the journal rows it
+	// feeds — blocked rows on failure, the moa_review evidence row on
+	// success. Verify duration was previously unjournaled (a real gap
+	// the D9 legs surfaced); the key is additive (ADR-0002).
+	verifyStart := time.Now()
 	gate := runVerifyGate(ctx, s.projectRoot, worktreePath, verifyPaths, "diff-"+strconv.FormatInt(d.ID, 10))
+	verifyMs := time.Since(verifyStart).Milliseconds()
 	if !gate.ok {
-		s.journalAutoLandBlocked(ctx, d, gate.reason, gate.detail, nil, "")
+		s.journalAutoLandBlockedExtra(ctx, d, gate.reason, gate.detail, nil, "",
+			map[string]interface{}{"verify_ms": verifyMs})
 		if gate.reason == "verify_unconfigured" {
 			// Discoverability (verify_advisory.go): an unconfigured or
 			// scope-missing project blocks EVERY such diff here; surface
@@ -613,6 +620,8 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		"reviews":           reviews,
 		"consensus_verdict": cv,
 		"patch_sha16":       sha16(data),
+		// D9-W3a (additive): the attesting verify's wall time.
+		"verify_ms": verifyMs,
 		// Tri-model right sidebar gap (read-only run/verify log): the
 		// verify that attested this landing was previously ephemeral —
 		// it rode only the review prompt. Journal it (capped like blocked

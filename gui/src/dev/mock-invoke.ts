@@ -366,6 +366,70 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         },
       };
     }
+    // D9-W3: the Learning panel's fold — 2 episodes (newest-first), one
+    // harmful flag, an empty candidate list (W3 ships no candidate writer).
+    case "learning_status": {
+      return {
+        ok: true,
+        learning: {
+          project_root: args?.projectRoot ?? "",
+          journal: "",
+          episodes: [
+            {
+              seq: 977,
+              conversation_id: 3,
+              workstream: "main",
+              epoch: 17,
+              window: { first_seq: 402, last_seq: 481 },
+              outcomes: {
+                accepted: 3, rejected: 1, weak_rejected: 0, auto_accepted: 2,
+                auto_rejected: 0, verify_failed: 1, panel_mixed: 0,
+                panel_minority_reject: 0, revise_rounds_spawned: 0,
+                revise_landed: 0, ladder_suspended: 0, revise_no_progress: 0,
+                agent_errors: 0, false_stops: 0, no_texts: 0, human_reverts: 0,
+              },
+              context: { panel_infra: 0, blocked_other: 0, diff_less_terminals: 0, attribution_lost: 0 },
+              flags_emitted: [977],
+              usage: { available: true, input: 81230, output: 9402, cache_read: 0, cache_write: 1200, cost_usd: 0.182 },
+              verify_ms_total: 41200,
+              distill_ms: 98821,
+            },
+            {
+              seq: 912,
+              conversation_id: 3,
+              workstream: "main",
+              epoch: 16,
+              window: { first_seq: 300, last_seq: 401 },
+              outcomes: {
+                accepted: 2, rejected: 2, weak_rejected: 1, auto_accepted: 0,
+                auto_rejected: 1, verify_failed: 0, panel_mixed: 1,
+                panel_minority_reject: 0, revise_rounds_spawned: 1,
+                revise_landed: 1, ladder_suspended: 0, revise_no_progress: 0,
+                agent_errors: 0, false_stops: 0, no_texts: 0, human_reverts: 1,
+              },
+              context: { panel_infra: 0, blocked_other: 0, diff_less_terminals: 0, attribution_lost: 0 },
+              flags_emitted: [],
+              usage: { available: true, input: 60111, output: 7201, cache_read: 0, cache_write: 800, cost_usd: 0.121 },
+              verify_ms_total: 30500,
+              distill_ms: 81230,
+            },
+          ],
+          episode_count: 2,
+          episode_totals: {
+            accepted: 5, rejected: 3, weak_rejected: 1, auto_accepted: 2,
+            auto_rejected: 1, verify_failed: 1, panel_mixed: 1,
+            panel_minority_reject: 0, revise_rounds_spawned: 1,
+            revise_landed: 1, ladder_suspended: 0, revise_no_progress: 0,
+            agent_errors: 0, false_stops: 0, no_texts: 0, human_reverts: 1,
+          },
+          flags: [
+            { seq: 977, rule: "Always run go vet before accepting", verdict: "harmful", injections: 12, rejects: 4, reject_conversations: 3 },
+          ],
+          flag_thresholds: { min_injections: 10, min_rejects: 3, min_reject_conversations: 3, rate_factor: 2 },
+          candidates: [],
+        },
+      };
+    }
 
     // ---------- Settings ----------
     case "get_settings": {

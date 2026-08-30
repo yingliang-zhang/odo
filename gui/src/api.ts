@@ -41,6 +41,7 @@ import type {
   DistillResponse,
   GetSettingsResponse,
   LedgerResponse,
+  LearningStatusResponse,
   ListAllPendingDiffsResponse,
   ListTopicsResponse,
   ListWikiResponse,
@@ -325,6 +326,12 @@ export function reviewDiff(diffId: number, projectRoot?: string): Promise<Review
 // shows on open; a read-only journal computation daemon-side.
 export function autonomyStatus(projectRoot?: string): Promise<AutonomyStatusResponse> {
   return invoke<AutonomyStatusResponse>("autonomy_status", { projectRoot: projectRoot ?? null });
+}
+// D9-W3 (learning control plane, pure observability): the flagged-rules +
+// episode/candidate fold the Learning panel renders. Read-only — no
+// decision path consumes it.
+export function learningStatus(projectRoot?: string): Promise<LearningStatusResponse> {
+  return invoke<LearningStatusResponse>("learning_status", { projectRoot: projectRoot ?? null });
 }
 
 // M2 settings: the bridge resolves its default project root when none is

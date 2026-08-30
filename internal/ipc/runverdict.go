@@ -28,6 +28,7 @@ package ipc
 import (
 	"context"
 	"log"
+	"path/filepath"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -57,6 +58,50 @@ func (s *Server) journalRunAdvisory(ctx context.Context, conversationID int64, m
 		return err
 	}
 	return nil
+}
+
+// journalRunUsage writes the D9-W3a measured-cost receipt
+// (memory_update{layer:"run_usage"}) for one drained REGULAR run — loop
+// runs carry the D3 loop_run_usage receipt instead (drainRun's defer
+// skips loopID≠0 so the same spend is never double-journaled). The OMP
+// session transcript's per-message usage blocks are summed LLM-free by
+// adapter.SessionUsage (journalLoopRunUsage precedent, D3).
+//
+// Fail-soft: a non-OMP adapter or a missing/unusable transcript journals
+// usage_available:false + reason — numbers are NEVER fabricated.
+// journalRunUsage must not wedge the drain tail either.
+func (s *Server) journalRunUsage(ctx context.Context, meta *runMeta) {
+	payload := map[string]interface{}{
+		"layer":  "run_usage",
+		"run_id": meta.runID,
+	}
+	reason := ""
+	usage, ok := adapter.Usage{}, false
+	if ad, found := s.adapterNamed(meta.adapter); found && ad != nil {
+		if _, isOMP := ad.(*adapter.OMP); !isOMP {
+			reason = "non-OMP adapter: no session transcript contract"
+		}
+	}
+	if reason == "" {
+		usage, ok = adapter.SessionUsage(filepath.Join(s.mgr.StateDir(), "sessions", meta.runID))
+		if !ok {
+			reason = "no session transcript (missing JSONL or no usage records)"
+		}
+	}
+	if !ok {
+		payload["usage_available"] = false
+		payload["reason"] = reason
+	} else {
+		payload["usage_available"] = true
+		payload["input_tokens"] = usage.InputTokens
+		payload["output_tokens"] = usage.OutputTokens
+		payload["cache_read_tokens"] = usage.CacheReadTokens
+		payload["cache_write_tokens"] = usage.CacheWriteTokens
+		payload["cost_usd"] = usage.CostUSD
+	}
+	if _, err := s.store.AppendEvent(ctx, meta.conversationID, store.EventMemoryUpdate, mustJSON(payload)); err != nil {
+		log.Printf("run-usage: journal for run %s (conversation %d): %v", meta.runID, meta.conversationID, err)
+	}
 }
 
 // journalRunVerdict writes the memory_update{layer:"run_verdict"} row for

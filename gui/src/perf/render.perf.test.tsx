@@ -251,7 +251,7 @@ describe("render-cost gate (P3)", () => {
     }));
   });
 
-  it("context panel with 8 tabs switches within budget", () => {
+  it("context panel with 9 tabs switches within budget", () => {
     gate("context-panel-tabs", measureCycles(() => {
       let activeTab: PanelTab = "changes";
       const onTabChange = (tab: PanelTab) => {
@@ -265,11 +265,11 @@ describe("render-cost gate (P3)", () => {
           </ContextPanel>,
         );
       });
-      // Interaction: click through all eight tab buttons, each click
+      // Interaction: click through all nine tab buttons, each click
       // followed by the App-side rerender the switch produces (the body
       // subtree remounts under RunGroupBoundary's new resetKey).
       const tabs = [...util.container.querySelectorAll<HTMLElement>('[role="tab"]')];
-      expect(tabs).toHaveLength(8);
+      expect(tabs).toHaveLength(9);
       const interactMs = timed(() => {
         for (const tabEl of tabs) {
           fireEvent.click(tabEl);

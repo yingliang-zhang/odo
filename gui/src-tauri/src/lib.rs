@@ -647,6 +647,15 @@ async fn autonomy_status(project_root: Option<String>) -> Result<Value, String> 
     let req = json!({"cmd": "autonomy_status", "project_root": root});
     run_command(root, req, READ_TIMEOUT).await
 }
+// D9-W3 (learning control plane, pure observability): the flagged-rules +
+// episode/candidate fold the Learning panel renders. Read-only, mirrors
+// autonomy_status; nothing on any decision path consumes it.
+#[tauri::command]
+async fn learning_status(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "learning_status", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
 
 // P2 (OMP stats): merged omp usage + grievances for the StatusBar's
 // read-only stats chip. The daemon shells out to `omp usage --json` and
@@ -1454,6 +1463,7 @@ pub fn run() {
             pending_counts,
             list_all_pending_diffs,
             autonomy_status,
+            learning_status,
             omp_usage,
             read_memory,
             memory_proposals,

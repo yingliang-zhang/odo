@@ -2037,8 +2037,11 @@ func TestCancelRun(t *testing.T) {
 		if !sawCancel {
 			t.Error("agent_error{cancelled by user} was not journaled")
 		}
+		// D9-W3 (additive): the cancelled run's drain journals its fail-
+		// soft run_usage receipt behind the error rows (stub transcripts
+		// carry no usage records — availability degrades, the row lands).
 		if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
-			"[user_message agent_error agent_error]"; got != want {
+			"[user_message agent_error agent_error memory_update]"; got != want {
 			t.Errorf("events = %s, want %s", got, want)
 		}
 
@@ -2132,26 +2135,40 @@ func TestDistill(t *testing.T) {
 	// M4: every distill is followed by the learner pass. The stub returns
 	// plain text (not the learner's JSON contract), so the learner degrades
 	// to a journaled memory_update{layer:learner,cause:failed} — never a
-	// distill failure (spec §2).
+	// distill failure (spec §2). D9-W3 (additive): the run's fail-soft
+	// run_usage receipt rides right behind agent_done (stub transcripts
+	// carry no usage records), and the learning_episode row follows the
+	// marker — both bookkeeping, never consumed by any decision path.
 	if got, want := fmt.Sprint(rig.allEventTypes(t, convID)),
-		"[user_message agent_text agent_done memory_update review_action memory_update]"; got != want {
+		"[user_message agent_text agent_done memory_update memory_update review_action review_action memory_update]"; got != want {
 		t.Errorf("events = %s, want %s", got, want)
 	}
 	events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
-	// The fold marker and the wiki commit row ride above learner/failed.
+	// The fold marker, the learning_episode row, and the wiki commit row
+	// ride above learner/failed.
 	var muPayload map[string]interface{}
-	if err := json.Unmarshal(events[len(events)-3].Payload, &muPayload); err != nil {
+	if err := json.Unmarshal(events[len(events)-4].Payload, &muPayload); err != nil {
 		t.Fatalf("memory_update payload: %v", err)
 	}
 	if muPayload["layer"] != "learner" || muPayload["cause"] != "failed" {
 		t.Errorf("memory_update payload = %v, want learner/failed", muPayload)
 	}
 	var payload map[string]interface{}
-	if err := json.Unmarshal(events[len(events)-2].Payload, &payload); err != nil {
+	if err := json.Unmarshal(events[len(events)-3].Payload, &payload); err != nil {
 		t.Fatalf("review_action payload: %v", err)
 	}
 	if payload["action"] != "distill" || payload["epoch"] != float64(2) || payload["wiki_path"] != wantPath {
 		t.Errorf("review_action payload = %v", payload)
+	}
+	// D9-W3: the episode row consumes the marker's OWN window pin.
+	var episode map[string]interface{}
+	if err := json.Unmarshal(events[len(events)-2].Payload, &episode); err != nil {
+		t.Fatalf("learning_episode payload: %v", err)
+	}
+	epWin, _ := episode["window"].(map[string]interface{})
+	if episode["action"] != "learning_episode" || episode["epoch"] != float64(2) ||
+		epWin["first_seq"] != payload["first_seq"] || epWin["last_seq"] != payload["last_seq"] {
+		t.Errorf("learning_episode payload = %v — window must equal the marker's pin %v/%v", episode, payload["first_seq"], payload["last_seq"])
 	}
 	// The pipeline commits its own wiki output and journals the commit as
 	// additive telemetry above the marker (layer wiki / cause commit).
@@ -2381,12 +2398,21 @@ func TestDistillViaMoa(t *testing.T) {
 
 		// Receipts on the fold marker (additive over the OMP-route shape).
 		// The wiki commit memory_update rides above the marker as the tail
-		// row; the marker itself carries the receipts.
+		// row (the D9-W3 learning_episode row sits right behind the marker);
+		// the marker itself carries the receipts.
 		events := rig.call(t, Request{Cmd: CmdPollEvents, ConversationID: convID, AfterSeq: 0}).Events
 		if tail := events[len(events)-1]; tail.Type != store.EventMemoryUpdate {
 			t.Fatalf("last event = %s, want the wiki commit memory_update", tail.Type)
 		}
-		last := events[len(events)-2]
+		if ep := events[len(events)-2]; ep.Type != store.EventReviewAction {
+			t.Fatalf("learning_episode event = %s, want review_action", ep.Type)
+		} else {
+			var epRow map[string]interface{}
+			if err := json.Unmarshal(ep.Payload, &epRow); err != nil || epRow["action"] != "learning_episode" {
+				t.Fatalf("learning_episode row misplaced: type %s payload %v", ep.Type, epRow)
+			}
+		}
+		last := events[len(events)-3]
 		if last.Type != store.EventReviewAction {
 			t.Fatalf("marker event = %s, want review_action", last.Type)
 		}

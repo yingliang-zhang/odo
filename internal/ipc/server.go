@@ -143,6 +143,18 @@ type runMeta struct {
 	// (unlike the legacy "land manually" advice, which the executor's
 	// every-actor refusal makes impossible).
 	refusalDetail string
+	// runUsageJournaled (D9-W3a) pins drainRun's deferred run_usage
+	// receipt to exactly-once — a test rig re-draining a finished run
+	// must not double-journal the measured cost.
+	runUsageJournaled bool
+}
+
+// runUsageReceiptDue reports whether drainRun's deferred receipt owes a
+// row for this meta: finished AND regular (loop runs carry the D3
+// loop_run_usage receipt — same spend, never double-journaled) AND not
+// already receipted.
+func (m *runMeta) runUsageReceiptDue() bool {
+	return m.finished && m.loopID == 0 && !m.runUsageJournaled
 }
 
 // Server dispatches IPC commands against the store, adapters, and worktree
@@ -769,6 +781,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleReviewDiff(ctx, req)
 	case CmdAutonomyStatus:
 		resp, err = s.handleAutonomyStatus(ctx, req)
+	case CmdLearningStatus:
+		resp, err = s.handleLearningStatus(ctx, req)
 	case CmdGetSettings:
 		resp, err = s.handleGetSettings(ctx, req)
 	case CmdUpdateSettings:
@@ -2734,6 +2748,21 @@ func (s *Server) drainRun(ctx context.Context, meta *runMeta) error {
 	defer func() {
 		if meta.finished {
 			s.unpinRunLandLocked(meta)
+		}
+	}()
+	// D9-W3a: exactly one run_usage receipt per drained REGULAR run
+	// (loop runs carry the D3 loop_run_usage receipt instead — same
+	// measured spend, never double-journaled). Deferred so EVERY
+	// terminal path out of drainRun (diff, no-diff, extraction error,
+	// memory-path refusal, false-stop retry admission) journals the
+	// row; the meta flag pins exactly-once against test rigs that
+	// re-drain a finished run. Fail-soft: the row degrades to
+	// usage_available:false + reason, never fabricated numbers, and a
+	// journal failure only logs (telemetry never wedges the tail).
+	defer func() {
+		if meta.runUsageReceiptDue() {
+			meta.runUsageJournaled = true
+			s.journalRunUsage(ctx, meta)
 		}
 	}()
 	evs, err := s.adapterFor(meta.adapter).Events(ctx, meta.runID, meta.consumed)
@@ -5057,6 +5086,10 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	if err != nil {
 		return Response{}, err
 	}
+	// D9-W3: read the distill's duration ONCE so the marker and the
+	// learning_episode row journal the same number (the episode fold
+	// itself stays clock-free — determinism pin, learning_episode.go).
+	distillDurationMS := time.Since(start).Milliseconds()
 	// Fold provenance (epoch-fold root fix): the marker records the folded
 	// window [first_seq, last_seq] explicitly instead of letting consumers
 	// reverse-derive it from journal scans, plus the note's content hash so
@@ -5067,8 +5100,8 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		"action":         "distill",
 		"epoch":          newEpoch,
 		"wiki_path":      wikiPath,
-		"duration_ms":    time.Since(start).Milliseconds(), // M6: ledger metric
-		"contradictions": contradictions,                   // M6: contradiction report count
+		"duration_ms":    distillDurationMS, // M6: ledger metric
+		"contradictions": contradictions,    // M6: contradiction report count
 		"first_seq":      firstSeq,
 		"last_seq":       lastSeq,
 		"note_path":      filepath.Join("wiki", noteName+".md"),
@@ -5146,6 +5179,24 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// c.Epoch — the distilled note's epoch, not newEpoch (the counter
 	// after increment).
 	s.journalDistillLedger(ctx, c.ID, c.Epoch, distillEv)
+
+	// D9-W3 (pure observability): one learning_episode row per lane per
+	// distill, computed as the pure fold over the marker's OWN window
+	// [firstSeq, lastSeq] out of the render-time event list — the same
+	// pin, never re-derived. Best-effort: a diff-list failure degrades to
+	// a log line (the row's cohort section needs the diff table; the
+	// episode itself is recomputed next epoch).
+	if epDiffs, derr := s.store.ListDiffs(ctx, c.ID); derr != nil {
+		log.Printf("distill: learning episode: list diffs for conversation %d: %v (row skipped)", c.ID, derr)
+	} else {
+		s.journalLearningEpisode(ctx, c, events, epDiffs, learningEpisodeParams{
+			epoch:      newEpoch,
+			workstream: w.Name,
+			firstSeq:   firstSeq,
+			lastSeq:    lastSeq,
+			distillMS:  distillDurationMS,
+		})
+	}
 
 	// M12: the fold retired the window. Evaluate the conditional
 	// auto-curate (never chained: it fires only when the notes/age
@@ -5270,9 +5321,15 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 			// click gets the same attribution on the same grounds as the
 			// metadata layers below — it records a prompt-input change,
 			// never conversation coverage the note claims.
+			// D9-W3: the learning control plane's bookkeeping (episode
+			// rows now; candidate/gate/stage rows in W4-W6) is fold-
+			// authored observability — never conversation coverage the
+			// note claims. Prefix-whitelisted so later waves' learning_*
+			// actions inherit the attribution; any non-learning unknown
+			// action still trips the guard (fail-closed direction kept).
 			if jsonUnmarshalOK(ev.Payload, &p) && (p.Action == "skill_gate" || p.Action == "memory_propose" ||
 				p.Action == "memory_gate" || p.Action == "memory_apply" ||
-				p.Action == "curate") {
+				p.Action == "curate" || strings.HasPrefix(p.Action, "learning_")) {
 				continue
 			}
 			return true
@@ -5296,6 +5353,11 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 					p.Cause == "flag_consumed" || p.Cause == "retract_proposal_rejected")) ||
 				p.Layer == "skills" || p.Layer == "memory" || p.Layer == "user" ||
 				p.Layer == "apply" || p.Layer == "ledger" || p.Layer == "wiki" ||
+				// D9-W3: run_usage receipts journal at a run's drain
+				// tail — measured-cost bookkeeping (fail-soft), never
+				// conversation coverage; a finishing run must not abort
+				// an in-flight fold on the same conversation.
+				p.Layer == "run_usage" ||
 				p.Layer == "curator" || p.Layer == "index" || p.Layer == "pins") {
 				continue
 			}
