@@ -17,7 +17,7 @@ import {
 import type { PanelModel, PromptSnapshot } from "../stats";
 import { pipelineLabel } from "../pipeline";
 import type { PipelinePhase, PipelineState } from "../pipeline";
-import type { PanelTab } from "./ContextPanel";
+import type { PanelTab } from "../contrib";
 import { ompUsage } from "../api";
 import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent } from "../types";
 import { strings } from "../strings";

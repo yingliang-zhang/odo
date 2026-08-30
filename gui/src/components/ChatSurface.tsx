@@ -34,6 +34,7 @@ import { detectAtQuery, registerCompletionSource, resolveCompletions } from "../
 import type { CompletionItem } from "../completions";
 import { makeWikiSource, makeWorkstreamSource } from "../completion-sources";
 import { strings } from "../strings";
+import { ESC_PRIORITY, useEscLayer } from "../esc-registry";
 import { LoaderCircle, Check, X, ChevronUp, ChevronDown, ArrowDown, Archive } from "lucide-react";
 import ToolTicker from "./ToolTicker";
 import RunGroupBoundary from "./RunGroupBoundary";
@@ -993,6 +994,24 @@ function ChatSurface({
     if (atTimerRef.current != null) window.clearTimeout(atTimerRef.current);
     setAtMenu(null);
   };
+
+  // P3.3: the @ / slash menus' unfocused Esc lane. The composer textarea's
+  // onKeyDown stays the focused lane (stopPropagation → this registry never
+  // sees it); these two layers replace App's old .at-menu/.slash-menu
+  // DOM-class gates for Esc landing anywhere else (same semantics: menu
+  // priority beats panel-close/agent-cancel).
+  useEscLayer({
+    id: "at-menu",
+    priority: ESC_PRIORITY.menu,
+    active: () => atMenu != null,
+    onEscape: closeAtMenu,
+  });
+  useEscLayer({
+    id: "slash-menu",
+    priority: ESC_PRIORITY.menu,
+    active: () => slashMenuOpen,
+    onEscape: () => setSlashMenuOpen(false),
+  });
 
   // Replace the `@query` span ending at the caret with the picked item's
   // insert text, then restore focus after the inserted text.

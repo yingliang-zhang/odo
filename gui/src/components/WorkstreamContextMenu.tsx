@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Pencil, Trash2, ClipboardCopy, ArrowRightLeft } from "lucide-react";
 import type { Workstream } from "../types";
 import { cn } from "../lib/utils";
+import { ESC_PRIORITY, useEscLayer } from "../esc-registry";
 
 /**
  * WorkstreamContextMenu — right-click menu for workstream rows.
@@ -12,8 +13,11 @@ import { cn } from "../lib/utils";
  * requires restructuring Sidebar's workstream <li> as a ContextMenuTrigger.
  * Deferred to a later phase.
  *
- * Esc gate: the window keydown listener calls stopPropagation before onClose
- * to prevent App's global Esc handler from also firing.
+ * Esc gate (P3.3): registered with the esc-registry at menu priority —
+ * mounting IS the active predicate (this component exists only while the
+ * menu is open), so a bare Esc reaches App's dispatcher, this layer owns
+ * it, and onClose runs. The window-listener + stopPropagation pair is
+ * gone; the single registry dispatch replaces both.
  */
 
 export interface ContextMenuItem {
@@ -45,6 +49,9 @@ export default function WorkstreamContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const prevFocusRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
   useEffect(() => () => prevFocusRef.current?.focus(), []);
+  // P3.3: menu-priority Esc ownership (replaces the window keydown
+  // listener + stopPropagation — App's dispatcher now routes Esc here).
+  useEscLayer({ id: "ws-context-menu", priority: ESC_PRIORITY.menu, onEscape: onClose });
 
   const [pos, setPos] = useState({ x, y });
   useLayoutEffect(() => {
@@ -62,12 +69,6 @@ export default function WorkstreamContextMenu({
     const onDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
     const onScroll = (e: Event) => {
       const target = e.target as Node | null;
       if (target && menuRef.current && !menuRef.current.contains(target) && !target.contains(menuRef.current)) {
@@ -80,11 +81,9 @@ export default function WorkstreamContextMenu({
       }
     };
     document.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [onClose]);

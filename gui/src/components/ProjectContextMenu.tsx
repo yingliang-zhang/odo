@@ -2,11 +2,14 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowRightLeft, Trash2 } from "lucide-react";
 import { cn } from "../lib/utils";
+import { ESC_PRIORITY, useEscLayer } from "../esc-registry";
 
 // Project header context menu — mirrors WorkstreamContextMenu's pattern:
 // positioned at click coords, viewport-clamped via useLayoutEffect,
 // dismissed by outside-click/Escape/scroll. Portaled to document.body.
 // Actions: Switch to (non-active only), Remove project.
+// Esc (P3.3): esc-registry menu layer — mounting while open is the
+// active predicate, App's dispatcher routes the keystroke here.
 
 interface Props {
   name: string;
@@ -33,6 +36,8 @@ export default function ProjectContextMenu({
   // closing returns focus to the element that opened the menu.
   const prevFocusRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
   useEffect(() => () => prevFocusRef.current?.focus(), []);
+  // P3.3: menu-priority Esc ownership (replaces the window keydown listener).
+  useEscLayer({ id: "project-context-menu", priority: ESC_PRIORITY.menu, onEscape: onClose });
 
   useLayoutEffect(() => {
     const menu = menuRef.current;
@@ -49,14 +54,11 @@ export default function ProjectContextMenu({
     const onDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     const onScroll = () => { onClose(); };
     document.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [onClose]);

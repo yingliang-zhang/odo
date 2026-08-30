@@ -14,6 +14,7 @@ import { FolderOpen, Eye, BookOpen } from "lucide-react";
 import { openPath } from "../api";
 import { cn } from "../lib/utils";
 import FilePreview from "./FilePreview";
+import { ESC_PRIORITY, useEscLayer } from "../esc-registry";
 
 interface Props {
   /** Relative or absolute path to the file. */
@@ -65,13 +66,20 @@ export default function FileRefContextMenu({
     setPos({ x: Math.max(4, adjX), y: Math.max(4, adjY) });
   }, [x, y]);
 
-  // Dismiss on outside-click, Escape, or any scroll outside the menu.
+  // P3.3: menu-priority Esc — the FilePreview overlay owns dismissal while
+  // mounted (same gate the old effect applied to its listeners).
+  useEscLayer({
+    id: "fileref-context-menu",
+    priority: ESC_PRIORITY.menu,
+    active: () => !previewing,
+    onEscape: onClose,
+  });
+  // Dismiss on outside-click or any scroll outside the menu.
   useEffect(() => {
     if (previewing) return; // the overlay owns dismissal while mounted
     const onDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     // This menu is portaled to document.body (to escape .run-group's
     // content-visibility containment). Dismiss on any scroll not
     // originating from inside the menu itself — the menu is fixed to
@@ -84,11 +92,9 @@ export default function FileRefContextMenu({
       onClose();
     };
     document.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [onClose, previewing]);

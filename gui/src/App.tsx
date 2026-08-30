@@ -34,7 +34,9 @@ import {
 } from "./api";
 import ChatSurface from "./components/ChatSurface";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
-import ContextPanel, { type PanelTab } from "./components/ContextPanel";
+import ContextPanel from "./components/ContextPanel";
+import { PANEL_TAB_IDS, type PanelTab } from "./contrib";
+import { ESC_PRIORITY, dispatchEscape, useEscLayer } from "./esc-registry";
 import DiffViewer from "./components/DiffViewer";
 import LedgerPanel from "./components/LedgerPanel";
 import MemoryPanel from "./components/MemoryPanel";
@@ -177,8 +179,7 @@ export default function App() {
   );
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     const stored = localStorage.getItem("odo-panel-tab");
-    const VALID: PanelTab[] = ["changes", "review", "wiki", "memory", "ledger", "skills", "runs", "preview"];
-    return stored && (VALID as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
+    return stored && (PANEL_TAB_IDS as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
   });
 
   // Keep-alive panel tabs (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
@@ -1343,36 +1344,46 @@ export default function App() {
 
   // Belt A global shortcuts. Radix Dialog/Popover/Menu layers (Phase 5/6)
   // stop Esc propagation in capture phase, so this window listener never
-  // fires while one is open — only the hand-rolled overlays below still
-  // need DOM-class gates. Belt B adds ⌘F (chat search) and ⌘K (command
-  // palette); Esc closes the search bar before it reaches blur/cancel.
+  // fires while one is open — they do not reach the registry either.
+  // Belt B adds ⌘F (chat search) and ⌘K (command palette).
+  //
+  // P3.3: the Esc ladder is the esc-registry, not inline ifs. The old
+  // DOM-class gates (.ws-context-menu/.at-menu/.slash-menu) are registry
+  // entries owned by those components (menu priority beats panel); App
+  // keeps only its own four layers, registered in the old nested-if order
+  // (same priority → earliest registration wins):
+  //   search-close → panel-close (M9 P3: panel before cancel) →
+  //   agent-cancel → blur-fallback (always active, always last).
+  useEscLayer({
+    id: "search",
+    priority: ESC_PRIORITY.panel,
+    active: () => searchOpenRef.current,
+    onEscape: () => setSearchOpen(false),
+  });
+  useEscLayer({
+    id: "panel",
+    priority: ESC_PRIORITY.panel,
+    active: () => panelOpenRef.current,
+    onEscape: () => setPanelOpen(false),
+  });
+  useEscLayer({
+    id: "cancel",
+    priority: ESC_PRIORITY.global,
+    active: () => agentRunningRef.current,
+    onEscape: () => void handleCancel(),
+  });
+  useEscLayer({
+    id: "blur-fallback",
+    priority: ESC_PRIORITY.global,
+    onEscape: () => (document.activeElement as HTMLElement | null)?.blur(),
+  });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        // Workstream context menu — its own Esc listener closes it, but
-        // without this gate a bare Esc would also cancel the agent. (Not a
-        // Radix layer yet, so the DOM-class gate stays.)
-        if (document.querySelector(".ws-context-menu") != null) return;
-        // @-mention completion menu — same pattern (tri-model review S2 fix).
-        if (document.querySelector(".at-menu") != null) return;
-        // M19 (V13): the slash menu — layer (a) of the dual Esc gate: its
-        // composer's own onKeyDown stopPropagation is layer (b). Both must
-        // hold; a bare Esc here cancels the running agent.
-        if (document.querySelector(".slash-menu") != null) return;
-        if (searchOpenRef.current) {
-          setSearchOpen(false);
-          return;
-        }
-        // M9 P3: panel open takes priority over cancel — matches old modal UX.
-        if (panelOpenRef.current) {
-          setPanelOpen(false);
-          return;
-        }
-        if (agentRunningRef.current) {
-          void handleCancel();
-          return;
-        }
-        (document.activeElement as HTMLElement | null)?.blur();
+        // The registry decides who consumes Esc (menus > search/panel >
+        // cancel/blur); every consumer runs its own close — nothing else
+        // inline remains.
+        dispatchEscape();
         return;
       }
       // P1.3: mod-combo dispatch consumes the keybinds.ts registry — one
@@ -1417,7 +1428,10 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleCancel]);
+    // Mount-once: Esc semantics live in the registry (closures swap
+    // in-place via useEscLayer), the mod-combo switch reads stable setters
+    // and the keybinds table — neither arm re-subscribes.
+  }, []);
 
   const handleSwitchWorkstream = useCallback(
     async (workstreamId: number, projectRoot?: string) => {
@@ -2474,10 +2488,12 @@ export default function App() {
         activeTab={panelTab}
         onTabChange={openTab}
         parked={parkState.parked}
-        changesBadge={diffs.length > 0 ? diffs.length : undefined}
-        reviewBadge={pendingTotal > 0 ? pendingTotal : undefined}
-        wikiBadge={wikiNoteCount ?? undefined}
-        memoryBadge={pendingMemoryProposals > 0 ? pendingMemoryProposals : undefined}
+        badgeInput={{
+          pendingDiffs: diffs.length,
+          pendingReview: pendingTotal,
+          wikiNotes: wikiNoteCount,
+          memoryProposals: pendingMemoryProposals,
+        }}
       >
         {/* Keep-alive (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
             each tab mounts on first activation and stays mounted only

@@ -2,28 +2,109 @@
    (700x500, tauri.conf.json) is the smallest layout we optimize for. */
 
 :root {
-  --bg: #0f1115;
-  --bg-raised: #1a1d24;
+  /* ---------- P3 theme cascade (1/3): PRIMITIVES ----------
+     Every raw color in the app lives here — the ONE place #hex/rgb()
+     literals are allowed. Dark seeds and light seeds sit side by side,
+     named by hue + weight (Tailwind-ish; higher = darker). Layers above
+     hold var(--p-*) references only: the semantic layer re-points token
+     names to these, and [data-theme="light"] re-references this layer. */
+  --p-ink-900: #0f1115;
+  --p-ink-800: #161a20;
+  --p-ink-700: #1a1d24;
+  --p-ink-650: #1e2228;
+  --p-ink-600: #21252d;
+  --p-ink-500: #2a2e37;
+  --p-slate-200: #d8dce4;
+  --p-slate-400: #7a818c;
+  --p-slate-500: #7d8593;
+  --p-stroke-tint: #636d83;
+  /* Light stroke recipes live whole in the primitive layer (the light
+     token block may only hold pure var() re-references); the dark recipes
+     stay with the semantic layer below. */
+  --p-light-stroke-primary: color-mix(in srgb, var(--p-stroke-tint) 40%, transparent);
+  --p-light-stroke-secondary: color-mix(in srgb, var(--p-stroke-tint) 24%, transparent);
+  --p-light-stroke-tertiary: color-mix(in srgb, var(--p-stroke-tint) 14%, transparent);
+  --p-graphite-900: #1a1a1a;
+  --p-graphite-500: #666;
+  --p-gray-500: #6b7280;
+  --p-paper-25: #fbfbfc;
+  --p-paper-50: #f5f5f5;
+  --p-paper-100: #e8e8e8;
+  --p-white: #fff;
+  --p-blue-400: #7aa2f7;
+  --p-blue-500: #0A84FF;
+  --p-blue-600: #2563eb;
+  --p-blue-700: #0066CC;
+  --p-blue-800: #1d4ed8;
+  --p-violet-400: #a78bfa;
+  --p-violet-600: #7c3aed;
+  --p-purple-400: #c08ae0;
+  --p-purple-600: #9333ea;
+  --p-green-300: #7bd794;
+  --p-green-500: #3fa35f;
+  --p-green-600: #16a34a;
+  --p-green-700: #15803d;
+  --p-mint-300: #6fd39f;
+  --p-teal-300: #6fd3d3;
+  --p-cyan-700: #0e7490;
+  --p-red-100: #fee2e2;
+  --p-red-200: #f0b8b8;
+  --p-red-300: #e08a8a;
+  --p-red-500: #c34a4a;
+  --p-red-600: #dc2626;
+  --p-red-700: #b91c1c;
+  --p-red-800: #991b1b;
+  --p-red-900: #7f1d1d;
+  --p-red-950: #3a2022;
+  --p-amber-300: #e8c876;
+  --p-amber-400: #d8a657;
+  --p-amber-500: #cca742;
+  --p-amber-700: #b45309;
+  --p-amber-800: #92400e;
+  --p-yellow-700: #a16207;
+  /* Scrims + elevation ingredients — full rgba() per weight. The two dark
+     0.35s stay separate symbols on purpose: chip scrim and panel shadow
+     tune independently. Light shadow recipes are whole composites so the
+     light token block re-points with one var() hop. */
+  --p-chip-scrim: rgba(0, 0, 0, 0.35);
+  --p-chip-scrim-light: rgba(0, 0, 0, 0.07);
+  --p-shadow-soft: rgba(0, 0, 0, 0.25);
+  --p-shadow-soft-ring: rgba(0, 0, 0, 0.15);
+  --p-shadow-panel: rgba(0, 0, 0, 0.35);
+  --p-shadow-panel-ring: rgba(0, 0, 0, 0.2);
+  --p-light-shadow-soft: rgba(0, 0, 0, 0.08);
+  --p-light-shadow-soft-ring: rgba(0, 0, 0, 0.10);
+  --p-light-shadow-panel: rgba(0, 0, 0, 0.12);
+  --p-light-shadow-panel-ring: rgba(0, 0, 0, 0.12);
+  --p-light-shadow-soft-set: 0 2px 8px var(--p-light-shadow-soft), 0 0 1px var(--p-light-shadow-soft-ring);
+  --p-light-shadow-panel-set: 0 4px 16px var(--p-light-shadow-panel), 0 0 1px var(--p-light-shadow-panel-ring);
+
+  /* ---------- P3 theme cascade (2/3): SEMANTIC (dark defaults) ----------
+     The stable token names components consume. Color tokens re-point to
+     primitives; derived tokens (color-mix off other semantic tokens,
+     aliases) keep their expressions — computed values are unchanged. */
+  --bg: var(--p-ink-900);
+  --bg-raised: var(--p-ink-700);
   /* StatusBar surface: flat in both themes (nothing scrolls beneath the
      fixed footer, so the old translucent+blur bg was invisible). */
   --statusbar-bg: var(--bg-raised);
-  --bg-input: #21252d;
+  --bg-input: var(--p-ink-600);
   /* The one elevation between raised and input — used by popovers that
      float over both (slash menu). Was referenced but never defined. */
-  --bg-elevated: #161a20;
+  --bg-elevated: var(--p-ink-800);
   --border: var(--stroke-secondary); /* alias for backward compat */
   /* Markdown blockquote left rail — stronger in the light theme (used to
      be a [data-theme] override rule). */
   --blockquote-border: var(--border);
-  --text: #d8dce4;
-  --text-dim: #7d8593;
-  --accent-user: #0A84FF;
-  --accent-agent: #1e2228;
+  --text: var(--p-slate-200);
+  --text-dim: var(--p-slate-500);
+  --accent-user: var(--p-blue-500);
+  --accent-agent: var(--p-ink-650);
   /* Background-run dot/chip. --accent-agent is a dark text color in this
      theme, so the dot needs its own purple that reads on dark surfaces. */
-  --bg-run: #a78bfa;
-  --ok: #3fa35f;
-  --err: #c34a4a;
+  --bg-run: var(--p-violet-400);
+  --ok: var(--p-green-500);
+  --err: var(--p-red-500);
   --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   /* Sidebar geometry: expanded column vs. the collapsed icon rail. */
   --sidebar-width: 240px;
@@ -38,24 +119,24 @@
   /* Belt D: semantic colors lifted out of literals so the light theme can
      re-theme every surface by overriding this block alone. Values below
      are the previous hardcoded dark-theme colors. */
-  --link: #7aa2f7;
-  --warn: #cca742;
-  --err-text: #e08a8a;
-  --err-surface: #3a2022;
-  --err-surface-text: #f0b8b8;
-  --err-surface-hover-text: #fff;
+  --link: var(--p-blue-400);
+  --warn: var(--p-amber-500);
+  --err-text: var(--p-red-300);
+  --err-surface: var(--p-red-950);
+  --err-surface-text: var(--p-red-200);
+  --err-surface-hover-text: var(--p-white);
   --diff-add-bg: color-mix(in srgb, var(--ok) 12%, transparent);
-  --diff-add-text: #7bd794;
+  --diff-add-text: var(--p-green-300);
   --diff-del-bg: color-mix(in srgb, var(--err) 12%, transparent);
-  --diff-del-text: #e08a8a;
+  --diff-del-text: var(--p-red-300);
   --agent-text: var(--text);
-  --code-chip-bg: rgba(0, 0, 0, 0.35);
+  --code-chip-bg: var(--p-chip-scrim);
   --panel-float: color-mix(in srgb, var(--bg-raised) 92%, transparent);
-  --tok-keyword: #c08ae0;
-  --tok-string: #d8a657;
-  --tok-comment: #7a818c;
-  --tok-number: #6fd3d3;
-  --tok-fn: #7aa2f7;
+  --tok-keyword: var(--p-purple-400);
+  --tok-string: var(--p-amber-400);
+  --tok-comment: var(--p-slate-400);
+  --tok-number: var(--p-teal-300);
+  --tok-fn: var(--p-blue-400);
   /* E P2: design tokens — consistent corner radii. Bumped toward the
      Apple HIG scale: knobs 6, fields/buttons 8, cards 12. */
   --radius-sm: 6px;
@@ -85,13 +166,13 @@
      Dark tuned per canonical consumer (dialog=primary@raised Δ1,
      divider=secondary@raised Δ0, menu=tertiary@elevated Δ2).
      One deliberate dark fix: input borders become visible hairlines. */
-  --stroke-tint: #636d83;
+  --stroke-tint: var(--p-stroke-tint);
   --stroke-primary: color-mix(in srgb, var(--stroke-tint) 28%, transparent);
   --stroke-secondary: color-mix(in srgb, var(--stroke-tint) 13%, transparent);
   --stroke-tertiary: color-mix(in srgb, var(--stroke-tint) 2%, transparent);
   /* Phase 4: elevation shadow for floating surfaces (Hermes shadow-nous pattern) */
-  --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 1px rgba(0, 0, 0, 0.15);
-  --shadow-panel: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 1px rgba(0, 0, 0, 0.2);
+  --shadow-soft: 0 2px 8px var(--p-shadow-soft), 0 0 1px var(--p-shadow-soft-ring);
+  --shadow-panel: 0 4px 16px var(--p-shadow-panel), 0 0 1px var(--p-shadow-panel-ring);
   /* Motion: Apple-style deceleration curve (cubic-bezier 0.32 0.72 0 1) for
      enter/slide, and a gentler standard curve for width/color tweens. */
   --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
@@ -106,9 +187,9 @@
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --accent: var(--accent-user);
   --bg-hover: color-mix(in srgb, var(--text) 6%, transparent);
-  --bg-tertiary: #2a2e37;
-  --ok-text: #6fd39f;
-  --warn-text: #e8c876;
+  --bg-tertiary: var(--p-ink-500);
+  --ok-text: var(--p-mint-300);
+  --warn-text: var(--p-amber-300);
 }
 
 /* E P2: thin scrollbars — macOS-native feel, consistent across themes */
@@ -134,59 +215,62 @@
 /* Belt D: light theme. Every component rule consumes the variables, so
    this block is the entire theme switch. --mono is inherited unchanged. */
 [data-theme="light"] {
-  --bg: #f5f5f5;
-  --bg-raised: #fff;
-  --bg-input: #fff;
-  --bg-elevated: #fbfbfc;
+  /* P3 theme cascade (3/3): LIGHT RE-REFERENCES — every declaration is a
+     pure var() hop into the primitive layer; zero #hex/rgb() literals in
+     this block or in any component-level light override below. */
+  --bg: var(--p-paper-50);
+  --bg-raised: var(--p-white);
+  --bg-input: var(--p-white);
+  --bg-elevated: var(--p-paper-25);
   --border: var(--stroke-secondary); /* alias for backward compat */
   --blockquote-border: var(--stroke-primary);
-  --text: #1a1a1a;
-  --text-dim: #666;
-  --accent-user: #0066CC;
-  --accent-agent: #7c3aed;
-  --bg-run: #7c3aed;
-  --err: #dc2626;
-  --ok: #16a34a;
-  --link: #2563eb;
-  --warn: #a16207;
-  --err-text: #b91c1c;
-  --err-surface: #fee2e2;
-  --err-surface-text: #991b1b;
-  --err-surface-hover-text: #7f1d1d;
-  --diff-add-text: #15803d;
-  --diff-del-text: #b91c1c;
+  --text: var(--p-graphite-900);
+  --text-dim: var(--p-graphite-500);
+  --accent-user: var(--p-blue-700);
+  --accent-agent: var(--p-violet-600);
+  --bg-run: var(--p-violet-600);
+  --err: var(--p-red-600);
+  --ok: var(--p-green-600);
+  --link: var(--p-blue-600);
+  --warn: var(--p-yellow-700);
+  --err-text: var(--p-red-700);
+  --err-surface: var(--p-red-100);
+  --err-surface-text: var(--p-red-800);
+  --err-surface-hover-text: var(--p-red-900);
+  --diff-add-text: var(--p-green-700);
+  --diff-del-text: var(--p-red-700);
   --agent-text: var(--text);
-  --code-chip-bg: rgba(0, 0, 0, 0.07);
-  --tok-keyword: #9333ea;
-  --tok-string: #b45309;
-  --tok-comment: #6b7280;
-  --tok-number: #0e7490;
-  --tok-fn: #1d4ed8;
+  --code-chip-bg: var(--p-chip-scrim-light);
+  --tok-keyword: var(--p-purple-600);
+  --tok-string: var(--p-amber-700);
+  --tok-comment: var(--p-gray-500);
+  --tok-number: var(--p-cyan-700);
+  --tok-fn: var(--p-blue-800);
   /* Phase 3: light theme stroke overrides — alpha knobs on the shared
      --stroke-tint hue (heavier tints needed on light surfaces). */
-  --stroke-primary: color-mix(in srgb, var(--stroke-tint) 40%, transparent);
-  --stroke-secondary: color-mix(in srgb, var(--stroke-tint) 24%, transparent);
-  --stroke-tertiary: color-mix(in srgb, var(--stroke-tint) 14%, transparent);
+  --stroke-primary: var(--p-light-stroke-primary);
+  --stroke-secondary: var(--p-light-stroke-secondary);
+  --stroke-tertiary: var(--p-light-stroke-tertiary);
   /* Light shadows: ~⅓ of dark alphas (was inheriting dark 0.25/0.35 —
      too heavy on white). Ring term stays stronger than blur for the
      floating-panel hairline edge. */
-  --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.10);
-  --shadow-panel: 0 4px 16px rgba(0, 0, 0, 0.12), 0 0 1px rgba(0, 0, 0, 0.12);
+  --shadow-soft: var(--p-light-shadow-soft-set);
+  --shadow-panel: var(--p-light-shadow-panel-set);
   --accent: var(--accent-user);
-  --bg-tertiary: #e8e8e8;
-  --ok-text: #15803d;
-  --warn-text: #a16207;
+  --bg-tertiary: var(--p-paper-100);
+  --ok-text: var(--p-green-700);
+  --warn-text: var(--p-yellow-700);
 }
 
 /* Frosted vibrancy: the top bar background is a single color-mix token
    (--bg-raised @ 88%) in both themes — the old per-theme override is gone. */
 
 [data-theme="light"] .daemon-down-banner {
-  color: #92400e;
+  color: var(--p-amber-800);
 }
 
 [data-theme="light"] .ws-parked-pill {
-  color: #fff;
+  color: var(--p-white);
 }
 
 /* In the light theme the agent message is a flat elevated surface, so
@@ -1439,9 +1523,9 @@ body {
    with white text — visually distinct from .risk-critical's tinted
    treatment (filled vs. outline). */
 [data-theme="light"] .risk-high {
-  background: #b91c1c;
-  color: #fff;
-  border-color: #b91c1c;
+  background: var(--p-red-700);
+  color: var(--p-white);
+  border-color: var(--p-red-700);
 }
 
 .mem-file {
@@ -1458,7 +1542,7 @@ body {
 
 mark {
   background: var(--accent-user);
-  color: #fff;
+  color: var(--p-white);
   border-radius: 2px;
   padding: 0 1px;
 }
@@ -1755,7 +1839,7 @@ mark {
   opacity: 1;
 }
 [data-theme="light"] .failure-overlay {
-  color: #92400e;
+  color: var(--p-amber-800);
 }
 
 /* P2.4: keep-alive LRU park — the strip keeps a dormant tab marked until

@@ -1,0 +1,38 @@
+{
+  "chat-transcript-200": {
+    "mountMs": 130,
+    "interactMs": 20,
+    "measuredP95Ms": {
+      "mount": 42.7,
+      "interact": 6.1
+    },
+    "multiplier": 3
+  },
+  "context-panel-tabs": {
+    "mountMs": 10,
+    "interactMs": 20,
+    "measuredP95Ms": {
+      "mount": 1,
+      "interact": 3.9
+    },
+    "multiplier": 3
+  },
+  "runs-panel-50": {
+    "mountMs": 40,
+    "interactMs": 30,
+    "measuredP95Ms": {
+      "mount": 10.2,
+      "interact": 7.8
+    },
+    "multiplier": 3
+  },
+  "messagebubble-diff": {
+    "mountMs": 10,
+    "interactMs": 10,
+    "measuredP95Ms": {
+      "mount": 0.9,
+      "interact": 2.3
+    },
+    "multiplier": 3
+  }
+}

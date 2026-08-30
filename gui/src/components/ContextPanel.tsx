@@ -2,13 +2,22 @@
 // Phase 1: shell with 4 tabs (Changes/Wiki/Memory/Ledger), empty body.
 // Phase 2: Changes tab gets DiffViewer.
 // Phase 3: Wiki/Memory/Ledger tabs get their content.
+// P3.4: the tab strip is data — ../contrib's registry declares every
+// panel (id / title / icon / badge derivation) and this component renders
+// FROM it; the union type lives there too.
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, Inbox, History, Eye } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import RunGroupBoundary from "./RunGroupBoundary";
 import { cn } from "../lib/utils";
 import { SLOT } from "../slots";
+import {
+  PANEL_CONTRIBUTIONS,
+  badgeFor,
+  type PanelBadgeInput,
+  type PanelTab,
+} from "../contrib";
 import {
   PANEL_MIN_WIDTH,
   PANEL_WIDTH_KEY,
@@ -16,7 +25,14 @@ import {
   readStoredPanelWidth,
 } from "../panel_overlay";
 
-export type PanelTab = "changes" | "review" | "wiki" | "memory" | "skills" | "ledger" | "runs" | "preview";
+// Funnel when the host passes no counts: every badge derivation reads
+// defined fields, so a zero/null input cannot crash the strip.
+const NO_BADGES: PanelBadgeInput = {
+  pendingDiffs: 0,
+  pendingReview: 0,
+  wikiNotes: null,
+  memoryProposals: 0,
+};
 
 interface Props {
   open: boolean;
@@ -25,12 +41,10 @@ interface Props {
   // posture — fixed over the chat + scrim, instead of docked in the grid.
   overlay?: boolean;
   onTabChange: (tab: PanelTab) => void;
-  // Badge counts for each tab (null/undefined = no badge)
-  changesBadge?: number;
-  reviewBadge?: number;
-  wikiBadge?: number | null;
-  memoryBadge?: number;
-  ledgerBadge?: number | null;
+  // P3.4: raw counts for the registry's per-tab badge derivations (was:
+  // five per-tab badge props, one — ledgerBadge — dead at every call
+  // site; derivation rules now sit with the declaration in ../contrib).
+  badgeInput?: PanelBadgeInput;
   // Tab content (rendered as keep-alive: mounted but hidden when inactive)
   children?: ReactNode;
   // P2.4 (keep-alive LRU park): tabs currently unmounted by the park —
@@ -39,31 +53,12 @@ interface Props {
   parked?: ReadonlySet<PanelTab>;
 }
 
-const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
-  { id: "changes", label: "Changes", icon: <GitCompareArrows size={12} /> },
-  // P1a: cross-workstream pending-review inbox (Changes stays per-conversation).
-  { id: "review", label: "Review", icon: <Inbox size={12} /> },
-  { id: "wiki", label: "Wiki", icon: <FileText size={12} /> },
-  { id: "memory", label: "Memory", icon: <MapPin size={12} /> },
-  { id: "skills", label: "Skills", icon: <BookMarked size={12} /> },
-  { id: "ledger", label: "Ledger", icon: <BookOpen size={12} /> },
-  // P2.2: journal-folded runs history (pure journal read, no daemon IPC).
-  { id: "runs", label: "Runs", icon: <History size={12} /> },
-  // P2.1: file/URL preview surface (read_file text + sandboxed localhost
-  // live frame).
-  { id: "preview", label: "Preview", icon: <Eye size={12} /> },
-];
-
 export default function ContextPanel({
   open,
   activeTab,
   overlay = false,
   onTabChange,
-  changesBadge,
-  reviewBadge,
-  wikiBadge,
-  memoryBadge,
-  ledgerBadge,
+  badgeInput,
   parked,
   children,
 }: Props) {
@@ -181,17 +176,6 @@ export default function ContextPanel({
     if (d) setPanelWidth(Math.min(dragMax(), Math.max(MIN_WIDTH, d.startW + (d.startX - d.lastX))));
   };
 
-  const badges: Record<PanelTab, number | null | undefined> = {
-    changes: changesBadge,
-    review: reviewBadge,
-    wiki: wikiBadge,
-    memory: memoryBadge,
-    skills: undefined,
-    ledger: ledgerBadge,
-    runs: undefined,
-    preview: undefined,
-  };
-
   return (
     <>
       {overlay && (
@@ -261,8 +245,8 @@ export default function ContextPanel({
           </button>
         )}
         <div className="panel-tabs flex gap-px flex-1 min-w-0 overflow-x-auto" role="tablist" ref={tabsRef} data-slot={SLOT.panelTabs}>
-          {TABS.map((tab) => {
-            const count = badges[tab.id];
+          {PANEL_CONTRIBUTIONS.map((tab) => {
+            const count = badgeFor(tab, badgeInput ?? NO_BADGES);
             const isActive = activeTab === tab.id;
             return (
               <button
@@ -282,8 +266,8 @@ export default function ContextPanel({
                 )}
                 onClick={() => onTabChange(tab.id)}
               >
-                {tab.icon}
-                {tab.label}
+                <tab.icon size={12} />
+                {tab.title}
                 {parked?.has(tab.id) && (
                   <span
                     className="panel-tab-parked"
