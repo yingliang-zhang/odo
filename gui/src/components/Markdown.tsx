@@ -201,7 +201,7 @@ function parseInline(text: string, highlight: string | undefined, keyPrefix: str
 // ZoomableImage: click to open a full-screen lightbox dialog (Radix, Phase 5).
 // Esc, overlay click, or clicking the zoomed image closes. The Dialog handles
 // focus, portal, and the App Esc gate.
-function ZoomableImage({ src, alt }: { src: string; alt: string }) {
+export function ZoomableImage({ src, alt }: { src: string; alt: string }) {
   const [zoomed, setZoomed] = useState(false);
   return (
     <>

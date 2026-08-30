@@ -1673,3 +1673,108 @@ mark {
    .inbox-row > .diff-card width fix became [&>.diff-card]: utilities on the
    inbox row. .inbox-accept/.inbox-reject → CVA Button default/danger size sm
    (mirrors DiffViewer's migrated .btn-accept/.btn-reject fills). */
+
+/* ---------- P2 (adoption lock) ---------- */
+
+/* P2.3: typed failure overlay — the same family as .daemon-down-banner:
+   persistent, amber, banner-high, but with a bold classification title, a
+   one-line cause, and one leading action. Classes (failure-overlay-socket_
+   closed &c.) stay as probe hooks — one visual recipe for all classes. */
+.failure-overlay {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(180, 120, 0, 0.15);
+  border-bottom: 1px solid rgba(220, 160, 0, 0.6);
+  color: var(--warn-text);
+  padding: 6px 12px;
+  font-size: 13px;
+  animation: toast-in var(--dur) ease-out;
+}
+.failure-overlay-icon {
+  flex-shrink: 0;
+}
+.failure-overlay-title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.failure-overlay-cause {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  opacity: 0.85;
+}
+.failure-overlay-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(220, 160, 0, 0.18);
+  border: 1px solid rgba(220, 160, 0, 0.6);
+  border-radius: var(--radius-sm);
+  color: #e8b030;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.failure-overlay-action:hover {
+  background: rgba(220, 160, 0, 0.32);
+}
+/* The past-threshold reload escape hatch: same ghost recipe, hollow fill
+   so the class's leading action stays the primary button. */
+.failure-overlay-reload {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid rgba(220, 160, 0, 0.6);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.failure-overlay-reload:hover {
+  background: rgba(220, 160, 0, 0.18);
+  opacity: 1;
+}
+.failure-overlay-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  flex-shrink: 0;
+  opacity: 0.7;
+  padding: 2px;
+}
+.failure-overlay-dismiss:hover {
+  opacity: 1;
+}
+[data-theme="light"] .failure-overlay {
+  color: #92400e;
+}
+
+/* P2.4: keep-alive LRU park — the strip keeps a dormant tab marked until
+   its next activation remounts it. */
+.panel-tab-parked {
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.65;
+}
+
+/* P2.2: Runs-tab transcript jump — brief ring on the focused bubble. */
+.bubble-focus-flash {
+  animation: bubble-focus-flash 1.6s ease-out;
+}
+@keyframes bubble-focus-flash {
+  0% {
+    box-shadow: 0 0 0 2px var(--accent-user, rgba(88, 130, 253, 0.9));
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}

@@ -16,6 +16,21 @@ export const SLOT = {
   palette: "palette",
   // ShortcutsPanel (⌘/) DialogContent.
   shortcuts: "shortcuts",
+  // P2.1: inline image rendered in a tool-result/attachment card (click
+  // opens the full lightbox) and the chip fallback when bytes are
+  // unavailable; Open-live affordance + sandboxed iframe in Preview tab.
+  previewImage: "preview-image",
+  previewChip: "preview-chip",
+  previewLive: "preview-live",
+  previewFrame: "preview-frame",
+  // P2.2: one row in the Runs history tab.
+  runsRow: "runs-row",
+  // P2.3: typed failure overlay root (daemon-down taxonomy).
+  failureOverlay: "failure-overlay",
+  // Reload escape hatch the overlay grows past POLL_FAIL_RESTART_THRESHOLD.
+  failureReload: "failure-reload",
+  // P2.4: parked badge on a keep-alive LRU-parked ContextPanel tab.
+  parkedBadge: "parked-badge",
 } as const;
 
 export type SlotName = keyof typeof SLOT;

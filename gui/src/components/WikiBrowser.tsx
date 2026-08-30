@@ -58,6 +58,9 @@ interface Props {
   // and drops cached page bodies; the search query and the selected path
   // deliberately survive (draft state), only bytes are refreshed.
   active: boolean;
+  // P2.4 (keep-alive LRU park): a non-empty search/query draft makes
+  // this tab draft-exempt (the LRU must never unmount away typed input).
+  onDraftChange?: (dirty: boolean) => void;
 }
 
 // Compact relative timestamp for the note list ("45s ago", "3h ago", …).
@@ -82,7 +85,7 @@ function relativeTime(iso: string): string {
 // M9 P3: the browser renders inline inside the right panel's Wiki tab; the
 // list and reader stack vertically and scroll independently while the tabs
 // and search stay pinned. Closing is the panel's job (⌘J).
-function WikiBrowser({ conversationId, projectRoot, focus, active }: Props) {
+function WikiBrowser({ conversationId, projectRoot, focus, active, onDraftChange }: Props) {
   const [tab, setTab] = useState<"notes" | "topics">("notes");
   const [notes, setNotes] = useState<WikiNoteInfo[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -100,6 +103,10 @@ function WikiBrowser({ conversationId, projectRoot, focus, active }: Props) {
   // (no IPC; unread notes match by title only).
   const [query, setQuery] = useState("");
   const trimmed = query.trim();
+  // P2.4: report draft-exemption state to App's LRU on query changes.
+  useEffect(() => {
+    onDraftChange?.(trimmed !== "");
+  }, [trimmed, onDraftChange]);
   const needle = trimmed === "" ? undefined : trimmed;
   const matchesQuery = (name: string, path: string): boolean => {
     if (needle === undefined) return true;

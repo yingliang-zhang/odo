@@ -104,6 +104,20 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return args?.path ?? "";
     }
     case "read_file": {
+      // P2.1: spec-armed per-path fixtures win over the dev stub (text +
+      // forward-compat binary contract); a fixture error rejects like the
+      // daemon's read_file failure path.
+      const armed = fx.previewFiles[String(args?.path ?? "")];
+      if (armed) {
+        if (armed.error) throw new Error(`read_file: ${armed.error}`);
+        return {
+          file_content: armed.content,
+          file_resolved: `${fx.projects[0].root}/${args?.path ?? ""}`,
+          file_truncated: false,
+          file_data_base64: armed.dataBase64,
+          file_mime: armed.mime,
+        };
+      }
       // Browser dev mode: return the fixture root path with a short stub
       // content so the preview dialog renders in dev.
       return {
@@ -293,6 +307,11 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true };
     }
     case "poll_events": {
+      // P2.3 lever: consecutive failures here arm the failure overlay the
+      // same way a dead daemon socket does against the real Tauri bridge.
+      if (fx.pollCtl.fail) {
+        throw new Error(fx.pollCtl.error);
+      }
       return fx.makePollResponse(args?.conversationId ?? 1, args?.afterSeq ?? undefined);
     }
 

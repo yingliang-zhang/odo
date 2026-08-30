@@ -533,6 +533,27 @@ export const bootstrapCtl = { delayMs: 0, fail: false };
 // synchronously, but the mock's fixed 50ms latency means arming within
 // that window targets the wrong request).
 export const bootstrapLandings: Record<string, number> = {};
+// P2.3 lever (same pattern as bootstrapCtl): make every poll_events call
+// reject with `error` — N=3 consecutive failures arm the failure-taxonomy
+// overlay the same way a dead socket arms it against the real daemon.
+// The poll loop self-heals the moment fail flips back to false.
+export const pollCtl = { fail: false, error: "closed the connection without responding" };
+
+// P2.1 fixtures (Preview tab + inline image chips): per-path read_file
+// responses armed from specs. `content` serves the text path; `dataBase64`
+// mirrors the forward-compat binary contract (api.ts ReadFileResponse
+// file_data_base64/file_mime) so the GUI's data-url render path is
+// provable end-to-end without a daemon binary reader.
+export interface PreviewFileFixture {
+  content?: string;
+  dataBase64?: string;
+  mime?: string;
+  error?: string;
+}
+export const previewFiles: Record<string, PreviewFileFixture> = {};
+// 1x1 transparent PNG (67 bytes) for inline-image arming.
+export const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 // M7 preview knob (same pattern as runState): the mock's poll response
 // mirrors this so e2e can simulate a streaming in-flight block — never

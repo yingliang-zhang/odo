@@ -4,7 +4,7 @@
 // Phase 3: Wiki/Memory/Ledger tabs get their content.
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, Inbox } from "lucide-react";
+import { ChevronLeft, ChevronRight, GitCompareArrows, FileText, MapPin, BookOpen, BookMarked, Inbox, History, Eye } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import RunGroupBoundary from "./RunGroupBoundary";
 import { cn } from "../lib/utils";
@@ -16,7 +16,7 @@ import {
   readStoredPanelWidth,
 } from "../panel_overlay";
 
-export type PanelTab = "changes" | "review" | "wiki" | "memory" | "ledger" | "skills";
+export type PanelTab = "changes" | "review" | "wiki" | "memory" | "skills" | "ledger" | "runs" | "preview";
 
 interface Props {
   open: boolean;
@@ -33,6 +33,10 @@ interface Props {
   ledgerBadge?: number | null;
   // Tab content (rendered as keep-alive: mounted but hidden when inactive)
   children?: ReactNode;
+  // P2.4 (keep-alive LRU park): tabs currently unmounted by the park —
+  // the strip keeps the tab and marks it so the user sees where dormant
+  // React state went (restore remounts + refetches on click).
+  parked?: ReadonlySet<PanelTab>;
 }
 
 const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
@@ -43,6 +47,11 @@ const TABS: { id: PanelTab; label: string; icon: ReactNode }[] = [
   { id: "memory", label: "Memory", icon: <MapPin size={12} /> },
   { id: "skills", label: "Skills", icon: <BookMarked size={12} /> },
   { id: "ledger", label: "Ledger", icon: <BookOpen size={12} /> },
+  // P2.2: journal-folded runs history (pure journal read, no daemon IPC).
+  { id: "runs", label: "Runs", icon: <History size={12} /> },
+  // P2.1: file/URL preview surface (read_file text + sandboxed localhost
+  // live frame).
+  { id: "preview", label: "Preview", icon: <Eye size={12} /> },
 ];
 
 export default function ContextPanel({
@@ -55,6 +64,7 @@ export default function ContextPanel({
   wikiBadge,
   memoryBadge,
   ledgerBadge,
+  parked,
   children,
 }: Props) {
   // U2.2/U2.3: width persists to localStorage (clamped on read); the
@@ -178,6 +188,8 @@ export default function ContextPanel({
     memory: memoryBadge,
     skills: undefined,
     ledger: ledgerBadge,
+    runs: undefined,
+    preview: undefined,
   };
 
   return (
@@ -272,6 +284,16 @@ export default function ContextPanel({
               >
                 {tab.icon}
                 {tab.label}
+                {parked?.has(tab.id) && (
+                  <span
+                    className="panel-tab-parked"
+                    data-slot={SLOT.parkedBadge}
+                    aria-label="parked — state preserved; restores on click"
+                    title="parked — tab unmounted by the keep-alive LRU; click restores it"
+                  >
+                    ⟲
+                  </span>
+                )}
                 {count != null && count > 0 && (
                   <span
                     className={cn(

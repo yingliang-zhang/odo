@@ -18,13 +18,25 @@ Element.prototype.scrollIntoView ??= () => {};
 
 describe("SLOT map (P1.2)", () => {
   it("covers the P1 touch points", () => {
-    expect(SLOT).toEqual({
+    expect(SLOT, `P1 subset`).toMatchObject({
       composer: "composer",
       statusbar: "statusbar",
       panelTabs: "panel-tabs",
       diffCard: "diff-card",
       palette: "palette",
       shortcuts: "shortcuts",
+    });
+  });
+
+  it("P2 touch points", () => {
+    expect(SLOT).toMatchObject({
+      previewImage: "preview-image",
+      previewChip: "preview-chip",
+      previewLive: "preview-live",
+      previewFrame: "preview-frame",
+      runsRow: "runs-row",
+      failureOverlay: "failure-overlay",
+      parkedBadge: "parked-badge",
     });
   });
 

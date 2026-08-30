@@ -1,10 +1,13 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, Copy, X } from "lucide-react";
+import { Check, Copy, ExternalLink, X } from "lucide-react";
 import { basename } from "../files";
+import { openPath, readFile } from "../api";
+import { extractHttpUrls, findImageRefs, imageDataUrl, isImagePath, isLocalPreviewUrl, looksLikeFilePath } from "../preview";
+import { SLOT } from "../slots";
 import { loopEventLabel } from "../loop";
 import type { OdoEvent, RecallItem } from "../types";
-import Markdown, { highlightText } from "./Markdown";
+import Markdown, { highlightText, ZoomableImage } from "./Markdown";
 import { looksLikeUnifiedDiff, ToolDiffView } from "./DiffViewer";
 import { Badge } from "./ui/badge";
 
@@ -142,11 +145,97 @@ function BubbleTime({ when, side }: { when: string; side: "left" | "right" }) {
 }
 
 // Renders one journaled event. Payloads come from the daemon verbatim; every
+// P2.1 (adoption-lock): one image attachment / tool-result ref. Attempts an
+// inline byte load on mount via read_file's forward-compat file_data_base64
+// (size-capped in preview.ts); today's daemon rejects binary reads, so the
+// chip-with-"Open" fallback below is the production default until the daemon
+// serves bytes. Loaded bytes render as ZoomableImage (click → lightbox).
+function ImageAttachmentChip({ path, projectRoot }: { path: string; projectRoot?: string | null }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    readFile(path, projectRoot)
+      .then((resp) => {
+        if (alive) setDataUrl(imageDataUrl(resp, path));
+      })
+      .catch(() => {
+        // Binary reads are rejected by today's daemon — the chip stays.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [path, projectRoot]);
+  if (dataUrl !== null) {
+    return (
+      // The wrapper carries the P2.1 probe slot; Markdown.tsx is locked to
+      // the export-only change, so the slot cannot ride ZoomableImage's img.
+      <span className="attachment-img inline-block max-w-full" data-slot={SLOT.previewImage} title={path}>
+        <ZoomableImage src={dataUrl} alt={basename(path)} />
+      </span>
+    );
+  }
+  return (
+    <span
+      className="attachment-chip inline-flex items-center gap-1.5 rounded-[12px] border border-border bg-bg-input px-2 py-0.5 font-mono text-caption"
+      data-slot={SLOT.previewChip}
+      title={path}
+    >
+      <code>{basename(path)}</code>
+      <button
+        type="button"
+        className="attachment-open inline-flex cursor-pointer items-center gap-0.5 rounded border border-border bg-transparent px-1 py-px text-[10px] text-text-dim hover:border-accent hover:text-text"
+        aria-label={`Open ${basename(path)}`}
+        title="Open in OS"
+        onClick={() => {
+          openPath(path, false, projectRoot).catch(() => {});
+        }}
+      >
+        <ExternalLink size={10} aria-hidden /> Open
+      </button>
+    </span>
+  );
+}
+
+// P2.3 (adoption-lock): "Open live" affordance for a URL that already passed
+// the caller's isLocalPreviewUrl gate. The label is host[:port] per the
+// design lock; the App-wired callback switches the Preview tab to live mode.
+function OpenLiveButton({ url, onOpenLiveUrl }: { url: string; onOpenLiveUrl: (url: string) => void }) {
+  let hostPort = url;
+  try {
+    hostPort = new URL(url).host;
+  } catch {
+    // Unparseable — keep the raw URL as the label (the caller's gate
+    // normally makes this arm unreachable).
+  }
+  return (
+    <button
+      type="button"
+      data-slot={SLOT.previewLive}
+      className="preview-live-btn inline-flex cursor-pointer items-center gap-1 rounded border border-border bg-transparent px-2 py-0.5 text-[10px] text-text-dim hover:border-accent hover:text-text"
+      title={`Open live preview of ${url} in the Preview tab`}
+      onClick={() => onOpenLiveUrl(url)}
+    >
+      <ExternalLink size={10} aria-hidden /> {hostPort}
+    </button>
+  );
+}
+
+// Renders one journaled event. Payloads come from the daemon verbatim; every
 // field is optional in the type, so render defensively.
 // Belt B: agent_text renders as markdown; `highlight` wraps occurrences of
 // the chat-search query in <mark>. The .bubble-mount wrapper carries the
 // data-seq jump anchor without disturbing the flex layout (display: contents).
-export default memo(function MessageBubble({ event, highlight, onEditUserMessage, projectRoot }: { event: OdoEvent; highlight?: string; onEditUserMessage?: (text: string) => void; projectRoot?: string | null }) {
+export default memo(function MessageBubble({ event, highlight, onEditUserMessage, projectRoot, onPreviewFile, onOpenLiveUrl }: {
+  event: OdoEvent;
+  highlight?: string;
+  onEditUserMessage?: (text: string) => void;
+  projectRoot?: string | null;
+  // P2.1–P2.3 (adoption-lock): App-wired chat→panel callbacks, threaded by
+  // ChatSurface. Optional at this leaf so foreign surfaces and existing tests
+  // keep rendering; each affordance mounts only when its callback exists.
+  onPreviewFile?: (path: string) => void;
+  onOpenLiveUrl?: (url: string) => void;
+}) {
   const p = event.payload ?? {};
   // GLM B4: copy feedback for tool results (mirrors CodeBlock pattern).
   const [copied, setCopied] = useState(false);
@@ -165,15 +254,23 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
           )}
           {p.attachments != null && p.attachments.length > 0 && (
             <div className="attachment-chips flex flex-wrap gap-1.5 pt-1.5">
-              {p.attachments.map((a) => (
-                <span
-                  className="attachment-chip inline-flex items-center gap-1.5 rounded-[12px] border border-border bg-bg-input px-2 py-0.5 font-mono text-caption"
-                  key={a}
-                  title={a}
-                >
-                  <code>{basename(a)}</code>
-                </span>
-              ))}
+              {p.attachments.map((a) =>
+                // P2.1: image attachments attempt an inline byte load
+                // (ZoomableImage once bytes arrive, chip + Open before that
+                // and when the daemon serves none); non-image chips render
+                // exactly as before.
+                isImagePath(a) ? (
+                  <ImageAttachmentChip key={a} path={a} projectRoot={projectRoot} />
+                ) : (
+                  <span
+                    className="attachment-chip inline-flex items-center gap-1.5 rounded-[12px] border border-border bg-bg-input px-2 py-0.5 font-mono text-caption"
+                    key={a}
+                    title={a}
+                  >
+                    <code>{basename(a)}</code>
+                  </span>
+                ),
+              )}
             </div>
           )}
           {p.recall != null && p.recall.length > 0 && (
@@ -232,6 +329,24 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       if (typeof args === "string") {
         try { args = JSON.parse(args); } catch { /* keep raw string */ }
       }
+      // P2.2: on file-oriented tools (read_file/grep/glob), an arg VALUE
+      // shaped like a file path renders as a button targeting the Preview
+      // tab — only when ChatSurface threaded onPreviewFile down from App.
+      // Everywhere else the same plain-text span renders as before.
+      const pathArgsTool = toolName === "read_file" || toolName === "grep" || toolName === "glob";
+      const argValue = (v: unknown, shown: string, hkey: string): ReactNode =>
+        pathArgsTool && onPreviewFile !== undefined && typeof v === "string" && looksLikeFilePath(v) ? (
+          <button
+            type="button"
+            className="tool-arg-preview cursor-pointer border-0 bg-transparent p-0 font-mono text-tok-string hover:underline"
+            title="Preview in panel"
+            onClick={() => onPreviewFile(v)}
+          >
+            {highlightText(shown, highlight, hkey)}
+          </button>
+        ) : (
+          <span className="tool-arg-val text-tok-string">{highlightText(shown, highlight, hkey)}</span>
+        );
       let argsSummary: ReactNode;
       if (args == null) {
         argsSummary = null;
@@ -250,7 +365,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
             return (
               <span key={k}>
                 {i > 0 && " · "}
-                <span className="tool-arg-key text-tok-keyword">{k}</span>: <span className="tool-arg-val text-tok-string">{highlightText(truncated + ellipsis, highlight, `ta${i}`)}</span>
+                <span className="tool-arg-key text-tok-keyword">{k}</span>: {argValue(v, truncated + ellipsis, `ta${i}`)}
               </span>
             );
           });
@@ -265,7 +380,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
                   return (
                     <div key={k} className="tool-arg-row flex gap-1.5 text-micro" title={sv}>
                       <span className="tool-arg-key shrink-0 min-w-[60px] text-tok-keyword">{k}</span>
-                      <span className="tool-arg-val text-tok-string">{highlightText(sv.slice(0, DETAIL_ARG_MAX), highlight, `ta${i}`)}</span>
+                      {argValue(v, sv.slice(0, DETAIL_ARG_MAX), `ta${i}`)}
                     </div>
                   );
                 })}
@@ -302,6 +417,14 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       // DiffViewer parser) instead of a monospaced <pre> dump — accept/
       // reject stays in the Changes tab; the copy button keeps the raw.
       const resultIsDiff = looksLikeUnifiedDiff(resultText);
+      // P2.1/P2.3: image file references in the result body get ONE chip row
+      // (each ref attempts the same byte-load-or-Open path as an image
+      // attachment; row capped at the first 3 refs, the title lists all);
+      // localhost URLs each get an "Open live" affordance when ChatSurface
+      // threaded onOpenLiveUrl down from App. Both scan the raw result text,
+      // not the 2000-char display clamp.
+      const imageRefs = findImageRefs(resultText);
+      const liveUrls = onOpenLiveUrl !== undefined ? extractHttpUrls(resultText).filter(isLocalPreviewUrl) : [];
       body = (
         <div className="bubble bubble-tool self-start bg-transparent text-text-dim font-mono text-caption px-1 py-0.5 max-w-[82%] rounded-lg whitespace-pre-wrap break-words leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <details>
@@ -331,6 +454,23 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
               >
                 {copied ? <Check size={10} aria-hidden /> : `Copy full (${resultBytes.toLocaleString()} chars)`}
               </button>
+            )}
+            {imageRefs.length > 0 && (
+              <div className="attachment-chips image-refs-row flex flex-wrap gap-1.5 pt-1.5" title={imageRefs.join("\n")}>
+                {imageRefs.slice(0, 3).map((ref) => (
+                  <ImageAttachmentChip key={ref} path={ref} projectRoot={projectRoot} />
+                ))}
+                {imageRefs.length > 3 && (
+                  <span className="self-center text-[10px] text-text-dim">+{imageRefs.length - 3} more</span>
+                )}
+              </div>
+            )}
+            {liveUrls.length > 0 && onOpenLiveUrl !== undefined && (
+              <div className="preview-live-row mt-1 flex flex-wrap gap-1.5">
+                {liveUrls.map((u) => (
+                  <OpenLiveButton key={u} url={u} onOpenLiveUrl={onOpenLiveUrl} />
+                ))}
+              </div>
             )}
           </details>
         </div>
@@ -503,6 +643,13 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
           <Badge variant="other" className="badge badge-other" title={`${p.url ?? ""}\nsha256 ${p.sha256 ?? ""}`}>
             preview · {p.url ?? "?"}{p.bytes != null ? ` · ${(p.bytes / 1024).toFixed(1)} KB` : ""}{p.wait_ms != null ? ` · ${p.wait_ms} ms` : ""}
           </Badge>
+          {onOpenLiveUrl !== undefined && p.url != null && p.url !== "" && isLocalPreviewUrl(p.url) && (
+            // P2.3: the capture URL rides the localhost gate like any other
+            // live target; the badge itself stays a pure provenance receipt.
+            <span className="ml-1.5 inline-flex">
+              <OpenLiveButton url={p.url} onOpenLiveUrl={onOpenLiveUrl} />
+            </span>
+          )}
         </div>
       );
       break;

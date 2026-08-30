@@ -126,6 +126,18 @@ interface Props {
   // P1.4: run-headers with journaled diffs carry a "N files changed" chip —
   // click opens the Changes tab (App wires openPanelTab("changes")).
   onOpenChanges?: () => void;
+  // P2.1: thread-throughs to MessageBubble — file refs open the Preview
+  // tab in file mode, localhost URLs open it in live (sandboxed) mode.
+  onPreviewFile?: (path: string) => void;
+  onOpenLiveUrl?: (url: string) => void;
+  // P2.2: Runs-tab jump — `{seq, n}` re-fires identical requests via the
+  // nonce (memoryFocus pattern); the target's run group is forced into
+  // the render window before scrolling to its data-seq anchor.
+  focusSeq?: { seq: number; n: number } | null;
+  // Fired once a focusSeq jump has landed (target scrolled into view and
+  // the flash settled) — the parent retires the pin so the transcript
+  // window bound snaps back.
+  onFocusSeqLanded?: () => void;
 }
 
 // Utilities replacing the deleted .auto-distill-chip CSS rule (inline-flex
@@ -529,6 +541,10 @@ function ChatSurface({
   distillInFlight = false,
   onDisarmAutoDistill,
   onOpenChanges,
+  onPreviewFile,
+  onOpenLiveUrl,
+  focusSeq = null,
+  onFocusSeqLanded,
   distillLocked = false,
   projectRoot = null,
   onTodoChanged,
@@ -1296,8 +1312,22 @@ function ChatSurface({
     }
     return null;
   }, [matches, clampedIdx, runGroups]);
-  const renderWindowStart =
-    matchGroupStart != null ? Math.min(chosenWindowStart, matchGroupStart) : chosenWindowStart;
+  // Runs-tab jump: like matchGroupStart, the focus target's group is
+  // forced into the window while the focus request stands; App retires
+  // the request when the effect below reports the landing (and on any
+  // conversation switch).
+  const focusGroupStart = useMemo(() => {
+    if (focusSeq == null) return null;
+    for (let i = 0; i < runGroups.length; i++) {
+      if (runGroups[i].events.some((e) => e.seq === focusSeq.seq)) return i;
+    }
+    return null;
+  }, [focusSeq, runGroups]);
+  const renderWindowStart = Math.min(
+    chosenWindowStart,
+    matchGroupStart ?? chosenWindowStart,
+    focusGroupStart ?? chosenWindowStart,
+  );
   const renderedGroups = useMemo(() => runGroups.slice(renderWindowStart), [runGroups, renderWindowStart]);
   const hiddenGroupCount = renderWindowStart;
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1340,6 +1370,26 @@ function ChatSurface({
     if (target) stickRef.current = false;
     target?.scrollIntoView({ block: "center" });
   }, [searchOpen, trimmedQuery, matches, clampedIdx]);
+  // P2.2 Runs-tab jump: scroll the focused run's starter bubble into view
+  // and flash it briefly (bounded timeout so the ring can't stick). The
+  // flash settling IS the landing signal: scroll has run and the target
+  // was visibly centered — report it so App retires the pin instead of
+  // letting it force every later group into the window (grounded revise
+  // R2, F2). A seq absent from runGroups (stale request) never fires; an
+  // early return keeps the pin until events catch up.
+  useEffect(() => {
+    if (focusSeq == null) return;
+    const target = listRef.current?.querySelector(`[data-seq="${focusSeq.seq}"] .bubble`) || listRef.current?.querySelector(`[data-seq="${focusSeq.seq}"]`);
+    if (!(target instanceof HTMLElement)) return;
+    stickRef.current = false;
+    target.scrollIntoView({ block: "center" });
+    target.classList.add("bubble-focus-flash");
+    const t = setTimeout(() => {
+      target.classList.remove("bubble-focus-flash");
+      onFocusSeqLanded?.();
+    }, 1600);
+    return () => clearTimeout(t);
+  }, [focusSeq, onFocusSeqLanded]);
 
   const handleSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Escape") {
@@ -1615,7 +1665,7 @@ function ChatSurface({
                 const items = runRenderItems(group.events);
                 return items.map((item, itemIdx) => {
                   if (item.kind === "bubble") {
-                    return <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />;
+                    return <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} />;
                   }
                   // ui/message-stream (Hermes parity): a lone call+result
                   // renders inline — a "1 tool call" wrapper costs a click
@@ -1625,7 +1675,7 @@ function ChatSurface({
                     return (
                       <Fragment key={`tools-${item.events[0].seq}`}>
                         {item.events.map((ev) => (
-                          <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
+                          <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} />
                         ))}
                       </Fragment>
                     );
@@ -1651,7 +1701,7 @@ function ChatSurface({
                         )}
                       </summary>
                       {item.events.map((ev) => (
-                        <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} />
+                        <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} />
                       ))}
                     </details>
                   );

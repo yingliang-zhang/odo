@@ -67,6 +67,10 @@ interface Props {
   // from the fetched settings ("never" hides the chip regardless of what
   // a stale poll carried).
   autoDistillEnabled?: boolean;
+  // P2.4 (keep-alive LRU park): true while the batch holds un-applied
+  // Accept/Reject flips — App keeps this tab draft-exempt so a park can
+  // never unmount away the decisions. Fires on change only.
+  onDraftChange?: (dirty: boolean) => void;
 }
 
 // Split the mixed proposals array into per-target sections while keeping
@@ -224,7 +228,7 @@ function SkillProposalRow({
   );
 }
 
-function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved, autoDistillCapResume, autoDistillEnabled = true }: Props) {
+function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved, autoDistillCapResume, autoDistillEnabled = true, onDraftChange }: Props) {
   const [tab, setTab] = useState<"proposals" | "files">(focus?.tab ?? "proposals");
   // External sub-tab requests. This effect is what keeps deep links
   // working under the panel's keep-alive tabs: the panel now survives
@@ -262,6 +266,10 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+  // P2.4: report draft-exemption state to App's LRU on every flip.
+  useEffect(() => {
+    onDraftChange?.(rejects.size > 0);
+  }, [rejects, onDraftChange]);
 
   // Mirror of the batch state for refresh-time identity comparison (the
   // async callback below can't read the closure's stale `batch`).

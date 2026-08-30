@@ -118,6 +118,11 @@ export interface ReadFileResponse {
   file_content?: string;
   file_resolved?: string;
   file_truncated?: boolean;
+  // P2.1 (forward-compatible, absent on today's daemon): when a later
+  // read_file serves an image it returns raw bytes base64-encoded plus a
+  // MIME hint; the GUI renders `data:<mime>;base64,…` capped at 2MB.
+  file_data_base64?: string;
+  file_mime?: string;
 }
 export async function readFile(
   path: string,

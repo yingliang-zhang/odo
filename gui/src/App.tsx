@@ -64,7 +64,12 @@ import type { AutoDistillCapResume, AutoDistillCountdown, BootstrapResponse, Con
 import { strings } from "./strings";
 import { comboFor, isEditableTarget, matchKeyEvent } from "./keybinds";
 import { mergeHits, type JournalHit } from "./journal_search";
-import { summarizeError } from "./errors";
+import { summarizeError, classifyFailure } from "./errors";
+import FailureOverlay from "./components/FailureOverlay";
+import RunsPanel from "./components/RunsPanel";
+import PreviewPanel from "./components/PreviewPanel";
+import type { PreviewTarget } from "./preview";
+import { initialParkState, mountedSet, activate, type ParkState } from "./lru";
 
 // Polling is the declared transport for M0 (no SSE/WebSocket). M7: the
 // interval adapts to run state — fast while the agent streams blocks (the
@@ -172,29 +177,58 @@ export default function App() {
   );
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     const stored = localStorage.getItem("odo-panel-tab");
-    const VALID: PanelTab[] = ["changes", "review", "wiki", "memory", "ledger", "skills"];
+    const VALID: PanelTab[] = ["changes", "review", "wiki", "memory", "ledger", "skills", "runs", "preview"];
     return stored && (VALID as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
   });
 
-  // Keep-alive panel tabs (tri-review P1 #5, 2026-08-24): the panel used
-  // to mount content conditionally (`panelTab === "x" && …`), so every
-  // switch unmounted the previous panel — local draft state, scroll
-  // positions, and fetched caches were dropped and refetched on return,
-  // despite ContextPanel's Props comment claiming keep-alive semantics.
-  // Tabs now mount lazily on first activation and stay mounted (hidden
-  // with the `hidden` attribute while inactive). mountedTabs records
-  // which tabs have ever been active; the seed is the restored tab.
-  const [mountedTabs, setMountedTabs] = useState<ReadonlySet<PanelTab>>(
-    () => new Set([panelTab]),
-  );
+  // Keep-alive panel tabs (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
+  // tabs mount lazily on first activation; parkState (lru.ts) caps the
+  // mounted set at active + 2 most-recent — deeper tabs unmount and show
+  // a parked badge in the strip until re-activation remounts (and the
+  // activation-edge refetch contract re-syncs) them. Draft-exempt tabs
+  // (Memory/Wiki with unsaved input, reported via onDraftChange) are never
+  // parked and mount outside the cap.
+  const [parkState, setParkState] = useState<ParkState<PanelTab>>(() => initialParkState(panelTab));
+  const [draftTabs, setDraftTabs] = useState<ReadonlySet<PanelTab>>(() => new Set());
+  // Activation callbacks read the exemption set from the ref so openTab
+  // never rememoizes on a draft flip; setTabDraft (the only writer) keeps
+  // ref and state in lockstep.
+  const draftTabsRef = useRef(draftTabs);
+  const mountedPanelTabs = mountedSet(parkState, draftTabs);
   // The single activation path for a panel tab: tab clicks, badge jumps,
   // toast click-throughs, and the poll loop's auto-open all go through
   // here so the keep-alive mount set can never diverge from the visible
   // tab (no second convention beside setPanelTab).
   const openTab = useCallback((tab: PanelTab) => {
     setPanelTab(tab);
-    setMountedTabs((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
+    setParkState((s) => activate(s, tab, draftTabsRef.current));
   }, []);
+  const setTabDraft = useCallback((tab: PanelTab, dirty: boolean) => {
+    // React may double-invoke a setState updater (StrictMode) — the ref
+    // write must not live inside one. This callback is the only writer,
+    // so the ref stays the source of truth and the state mirrors it.
+    const prev = draftTabsRef.current;
+    if (prev.has(tab) === dirty) return;
+    const next = new Set(prev);
+    if (dirty) next.add(tab); else next.delete(tab);
+    draftTabsRef.current = next;
+    setDraftTabs(next);
+  }, []);
+  const handleMemoryDraft = useCallback((d: boolean) => setTabDraft("memory", d), [setTabDraft]);
+  const handleWikiDraft = useCallback((d: boolean) => setTabDraft("wiki", d), [setTabDraft]);
+  // P2.1: the Preview tab's target — a file from a tool-result/arg ref,
+  // or a localhost URL from an Open-live affordance. Setting a target
+  // always pivots the panel to the preview tab.
+  const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
+  // P2.2: the Runs-tab transcript jump (nonce pattern: re-fires an
+  // identical seq on later clicks via the counter). Lifecycle (grounded
+  // revise R2, F2): ChatSurface reports the landing through
+  // handleFocusSeqLanded (target scrolled + flash settled), which retires
+  // the pin, and the effect beside it clears the pin on every conversation
+  // switch — the transcript-window bound can't be defeated for the rest
+  // of the session, and a stale seq can't collide with the new
+  // conversation's run groups.
+  const [focusSeq, setFocusSeq] = useState<{ seq: number; n: number } | null>(null);
   // M9 P3: memory sub-tab deep links (toast click-throughs). Shaped like
   // WikiBrowser's focus ({tab, n}) — the counter re-fires identical
   // requests. (tri-review P1 #5): with the panel keep-alive, MemoryPanel
@@ -225,6 +259,15 @@ export default function App() {
   // E P2: daemon disconnect tracking — consecutive poll failures
   const [daemonDown, setDaemonDown] = useState(false);
   const pollFailRef = useRef(0);
+  // P2.3 (failure taxonomy): the latest poll failure's raw string feeds
+  // classifyFailure; the reference copy lets the catch arm the overlay
+  // without a setState race. A dismissal is keyed to ONE class (grounded
+  // revise R2, F3): identical failures keep it hidden; ANY class change —
+  // an A→B→A flap included — voids the dismissal and re-arms, and an
+  // explicit Reconnect resets it as a fresh start.
+  const [lastPollError, setLastPollError] = useState<string | null>(null);
+  const lastPollErrorRef = useRef<string | null>(null);
+  const dismissedFailureRef = useRef<string | null>(null);
   // P4: render-mirror of pollFailRef — the banner's Restart button gates on
   // POLL_FAIL_RESTART_THRESHOLD, which refs alone can't re-render for.
   const [pollFailures, setPollFailures] = useState(0);
@@ -629,6 +672,11 @@ export default function App() {
   useEffect(() => {
     if (panelTab === "ledger") ledgerEventsRef.current = events;
   });
+  // P2.2: same freeze contract for the Runs tab's journal fold.
+  const runsEventsRef = useRef(events);
+  useEffect(() => {
+    if (panelTab === "runs") runsEventsRef.current = events;
+  });
 
   // Background runs: daemon-reported running workstreams minus the one in
   // view. Invisible from the chat surface (panel sessions, other ws) — the
@@ -984,12 +1032,31 @@ export default function App() {
         pollFailRef.current = 0;
         setDaemonDown(false);
         setPollFailures(0);
+        // P2.3: a healthy tick clears the taxonomy lane too.
+        lastPollErrorRef.current = null;
+        setLastPollError(null);
+        dismissedFailureRef.current = null;
       } catch (e) {
         // E P2: track consecutive poll failures for disconnect detection
+        // P2.3: remember this failure's raw text; the overlay classifies
+        // the SAME string the banner prefixes, never a re-derived copy.
+        const pollErr = `poll failed: ${errorMessage(e)}`;
+        lastPollErrorRef.current = pollErr;
+        setLastPollError(pollErr);
         pollFailRef.current += 1;
         setPollFailures(pollFailRef.current);
         if (pollFailRef.current >= POLL_FAIL_THRESHOLD) {
-          setDaemonDown(true);
+          // Class-keyed dismissal (F3): the same class never re-arms on
+          // every backoff tick; a DIFFERENT class arriving voids the
+          // dismissal outright, so a later return of the dismissed class
+          // (A→B→A) surfaces the overlay again. An UNCLASSIFIABLE string
+          // (cls null) has no dismissal concept — it always arms the
+          // legacy banner, exactly as pre-R2.
+          const cls = classifyFailure(pollErr)?.cls ?? null;
+          if (cls === null || cls !== dismissedFailureRef.current) {
+            dismissedFailureRef.current = null;
+            setDaemonDown(true);
+          }
         }
         if (!distillingRef.current && !curatingRef.current) {
           setError(`poll failed: ${errorMessage(e)}`);
@@ -1736,6 +1803,38 @@ export default function App() {
   // P1.4 run-header "N files changed" chip → Changes tab. Stable ref —
   // ChatSurface is memo'd and this rides its prop list every poll tick.
   const handleOpenChanges = useCallback(() => openPanelTab("changes"), [openPanelTab]);
+  // P2.1: tool-result file refs and Open-live affordances pivot the panel
+  // to the Preview tab with the requested target (stable refs — ChatSurface
+  // is memo'd and these ride its prop list every poll tick).
+  const handlePreviewFile = useCallback(
+    (path: string) => {
+      setPreviewTarget({ kind: "file", path });
+      openPanelTab("preview");
+    },
+    [openPanelTab],
+  );
+  const handleOpenLiveUrl = useCallback(
+    (url: string) => {
+      setPreviewTarget({ kind: "url", url });
+      openPanelTab("preview");
+    },
+    [openPanelTab],
+  );
+  // P2.2: a Runs-row click jumps the transcript to the run's starter
+  // bubble (nonce re-fires identical seqs on later clicks).
+  const handleJumpToSeq = useCallback((seq: number) => {
+    setFocusSeq((prev) => ({ seq, n: (prev?.n ?? 0) + 1 }));
+  }, []);
+  // Grounded revise R2 (F2): ChatSurface fires this once the focused
+  // bubble has been scrolled into view and the flash settled — retiring
+  // the request restores the transcript window bound.
+  const handleFocusSeqLanded = useCallback(() => setFocusSeq(null), []);
+  // …and a workstream/conversation switch retires a standing request:
+  // seqs are conversation-scoped, so a carried-over pin would collide with
+  // an unrelated group in the new conversation's window.
+  useEffect(() => {
+    setFocusSeq(null);
+  }, [conversation?.id]);
 
   // Fold chip's "Open note": pivot to the wiki tab and focus the folded
   // epoch's note there.
@@ -1767,6 +1866,41 @@ export default function App() {
     },
     [dismissToast],
   );
+  // P2.3 (failure taxonomy): the overlay's leading actions. Reconnect
+  // resets the failure counters and kicks an immediate poll (the loop
+  // self-heals daemonDown on the next healthy tick); past
+  // POLL_FAIL_RESTART_THRESHOLD the overlay grows the same reload escape
+  // hatch the legacy banner has always had (grounded revise R2, F1).
+  const handleFailureReconnect = useCallback(() => {
+    pollFailRef.current = 0;
+    setPollFailures(0);
+    setDaemonDown(false);
+    // A reconnect is an explicit fresh start: any dismissal is void, so
+    // the same class recurring past the threshold surfaces again (F3).
+    dismissedFailureRef.current = null;
+    handlePollNow();
+  }, [handlePollNow]);
+  const handleFailureOpenJournal = useCallback(() => openPanelTab("ledger"), [openPanelTab]);
+  // Diagnostics snapshot: the poll counters and raw error the overlay
+  // shows, plus routing context — the P2.5 design-lock JSON (daemon log
+  // tail omitted: no fs-read surface without a supply-chain change).
+  const handleFailureCopyDiagnostics = useCallback(() => {
+    const diag = {
+      pollFailures: pollFailRef.current,
+      lastPollError: lastPollErrorRef.current,
+      projectRoot: activeProjectRoot,
+      conversationId: conversation?.id ?? null,
+      timestamp: new Date().toISOString(),
+    };
+    navigator.clipboard
+      ?.writeText(JSON.stringify(diag, null, 2))
+      ?.then(() => pushToast({ text: "diagnostics copied" }))
+      ?.catch(() => {});
+  }, [activeProjectRoot, conversation?.id, pushToast]);
+  const handleFailureDismiss = useCallback((cls: string) => {
+    dismissedFailureRef.current = cls;
+    setDaemonDown(false);
+  }, []);
   useEffect(
     () => () => {
       for (const t of toastTimersRef.current) window.clearTimeout(t);
@@ -2081,7 +2215,33 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      {daemonDown && (
+      {daemonDown && (() => {
+        // P2.3 (failure taxonomy): a classifiable poll failure renders the
+        // typed overlay (title + one-line cause + leading action); the raw
+        // poll line rides the cause's title attr. Unclassified failures
+        // keep the legacy banner below, byte for byte.
+        const spec = lastPollError !== null ? classifyFailure(lastPollError) : null;
+        if (spec !== null) {
+          return (
+            <FailureOverlay
+              spec={spec}
+              raw={lastPollError!}
+              onReconnect={handleFailureReconnect}
+              onCopyDiagnostics={handleFailureCopyDiagnostics}
+              onOpenJournal={handleFailureOpenJournal}
+              onDismiss={() => handleFailureDismiss(spec.cls)}
+              // F1: the classified lane keeps the banner's past-threshold
+              // escape hatch — at the same count the overlay grows the
+              // reload affordance instead of hiding it.
+              onReload={
+                pollFailures >= POLL_FAIL_RESTART_THRESHOLD
+                  ? () => window.location.reload()
+                  : undefined
+              }
+            />
+          );
+        }
+        return (
         <div className="daemon-down-banner" role="alert">
           <WifiOff size={14} />
           <span>{strings.banner.daemonDown}</span>
@@ -2099,7 +2259,8 @@ export default function App() {
             </button>
           )}
         </div>
-      )}
+        );
+      })()}
       <TopBar
         projectName={
           projects.find((p) => p.root === activeProjectRoot)?.name ??
@@ -2272,6 +2433,10 @@ export default function App() {
           onSearchQueryChange={setSearchQuery}
           onSearchClose={handleSearchClose}
           onOpenChanges={handleOpenChanges}
+          onPreviewFile={handlePreviewFile}
+          onOpenLiveUrl={handleOpenLiveUrl}
+          focusSeq={focusSeq}
+          onFocusSeqLanded={handleFocusSeqLanded}
           // M12: the composer chip discloses the daemon's auto-distill
           // state for the active conversation; the lock covers MANUAL
           // distill only — an auto distill is send-cancelled, it never
@@ -2308,15 +2473,17 @@ export default function App() {
         overlay={panelOverlay}
         activeTab={panelTab}
         onTabChange={openTab}
+        parked={parkState.parked}
         changesBadge={diffs.length > 0 ? diffs.length : undefined}
         reviewBadge={pendingTotal > 0 ? pendingTotal : undefined}
         wikiBadge={wikiNoteCount ?? undefined}
         memoryBadge={pendingMemoryProposals > 0 ? pendingMemoryProposals : undefined}
       >
-        {/* Keep-alive (tri-review P1 #5, 2026-08-24): each tab mounts on
-            first activation (mountedTabs) and stays mounted afterwards,
-            hidden with the `hidden` attribute — draft state, scroll
-            position, and fetched caches survive tab switches. The wrapper
+        {/* Keep-alive (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
+            each tab mounts on first activation and stays mounted only
+            while it sits inside the LRU park's cap (lru.ts — active + 2
+            most-recent, draft-exempt Memory/Wiki outside it); parked tabs
+            unmount and re-mount/refetch on re-activation. The wrapper
             carries no classes: ContextPanel's .panel-body is a block
             scroll container (not flex), so a plain block div is
             layout-neutral for the one visible wrapper and `hidden`
@@ -2324,7 +2491,7 @@ export default function App() {
             panels are unchanged. RunGroupBoundary in ContextPanel still
             scopes an error to its tab's subtree. */}
         <div hidden={panelTab !== "changes"}>
-          {mountedTabs.has("changes") && (diffs.length > 0
+          {mountedPanelTabs.has("changes") && (diffs.length > 0
             ? diffs.map((d) => (
                 <DiffViewer
                   key={`${projectRootRef.current ?? ""}:${d.id}`}
@@ -2343,7 +2510,7 @@ export default function App() {
           )}
         </div>
         <div hidden={panelTab !== "review"}>
-          {mountedTabs.has("review") && (
+          {mountedPanelTabs.has("review") && (
             // P1a: cross-workstream inbox. Rows are project-scoped, so the
             // key remounts on project switch — never render another
             // project's inbox against this one's handlers.
@@ -2360,7 +2527,7 @@ export default function App() {
           )}
         </div>
         <div hidden={panelTab !== "wiki"}>
-          {mountedTabs.has("wiki") && (conversation?.id != null ? (
+          {mountedPanelTabs.has("wiki") && (conversation?.id != null ? (
             // M11 P1: the key remounts the panel on project switch so no
             // cross-project state (lists, reader cache, selection) survives;
             // conversation ids can collide across projects (both are
@@ -2371,13 +2538,14 @@ export default function App() {
               projectRoot={project?.root_path ?? null}
               focus={wikiFocus}
               active={panelTab === "wiki"}
+              onDraftChange={handleWikiDraft}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>
           ))}
         </div>
         <div hidden={panelTab !== "memory"}>
-          {mountedTabs.has("memory") && (conversation?.id != null ? (
+          {mountedPanelTabs.has("memory") && (conversation?.id != null ? (
             <MemoryPanel
               key={`${project?.root_path ?? "default"}:${conversation.id}`}
               conversationId={conversation.id}
@@ -2388,6 +2556,7 @@ export default function App() {
               active={panelTab === "memory"}
               strandedTotal={strandedMemoryOps}
               strandedOps={strandedOps}
+              onDraftChange={handleMemoryDraft}
               onResolved={refreshPendingCounts}
               autoDistillCapResume={autoDistillCapResume}
               // FIX 3 (2026-08-26 storm fix): the chip also gates on the
@@ -2401,7 +2570,7 @@ export default function App() {
           ))}
         </div>
         <div hidden={panelTab !== "ledger"}>
-          {mountedTabs.has("ledger") && (conversation?.id != null ? (
+          {mountedPanelTabs.has("ledger") && (conversation?.id != null ? (
             <LedgerPanel
               key={`${project?.root_path ?? "default"}:${conversation.id}`}
               conversationId={conversation.id}
@@ -2417,11 +2586,38 @@ export default function App() {
           ))}
         </div>
         <div hidden={panelTab !== "skills"}>
-          {mountedTabs.has("skills") && (
+          {mountedPanelTabs.has("skills") && (
             <SkillsPanel
               key={project?.root_path ?? "default"}
               projectRoot={project?.root_path ?? null}
               active={panelTab === "skills"}
+            />
+          )}
+        </div>
+        <div hidden={panelTab !== "runs"}>
+          {mountedPanelTabs.has("runs") && (conversation?.id != null ? (
+            // P2.2: journal-folded runs history — pure events derive (the
+            // freeze pattern above keeps a hidden tab's memo stable).
+            <RunsPanel
+              events={panelTab === "runs" ? events : runsEventsRef.current}
+              projectRoot={project?.root_path ?? null}
+              active={panelTab === "runs"}
+              currentModel={appSettings?.coding_model ?? undefined}
+              onJumpToSeq={handleJumpToSeq}
+            />
+          ) : (
+            <div className="panel-empty">No active conversation.</div>
+          ))}
+        </div>
+        <div hidden={panelTab !== "preview"}>
+          {mountedPanelTabs.has("preview") && (
+            // P2.1: file refs / localhost URLs from tool results land here;
+            // no conversation gate — a target survives a workstream switch
+            // like the read_file containment root does.
+            <PreviewPanel
+              target={previewTarget}
+              projectRoot={project?.root_path ?? null}
+              active={panelTab === "preview"}
             />
           )}
         </div>
