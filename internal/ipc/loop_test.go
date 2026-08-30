@@ -771,8 +771,14 @@ func TestLoopAuditSubjectCapAdmits200KB(t *testing.T) {
 		t.Fatalf("round rows: %d, want 1", len(rounds))
 	}
 	sb, _ := rounds[0]["subject_bytes"].(float64)
-	if sb <= float64(settleDiffCapBytes) || sb > float64(loopAuditSubjectCapBytes) {
-		t.Errorf("subject_bytes = %v, want (%d, %d]", sb, settleDiffCapBytes, loopAuditSubjectCapBytes)
+	// The window pin: subject must clear the 128KB repair-input territory
+	// AND sit under the loop hard wall. settleDiffCapBytes rose 128K → 256K
+	// (2026-08-29 B relief) making (settleDiffCapBytes, loopCap] empty, so
+	// the low edge pins the pre-raise settle anchor (128K) — what the test
+	// has always meant: "clear of settle's repair-input cap territory,
+	// under the 256K loop wall".
+	if sb <= float64(128*1024) || sb > float64(loopAuditSubjectCapBytes) {
+		t.Errorf("subject_bytes = %v, want (%d, %d]", sb, 128*1024, loopAuditSubjectCapBytes)
 	}
 }
 
