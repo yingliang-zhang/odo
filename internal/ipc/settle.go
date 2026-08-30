@@ -158,7 +158,11 @@ const (
 	// multi-item diffs to the human without adding fidelity — the cap
 	// exists to prevent truncation-hallucination, not to size-limit
 	// scope. Comments cap unchanged (feedback is naturally small).
-	settleDiffCapBytes     = 128 * 1024
+	// Raised to 256KB (same day, B): the P2 bundle (33 files) hit 194KB
+	// against 128KB. Interim relief until repair A (needs-based diff
+	// digest in the revise prompt — stat + dissent-named files full
+	// text) lands; A is the structural fix, this cap only buys headroom.
+	settleDiffCapBytes     = 256 * 1024
 	settleCommentsCapBytes = 16 * 1024
 	// settleGoalCapBytes caps the origin goal riding into the repair
 	// prompt. The lock's 32KB is about the prompt bundle: an uncapped
