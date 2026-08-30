@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Diff #104 Verify Fix Pass: 4 Failing E2E Specs Root-Caused and Fixed
 
 ## Context

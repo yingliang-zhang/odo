@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Bug-fix epoch 29 — P2 panel-reject revise rounds and the settle diff digest
 
 ## Epoch arc

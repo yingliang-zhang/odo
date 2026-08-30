@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo Adoption Lock: P1 Pipeline Fixes, Re-apply, and P2 Implementation (Blocked)
 
 ## Key decisions
