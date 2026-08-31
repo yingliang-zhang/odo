@@ -71,7 +71,10 @@ const learningFreezeMainEpochs = 3
 
 // learningCandidateFreezeSet folds MAIN-lane learning_rollback rows (W5
 // emits them; W4 lands the fold + check) plus learning_frozen rows into
-// the R2 frozen-text set: normalized rule text -> freeze reason. currentMainEpoch
+// the R2 frozen-text set: normalized rule text -> freeze reason
+// (learning_frozen journals DECORATED texts — the stage interrupt's
+// text + " (" + reason + ")" form, learningFrozenHits — so the fold
+// keys the bare rule, learningFrozenBareText). currentMainEpoch
 // is the lane's just-completed epoch; a rollback at epoch E freezes texts
 // while 0 <= currentMainEpoch-E <= learningFreezeMainEpochs (boundary fixture:
 // rollback at N ⇒ re-propose at N+1..N+3 rejected, N+4 free; the same-epoch
@@ -98,6 +101,11 @@ func learningCandidateFreezeSet(events []store.Event, currentMainEpoch int) map[
 		case "learning_rollback":
 			texts, why = p.Rules, "rolled back"
 		case "learning_frozen":
+			// Production shape (#118 panel): undecorate before the
+			// freeze key — the journaled text carries its reason.
+			for i, t := range p.Texts {
+				p.Texts[i] = learningFrozenBareText(t)
+			}
 			texts, why = p.Texts, "frozen"
 		default:
 			continue
@@ -116,6 +124,23 @@ func learningCandidateFreezeSet(events []store.Event, currentMainEpoch int) map[
 		}
 	}
 	return frozen
+}
+
+// learningFrozenReasonMarker delimits the reason decoration the R2
+// stage-interrupt appends to each journaled learning_frozen text
+// (learningFrozenHits: text + " (" + reason + ")"; the reason itself
+// carries parentheses — "(within N)" — so the cut keys on this fixed
+// prefix, never on a paren pair).
+const learningFrozenReasonMarker = " (oscillation_guard: "
+
+// learningFrozenBareText strips the stage-interrupt's reason decoration
+// from a journaled learning_frozen text, returning the bare rule text
+// (the freeze-set key). Undecorated texts pass through unchanged.
+func learningFrozenBareText(t string) string {
+	if i := strings.LastIndex(t, learningFrozenReasonMarker); i > 0 && strings.HasSuffix(t, ")") {
+		return t[:i]
+	}
+	return t
 }
 
 // learningEvidenceNoteRe matches a cites token the learner emits: a wiki

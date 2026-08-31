@@ -5216,6 +5216,9 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 	// never fails the fold.
 	if w.Name == RulesAuditMainWorkstream {
 		s.learningShadowCheckpoints(ctx, c, newEpoch)
+		// D9-W5: the per-epoch measure tick (canary promotion / project_active
+		// rollback / stall advisories), same cadence, same best-effort posture.
+		s.learningMeasureTick(ctx, c, newEpoch)
 	}
 
 	// M12: the fold retired the window. Evaluate the conditional

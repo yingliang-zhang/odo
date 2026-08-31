@@ -194,12 +194,15 @@ func TestLearningCandidateFreezeSet(t *testing.T) {
 	if reason := learningCandidateFreezeSet(events, 4)[normalizeRule("bad   RULE alpha")]; reason == "" {
 		t.Error("freeze is normalized-text joined — casing/whitespace variants must freeze too")
 	}
-	// learning_frozen rows freeze on the same window.
-	f2 := learningCandidateFreezeSet([]store.Event{frozenRow(3, 5, "Rule beta")}, 8)
+	// learning_frozen rows freeze on the same window — fixture pinned to
+	// the PRODUCTION journal shape: the stage interrupt decorates each
+	// text with its freeze-set reason (#118 panel; the fold undecorates).
+	const decoratedBeta = "Rule beta (oscillation_guard: frozen at main epoch 5 (within 3))"
+	f2 := learningCandidateFreezeSet([]store.Event{frozenRow(3, 5, decoratedBeta)}, 8)
 	if _, ok := f2[normalizeRule("Rule beta")]; !ok {
-		t.Error("learning_frozen at epoch 5 must still freeze at epoch 8")
+		t.Error("learning_frozen at epoch 5 must still freeze at epoch 8 (decorated production shape)")
 	}
-	if _, ok := learningCandidateFreezeSet([]store.Event{frozenRow(3, 5, "Rule beta")}, 9)[normalizeRule("Rule beta")]; ok {
+	if _, ok := learningCandidateFreezeSet([]store.Event{frozenRow(3, 5, decoratedBeta)}, 9)[normalizeRule("Rule beta")]; ok {
 		t.Error("epoch 9 must be free (5+4 > 8)")
 	}
 	// A foreign action never freezes.

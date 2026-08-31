@@ -14,16 +14,29 @@ package ipc
 // Shadow checkpoints (K3 §3.1): at each MAIN-lane distill tail, every
 // shadow candidate re-runs the frozen replay against the grown slice.
 // Re-fail ⇒ learning_stage shadow→dropped (cause shadow_failed, evidence
-// seqs journaled). Pass at ≥3 main-epoch age with no harmful tuple ⇒ the
-// candidate is promotion-eligible; W4 never occupies the canary slot
-// (promotion actuation is W5), so the checkpoint journals
-// cause:"shadow_queued" — visible, never silently stuck. Stage rows never
-// write the shadow candidate itself (the fold IS the state — a passing
-// checkpoint needs no transition).
+// seqs journaled). Pass at ≥3 main-epoch age with no harmful tuple ⇒
+// W5 actuates shadow→canary when the single canary slot is free (one
+// promotion per tick — cohort purity, lock R3's single-slot rule); a
+// slot-blocked or frozen candidate journals shadow_queued / the R2
+// stage-interrupt (learning_frozen) instead — never silently stuck.
+// Stage rows never write the shadow candidate itself (the fold IS the
+// state — a passing checkpoint needs no transition).
+//
+// W5 additions below: the per-epoch measure tick (canary promotion /
+// hold / drop + stall advisories, learning_measure.go's fold feeding
+// learning_rollback.go and this file's actuation), the R2 stage-
+// interrupt (learning_frozen: a held/shadow candidate carrying frozen
+// text stalls — journaled once per hash+stage), and the marker-first
+// promotion apply (memory_apply{actor:"learning_promote",
+// epoch:learningPromoteEpochKey} — the sentinel keeps the batch fold
+// collision-free, see learningPromoteApply).
 
 import (
 	"context"
 	"log"
+	"path/filepath"
+	"sort"
+	"strconv"
 
 	"github.com/yingliang-zhang/odo/internal/store"
 )
@@ -138,9 +151,11 @@ const learningShadowAgingEpochs = 3
 // learningShadowCheckpoints is the distill-tail driver (MAIN lane only):
 // re-run the frozen replay for every shadow candidate against the grown
 // slice, journal memory_update{layer:"learning"} rows, and demote
-// re-failures. Promotion eligibility is surfaced via shadow_queued — W4
-// never actuates the canary slot (W5), so an eligible candidate is never
-// stage-flipped here; the queued row is the never-stuck signal.
+// re-failures. W5 actuation: an aged passing candidate flips
+// shadow→canary when the single canary slot is free (one flip per
+// tick — cohort purity, R3); slot-blocked keeps the W4 shadow_queued
+// signal; a frozen candidate stalls on the R2 stage-interrupt
+// (learning_frozen, journaled once per hash+stage).
 //
 // Best-effort per candidate: one artifact's failure never blocks the rest
 // and never fails the distill (the W3 episode-bookkeeping precedent).
@@ -203,19 +218,97 @@ func (s *Server) learningShadowCheckpoints(ctx context.Context, mainConv store.C
 			continue
 		}
 		aged := mainEpoch-learningCandidateMainEpoch(gathered.laneEvents(), cand.ArtifactHash) >= learningShadowAgingEpochs
-		if aged {
-			// Promotion-eligible per the W4 criteria (re-pass on grown
-			// slice, no harmful tuple — replay-a inside the report). The
-			// canary slot stays un-actuated until W5 lands promotion:
-			// journal the never-stuck signal instead of a transition.
+		if !aged {
+			continue
+		}
+		// R2 stage-interrupt: an eligible candidate whose texts are frozen
+		// (rolled back / flagged within the window AFTER its own creation)
+		// never actuates — journaled once per hash+stage.
+		if hits := learningFrozenHits(cand, learningFreezeSetForStage(gathered, mainEpoch)); len(hits) > 0 {
+			s.journalLearningFrozen(ctx, mainConv.ID, cand.ArtifactHash, "shadow", hits, mainEpoch)
+			continue
+		}
+		if slotOccupied {
+			// Promotion-eligible but the single canary slot is taken:
+			// the W4 never-stuck signal stays the honest surface.
 			s.journalLearningUpdate(ctx, mainConv.ID, "shadow_queued", map[string]interface{}{
 				"artifact_hash":  cand.ArtifactHash,
 				"epoch":          mainEpoch,
 				"checkpoint_seq": checkpointSeq,
-				"slot_free":      !slotOccupied,
+				"slot_free":      false,
 				"promoted":       false,
 			})
+			continue
 		}
+		// W5 actuation: shadow→canary (checkpoint evidence rides the
+		// transition row; epoch keys the stall clock and freeze windows).
+		s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "shadow", "canary", "checkpoint_promoted", map[string]interface{}{
+			"epoch":         mainEpoch,
+			"evidence_seqs": []int{freezeSeq, checkpointSeq},
+		})
+		slotOccupied = true
+	}
+}
+
+// learningFrozenHits intersects the candidate's delta texts (add ∪
+// retract, normalized — one identity rule) with the R2 freeze set:
+// the texts and their freeze reasons, verbatim-sorted (deterministic
+// journal output).
+func learningFrozenHits(cand LearningCandidate, frozen map[string]string) []string {
+	var hits []string
+	check := func(text string) {
+		if reason, froz := frozen[normalizeRule(text)]; froz {
+			hits = append(hits, text+" ("+reason+")")
+		}
+	}
+	for _, a := range cand.Delta.Add {
+		check(a.Rule)
+	}
+	for _, t := range cand.Delta.Retract {
+		check(t)
+	}
+	sort.Strings(hits)
+	return hits
+}
+
+// journalLearningFrozen journals the R2 stage-interrupt row
+// (review_action{action:"learning_frozen"}) ONCE per (hash, stage) —
+// the stall signal for a held/frozen candidate; the repeated-section
+// dedupe keeps each discovery epoch's window from re-arming on every
+// checkpoint (the text's own freeze windows, journaled separately by
+// rollback rows, govern re-entry).
+func (s *Server) journalLearningFrozen(ctx context.Context, convID int64, hash, stage string, hits []string, epoch int) {
+	have := false
+	if events, err := s.store.ListEvents(ctx, convID, 0); err == nil {
+		for _, ev := range events {
+			if ev.Type != store.EventReviewAction {
+				continue
+			}
+			var p struct {
+				Action string `json:"action"`
+				Hash   string `json:"artifact_hash"`
+				Stage  string `json:"stage"`
+			}
+			if jsonUnmarshalOK(ev.Payload, &p) && p.Action == "learning_frozen" && p.Hash == hash && p.Stage == stage {
+				have = true
+				break
+			}
+		}
+	}
+	if have {
+		return
+	}
+	texts := make([]string, len(hits))
+	copy(texts, hits)
+	if _, err := s.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action":        "learning_frozen",
+		"artifact_hash": hash,
+		"stage":         stage,
+		"epoch":         epoch,
+		"reason":        "stage_interrupt",
+		"texts":         texts,
+	})); err != nil {
+		log.Printf("learning: journal learning_frozen: %v", err)
 	}
 }
 
@@ -262,4 +355,270 @@ func (s *Server) journalLearningUpdate(ctx context.Context, convID int64, cause 
 		return 0
 	}
 	return ev.Seq
+}
+
+// learningPromoteEpochKey is the promotion apply marker's epoch sentinel
+// (-1): findPendingBatch pairs memory_apply rows with distill batches by
+// epoch and pending epochs are ≥ 0, so the sentinel keeps a promotion
+// from ever consuming a learner batch; the replay fold's propose prune
+// and pairing treat a propose-less negative-epoch receipt as the
+// documented nil-propose path (safe conflict, never a wrong merge —
+// memory_replay.go).
+const learningPromoteEpochKey = -1
+
+// learningMeasureTick is the W5 per-epoch measure driver (MAIN lane,
+// distill tail, after the shadow checkpoints): the per-stage cadence of
+// the evidence→measure→gate pipeline.
+//
+//	canary → journal the measure row (cadence); run the promotion gate:
+//	         "promote" ⇒ marker-first apply + canary→project_active,
+//	         "hold"    ⇒ canary→held_for_human (D4: retractions stay
+//	         human-resolved), "drop" ⇒ canary→dropped (its own canary
+//	         cohort met the harmful tuple), "" ⇒ keep measuring.
+//	         Frozen texts stall the promotion (R2 stage-interrupt).
+//	project_active → learningRollbackCheck (learning_rollback.go, R1).
+//	held_for_human → R2 stage-interrupt signal only (human resolution
+//	         pending; the frozen stall rows keep it visible).
+//	shadow → stall advisory when aged past learningStallMainEpochs
+//	         (aging without promotion-worthy evidence — surfaced, NEVER
+//	         auto-promoted, never auto-dropped; the lock's promotion-
+//	         starvation pin). Canary aging past the floor without its
+//	         cohort minimums advises the same way.
+//
+// Best-effort per candidate (the checkpoint precedent): one artifact's
+// failure never fails the distill.
+func (s *Server) learningMeasureTick(ctx context.Context, mainConv store.Conversation, newEpoch int) {
+	if !learningStagesEnabled() {
+		return
+	}
+	cands, rerr := ReadLearningCandidates(s.projectRoot)
+	if rerr != nil || len(cands) == 0 {
+		if rerr != nil {
+			log.Printf("learning: measure tick: read candidates: %v", rerr)
+		}
+		return
+	}
+	w, werr := s.store.GetWorkstream(ctx, mainConv.WorkstreamID)
+	if werr != nil {
+		return
+	}
+	in := s.gatherLearningReplayInput(ctx, w.ProjectID)
+	lanes := in.laneEvents()
+	table := foldLearningStages(lanes...)
+	// Pass 1 — destructive/held stages first: a rollback journaled HERE
+	// must freeze its texts before any canary/shadow promotes below
+	// (same-tick re-entry through a sibling candidate carrying the same
+	// text is the R2 hole this ordering closes).
+	frozen := learningFreezeSetForStage(in, newEpoch)
+	for _, cand := range cands {
+		switch table[cand.ArtifactHash].To {
+		case "project_active":
+			s.learningRollbackCheck(ctx, mainConv, in, cand, newEpoch)
+		case "held_for_human":
+			if hits := learningFrozenHits(cand, frozen); len(hits) > 0 {
+				s.journalLearningFrozen(ctx, mainConv.ID, cand.ArtifactHash, "held_for_human", hits, newEpoch)
+			}
+		}
+	}
+	// Pass 2 — re-gather so the freeze set sees pass-1 rollback rows.
+	in = s.gatherLearningReplayInput(ctx, w.ProjectID)
+	lanes = in.laneEvents()
+	frozen = learningFreezeSetForStage(in, newEpoch)
+	for _, cand := range cands {
+		switch table[cand.ArtifactHash].To {
+		case "canary":
+			s.learningCanaryMeasure(ctx, mainConv, in, cand, newEpoch, frozen)
+		case "shadow":
+			age := newEpoch - learningCandidateMainEpoch(lanes, cand.ArtifactHash)
+			if age > learningStallMainEpochs {
+				s.journalLearningStall(ctx, mainConv.ID, cand.ArtifactHash, "shadow",
+					"shadow aged "+strconv.Itoa(age)+" main epochs without reaching canary (replay re-pass failing, frozen, or canary slot occupied)", newEpoch)
+			}
+		}
+	}
+}
+
+// learningCanaryMeasure is the canary arm of the tick: measure (journaled
+// every epoch — the cadence), gate, actuate. Never promotes on vacuity:
+// the gate returns "" below the paired minimums and the measure row is
+// the only output.
+func (s *Server) learningCanaryMeasure(ctx context.Context, mainConv store.Conversation, in learningReplayInput, cand LearningCandidate, epoch int, frozen map[string]string) {
+	lanes := in.laneEvents()
+	since := learningStageSince(lanes, cand.ArtifactHash, "canary")
+	m := computeLearningMeasure(in, cand, since, epoch)
+	m.Kind = "canary"
+	measureSeq := s.journalLearningUpdate(ctx, mainConv.ID, "measure", map[string]interface{}{
+		"artifact_hash": m.ArtifactHash,
+		"kind":          m.Kind,
+		"epoch":         epoch,
+		"window_from":   m.WindowFrom,
+		"canary":        m.Canary,
+		"live":          m.Live,
+		"baseline":      m.Baseline,
+		"rules":         m.Rules,
+		"excluded":      m.Excluded,
+	})
+	// R2 stage-interrupt: a canary whose texts froze mid-experiment (a
+	// sibling's rollback) never promotes — stall, journaled once.
+	if hits := learningFrozenHits(cand, frozen); len(hits) > 0 {
+		s.journalLearningFrozen(ctx, mainConv.ID, cand.ArtifactHash, "canary", hits, epoch)
+		return
+	}
+	verdict, detail := learningPromotionVerdict(m, cand)
+	if detail == nil {
+		detail = map[string]interface{}{} // keep-measuring verdicts carry no gate detail
+	}
+	detail["measure_seq"] = measureSeq
+	detail["epoch"] = epoch
+	switch verdict {
+	case "promote":
+		s.learningPromoteApply(ctx, mainConv, cand, m)
+	case "hold":
+		s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "canary", "held_for_human", "retract_delta_held", detail)
+		s.journalLearningAdvisory(ctx, mainConv.ID, cand, "held for human: stats pass but the delta carries retractions (D4 preserved) — resolve via apply_memory / `odo rules retract`")
+	case "drop":
+		s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "canary", "dropped", "harmful_tuple", detail)
+		s.journalLearningAdvisory(ctx, mainConv.ID, cand, "dropped: its own canary cohort met the harmful tuple — the experiment hurt")
+	default:
+		// Keep measuring. Stall advisory only: aging without the cohort
+		// minimums is surfaced, never auto-promoted.
+		canarySince := learningStageMainEpochAt(lanes, cand.ArtifactHash, "canary")
+		age := 0
+		if canarySince > 0 { // pre-W5 stage rows carry no epoch: the stall clock reads unknown as "not yet", never as ancient
+			age = epoch - canarySince
+		}
+		if age > learningStallMainEpochs && m.Canary.Outcomes < learningPromotionMinOutcomes {
+			s.journalLearningStall(ctx, mainConv.ID, cand.ArtifactHash, "canary",
+				"canary aged "+strconv.Itoa(age)+" main epochs with "+strconv.Itoa(m.Canary.Outcomes)+" resolved outcome(s), short of the "+strconv.Itoa(learningPromotionMinOutcomes)+" floor", epoch)
+		}
+	}
+}
+
+// learningPromoteApply lands an additive-only candidate into memory.md
+// under the marker-first doctrine (the applyResolvedBatch convention):
+//
+//  1. under memMu + the stranded-receipt repair pass,
+//  2. memory_apply marker (actor "learning_promote", sentinel epoch,
+//     recovery block) BEFORE any write — a crash after it is repaired
+//     by the boot replayer (the one place memory_replay serves D9),
+//  3. the canary→project_active stage row (the control flip),
+//  4. the file write + memory-layer receipt (before/after shas).
+//
+// A candidate whose rules are ALREADY present verbatim (crash between
+// steps 2-4 of an earlier tick, or a human/curated add identical to the
+// delta) converges without a second marker: the stage row journals with
+// present:true.
+func (s *Server) learningPromoteApply(ctx context.Context, mainConv store.Conversation, cand LearningCandidate, m learningCohortMeasure) {
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
+
+	// Repair pass (the convention): a stranded marker from any earlier
+	// crash is restored before planning, and its landing makes THIS plan
+	// a no-op — idempotent re-entry after a mid-apply crash.
+	if events, err := s.store.ListEvents(ctx, mainConv.ID, 0); err == nil {
+		s.replayLaneMemReceipts(ctx, mainConv.ID, events, replayApply)
+	}
+	memPath := filepath.Join(s.projectRoot, ".odo", memoryFileName)
+	oldMem := readFileFull(memPath)
+	accepted := make([]acceptedRule, 0, len(cand.Delta.Add))
+	for _, a := range cand.Delta.Add {
+		accepted = append(accepted, acceptedRule{rule: a.Rule, evidence: a.Evidence})
+	}
+	plan := planMemoryApply(oldMem, accepted, nil, m.Epoch)
+	if plan.content == oldMem {
+		// Nothing to write (already landed) — converge the stage.
+		s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "canary", "project_active", "measured_promote", map[string]interface{}{
+			"epoch":     m.Epoch,
+			"present":   true,
+			"measure_c": m.Canary.Outcomes,
+		})
+		return
+	}
+
+	// Marker-first: the journaled intent + recovery block precede every
+	// file write (2026-08-25 doctrine; boot replayer repairs the rest).
+	beforeSHA := sha16([]byte(oldMem))
+	afterSHA := sha16([]byte(plan.content))
+	markSeq := 0
+	if ev, err := s.store.AppendEvent(ctx, mainConv.ID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action":        "memory_apply",
+		"epoch":         learningPromoteEpochKey,
+		"actor":         "learning_promote",
+		"artifact_hash": cand.ArtifactHash,
+		"metrics":       map[string]int{"promoted": len(cand.Delta.Add)},
+		"recovery": applyRecovery{
+			Memory: &applyRecoveryLayer{
+				BeforeSHA: beforeSHA, AfterSHA: afterSHA,
+				Body: plan.content, Entries: plan.addedEntries,
+			},
+		},
+	})); err != nil {
+		log.Printf("learning: promote marker: %v (promotion deferred: no marker, no write)", err)
+		return
+	} else {
+		markSeq = ev.Seq
+	}
+	s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "canary", "project_active", "measured_promote", map[string]interface{}{
+		"epoch":      m.Epoch,
+		"marker_seq": markSeq,
+		"measure_c":  m.Canary.Outcomes,
+	})
+	if err := writeFileWithin(s.projectRoot, memPath, plan.content, 0o644); err != nil {
+		// Marker + stage landed; the replayer repairs the file (a failed
+		// write is exactly the crash window the doctrine covers).
+		log.Printf("learning: promote write memory.md: %v (marker-first: replay repairs)", err)
+		return
+	}
+	if _, err := s.store.AppendEvent(ctx, mainConv.ID, store.EventMemoryUpdate, mustJSON(map[string]interface{}{
+		"layer":      "memory",
+		"cause":      "apply",
+		"before_sha": beforeSHA,
+		"after_sha":  afterSHA,
+		"detail":     "learning promote " + cand.ArtifactHash + ": accepted " + strconv.Itoa(len(cand.Delta.Add)) + " rule(s)",
+	})); err != nil {
+		log.Printf("learning: promote apply receipt: %v", err)
+	}
+	s.journalLearningAdvisory(ctx, mainConv.ID, cand, "promoted to project_active: paired cohorts passed the promotion gate (measured)")
+}
+
+// journalLearningStall journals ONE learning_stall advisory per
+// (hash, stage) — aging without cohort minimums is surfaced for the
+// LearningPanel (GUI render rides W6; the journal row is the truth), and
+// NEVER auto-promotes, never auto-drops.
+func (s *Server) journalLearningStall(ctx context.Context, convID int64, hash, stage, reason string, epoch int) {
+	if events, err := s.store.ListEvents(ctx, convID, 0); err == nil {
+		for _, ev := range events {
+			if ev.Type != store.EventMemoryUpdate {
+				continue
+			}
+			var p struct {
+				Layer string `json:"layer"`
+				Cause string `json:"cause"`
+				Hash  string `json:"artifact_hash"`
+				Stage string `json:"stage"`
+			}
+			if jsonUnmarshalOK(ev.Payload, &p) && p.Layer == "learning" && p.Cause == "learning_stall" &&
+				p.Hash == hash && p.Stage == stage {
+				return // already surfaced for this hash+stage
+			}
+		}
+	}
+	s.journalLearningUpdate(ctx, convID, "learning_stall", map[string]interface{}{
+		"artifact_hash": hash,
+		"stage":         stage,
+		"epoch":         epoch,
+		"reason":        reason,
+	})
+}
+
+// journalLearningAdvisory renders a learning actuation into the
+// transcript (the journalRunAdvisory precedent, learning-prefixed).
+func (s *Server) journalLearningAdvisory(ctx context.Context, convID int64, cand LearningCandidate, what string) {
+	short := cand.ArtifactHash
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	if err := s.journalRunAdvisory(ctx, convID, "learning: candidate "+short+": "+what); err != nil {
+		log.Printf("learning: advisory: %v", err)
+	}
 }

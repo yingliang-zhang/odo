@@ -17,6 +17,29 @@ import (
 	"github.com/yingliang-zhang/odo/internal/store"
 )
 
+// w4SeedActivity journals ONE completed no-panel run transcript
+// (send → diff → done) so the distill has conversation content without
+// a live agent run — a live run's rows can be REPLAYED by the liveness
+// ladder under machine load, scrambling the terminal→diff attribution
+// this file's e2e depends on (diff #119 verify_failed root cause).
+func w4SeedActivity(t *testing.T, rig *testRig, convID int64, text, summary, patch string) {
+	t.Helper()
+	ctx := context.Background()
+	content := "- Base rule — cites: main-epoch-1; reaffirmed: 1\n"
+	h := sha16([]byte(content))
+	if _, err := rig.store.AppendEvent(ctx, convID, store.EventUserMessage, mustJSON(map[string]interface{}{
+		"text": text, "receipt": map[string]string{".odo/memory.md": h}})); err != nil {
+		t.Fatalf("seed send: %v", err)
+	}
+	if _, err := rig.store.InsertDiff(ctx, convID, patch, "", "", ""); err != nil {
+		t.Fatalf("seed diff: %v", err)
+	}
+	if _, err := rig.store.AppendEvent(ctx, convID, store.EventAgentDone, mustJSON(map[string]interface{}{
+		"summary": summary})); err != nil {
+		t.Fatalf("seed done: %v", err)
+	}
+}
+
 // w4SeedCoveredReject journals snapshot→send→done→(diff)→reject so the
 // replay has one cohort-covered negative outcome, then returns the
 // cohort hash and diff id.
@@ -358,8 +381,9 @@ func TestLearningShadowCheckpoints(t *testing.T) {
 	rig.server.learningShadowCheckpoints(ctx, *boot.Conversation, 5)
 	rows := allEvents(t, rig, convID)
 
-	// Passing candidate: checkpoint (pass) + shadow_queued (aged ≥3, slot
-	// un-actuated in W4) — and it stays shadow (no transition).
+	// Passing candidate: checkpoint (pass) + W5 actuation shadow→canary
+	// (aged ≥3, slot free) with the checkpoint evidence riding the
+	// transition. No shadow_queued row — the slot was free.
 	checkpoints := memoryUpdatesByCause(t, rows, "shadow_checkpoint")
 	if len(checkpoints) != 2 {
 		t.Fatalf("shadow_checkpoint rows = %d, want 2 (one per shadow candidate)", len(checkpoints))
@@ -371,12 +395,24 @@ func TestLearningShadowCheckpoints(t *testing.T) {
 	if m, _ := byHash[pass.ArtifactHash]["metrics"].(map[string]interface{}); m["verdict"] != "pass" {
 		t.Errorf("pass candidate checkpoint verdict = %v", m["verdict"])
 	}
-	queued := memoryUpdatesByCause(t, rows, "shadow_queued")
-	if len(queued) != 1 || queued[0]["artifact_hash"] != pass.ArtifactHash || queued[0]["promoted"] != false {
-		t.Errorf("shadow_queued rows = %+v, want one for the aged passing candidate, promoted false", queued)
+	stageRows := payloadsByAction(t, rows, "learning_stage")
+	var promote map[string]interface{}
+	for _, s := range stageRows {
+		if s["cause"] == "checkpoint_promoted" {
+			promote = s
+		}
+	}
+	if promote == nil || promote["artifact_hash"] != pass.ArtifactHash ||
+		promote["from"] != "shadow" || promote["to"] != "canary" || promote["epoch"] != float64(5) {
+		t.Fatalf("checkpoint_promoted row = %+v, want shadow→canary epoch 5 for the aged candidate", promote)
+	}
+	if seqs, _ := promote["evidence_seqs"].([]interface{}); len(seqs) != 2 {
+		t.Errorf("promote evidence_seqs = %v, want [freeze, checkpoint]", seqs)
+	}
+	if queued := memoryUpdatesByCause(t, rows, "shadow_queued"); len(queued) != 0 {
+		t.Errorf("shadow_queued rows = %+v, want none (the slot was free — W5 actuates)", queued)
 	}
 	// The replay-failing candidate demotes to dropped with evidence.
-	stageRows := payloadsByAction(t, rows, "learning_stage")
 	var drop map[string]interface{}
 	for _, s := range stageRows {
 		if s["cause"] == "shadow_failed" {
@@ -389,8 +425,8 @@ func TestLearningShadowCheckpoints(t *testing.T) {
 	if seqs, _ := drop["evidence_seqs"].([]interface{}); len(seqs) != 2 {
 		t.Errorf("drop evidence_seqs = %v, want [freeze, checkpoint]", seqs)
 	}
-	if info, ok := rig.server.learningStageOf(ctx, 1, pass.ArtifactHash); !ok || info.To != "shadow" {
-		t.Errorf("pass stage = %q ok %v, want shadow", info.To, ok)
+	if info, ok := rig.server.learningStageOf(ctx, 1, pass.ArtifactHash); !ok || info.To != "canary" {
+		t.Errorf("pass stage = %q ok %v, want canary (W5 actuation)", info.To, ok)
 	}
 	if fr := payloadsByAction(t, rows, "learning_freeze"); len(fr) < 2 {
 		t.Errorf("learning_freeze rows = %d, want ≥ 2 (one per checkpointed candidate)", len(fr))
@@ -415,11 +451,18 @@ func TestDistillStagesCandidateEndToEnd(t *testing.T) {
 
 	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
 	convID := boot.Conversation.ID
-	rig.call(t, Request{Cmd: CmdSendMessage, ConversationID: convID, Text: "Create hello.txt"})
-	rig.pollUntilDone(t, convID)
+	// Hermetic transcript, NOT a live run: a real "Create hello.txt" run
+	// can wedge under machine load (full-suite oversubscription) and the
+	// liveness ladder replays it — the replayed send + second terminal +
+	// extra diff row scramble the terminal→diff attribution for the
+	// seeded reject (same-second claims are FIFO by seq), the replay
+	// then counts ZERO covered outcomes (check f: vacuous ⇒ fail) and
+	// the creation gates legitimately drop the fresh candidate
+	// (diff #119 verify_failed: stage "dropped", want shadow).
+	dir := t.TempDir()
+	w4SeedActivity(t, rig, convID, "Create hello.txt", "Created hello.txt as requested.", w4Patch(t, dir, "hello.diff", "hello.txt"))
 	// Cohort-covered negative evidence so the candidate's replay is
 	// non-vacuous (f ≥ 1) before the fold.
-	dir := t.TempDir()
 	w4SeedCoveredReject(t, rig, convID, w4Patch(t, dir, "e2e.diff", "src/feature.go"))
 
 	_, d := runToDistill(t, rig, root)
