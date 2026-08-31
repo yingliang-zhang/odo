@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/moa"
 	"github.com/yingliang-zhang/odo/internal/store"
@@ -276,6 +277,7 @@ func TestGroundedReceiptMirror(t *testing.T) {
 // call still journaled.
 func TestGroundedBudget(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv(groundedRoundsEnv, "") // no ambient hatch: this test pins the D9-C default budget
 	// 400 lines × 100 chars ≈ 42.3KB per read under the 64KB per-read
 	// cap: 6 reads ≈ 254KB fit, the 7th crosses 256KB and trips the
 	// budget, the 8th is refused.
@@ -321,6 +323,15 @@ func TestGroundedBudget(t *testing.T) {
 		if got := len(bodies()); got != 5 {
 			t.Errorf("posts = %d, want 5 (4 tool rounds + answer)", got)
 		}
+		// D9-C: tool_rounds_used rides EVERY grounded row (not just cap
+		// deaths), and fail-soft byte exhaustion stays visually distinct
+		// from the fail-hard round-cap death marker.
+		if rr.ToolRoundsUsed != 8 {
+			t.Errorf("tool_rounds_used = %d, want 8 (journaled on every grounded row, not just cap deaths)", rr.ToolRoundsUsed)
+		}
+		if strings.Contains(rr.Comments, "round-cap death") {
+			t.Errorf("comments = %q — byte-budget exhaustion must never read as a round-cap death", rr.Comments)
+		}
 	})
 
 	t.Run("the round wall refuses a stubborn tool loop fail-closed", func(t *testing.T) {
@@ -334,12 +345,16 @@ func TestGroundedBudget(t *testing.T) {
 		plan := groundedPlanFor(t, s, root, []string{"sub/a.go"})
 		rr := s.reviewWithModelGrounded(context.Background(), reviewModel{model: "rmG", provider: "test"}, "review this diff", plan)
 
-		// maxRounds = 16 (user ruling, 2026-08-29; was 8) executes 15
-		// tool rounds and refuses the 16th (the post that would START
-		// the 17th API turn never leaves); with no verdict token the
-		// existing fail-closed degradation applies.
-		if rr.Verdict != "needs_fixes" || !strings.Contains(rr.Comments, "exceeded 16 rounds") {
-			t.Errorf("degraded leg = %q (%s), want needs_fixes naming the 16-round wall", rr.Verdict, rr.Comments)
+		// maxRounds = 40 (D9-C; was 16) executes 39 tool rounds and
+		// refuses the 40th; with no verdict token the existing fail-closed
+		// degradation applies, and the row's marker keeps the fail-hard
+		// round-cap death visually distinct from fail-soft byte-budget
+		// exhaustion.
+		if rr.Verdict != "needs_fixes" || !strings.Contains(rr.Comments, "exceeded 40 rounds") {
+			t.Errorf("degraded leg = %q (%s), want needs_fixes naming the 40-round wall", rr.Verdict, rr.Comments)
+		}
+		if !strings.Contains(rr.Comments, "round-cap death") {
+			t.Errorf("comments = %q, want the fail-hard round-cap-death marker (never blurred with byte exhaustion)", rr.Comments)
 		}
 		// 2026-08-29 (P1 diff #101 lesson): tool-loop exhaustion IS infra
 		// regardless of posture — the leg's reasoning machinery failed
@@ -347,8 +362,16 @@ func TestGroundedBudget(t *testing.T) {
 		if !rr.Infra {
 			t.Error("Infra = false on loop exhaustion — a burned-out tool loop is not a judgment")
 		}
-		if got := len(rr.ToolCalls); got != 15 {
-			t.Errorf("tool_calls = %d, want 15 (every executed round journaled; the refused 16th round executed nothing)", got)
+		if got := len(rr.ToolCalls); got != 39 {
+			t.Errorf("tool_calls = %d, want 39 (every executed round journaled; the refused 40th round executed nothing)", got)
+		}
+		// D9-C: the death row journals the call names/args (linear
+		// progress vs degenerate re-reads) and the pre-truncation spend.
+		if rr.ToolRoundsUsed != 39 {
+			t.Errorf("tool_rounds_used = %d, want 39 (the pre-capToolAudits count rides every grounded row)", rr.ToolRoundsUsed)
+		}
+		if rr.ToolCalls[0].Name != "read_file" || !strings.Contains(rr.ToolCalls[0].Input, "sub/a.go") {
+			t.Errorf("tool_calls[0] = %+v, want the call's name/args journaled on the death path", rr.ToolCalls[0])
 		}
 		if rr.ToolBudgetExhausted {
 			t.Error("tool_budget_exhausted = true with tiny reads — only the byte cap may set it")
@@ -468,5 +491,260 @@ func TestAuditLegGroundedPrompt(t *testing.T) {
 	// the ungrounded prompt's tail.
 	if !strings.HasSuffix(g, base[len(base)-60:]) {
 		t.Error("grounded prompt is not the ungrounded prompt plus an additive notice")
+	}
+}
+
+// --- D9-C: the parameterized round cap -------------------------------
+
+// TestGroundedToolRoundsResolution pins the D9-C resolution order: the
+// default ships ACTIVE (40 — a default of 16 ships the #118/#120 incident
+// unfixed), the env/prefs line is the escape hatch (never the activation
+// mechanism), and an explicit Server field (the test seam) wins.
+// Above-ceiling values read as the ceiling; garbage reads as the default.
+func TestGroundedToolRoundsResolution(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no ambient prefs.md
+	if got := (&Server{}).groundedToolRoundsCap(); got != 40 {
+		t.Errorf("default = %d, want 40 (the D9-C fix ships ACTIVE — a default of 16 ships the incident unfixed)", got)
+	}
+
+	t.Run("env hatch round-trips", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(groundedRoundsEnv, "12")
+		if got := (&Server{}).groundedToolRoundsCap(); got != 12 {
+			t.Errorf("env-set = %d, want 12", got)
+		}
+		t.Setenv(groundedRoundsEnv, "") // cleared reads as absent
+		if got := (&Server{}).groundedToolRoundsCap(); got != 40 {
+			t.Errorf("env-cleared = %d, want the 40 default back", got)
+		}
+	})
+
+	t.Run("prefs hatch", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv(groundedRoundsEnv, "")
+		writePrefs(t, home, "grounded_tool_rounds: 18\n")
+		if got := (&Server{}).groundedToolRoundsCap(); got != 18 {
+			t.Errorf("prefs-set = %d, want 18", got)
+		}
+	})
+
+	t.Run("explicit field wins over the hatch", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv(groundedRoundsEnv, "12")
+		writePrefs(t, home, "grounded_tool_rounds: 18\n")
+		if got := (&Server{groundedToolRounds: 16}).groundedToolRoundsCap(); got != 16 {
+			t.Errorf("field = %d, want 16 (the explicit field wins over env and prefs)", got)
+		}
+	})
+
+	t.Run("above-ceiling and garbage read sanely", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(groundedRoundsEnv, "99")
+		if got := (&Server{}).groundedToolRoundsCap(); got != 40 {
+			t.Errorf("above-ceiling env = %d, want the 40 ceiling (QueryWithTools clamps there regardless)", got)
+		}
+		t.Setenv(groundedRoundsEnv, "many")
+		if got := (&Server{}).groundedToolRoundsCap(); got != 40 {
+			t.Errorf("garbage env = %d, want the 40 default", got)
+		}
+	})
+}
+
+// TestGroundedLegDeadlineInterlock pins the D9-C wall-clock interlock
+// (DSF option b): a round cap above the 16-round baseline scales the
+// leg's outer deadline by rounds/16 — a legitimate long chain dies a
+// typed round-capacity death, never a misleading wall-clock timeout.
+func TestGroundedLegDeadlineInterlock(t *testing.T) {
+	t.Parallel()
+	base := 100 * time.Second
+	for _, tc := range []struct {
+		rounds int
+		want   time.Duration
+	}{
+		{8, base},               // below the baseline: unchanged
+		{16, base},              // at the baseline: unchanged
+		{32, 200 * time.Second}, // ×32/16
+		{40, 250 * time.Second}, // the D9-C default: ×40/16
+	} {
+		if got := groundedLegDeadline(base, tc.rounds); got != tc.want {
+			t.Errorf("groundedLegDeadline(base, %d) = %v, want %v", tc.rounds, got, tc.want)
+		}
+	}
+}
+
+// TestGroundedRoundCapIncident is the D9-C incident-shaped regression
+// (#118 ×2, #120 ×3): K3's grounded leg runs a legitimate ~25-round
+// glob→grep→read chain — it COMPLETES and issues a verdict under the
+// default-40 cap, and DIES a fail-hard round-cap death under the old 16
+// (the behavior being fixed).
+func TestGroundedRoundCapIncident(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	chain := func(post int) ([]map[string]interface{}, string) {
+		if post <= 25 {
+			// The legitimate chain: one scoped read per round for 25
+			// rounds (K3 reads the import neighborhood serially), then
+			// the verdict.
+			return []map[string]interface{}{readUse(fmt.Sprintf("call-%d", post), "sub/a.go")}, "tool_use"
+		}
+		return textBlock("ACCEPT\n\nchain verified."), "end_turn"
+	}
+
+	t.Run("completes and issues a verdict under the default 40", func(t *testing.T) {
+		t.Setenv(groundedRoundsEnv, "")
+		root := t.TempDir()
+		writeGroundedFile(t, root, "sub/a.go", "package sub\n\nconst A = 1\n")
+		bodies := groundedStub(t, chain)
+
+		s := &Server{projectRoot: root}
+		plan := groundedPlanFor(t, s, root, []string{"sub/a.go"})
+		rr := s.reviewWithModelGrounded(context.Background(), reviewModel{model: "rmG", provider: "test"}, "review this diff", plan)
+
+		if rr.Verdict != "accept" {
+			t.Errorf("verdict = %q (%s), want accept — a legitimate >16-round chain must now complete", rr.Verdict, rr.Comments)
+		}
+		if rr.Infra {
+			t.Error("Infra = true on a chain the 40-round budget serves")
+		}
+		if rr.ToolRoundsUsed != 25 || len(rr.ToolCalls) != 25 {
+			t.Errorf("tool_rounds_used = %d, len(tool_calls) = %d, want 25/25", rr.ToolRoundsUsed, len(rr.ToolCalls))
+		}
+		if got := len(bodies()); got != 26 {
+			t.Errorf("posts = %d, want 26 (25 tool rounds + the verdict)", got)
+		}
+		raw, _ := json.Marshal(rr)
+		if !strings.Contains(string(raw), `"tool_rounds_used":25`) {
+			t.Errorf("journaled row missing tool_rounds_used:25 — got %s", raw)
+		}
+	})
+
+	t.Run("dies a fail-hard round-cap death under the old 16", func(t *testing.T) {
+		t.Setenv(groundedRoundsEnv, "")
+		root := t.TempDir()
+		writeGroundedFile(t, root, "sub/a.go", "package sub\n\nconst A = 1\n")
+		groundedStub(t, chain)
+
+		s := &Server{projectRoot: root, groundedToolRounds: 16} // the pre-D9-C budget, via the field seam
+		plan := groundedPlanFor(t, s, root, []string{"sub/a.go"})
+		rr := s.reviewWithModelGrounded(context.Background(), reviewModel{model: "rmG", provider: "test"}, "review this diff", plan)
+
+		if rr.Verdict != "needs_fixes" || !rr.Infra {
+			t.Errorf("leg = %q infra=%v, want needs_fixes + infra (the 16-round death the incident shipped)", rr.Verdict, rr.Infra)
+		}
+		if !strings.Contains(rr.Comments, "round-cap death") || !strings.Contains(rr.Comments, "exceeded 16 rounds") {
+			t.Errorf("comments = %q, want the fail-hard marker naming the 16-round wall", rr.Comments)
+		}
+		if rr.ToolRoundsUsed != 15 || len(rr.ToolCalls) != 15 {
+			t.Errorf("tool_rounds_used = %d, len = %d, want 15/15 (cut mid-chain, names/args journaled)", rr.ToolRoundsUsed, len(rr.ToolCalls))
+		}
+	})
+}
+
+// TestGroundedByteBudgetGraceful pins lock item 6 at its literal edge: a
+// loop running to the very END of the 40-round budget — 39 executed
+// rounds, the verdict on the 40th and last admitted post — that trips
+// the 256KB byte budget mid-loop degrades GRACEFULLY: refusals steer the
+// model, the verdict still ships, and the row stays visually distinct
+// (tool_budget_exhausted + verdict ≠ round-cap death + infra). Pre-fix
+// this exact shape died at round 16 as an infra error. (Re-review
+// strengthening: the v2 submission exercised only 17 rounds; the lock
+// names a 40-round loop — this runs the full budget.)
+func TestGroundedByteBudgetGraceful(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(groundedRoundsEnv, "")
+	// 400 lines × 100 chars ≈ 42.3KB per read under the 64KB per-read
+	// cap: 6 reads fit, the 7th crosses 256KB (served, then the budget
+	// trips), every later call is refused "budget exhausted — issue
+	// your verdict now".
+	big := strings.Repeat(strings.Repeat("x", 100)+"\n", 400)
+
+	root := t.TempDir()
+	writeGroundedFile(t, root, "sub/a.go", "package sub\n\nconst A = 1\n")
+	writeGroundedFile(t, root, "sub/big.txt", big)
+	bodies := groundedStub(t, func(post int) ([]map[string]interface{}, string) {
+		if post <= 39 {
+			return []map[string]interface{}{readUse(fmt.Sprintf("call-%d", post), "sub/big.txt")}, "tool_use"
+		}
+		return textBlock("ACCEPT\n\nissuing the verdict with what I have."), "end_turn"
+	})
+
+	s := &Server{projectRoot: root}
+	plan := groundedPlanFor(t, s, root, []string{"sub/a.go"})
+	rr := s.reviewWithModelGrounded(context.Background(), reviewModel{model: "rmG", provider: "test"}, "review this diff", plan)
+
+	if rr.Verdict != "accept" {
+		t.Errorf("verdict = %q (%s), want accept — byte exhaustion is fail-soft and must not cost the verdict", rr.Verdict, rr.Comments)
+	}
+	if rr.Infra {
+		t.Error("Infra = true — byte-budget exhaustion is NOT an infra death (that class belongs to the round cap)")
+	}
+	if !rr.ToolBudgetExhausted {
+		t.Error("tool_budget_exhausted = false, want true (the full-budget loop DID trip the 256KB budget)")
+	}
+	if rr.ReadBytes <= groundedTotalBytes {
+		t.Errorf("read_bytes = %d, want > %d (the crossing read trips the budget mid-loop)", rr.ReadBytes, groundedTotalBytes)
+	}
+	if strings.Contains(rr.Comments, "round-cap death") || strings.Contains(rr.Comments, "exceeded") {
+		t.Errorf("comments = %q — fail-soft byte exhaustion must stay visually distinct from a round-cap death", rr.Comments)
+	}
+	// The maximal loop the 40-round cap admits: 39 executed rounds, the
+	// verdict on the 40th post — one more tool request would die.
+	if rr.ToolRoundsUsed != 39 || len(rr.ToolCalls) != 39 {
+		t.Errorf("tool_rounds_used = %d, len(tool_calls) = %d, want 39/39", rr.ToolRoundsUsed, len(rr.ToolCalls))
+	}
+	if rr.ToolCallsTruncated {
+		t.Error("tool_calls_truncated = true at 39 calls — the 96-entry journal cap must hold a full 40-round loop")
+	}
+	refusals := 0
+	for _, c := range rr.ToolCalls {
+		if c.Error != "" {
+			refusals++
+		}
+	}
+	if refusals != 32 {
+		t.Errorf("budget refusals = %d, want 32 (calls 8–39 refused after the served crossing read)", refusals)
+	}
+	if !strings.Contains(rr.ToolCalls[7].Error, "budget exhausted") {
+		t.Errorf("tool_calls[7].Error = %q, want the budget-exhausted refusal on the first refused call", rr.ToolCalls[7].Error)
+	}
+	if got := len(bodies()); got != 40 {
+		t.Errorf("posts = %d, want 40 (39 tool rounds + the verdict — the full 40-round budget)", got)
+	}
+}
+
+// TestAuditLegGroundedRoundsUsed pins the D9-C receipts on the audit
+// side: the grounded audit leg consumes the plan's resolved round cap
+// and journals tool_rounds_used (pre-truncation) on every row.
+func TestAuditLegGroundedRoundsUsed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(groundedRoundsEnv, "")
+	root := t.TempDir()
+	writeGroundedFile(t, root, "sub/a.go", "package sub\n\nconst A = 1\n")
+	groundedStub(t, func(post int) ([]map[string]interface{}, string) {
+		if post <= 3 {
+			return []map[string]interface{}{readUse(fmt.Sprintf("call-%d", post), "sub/a.go")}, "tool_use"
+		}
+		return textBlock("```findings\n```"), "end_turn"
+	})
+
+	s := &Server{projectRoot: root}
+	plan := groundedPlanFor(t, s, root, []string{"sub/a.go"})
+	if plan.rounds != 40 {
+		t.Errorf("plan.rounds = %d, want the resolved D9-C default 40", plan.rounds)
+	}
+	client := moa.NewClient(os.Getenv("MOA_BASE_URL"), "test-key")
+	res := auditLegGrounded(context.Background(), client, reviewModel{model: "rmG", provider: "test"}, auditSystemGrounded(), "audit this diff", plan)
+
+	if res.Verdict != "complete" {
+		t.Errorf("verdict = %q, want complete (the empty findings block parses)", res.Verdict)
+	}
+	if res.ToolRoundsUsed != 3 || len(res.ToolCalls) != 3 {
+		t.Errorf("tool_rounds_used = %d, len(tool_calls) = %d, want 3/3 (pre-truncation count on every grounded row)", res.ToolRoundsUsed, len(res.ToolCalls))
+	}
+	raw, _ := json.Marshal(res)
+	if !strings.Contains(string(raw), `"tool_rounds_used":3`) {
+		t.Errorf("journaled audit-leg row missing tool_rounds_used:3 — got %s", raw)
 	}
 }

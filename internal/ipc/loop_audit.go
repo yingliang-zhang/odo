@@ -304,16 +304,20 @@ type auditLegResult struct {
 	// D2 grounded-leg receipts (additive; identical contract to the
 	// ReviewResult block — grounded.go): absent on ungrounded legs;
 	// model-visible ⟺ logged holds for refusals too.
-	Grounded            bool            `json:"grounded,omitempty"`
-	ResolvedBy          string          `json:"resolved_by,omitempty"`
-	ToolCalls           []moa.ToolAudit `json:"tool_calls,omitempty"`
-	ToolCallsTruncated  bool            `json:"tool_calls_truncated,omitempty"`
-	ReadBytes           int             `json:"read_bytes,omitempty"`
-	ScopeSHA16          string          `json:"scope_sha16,omitempty"`
-	ScopeFiles          int             `json:"scope_files,omitempty"`
-	ScopeTruncated      bool            `json:"scope_truncated,omitempty"`
-	ToolBudgetExhausted bool            `json:"tool_budget_exhausted,omitempty"`
-	Findings            []finding       `json:"-"` // union input, not journaled per-leg
+	Grounded           bool            `json:"grounded,omitempty"`
+	ResolvedBy         string          `json:"resolved_by,omitempty"`
+	ToolCalls          []moa.ToolAudit `json:"tool_calls,omitempty"`
+	ToolCallsTruncated bool            `json:"tool_calls_truncated,omitempty"`
+	// ToolRoundsUsed (D9-C) is the executed tool-call count BEFORE the
+	// journal cap truncated ToolCalls — on every grounded row, not just
+	// round-cap deaths.
+	ToolRoundsUsed      int       `json:"tool_rounds_used,omitempty"`
+	ReadBytes           int       `json:"read_bytes,omitempty"`
+	ScopeSHA16          string    `json:"scope_sha16,omitempty"`
+	ScopeFiles          int       `json:"scope_files,omitempty"`
+	ScopeTruncated      bool      `json:"scope_truncated,omitempty"`
+	ToolBudgetExhausted bool      `json:"tool_budget_exhausted,omitempty"`
+	Findings            []finding `json:"-"` // union input, not journaled per-leg
 }
 
 // auditSystem is the auditor role contract. Severity rubric P0–P3; the
@@ -454,9 +458,11 @@ func auditLegGrounded(ctx context.Context, client *moa.Client, m reviewModel, sy
 	res := auditLegResult{Model: label, BaseURLScrubbed: scrubBaseURL(client.BaseURL)}
 	plan.receipts(&res)
 	scoped := &scopedToolExecutor{inner: newFSToolExecutorRooted(plan.root), scope: plan.scope}
-	lctx, cancel := context.WithTimeout(ctx, moa.TimeoutForModel(m.model))
+	rounds := plan.roundsCap()
+	lctx, cancel := context.WithTimeout(ctx, groundedLegDeadline(moa.TimeoutForModel(m.model), rounds))
 	defer cancel()
-	out, calls, err := client.QueryWithTools(lctx, m.model, system, prompt, moaFSTools(), scoped.Execute, groundedMaxRounds)
+	out, calls, err := client.QueryWithTools(lctx, m.model, system, prompt, moaFSTools(), scoped.Execute, rounds)
+	res.ToolRoundsUsed = len(calls) // D9-C: BEFORE capToolAudits truncation
 	res.ToolCalls, res.ToolCallsTruncated = capToolAudits(calls)
 	res.ReadBytes = toolReadBytes(calls)
 	res.ToolBudgetExhausted = scoped.getExhausted()

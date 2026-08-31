@@ -438,9 +438,18 @@ func TestRequestTimeoutFloor(t *testing.T) {
 	}
 }
 
-// An endlessly-calling model must trip the default cap, now the ceiling:
-// defaultToolRounds == maxToolRounds == 16, so maxRounds=0 means 16 posts.
+// D9-C intentionally RETIRED the default == ceiling invariant: the
+// grounded review/audit legs opt into the 40-round ceiling while the
+// design legs (design_moa.go) and the /panel consult (server.go) keep
+// passing 0 → the unchanged 16 default. Pin the split: default(16) <
+// ceiling(40), and maxRounds=0 still means 16 posts.
 func TestQueryWithToolsDefaultRoundCap(t *testing.T) {
+	if defaultToolRounds != 16 || maxToolRounds != 40 {
+		t.Errorf("round budget = default %d / ceiling %d, want 16/40 (the D9-C budget split)", defaultToolRounds, maxToolRounds)
+	}
+	if defaultToolRounds >= maxToolRounds {
+		t.Errorf("defaultToolRounds (%d) >= maxToolRounds (%d) — the D9-C budget split is default < ceiling", defaultToolRounds, maxToolRounds)
+	}
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -455,8 +464,36 @@ func TestQueryWithToolsDefaultRoundCap(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "16 rounds") {
 		t.Fatalf("err = %v, want 16-round cap error", err)
 	}
-	if calls != maxToolRounds {
-		t.Errorf("requests = %d, want %d (default == ceiling)", calls, maxToolRounds)
+	if calls != defaultToolRounds {
+		t.Errorf("requests = %d, want %d (callers passing 0 — designLeg, the /panel consult — keep the 16 default)", calls, defaultToolRounds)
+	}
+}
+
+// TestQueryWithToolsRoundCapClamp pins the ceiling arithmetic (D9-C): any
+// caller-supplied cap resolves inside [default, ceiling] — 0→16 (the no-op
+// path every ungrounded caller rides), 16→16, 40→40 (the grounded legs'
+// new full budget), 50→40 (above-ceiling reads as the ceiling).
+func TestQueryWithToolsRoundCapClamp(t *testing.T) {
+	for _, tc := range []struct{ in, want int }{{0, 16}, {16, 16}, {40, 40}, {50, 40}} {
+		t.Run(fmt.Sprintf("maxRounds=%d→%d", tc.in, tc.want), func(t *testing.T) {
+			var calls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Write([]byte(`{"content":[{"type":"tool_use","id":"t1","name":"read_file","input":{}}],"stop_reason":"tool_use"}`))
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.URL, "test-key")
+			tools := []Tool{{Name: "read_file", Description: "read", InputSchema: map[string]interface{}{"type": "object"}}}
+			exec := func(ctx context.Context, call ToolCall) (string, error) { return "ok", nil }
+			_, _, err := c.QueryWithTools(context.Background(), "test", "", "prompt", tools, exec, tc.in)
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeded %d rounds", tc.want)) {
+				t.Fatalf("err = %v, want the %d-round cap error", err, tc.want)
+			}
+			if calls != tc.want {
+				t.Errorf("requests = %d, want %d", calls, tc.want)
+			}
+		})
 	}
 }
 

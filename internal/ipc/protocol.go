@@ -283,6 +283,11 @@ type ReviewResult struct {
 	// Error set.
 	ToolCalls          []moa.ToolAudit `json:"tool_calls,omitempty"`
 	ToolCallsTruncated bool            `json:"tool_calls_truncated,omitempty"`
+	// ToolRoundsUsed (D9-C) is the executed tool-call count BEFORE the
+	// journal cap truncated ToolCalls — journaled on every grounded row,
+	// not just round-cap deaths, so a post-mortem reads the loop's true
+	// spend and distinguishes linear progress from degenerate re-reads.
+	ToolRoundsUsed int `json:"tool_rounds_used,omitempty"`
 	// ReadBytes is the total tool-result bytes the leg was served (the
 	// groundedTotalBytes budget's spend).
 	ReadBytes int `json:"read_bytes,omitempty"`

@@ -62,13 +62,20 @@ const (
 	baseRequestTimeout = 900 * time.Second
 	genTokPerSecFloor  = 120 // conservative floor under the ≥170 tok/s measured on the slowest model
 
-	// defaultToolRounds bounds QueryWithTools' execute-and-continue loop.
-	// 8 cut glm-5.2 off mid-chain (observed: a legitimate glob→grep→read
+	// defaultToolRounds bounds QueryWithTools' execute-and-continue loop
+	// when the caller passes 0 (the design legs, the /panel consult). 8
+	// cut glm-5.2 off mid-chain (observed: a legitimate glob→grep→read
 	// chain filled 15 calls across 8 rounds before it could write the
-	// answer), so the default is the ceiling.
+	// answer). D9-C: the default STAYS 16 — only the grounded review/
+	// audit legs opt into the ceiling below.
 	defaultToolRounds = 16
 	// maxToolRounds is the hard ceiling a caller can raise the cap to.
-	maxToolRounds = 16
+	// Raised 16 → 40 (D9-C lock, 2026-08-31): K3 — the panel's grounded
+	// leg — died 5× on "tool loop exceeded 16 rounds" (#118 ×2, #120 ×3)
+	// while the GLM/DSF legs accepted the same diffs; the round cap
+	// lagged the diff-size ladder (32K→256K) by two rungs (8→16 was the
+	// 2026-08-29 precedent).
+	maxToolRounds = 40
 	// errBodyTail caps how much of a non-200 response body the error shows
 	// (gateway diagnostics; the old "check server logs" text hid 400s that
 	// name the exact problem, e.g. an unsupported tools field).

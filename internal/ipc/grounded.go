@@ -34,13 +34,27 @@ package ipc
 //	                    model (the client's loop), so citing-without-
 //	                    calling is mechanically detectable.
 //
-// Caps (lock): maxRounds 8 (the client ceiling is 16), per-read stays
-// fsReadBytesCap 64KB, total groundedTotalBytes 256KB across rounds, wall
-// deadline unchanged (s.legTimeout). Budget exhaustion never frees the
-// leg from its verdict: refusals steer the model to answer, the flag
-// tool_budget_exhausted is journaled, and a missing verdict token hits
-// the existing fail-closed degradation (reviewVerdict forces
-// needs_fixes; the audit leg reads parse_error).
+// Caps (D9-C lock): the grounded leg carries THREE budgets that move
+// together with the diff-size ladder (32K→256K; the round cap lagged it
+// by two rungs — 8→16 on 2026-08-29, then K3 died 5× on "tool loop
+// exceeded 16 rounds" over #118/#120 while the ungrounded legs accepted
+// the same diffs):
+//
+//	rounds    groundedDefaultRounds, DEFAULT 40, resolved per plan by
+//	          groundedToolRoundsCap — the fix ships ACTIVE (a default of
+//	          16 ships the incident unfixed); the env/prefs line is the
+//	          escape hatch back down, never the activation mechanism.
+//	bytes     groundedTotalBytes 256KB fail-soft across rounds (per-read
+//	          stays fsReadBytesCap 64KB). Budget exhaustion never frees
+//	          the leg from its verdict: refusals steer the model to
+//	          answer, the flag tool_budget_exhausted is journaled, and a
+//	          missing verdict token hits the existing fail-closed
+//	          degradation (reviewVerdict forces needs_fixes; the audit
+//	          leg reads parse_error).
+//	wall      groundedLegDeadline — above the 16-round baseline the
+//	          leg's outer deadline scales ×rounds/16, so the typed infra
+//	          death stays "round capacity", not a misleading wall-clock
+//	          timeout.
 
 import (
 	"context"
@@ -55,27 +69,34 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
 	"github.com/yingliang-zhang/odo/internal/moa"
 )
 
 const (
-	// groundedMaxRounds bounds the grounded leg's tool loop (the
-	// client's hard ceiling is maxToolRounds = 16). Raised 8 → 16
-	// (user ruling, 2026-08-29): K3 — the panel's only grounded leg —
-	// burned the 8-round wall three times in a row (#101, #102 r1,
-	// #105 r1), each time as an infra round parked for a restart
-	// re-fire. K3's grounded behavior is to keep reading files in the
-	// diff's import neighborhood; the shorter cap converted a working
-	// reviewer into a recurring infra event. 16 gives the leg the
-	// client's full budget; the byte caps below still bound the spend.
-	groundedMaxRounds = 16
+	// groundedDefaultRounds is the grounded leg's tool-loop round cap and
+	// the D9-C default — it equals the client's hard ceiling (moa
+	// maxToolRounds = 40) and ships ACTIVE (see the header's budget
+	// ladder): the ODO_GROUNDED_TOOL_ROUNDS env or the
+	// grounded_tool_rounds: prefs line turns it back down, never up.
+	groundedDefaultRounds = 40
+	// groundedBaselineRounds is the pre-D9-C cap (8 → 16 on 2026-08-29,
+	// the #101/#102/#105 ruling): the wall-clock interlock's scaling
+	// baseline only.
+	groundedBaselineRounds = 16
+	// groundedRoundsEnv is the round-cap escape hatch (header's rounds
+	// budget). Empty/invalid reads as absent.
+	groundedRoundsEnv = "ODO_GROUNDED_TOOL_ROUNDS"
 	// groundedTotalBytes caps the cumulative tool-result bytes one
 	// grounded leg may be served across all rounds.
 	groundedTotalBytes = 256 * 1024
 	// groundedToolCallsCap bounds journaled tool audit entries per leg.
-	groundedToolCallsCap = 64
+	// Raised 64 → 96 (D9-C): 40 rounds × ≥2 calls/round can exceed 64 —
+	// the audit trail must survive the full loop (tool_rounds_used keeps
+	// the true count when this truncates).
+	groundedToolCallsCap = 96
 )
 
 // groundedReviewNotice is the additive prompt sentence every grounded
@@ -380,8 +401,64 @@ type groundedPlan struct {
 	required   bool
 	root       string
 	scope      groundedScope
-	ok         bool
-	detail     string
+	// rounds is the D9-C tool-loop round cap, resolved ONCE here (by
+	// planGrounded via groundedToolRoundsCap) so the review and audit
+	// legs run the same budget.
+	rounds int
+	ok     bool
+	detail string
+}
+
+// roundsCap returns the plan's round budget — a zero-value plan (built
+// outside planGrounded) reads as the D9-C default.
+func (p groundedPlan) roundsCap() int {
+	if p.rounds >= 1 {
+		return p.rounds
+	}
+	return groundedDefaultRounds
+}
+
+// groundedToolRoundsCap resolves the grounded legs' tool-loop round cap.
+// The D9-C default ships ACTIVE (40 — a default of 16 ships the #118/#120
+// incident unfixed); ODO_GROUNDED_TOOL_ROUNDS, then the
+// grounded_tool_rounds: prefs line, is the escape hatch back down, never
+// the activation mechanism; an explicit Server field wins (the test
+// seam). Above-ceiling values read as the ceiling (QueryWithTools clamps
+// there regardless).
+func (s *Server) groundedToolRoundsCap() int {
+	n := s.groundedToolRounds
+	if n < 1 {
+		if v := strings.TrimSpace(os.Getenv(groundedRoundsEnv)); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				n = parsed
+			}
+		}
+	}
+	if n < 1 {
+		if v := adapter.LoadPrefsRaw("grounded_tool_rounds"); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				n = parsed
+			}
+		}
+	}
+	if n < 1 {
+		return groundedDefaultRounds
+	}
+	if n > groundedDefaultRounds {
+		return groundedDefaultRounds
+	}
+	return n
+}
+
+// groundedLegDeadline is the D9-C wall-clock interlock (DSF option b,
+// K3/GLM concur): a round cap above the 16-round baseline scales the
+// leg's outer deadline by rounds/16, so a legitimate long chain dies a
+// typed ROUND-CAPACITY death — never a misleading wall-clock timeout.
+func groundedLegDeadline(base time.Duration, rounds int) time.Duration {
+	if rounds > groundedBaselineRounds {
+		return base * time.Duration(rounds) / groundedBaselineRounds
+	}
+	return base
 }
 
 // groundedRequiredMode resolves grounded_review_required with the lock's
@@ -427,7 +504,7 @@ func resolveScopeRoot(root string) string {
 //     not read as "not gate source". An EMPTY touched set is NOT an
 //     init failure — an empty diff legitimately scopes to nothing.
 func (s *Server) planGrounded(models []reviewModel, root string, touched []string, pathsErr error) groundedPlan {
-	p := groundedPlan{resolvedBy: "first", root: resolveScopeRoot(root), ok: true}
+	p := groundedPlan{resolvedBy: "first", root: resolveScopeRoot(root), ok: true, rounds: s.groundedToolRoundsCap()}
 	if pref := strings.TrimSpace(adapter.LoadPrefsRaw("grounded_reviewer")); pref != "" {
 		wantM, wantP := adapter.ParseModelProvider(pref)
 		for i, m := range models {
@@ -534,22 +611,25 @@ func toolReadBytes(calls []moa.ToolAudit) int {
 // reviewWithModelGrounded runs the D2 grounded review leg: the same
 // verdict contract as reviewWithModel (a failed or verdict-less run still
 // degrades to needs_fixes, truncation still forces it), plus the scoped
-// read-only tool loop (maxRounds = groundedMaxRounds, wall deadline
-// unchanged: s.legTimeout) and the full receipt set — including the
-// degraded rows, whose refusals and audits stay journaled.
+// read-only tool loop (D9-C: maxRounds = plan.rounds — the default-40
+// cap — and the wall deadline scales with it, groundedLegDeadline) and
+// the full receipt set — including the degraded rows, whose refusals and
+// audits stay journaled.
 func (s *Server) reviewWithModelGrounded(ctx context.Context, m reviewModel, prompt string, plan groundedPlan) ReviewResult {
 	label := m.model + "@" + m.provider
 	client := s.sharedMoa()
 	scoped := &scopedToolExecutor{inner: newFSToolExecutorRooted(plan.root), scope: plan.scope}
-	lctx, cancel := context.WithTimeout(ctx, s.legTimeout(m.model))
+	rounds := plan.roundsCap()
+	lctx, cancel := context.WithTimeout(ctx, groundedLegDeadline(s.legTimeout(m.model), rounds))
 	defer cancel()
 	res, calls, err := client.QueryWithTools(lctx, m.model,
 		"You are a code reviewer. Review the following diff and provide your verdict.",
-		prompt, moaFSTools(), scoped.Execute, groundedMaxRounds)
+		prompt, moaFSTools(), scoped.Execute, rounds)
+	roundsUsed := len(calls) // D9-C: BEFORE capToolAudits truncation
 	calls, callsTruncated := capToolAudits(calls)
 	rr := ReviewResult{
 		Model: label, Grounded: true, ResolvedBy: plan.resolvedBy, BaseURL: scrubBaseURL(client.BaseURL),
-		ToolCalls: calls, ToolCallsTruncated: callsTruncated,
+		ToolCalls: calls, ToolCallsTruncated: callsTruncated, ToolRoundsUsed: roundsUsed,
 		ReadBytes:  toolReadBytes(calls),
 		ScopeSHA16: plan.scope.sha(), ScopeFiles: plan.scope.count(), ScopeTruncated: plan.scope.truncated,
 		ToolBudgetExhausted: scoped.getExhausted(),
@@ -569,6 +649,15 @@ func (s *Server) reviewWithModelGrounded(ctx context.Context, m reviewModel, pro
 		loopExhausted := strings.Contains(err.Error(), "tool loop exceeded")
 		rr.Verdict = "needs_fixes"
 		rr.Comments = "grounded review failed: " + err.Error()
+		if loopExhausted {
+			// D9-C fail-visible: name the class. The round-cap death is
+			// fail-HARD (infra, no verdict); byte-budget exhaustion is
+			// fail-SOFT (tool_budget_exhausted + a verdict) — the row
+			// must never blur them. The journaled call names/args above
+			// let the next post-mortem distinguish linear progress from
+			// degenerate re-reads.
+			rr.Comments = "grounded review failed: tool round-cap death (fail-hard): " + err.Error()
+		}
 		rr.Infra = plan.required || loopExhausted
 		return rr
 	}

@@ -431,6 +431,11 @@ type Server struct {
 	// the grounded-leg plan into init failure with this string as the
 	// detail — production never sets it.
 	groundedInitFailForTest string
+	// D9-C seam: the grounded legs' tool-loop round cap. Zero resolves
+	// env (ODO_GROUNDED_TOOL_ROUNDS) → prefs (grounded_tool_rounds:) →
+	// the lock default 40 — the fix ships ACTIVE; the hatch only turns
+	// it back down (grounded.go's budget ladder).
+	groundedToolRounds int
 	// P1 #10: ONE shared MoA client per Server. Per-leg NewClientFromEnv
 	// gave every leg a FRESH client, so the client's in-flight semaphore
 	// (moa defaultMaxInFlight=5) never contended — a skills/distill gate
@@ -4400,11 +4405,14 @@ func (s *Server) handlePanelQuery(ctx context.Context, c *store.Conversation, te
 		go func(legIdx int) {
 			defer wg.Done()
 			label := m.model + "@" + m.provider
-			// P1 #9: per-leg outer deadline (the designLeg/auditLeg
-			// precedent) — one worst-case attempt chain; a hung gateway
-			// dies a typed timeout and the panel answers on the surviving
-			// legs instead of holding the consult for hours (16 tool
-			// rounds × 1173s worst).
+			// P1 #9: per-leg outer deadline (pattern after the designLeg/
+			// auditLeg precedent) for the USER-FACING /panel consult —
+			// unscoped home-root executor, NOT a design/audit leg: one
+			// worst-case attempt chain; a hung gateway dies a typed
+			// timeout and the panel answers on the surviving legs instead
+			// of holding the consult for hours (16 tool rounds × 1173s
+			// worst — /panel passes 0 → the client default; the D9-C
+			// 40-round budget is grounded-leg only).
 			lctx, cancel := context.WithTimeout(ctx, s.legTimeout(m.model))
 			defer cancel()
 			resp, calls, err := client.QueryWithTools(lctx, m.model, system, text, tools, exec.Execute, 0)
