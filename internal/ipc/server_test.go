@@ -3056,6 +3056,52 @@ func TestParseVerdict(t *testing.T) {
 	}
 }
 
+// TestParseVerdictMarkdown pins the markdown-tolerance contract: panel
+// models decorate the verdict line as "**Verdict: ACCEPT**" (K3), "##
+// Verdict: ACCEPT" (GLM), or "## Verdict: **ACCEPT**" (DSF). Before
+// normalizeVerdictLine every decorated line missed the bare-token match
+// and failed closed to needs_fixes — journal history showed 61% of
+// accept-grade legs misfiled, leaving the Tier-1 memory gate structurally
+// dead. Bare-token, last-line-wins, and fail-closed semantics must not
+// move (regression pins below).
+func TestParseVerdictMarkdown(t *testing.T) {
+	tests := []struct {
+		name         string
+		text         string
+		wantVerdict  string
+		wantComments string
+	}{
+		{"K3 bold verdict label", "The diff is sound.\n**Verdict: ACCEPT**", "accept", "The diff is sound."},
+		{"GLM heading verdict label", "Analysis complete.\n## Verdict: ACCEPT", "accept", "Analysis complete."},
+		{"DSF heading with bold token", "No blocking issues found.\n## Verdict: **ACCEPT**", "accept", "No blocking issues found."},
+		{"label with needs_fixes token", "The retry path is broken.\nVerdict: NEEDS_FIXES\nfix the retry path", "needs_fixes", "fix the retry path"},
+		{"bold reject label", "**Verdict: REJECT**", "reject", ""},
+		{"bare accept regression pin", "looks fine\nACCEPT", "accept", "looks fine"},
+		{"bare accept with comment regression pin", "ACCEPT with minor nits", "accept", ""},
+		{"space variant needs fixes", "NEEDS FIXES", "needs_fixes", ""},
+		{"verdict-less text stays fail-closed", "thorough analysis\nno verdict anywhere", "needs_fixes", "thorough analysis\nno verdict anywhere"},
+		{"acceptance criteria decoy is not a verdict", "ACCEPTANCE CRITERIA:\n- tests must pass", "needs_fixes", "ACCEPTANCE CRITERIA:\n- tests must pass"},
+		{"decorated last-verdict-wins", "Verdict: ACCEPT\nwait — it drops a caller.\nVerdict: REJECT\ncaller must stay", "reject", "caller must stay"},
+		{
+			"GLM real-world sample mid-text",
+			"The change tightens the round cap as designed.\n\n1. Clamp semantics verified against callers.\n2. Deadline interlock preserved.\n\n## Verdict: ACCEPT",
+			"accept",
+			"The change tightens the round cap as designed.\n\n1. Clamp semantics verified against callers.\n2. Deadline interlock preserved.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseVerdict("m", tt.text)
+			if got.Verdict != tt.wantVerdict {
+				t.Errorf("verdict = %q, want %q", got.Verdict, tt.wantVerdict)
+			}
+			if got.Comments != tt.wantComments {
+				t.Errorf("comments = %q, want %q", got.Comments, tt.wantComments)
+			}
+		})
+	}
+}
+
 // TestReviewVerdictTruncation pins the fail-closed truncation contract
 // (M16 panel: a cut-off stream cannot prove the model's final position —
 // even a cleanly parsing partial verdict counts as needs_fixes).

@@ -4702,11 +4702,20 @@ func (s *Server) handleVisionQuery(ctx context.Context, c *store.Conversation, t
 // first, verdict last), they fall back to the pre-verdict analysis so a
 // recorded vote keeps its justification. Unparseable output degrades to
 // needs_fixes — a review must never silently read as an accept.
+//
+// Panel models decorate the verdict line with markdown — K3 emits
+// "**Verdict: ACCEPT**", GLM "## Verdict: ACCEPT", DSF "## Verdict:
+// **ACCEPT**" — which a bare line-initial token match misses entirely,
+// silently degrading every decorated accept to the needs_fixes default.
+// normalizeVerdictLine strips leading heading/bold/italic/blockquote
+// decoration and an optional "VERDICT:" label (plus trailing emphasis
+// markers) before the token match; matching semantics (prefix-with-comment,
+// last-line-wins, fail-closed) are unchanged.
 func parseVerdict(model, text string) ReviewResult {
 	lines := strings.Split(text, "\n")
 	verdict, last := "", -1
 	for i, line := range lines {
-		up := strings.ToUpper(strings.TrimSpace(line))
+		up := normalizeVerdictLine(line)
 		v := ""
 		switch {
 		case up == "NEEDS_FIXES" || strings.HasPrefix(up, "NEEDS_FIXES ") || strings.HasPrefix(up, "NEEDS FIXES"):
@@ -4737,6 +4746,27 @@ func parseVerdict(model, text string) ReviewResult {
 		Model:    model,
 		Verdict:  verdict,
 		Comments: comments,
+	}
+}
+
+// normalizeVerdictLine reduces a raw output line to its candidate verdict
+// text: uppercase, leading markdown decoration ("#", "*", "_", ">",
+// whitespace) removed, an optional "VERDICT:" label discarded, trailing
+// emphasis markers removed. The fixpoint loop accepts stacked forms like
+// "## **Verdict: **ACCEPT****". A bare verdict token survives unchanged; the
+// cutset strips decoration characters only — never letters — so prose like
+// "ACCEPTANCE CRITERIA:" can never reduce to a token.
+func normalizeVerdictLine(line string) string {
+	up := strings.ToUpper(strings.TrimSpace(line))
+	for {
+		next := strings.TrimLeft(up, "#*_> ")
+		next = strings.TrimPrefix(next, "VERDICT:")
+		next = strings.TrimLeft(next, "#*_> ")
+		next = strings.TrimRight(next, "*_ ")
+		if next == up {
+			return up
+		}
+		up = next
 	}
 }
 
