@@ -4,7 +4,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
-import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity } from "lucide-react";
+import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity, ShieldAlert } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { cn } from "../lib/utils";
 import { SLOT } from "../slots";
@@ -16,7 +16,7 @@ import {
 } from "../stats";
 import type { PanelModel, PromptSnapshot } from "../stats";
 import { pipelineLabel } from "../pipeline";
-import type { PipelinePhase, PipelineState } from "../pipeline";
+import type { PipelinePhase, PipelineState, GateDriftState } from "../pipeline";
 import type { PanelTab } from "../contrib";
 import { ompUsage } from "../api";
 import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent } from "../types";
@@ -98,6 +98,10 @@ interface Props {
   // right now (expired flashes are dropped in derivation). Empty = pref
   // off / nothing tracked → the chip is absent.
   pipelineStates: PipelineState[];
+  // D1 gate-drift latch (deriveGateDrift): while drifted the daemon refuses
+  // every pipeline landing — a compact, NON-foldable alert chip (a chip the
+  // overflow engine could hide would defeat the alarm).
+  gateDrift: GateDriftState;
   // Clickable badges → open panel on the matching tab. PanelTab (single
   // source in ContextPanel) already includes "review", so the pipeline
   // chip's row-jump needs no cast and no caller change — tsc enforces
@@ -787,6 +791,7 @@ export default function StatusBar({
   codingModel,
   reviewPanel,
   pipelineStates,
+  gateDrift,
   pendingDiffs,
   wikiNoteCount,
   pendingMemoryProposals,
@@ -826,6 +831,7 @@ export default function StatusBar({
   // self-lock (hiding a chip narrows the row → hides more → no rebound).
   const footerRef = useRef<HTMLElement | null>(null);
   const factRef = useRef<HTMLButtonElement | null>(null);
+  const gateDriftRef = useRef<HTMLButtonElement | null>(null);
   const chipWidthsRef = useRef<ChipWidthCache>({});
   const [hiddenChips, setHiddenChips] = useState<ReadonlySet<ChipKey>>(EMPTY_SET);
   const hiddenChipsRef = useRef<ReadonlySet<ChipKey>>(EMPTY_SET);
@@ -866,9 +872,12 @@ export default function StatusBar({
     if (moreEl != null && moreEl.offsetWidth > 0) moreWidthRef.current = moreEl.offsetWidth;
     // Available chip-zone width: footer content box minus the session-fact
     // button (post-shrink — it truncates itself before chips overflow) and
-    // its spacer gap.
+    // its spacer gap — minus the NON-foldable gate-drift alert when latched,
+    // whose width the engine must not hand to the foldable chips.
+    const driftWidth = gateDriftRef.current?.offsetWidth ?? 0;
     const available =
-      footer.clientWidth - STATUSBAR_PAD_PX * 2 - (factRef.current?.offsetWidth ?? 0) - FACT_GAP_PX;
+      footer.clientWidth - STATUSBAR_PAD_PX * 2 - (factRef.current?.offsetWidth ?? 0) - FACT_GAP_PX -
+      (driftWidth > 0 ? driftWidth + CHIP_GAP_PX : 0);
     const next = computeHiddenChipKeys(
       chipKeys.map((key) => ({ key, width: chipWidthsRef.current[key] ?? 0 })),
       available,
@@ -1091,6 +1100,23 @@ export default function StatusBar({
         </span>
       </button>
       <span className="status-spacer flex-1" />
+      {/* D1 gate-drift latch: renders only while drifted (parity with the
+          pipeline chip's "any states" render gate). Deliberately OUTSIDE
+          the overflow fold (no data-chip) — the alarm outranks telemetry;
+          measureOverflow subtracts its width so nothing clips. Click jumps
+          to the review tab, the surface holding the frozen diffs. */}
+      {gateDrift.drifted && (
+        <button
+          ref={gateDriftRef}
+          type="button"
+          className={cn(STATUS_BADGE, "gate-drift-chip border-err text-err-text")}
+          aria-label={strings.statusbar.gateDriftLabel}
+          title={strings.statusbar.gateDriftTitle(gateDrift.detail)}
+          onClick={() => onBadgeClick("review")}
+        >
+          <ShieldAlert size={11} aria-hidden /> {strings.statusbar.gateDriftLabel}
+        </button>
+      )}
       {/* Center-right: run indicators — foreground spinner, then the
           background chip (the only surface for runs outside the view). */}
       {agentRunning && (

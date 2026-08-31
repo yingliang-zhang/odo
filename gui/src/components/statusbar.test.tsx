@@ -98,6 +98,7 @@ const BASE: Props = {
   wikiNoteCount: null,
   pendingMemoryProposals: 0,
   onBadgeClick: vi.fn(),
+  gateDrift: { drifted: false, seq: 0 },
 };
 
 // Full house minus pipeline: bgruns, ctx, panel, omp + three count chips.
@@ -350,6 +351,54 @@ describe("StatusBar overflow fold (component)", () => {
     fireEvent.click(within(dialog2).getByText("feat-x"));
     expect(onJumpWorkstream).toHaveBeenCalledWith(2);
     expect(screen.queryByRole("dialog", { name: "Hidden status items" })).toBeNull();
+  });
+
+  it("gate-drift alert: renders when latched, routes to review, never folds", async () => {
+    const onBadgeClick = vi.fn();
+    const { container } = setup(
+      {
+        ...CHIPS_B,
+        onBadgeClick,
+        gateDrift: { drifted: true, seq: 12, detail: "internal/ipc/gatepolicy.go sha16 drift" },
+      },
+      WIDTHS_B,
+      500,
+    );
+    await screen.findByText("OMP · 2p");
+
+    const chip = screen.getByLabelText("gate drift — landing frozen");
+    expect(chip.classList.contains("gate-drift-chip")).toBe(true);
+    // The title carries the verbatim drift detail + the remediation steps.
+    expect(chip.title).toContain("internal/ipc/gatepolicy.go sha16 drift");
+    expect(chip.title).toContain("odo gate re-pin");
+    // No data-chip attribute — the overflow engine can never fold it.
+    expect(chip.getAttribute("data-chip")).toBeNull();
+    fireEvent.click(chip);
+    expect(onBadgeClick).toHaveBeenCalledWith("review");
+    expect(container.querySelector(".gate-drift-chip")).not.toBeNull();
+  });
+
+  it("gate-drift alert width subtracts from the fold zone", async () => {
+    // Mirror the rebound case's inline pattern: arming the banner's mock
+    // width then re-rendering re-measures via the post-render effect.
+    const all: Props = { ...BASE, ...CHIPS_B, gateDrift: { drifted: true, seq: 12 } };
+    const { container, rerender } = render(<StatusBar {...all} />);
+    sizeLayout(container, WIDTHS_B, 500);
+    act(() => rerender(<StatusBar {...all} />));
+    await screen.findByText("OMP · 2p");
+    expect(screen.getByLabelText("Hidden status items")).toHaveTextContent("+6");
+    // Available drops 168px (160 + the banner's gap): every chip folds.
+    (container.querySelector(".gate-drift-chip") as HTMLElement).dataset.mockW = "160";
+    act(() => rerender(<StatusBar {...all} />));
+    expect(screen.getByLabelText("Hidden status items")).toHaveTextContent("+8");
+    // Folded or not, the alarm itself is never the hidden one.
+    expect(container.querySelector(".gate-drift-chip")).not.toBeNull();
+  });
+
+  it("clear posture renders no drift chip", () => {
+    const { container } = setup({ gateDrift: { drifted: false, seq: 9 } }, {}, 1000);
+    expect(container.querySelector(".gate-drift-chip")).toBeNull();
+    expect(screen.queryByLabelText("gate drift — landing frozen")).toBeNull();
   });
 
   it("rebound: widening the footer un-folds every chip (no self-lock)", async () => {

@@ -54,6 +54,8 @@ export interface Strings {
     reviewPanelReadonlyTitle: string;
     overflowLabel: string;
     overflowTitle: string;
+    gateDriftLabel: string;
+    gateDriftTitle: (detail?: string) => string;
   };
   steerQueue: {
     title: (n: number) => string;
@@ -117,6 +119,11 @@ export const en: Strings = {
     reviewPanelReadonlyTitle: "review panel — read-only (⌘, to change)",
     overflowLabel: "Hidden status items",
     overflowTitle: "hidden by overflow — live values; rows navigate",
+    gateDriftLabel: "gate drift — landing frozen",
+    // The daemon's own remediation (cmd_gate.go): re-pin, commit BOTH gate
+    // files, restart — the boot-time latch clears nowhere else.
+    gateDriftTitle: (detail) =>
+      `Gate policy drift — pipeline landing is frozen${detail ? ` (${detail})` : ""}. Run: odo gate re-pin · commit internal/ipc/gatepolicy.go + gate_manifest.json · restart the daemon`,
   },
   steerQueue: {
     title: (n) => (n === 1 ? "Queued steer · 1" : `Queued steers · ${n}`),

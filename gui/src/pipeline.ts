@@ -63,6 +63,65 @@ function ladderPosture(events: readonly OdoEvent[]): LadderPosture {
   return { suspended: false, suspendedSeq: 0 };
 }
 
+// ---------- D1 gate-drift latch (gatepolicy.go, autoland.go) ----------
+
+export interface GateDriftState {
+  drifted: boolean;
+  seq: number; // seq of the decisive row (0 = no evidence)
+  detail?: string; // newest gate_source_drift detail, verbatim (banner tooltip)
+}
+
+// Journal contract (gatepolicy.go checkGatePolicy): every daemon boot
+// journals ONE review_action{action:"gate_policy_check", cause:"ok"|"drift",
+// tier0, actor:"daemon"} per active conversation, preceded (on drift) by
+// per-file memory_update{layer:"gate_policy", cause:"gate_source_drift",
+// detail, expected_sha16, actual_sha16} rows. While latched, every landing
+// pipeline refuses per attempt with auto_land_blocked{reason:
+// "gate_policy_drift"}. The latch clears ONLY at daemon restart after a
+// human re-pin — and that restart journals a fresh gate_policy_check row,
+// so "newest decisive row wins" is a complete, latch-free fold:
+//   - gate_policy_check{cause:"drift"}  → latched (this boot's evidence)
+//   - gate_policy_check{cause:"ok"}     → clear (a re-pin + restart happened)
+//   - auto_land_blocked{gate_policy_drift} → latched
+// Blocked rows with any OTHER reason are non-decisive (a verify failure
+// does not clear the latch) — the scan skips them and keeps looking.
+// Conversations created AFTER a drifted boot carry no check row (rows
+// land only on conversations alive at boot); the first landing refusal
+// journals the blocked row there, so the banner appears exactly when the
+// freeze bites.
+export function deriveGateDrift(events: readonly OdoEvent[]): GateDriftState {
+  let drifted = false;
+  let seq = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type !== "review_action") continue;
+    const p = e.payload;
+    if (p?.action === "gate_policy_check") {
+      drifted = p.cause === "drift";
+      seq = e.seq;
+      break;
+    }
+    if (p?.action === "auto_land_blocked" && p.reason === "gate_policy_drift") {
+      drifted = true;
+      seq = e.seq;
+      break;
+    }
+  }
+  if (!drifted) return { drifted: false, seq };
+  // Drift evidence rows precede the decisive row; the newest carries this
+  // boot's finding (an older boot's rows are superseded exactly when its
+  // check row is).
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type !== "memory_update") continue;
+    const p = e.payload;
+    if (p?.layer === "gate_policy" && p.cause === "gate_source_drift") {
+      return { drifted: true, seq, detail: p.detail };
+    }
+  }
+  return { drifted: true, seq };
+}
+
 // Derivation contract — conversation scope (lock rule 2): `events` MUST be
 // the ACTIVE conversation's journal stream, the same array the transcript
 // and LedgerPanel already render. The scope is a daemon guarantee, not a

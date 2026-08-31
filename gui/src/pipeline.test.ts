@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { derivePipelineStates, LANDED_FLASH_MS, pipelineHumanLocked } from './pipeline';
+import { deriveGateDrift, derivePipelineStates, LANDED_FLASH_MS, pipelineHumanLocked } from './pipeline';
 import type { PipelinePhase } from './pipeline';
 import type { EventPayload, OdoEvent } from './types';
 
@@ -159,5 +159,54 @@ describe('pipelineHumanLocked', () => {
 
   it('no derivation (foreign-conversation inbox row) means unlocked', () => {
     expect(pipelineHumanLocked(undefined)).toBe(false);
+  });
+});
+
+describe('deriveGateDrift', () => {
+  const check = (seq: number, cause: 'ok' | 'drift') =>
+    ev(seq, 'review_action', { action: 'gate_policy_check', cause, actor: 'daemon' });
+  const driftRow = (seq: number, detail: string) =>
+    ev(seq, 'memory_update', { layer: 'gate_policy', cause: 'gate_source_drift', detail });
+
+  it('no gate rows: clear, no evidence seq', () => {
+    expect(deriveGateDrift([])).toEqual({ drifted: false, seq: 0 });
+    expect(deriveGateDrift([ev(1, 'user_message', { text: 'hi' })])).toEqual({ drifted: false, seq: 0 });
+  });
+
+  it('a clean boot check: clear at the row seq', () => {
+    expect(deriveGateDrift([check(4, 'ok')])).toEqual({ drifted: false, seq: 4 });
+  });
+
+  it('a drifted boot check: latched, newest drift detail surfaced verbatim', () => {
+    const events = [
+      driftRow(4, 'internal/ipc/gatepolicy.go sha16 drift: pinned aaa but on-disk bbb'),
+      driftRow(5, 'internal/ipc/gate_manifest.json missing'),
+      check(6, 'drift'),
+    ];
+    expect(deriveGateDrift(events)).toEqual({
+      drifted: true,
+      seq: 6,
+      detail: 'internal/ipc/gate_manifest.json missing',
+    });
+  });
+
+  it('re-pin + restart clears: the newer ok check supersedes the drift evidence', () => {
+    const events = [driftRow(4, 'drifted'), check(5, 'drift'), check(12, 'ok')];
+    expect(deriveGateDrift(events)).toEqual({ drifted: false, seq: 12 });
+  });
+
+  it('post-boot conversation (no check row): the refusal row latches the banner', () => {
+    const events = [autoRow(9, { action: 'auto_land_blocked', reason: 'gate_policy_drift', diff_id: 3 })];
+    expect(deriveGateDrift(events)).toEqual({ drifted: true, seq: 9 });
+  });
+
+  it('other blocked reasons are non-decisive — and never clear the latch', () => {
+    expect(deriveGateDrift([autoRow(9, { action: 'auto_land_blocked', reason: 'verify_failed', diff_id: 3 })]))
+      .toEqual({ drifted: false, seq: 0 });
+    const events = [
+      check(5, 'drift'),
+      autoRow(9, { action: 'auto_land_blocked', reason: 'verify_failed', diff_id: 3 }),
+    ];
+    expect(deriveGateDrift(events).drifted).toBe(true);
   });
 });

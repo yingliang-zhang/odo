@@ -60,7 +60,7 @@ import {
 } from "./switch_cache";
 import { deriveLoopStates, loopMode } from "./loop";
 import { sameAutoDistillList, sameCountMap, sameDiff, sameDiffInfoExList, sameDiffList, sameIdList, sameStrandedOpsList } from "./diff_stable";
-import { derivePipelineStates } from "./pipeline";
+import { deriveGateDrift, derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
 import { deriveLastPrompt, parseReviewModels } from "./stats";
 import type { AutoDistillCapResume, AutoDistillCountdown, BootstrapResponse, Conversation, Diff, DiffInfoEx, OdoEvent, PanelProgress, PreviewEvent, Project, ProjectEntry, Settings as DaemonSettings, StrandedOp, Workstream } from "./types";
@@ -627,6 +627,16 @@ export default function App() {
   const pipelineStateByDiff = useMemo(
     () => new Map(pipelineStates.map((s) => [s.diffId, s])),
     [pipelineStates],
+  );
+
+  // D1 gate-drift latch (gatepolicy.go): the project-wide landing freeze is
+  // journaled on the same review_action/memory_update stream (one check row
+  // per boot; refusal rows per landing attempt), so its fold rides the
+  // pipelineScan fingerprint — no second scan per streaming batch.
+  const gateDrift = useMemo(
+    () => deriveGateDrift(events),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pipelineScan],
   );
 
   // M19 (V11): ONE system notification per (loop, terminal kind), pref-
@@ -2668,6 +2678,7 @@ export default function App() {
         codingModel={appSettings?.coding_model ?? null}
         reviewPanel={reviewPanel}
         pipelineStates={pipelineStates}
+        gateDrift={gateDrift}
         pendingDiffs={diffs.length}
         wikiNoteCount={wikiNoteCount}
         pendingMemoryProposals={pendingMemoryProposals}

@@ -267,6 +267,47 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         fx.events.push(event);
         return { ok: true, event };
       }
+
+      // Human design gate (loopDesignCtl parity): approve/amend journal the
+      // implement spawn (the spawn row is the receipt); veto journals the
+      // task's vetoed loop_task_done. All three resolve the pending gate
+      // daemon-style ("first not-done task with a design lock") — the GUI
+      // names no task.
+      if (action === "approve_design" || action === "amend_design" || action === "veto_design") {
+        if (live.mode !== "tasks") {
+          return { ok: false, error: "loop_ctl: no active tasks loop for this conversation" };
+        }
+        const task = live.tasks.find((t) => !t.done && t.designLockSeq > 0);
+        if (task == null) {
+          return { ok: false, error: "loop_ctl: no design lock is awaiting the gate" };
+        }
+        if (action === "veto_design") {
+          const event = fx.ev("loop_event", {
+            kind: "loop_task_done",
+            loop_id: live.id,
+            mode: "tasks",
+            task: task.n,
+            status: "vetoed",
+            origin: "loop_ctl",
+            spent_tokens: live.spentTokens,
+          }, convId);
+          fx.events.push(event);
+          return { ok: true, event };
+        }
+        if (action === "amend_design" && typeof args?.text !== "string") {
+          return { ok: false, error: "loop_ctl: amend_design requires the amended text" };
+        }
+        fx.events.push(fx.ev("loop_event", {
+          kind: "loop_task_spawn",
+          loop_id: live.id,
+          mode: "tasks",
+          task: task.n,
+          amended: action === "amend_design",
+          origin: "loop_ctl",
+          spent_tokens: live.spentTokens,
+        }, convId));
+        return { ok: true };
+      }
       return { ok: false, error: `loop_ctl: unknown action "${action}"` };
     }
     // W6 (goal queue): a human resume journals run_prompt{origin:

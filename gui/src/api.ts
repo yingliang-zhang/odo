@@ -216,14 +216,17 @@ export function cancel(conversationId: number, projectRoot?: string): Promise<Ca
   return invoke<CancelResponse>("cancel", { conversationId, projectRoot: projectRoot ?? null });
 }
 
-// M19 (/loop): GUI chip buttons + notification receipts (design lock:
-// GUI-only IPC). stop/resume resolve the active loop daemon-side — the
-// chip passes no loop_id; notified carries loop_id + terminal kind in
-// `text` (the daemon dedups per terminal kind: a journaled receipt makes
-// re-fires impossible).
+// M19 (/loop): GUI chip buttons + design-gate verbs + notification
+// receipts (design lock: GUI-only IPC). stop/resume resolve the active
+// loop daemon-side — the chip passes no loop_id; the design-gate verbs
+// (approve/veto, amend needs the amended design in `text`) likewise
+// resolve the pending design lock daemon-side (loopDesignCtl: the first
+// not-done task holding a lock — at most one can be open). notified
+// carries loop_id + terminal kind in `text` (the daemon dedups per
+// terminal kind: a journaled receipt makes re-fires impossible).
 export function loopCtl(
   conversationId: number,
-  action: "stop" | "resume" | "notified",
+  action: "stop" | "resume" | "notified" | "approve_design" | "amend_design" | "veto_design",
   opts?: { loopId?: number; text?: string; loopBudget?: number; projectRoot?: string },
 ): Promise<LoopCtlResponse> {
   return invoke<LoopCtlResponse>("loop_ctl", {
