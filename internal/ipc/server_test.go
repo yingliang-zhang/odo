@@ -57,10 +57,38 @@ func initRepo(t *testing.T) string {
 	return root
 }
 
+// stubSleepPreamble shadows `sleep` inside a wrapper script so TestMain's
+// ODO_STUB_SCALE shrinks the wall-clock cost while keeping every other
+// instruction verbatim. A test interleaving with a run mid-flight (the
+// WINDOW class) pins t.Setenv("ODO_STUB_SCALE", "1") beside its wrapper;
+// everyone else rides the TestMain default.
+const stubSleepPreamble = "# odo test seam: ODO_STUB_SCALE scales every sleep below (default 1 = realtime).\n" +
+	"_odo_scale=\"${ODO_STUB_SCALE:-1}\"\n" +
+	"sleep() { command sleep \"$(awk -v v=\"$1\" -v s=\"$_odo_scale\" 'BEGIN{printf \"%.3f\", v*s}')\"; }\n"
+
+// TestMain sets the suite-wide stub-sleep scale: wrapper scripts breathe
+// at 15% of their written sleeps (1s→0.15s, 3s→0.45s), keeping a ≥150ms
+// margin above the ~few-ms first-poll latency of pollUntilDone's
+// agent_running assertion (the scout-audited floor is 0.1s) while cutting
+// the dominant wall-clock driver of the suite. Honored only through
+// writeStub's preamble; ODO_STUB_SCALE in the environment wins.
+func TestMain(m *testing.M) {
+	if os.Getenv("ODO_STUB_SCALE") == "" {
+		os.Setenv("ODO_STUB_SCALE", "0.15")
+	}
+	os.Exit(m.Run())
+}
+
 // writeStub installs an agent wrapper script and returns its path.
 func writeStub(t *testing.T, script string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "stub_wrapper.sh")
+	if i := strings.IndexByte(script, '\n'); i >= 0 && strings.HasPrefix(script, "#!") {
+		// Keep the shebang line first; activate the sleep shadow after it.
+		script = script[:i+1] + stubSleepPreamble + script[i+1:]
+	} else {
+		script = stubSleepPreamble + script
+	}
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +189,9 @@ func startRig(t *testing.T, root string) *testRig {
 	// journals stay deterministic. liveness_test.go is the opt-in
 	// coverage (the auto_test.go convention).
 	srv.livenessDisabled.Store(true)
+	// W4.5: 10ms one-shot polls — distill/learner/curate stops burn ~100ms
+	// of dead latency each at the production 200ms cadence.
+	srv.oneShotPollNs.Store(int64(10 * time.Millisecond))
 
 	// Socket in its own short dir: macOS caps sun_path at ~104 chars and
 	// t.TempDir() paths under /var/folders are already ~60.
@@ -199,6 +230,7 @@ func restartRig(t *testing.T, r *testRig) *testRig {
 	// Same dark-launch as startRig (auto + liveness stay deterministic).
 	srv.autoDisabled = true
 	srv.livenessDisabled.Store(true)
+	srv.oneShotPollNs.Store(int64(10 * time.Millisecond))
 	sockDir, err := os.MkdirTemp("", "odo-sock")
 	if err != nil {
 		t.Fatalf("sockdir: %v", err)
@@ -307,7 +339,7 @@ func (r *testRig) pollUntilDone(t *testing.T, convID int64) Response {
 		if time.Now().After(deadline) {
 			t.Fatal("agent did not finish within 20s")
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -633,6 +665,7 @@ func TestReviewDuringLiveRunKeepsLiveRun(t *testing.T) {
 	// the prompt the stub copies into hello.txt.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	t.Setenv("ODO_STUB_SCALE", "1") // W4.5 WINDOW: the run-1 review must land while run 2 is still in flight (~3s span)
 	rig := startRig(t, root)
 	defer rig.stop(t)
 

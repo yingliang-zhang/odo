@@ -366,6 +366,7 @@ func TestParkedGoalConsumerSafety(t *testing.T) {
 // deterministically — a real run's drain would auto-consume the parked
 // goal, so we verify the exclusion at the function level.
 func TestReplayExcludesWaitingParkedGoal(t *testing.T) {
+	t.Parallel()
 	// Build a synthetic journal: user_message, agent_text, then a parked
 	// user_message (park:true), then more agent_text. The parked goal
 	// is WAITING (no run_prompt{goal_seqs} consumes it).

@@ -277,6 +277,7 @@ func TestRetractProposalNeedsFlagRow(t *testing.T) {
 // epochs freezes — the vet rejects further retract intents with
 // oscillation_guard, deterministic from the memory_apply rows alone.
 func TestOscillationGuard(t *testing.T) {
+	t.Parallel()
 	propose := func(seq, epoch int, props ...MemoryProposal) store.Event {
 		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(mustJSON(map[string]interface{}{
 			"action": "memory_propose", "epoch": epoch, "proposals": props,

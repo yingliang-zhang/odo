@@ -49,6 +49,7 @@ func hasToken(tokens []string, want string) bool {
 // (which tokenizes to almost nothing under the ASCII split) still inherits
 // the thread's English terms.
 func TestRecallQueryUnion(t *testing.T) {
+	t.Parallel()
 	events := []store.Event{
 		chatEvent(1, store.EventUserMessage, "folded turn mentions jwtsecret"),
 		chatEvent(2, store.EventAgentText, "folded agent answer"),
@@ -78,6 +79,7 @@ func TestRecallQueryUnion(t *testing.T) {
 // TestRecallQueryNoEvents: with no journal state the query is the message
 // alone — first-send behavior (and its frozen receipts) is unchanged.
 func TestRecallQueryNoEvents(t *testing.T) {
+	t.Parallel()
 	if q := recallQuery("hello", nil); q != "hello" {
 		t.Errorf("recallQuery(nil) = %q, want the text unchanged", q)
 	}
@@ -87,6 +89,7 @@ func TestRecallQueryNoEvents(t *testing.T) {
 }
 
 func TestOpenLoopsSection(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ name, note, want string }{
 		{"absent", "# Epoch 1\n\nbody\n", ""},
 		{"none", "## Open loops\n\nNone.\n", ""},

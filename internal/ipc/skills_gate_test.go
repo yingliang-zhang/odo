@@ -14,6 +14,7 @@ import (
 // --- classifyGate tests ---
 
 func TestClassifyGate_AllReject_AutoDiscard(t *testing.T) {
+	t.Parallel()
 	reviews := []ReviewResult{
 		{Model: "m1", Verdict: "reject"},
 		{Model: "m2", Verdict: "reject"},
@@ -25,6 +26,7 @@ func TestClassifyGate_AllReject_AutoDiscard(t *testing.T) {
 }
 
 func TestClassifyGate_TwoReject_HumanGate(t *testing.T) {
+	t.Parallel()
 	reviews := []ReviewResult{
 		{Model: "m1", Verdict: "reject"},
 		{Model: "m2", Verdict: "reject"},
@@ -36,6 +38,7 @@ func TestClassifyGate_TwoReject_HumanGate(t *testing.T) {
 }
 
 func TestClassifyGate_ZeroModels_HumanGate(t *testing.T) {
+	t.Parallel()
 	if got := classifyGate(nil, 0); got != "human_gate" {
 		t.Errorf("classifyGate(0 models) = %q, want human_gate (not auto_discard)", got)
 	}
@@ -45,6 +48,7 @@ func TestClassifyGate_ZeroModels_HumanGate(t *testing.T) {
 }
 
 func TestClassifyGate_AllNeedsFixes_HumanGate(t *testing.T) {
+	t.Parallel()
 	reviews := []ReviewResult{
 		{Model: "m1", Verdict: "needs_fixes"},
 		{Model: "m2", Verdict: "needs_fixes"},
@@ -56,6 +60,7 @@ func TestClassifyGate_AllNeedsFixes_HumanGate(t *testing.T) {
 }
 
 func TestClassifyGate_AllAccept_HumanGate(t *testing.T) {
+	t.Parallel()
 	// auto_accept is deferred in MVP — 3/3 accept still goes to human_gate.
 	reviews := []ReviewResult{
 		{Model: "m1", Verdict: "accept"},
@@ -68,6 +73,7 @@ func TestClassifyGate_AllAccept_HumanGate(t *testing.T) {
 }
 
 func TestClassifyGate_OneRejectTwoAccept_HumanGate(t *testing.T) {
+	t.Parallel()
 	reviews := []ReviewResult{
 		{Model: "m1", Verdict: "reject"},
 		{Model: "m2", Verdict: "accept"},
@@ -81,6 +87,7 @@ func TestClassifyGate_OneRejectTwoAccept_HumanGate(t *testing.T) {
 // --- composeSkillMD tests ---
 
 func TestComposeSkillMD_ParseableFrontmatter(t *testing.T) {
+	t.Parallel()
 	md := composeSkillMD("run-tests", "Use when claiming done.", []string{"test", "commit"}, "# Run Tests\n\n1. Run `go test`")
 	name, desc, origin, keywords, body := parseFrontmatter(md)
 	if name != "run-tests" {
@@ -101,6 +108,7 @@ func TestComposeSkillMD_ParseableFrontmatter(t *testing.T) {
 }
 
 func TestComposeSkillMD_SanitizesName(t *testing.T) {
+	t.Parallel()
 	// Name with control chars should be sanitized to single-line.
 	md := composeSkillMD("test\nskill", "desc", []string{"k"}, "body")
 	name, _, _, _, _ := parseFrontmatter(md)
@@ -321,6 +329,7 @@ func TestVetProcedures_ScanSkillsConflict(t *testing.T) {
 // anyway is out-of-contract input — dropped wholesale, NOT counted as gate
 // drops (the stats count deliberation, never unrequested output).
 func TestVetProcedures_OffByDefault(t *testing.T) {
+	t.Parallel()
 	res := makeLearnerResult([]struct {
 		Name        string   `json:"name"`
 		Description string   `json:"description"`
@@ -342,6 +351,7 @@ func TestVetProcedures_OffByDefault(t *testing.T) {
 // --- splitSkillProposals test ---
 
 func TestSplitSkillProposals(t *testing.T) {
+	t.Parallel()
 	proposals := []MemoryProposal{
 		{Target: "memory.md", Rule: "r1"},
 		{Target: "skills", Rule: "s1", Name: "skill-1"},
@@ -365,6 +375,7 @@ func TestSplitSkillProposals(t *testing.T) {
 // --- slugifySkillName tests ---
 
 func TestSlugifySkillName(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"Run Tests", "run-tests"},
 		{"run-tests-before-commit", "run-tests-before-commit"},

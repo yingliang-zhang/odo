@@ -162,6 +162,7 @@ func seedPreviewRig(t *testing.T, rec *previewMoaRecorder) (*testRig, int64) {
 }
 
 func TestPreviewArgParsing(t *testing.T) {
+	t.Parallel()
 	if _, _, err := parsePreviewArgs(""); err == nil {
 		t.Error("empty args: want error")
 	}
@@ -176,6 +177,7 @@ func TestPreviewArgParsing(t *testing.T) {
 }
 
 func TestPreviewHostAllowlist(t *testing.T) {
+	t.Parallel()
 	accepts := []string{
 		"http://localhost:1420",
 		"http://LOCALHOST/app",
@@ -732,6 +734,7 @@ exit 0
 // TestPreviewShotReceiptFields is the unit-level guard of the receipt
 // naming the journalled wire-load: sha16 vs full-sha256 of the same bytes.
 func TestPreviewShotReceiptFields(t *testing.T) {
+	t.Parallel()
 	sum := sha256.Sum256(previewFixturePNG)
 	if got := sha16(previewFixturePNG); got != hex.EncodeToString(sum[:8]) {
 		t.Errorf("sha16 = %q, want first-8-bytes hex of sha256", got)
@@ -745,6 +748,7 @@ func TestPreviewShotReceiptFields(t *testing.T) {
 // passwords never persist verbatim in the preview_captured record; the
 // username and the host survive unchanged.
 func TestPreviewURLRedaction(t *testing.T) {
+	t.Parallel()
 	if got := redactPreviewURL("http://user:secret@localhost:3000/x"); got != "http://user:xxxxx@localhost:3000/x" {
 		t.Errorf("redact = %q", got)
 	}

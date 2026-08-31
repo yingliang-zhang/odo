@@ -26,6 +26,7 @@ func journalLearningRow(t *testing.T, st *store.Store, convID int64, p map[strin
 }
 
 func TestComputeLearningStatus(t *testing.T) {
+	t.Parallel()
 	f := newAutonomyFixture(t)
 	ctx := context.Background()
 

@@ -17,7 +17,9 @@ import (
 // <seconds> <prompt_file> <output_file>; it appends JSONL stream lines to the
 // output file with sleeps between them (text_start → delta → ... text_end),
 // then creates hello.txt for the diff and exits 0. The ~2s window between
-// the delta and text_end lets several polls observe the in-flight preview.
+// the delta and text_end lets several polls observe the in-flight preview;
+// it bypasses the test seam (`command sleep`) so ODO_STUB_SCALE never
+// shrinks the observed preview window — only the two lead-in sleeps scale.
 const streamingStubWrapper = `#!/bin/sh
 prompt_file="$2"
 output_file="$3"
@@ -27,7 +29,7 @@ sleep 1
 printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}' >> "$output_file"
 sleep 1
 printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Creating hello.txt."}}' >> "$output_file"
-sleep 2
+command sleep 2
 printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Creating hello.txt."}}' >> "$output_file"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Creating hello.txt."}]}}' >> "$output_file"
 cp "$prompt_file" hello.txt

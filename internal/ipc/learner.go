@@ -575,7 +575,7 @@ func (s *Server) runLearner(ctx context.Context, conversationID int64, noteName,
 		if ad == nil {
 			ad = s.adapterFor("") // same fallback as runDistillAgent
 		}
-		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, procs, auditFlagPromptBlock(afc)), learnerTimeout)
+		rawText, err = runOneShot(ctx, ad, learnerPrompt(noteName, noteContent, ownMem, procs, auditFlagPromptBlock(afc)), learnerTimeout, s.resolvedOneShotPoll())
 	}
 	if err != nil {
 		fail(fmt.Errorf("learner run: %w", err))

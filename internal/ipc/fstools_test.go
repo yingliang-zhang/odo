@@ -11,6 +11,7 @@ import (
 // TestDefaultFSDenyCredentialEntries verifies the default deny list
 // contains the M17 audit's credential entries (Hole 1).
 func TestDefaultFSDenyCredentialEntries(t *testing.T) {
+	t.Parallel()
 	want := map[string]bool{
 		".ssh": true, ".aws": true, ".gnupg": true,
 		".netrc": true, ".kube": true, ".docker": true,
@@ -28,6 +29,7 @@ func TestDefaultFSDenyCredentialEntries(t *testing.T) {
 // TestFSDenyBlocksCredentialPaths verifies check() rejects every
 // default deny entry (both files and dirs).
 func TestFSDenyBlocksCredentialPaths(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	deny := make([]string, 0, len(defaultFSDeny))
 	for _, d := range defaultFSDeny {
@@ -62,6 +64,7 @@ func TestFSDenyBlocksCredentialPaths(t *testing.T) {
 // are refused with the moa_fs_deny error — pure check() on every entry,
 // plus on-disk touched paths through resolve() for a sample.
 func TestDefaultFSDenyNewEntries(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	deny := make([]string, 0, len(defaultFSDeny))
 	for _, d := range defaultFSDeny {
@@ -119,6 +122,7 @@ func TestDefaultFSDenyNewEntries(t *testing.T) {
 // exactly the built-in defaults, in declared order (ADR-0004 merge
 // semantics; there is no syntax for an empty list).
 func TestParseFSDenyDefaultsOnEmpty(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{"", "   ", "\t "} {
 		if got := parseFSDeny(raw); !slices.Equal(got, defaultFSDeny) {
 			t.Errorf("parseFSDeny(%q) = %v, want defaultFSDeny %v", raw, got, defaultFSDeny)
@@ -130,6 +134,7 @@ func TestParseFSDenyDefaultsOnEmpty(t *testing.T) {
 // the old replace parse dropped every default on the first prefs token);
 // restated defaults and case variants dedupe to one entry.
 func TestParseFSDenyUnion(t *testing.T) {
+	t.Parallel()
 	got := parseFSDeny("tmp, .ssh, TMP")
 	if len(got) != len(defaultFSDeny)+1 {
 		t.Fatalf("parseFSDeny union len = %d, want %d: %v", len(got), len(defaultFSDeny)+1, got)
@@ -154,6 +159,7 @@ func TestParseFSDenyUnion(t *testing.T) {
 // TestParseFSDenyRemoval: a -name token subtracts exactly the named
 // default; an unknown -name is a no-op.
 func TestParseFSDenyRemoval(t *testing.T) {
+	t.Parallel()
 	got := parseFSDeny("-node_modules")
 	if slices.Contains(got, "node_modules") {
 		t.Errorf("-node_modules should remove the default, got %v", got)
@@ -172,6 +178,7 @@ func TestParseFSDenyRemoval(t *testing.T) {
 // TestParseFSDenyRemovalCaseInsensitive: removal names fold like check()
 // does on macOS APFS.
 func TestParseFSDenyRemovalCaseInsensitive(t *testing.T) {
+	t.Parallel()
 	got := parseFSDeny("-NODE_MODULES")
 	if slices.Contains(got, "node_modules") {
 		t.Errorf("-NODE_MODULES should remove node_modules (case-fold), got %v", got)
@@ -185,6 +192,7 @@ func TestParseFSDenyRemovalCaseInsensitive(t *testing.T) {
 // denied, in either token order — the surprising direction is the safe
 // direction.
 func TestParseFSDenyContradictionDenies(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{"foo, -foo", "-foo, foo"} {
 		if got := parseFSDeny(raw); !slices.Contains(got, "foo") {
 			t.Errorf("parseFSDeny(%q) = %v: contradictory name must stay denied", raw, got)
@@ -202,6 +210,7 @@ func TestParseFSDenyContradictionDenies(t *testing.T) {
 // Regression pin for the live fail-open hole: the old parser treated
 // "moa_fs_deny: ," as replace-with-nothing and denied ZERO paths.
 func TestParseFSDenyNoiseTokens(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{",,,", " - "} {
 		if got := parseFSDeny(raw); !slices.Equal(got, defaultFSDeny) {
 			t.Errorf("parseFSDeny(%q) = %v, want full defaultFSDeny", raw, got)
@@ -269,6 +278,7 @@ func TestNewFSToolExecutorDenyReset(t *testing.T) {
 // recorded conscious act, ADR-0004). A future protected-floor ADR MUST
 // change this test — if it still passes, the floor is not implemented.
 func TestParseFSDenyRemovalAnyEntry(t *testing.T) {
+	t.Parallel()
 	got := parseFSDeny("-.ssh")
 	if slices.Contains(got, ".ssh") {
 		t.Errorf("-.ssh must remove .ssh (no protected floor), got %v", got)

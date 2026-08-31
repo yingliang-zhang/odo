@@ -37,6 +37,7 @@ func writeTopicPage(t *testing.T, root, name, content string) {
 // query matches a CJK topic page via bigrams, an EN query matches an EN
 // page the same way, and unmatched pages stay out both ways.
 func TestCrossTopicRecallCJKENParity(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeTopicPage(t, root, "epoch-folding", "# Folding\n\n折叠边界由 marker 显式记录。 (main-epoch-3)\n")
 	writeTopicPage(t, root, "recall-tuning", "# Recall\n\nTokenizer bigrams matter for recall. (ui-epoch-2)\n")
@@ -95,6 +96,7 @@ func TestCrossZeroMatchNoFallback(t *testing.T) {
 // collision — the 2-term page wins, the rank-2 slot among three equal
 // 1-term pages breaks deterministically by name ASC.
 func TestCrossTopicTop2RankingTie(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeTopicPage(t, root, "b-page", "gamma only here\n")
 	writeTopicPage(t, root, "top", "alpha beta both here\n")
@@ -117,6 +119,7 @@ func TestCrossTopicTop2RankingTie(t *testing.T) {
 // page that would overflow is left whole-out and named by the omission
 // marker; an oversized first page yields nothing at all.
 func TestCrossTopicPageBoundaryCap(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	big := strings.Repeat("alpha content line padding for size.\n", 60) // ~2.1KB
 	writeTopicPage(t, root, "one", big)
@@ -145,6 +148,7 @@ func TestCrossTopicPageBoundaryCap(t *testing.T) {
 // are never "siblings" — they're the home recall layer's job. Among
 // matched siblings the newest epoch wins; equal epochs break on mtime.
 func TestCrossSiblingExcludesCurrentWs(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeEpochNote(t, root, "main-epoch-5", "zeta in the current workstream\n")
 	writeEpochNote(t, root, "ui-epoch-2", "zeta from the ui sibling\n")
@@ -185,6 +189,7 @@ func TestCrossSiblingExcludesCurrentWs(t *testing.T) {
 // TestCrossSiblingLineBoundaryCap: header+content stay under 2KB and the
 // content cut lands on a whole line.
 func TestCrossSiblingLineBoundaryCap(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	line := "zeta-padding-line\n"
 	writeEpochNote(t, root, "ui-epoch-2", strings.Repeat(line, 200))
@@ -232,6 +237,7 @@ func TestCrossLabeledHeaders(t *testing.T) {
 // TestCrossCitationlessTopicHeader: a page without ws-qualified citations
 // renders without a sources segment rather than a fabricated one.
 func TestCrossCitationlessTopicHeader(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeTopicPage(t, root, "uncited", "- alpha with no citations at all\n")
 	body, _, _ := recallTopicPages(root, "alpha")
@@ -298,6 +304,7 @@ func TestCrossWsRecallPrefMatrix(t *testing.T) {
 // TestCrossWsPromptOrder: the send-path block sits after the recalled
 // notes and before the memory map (injection order pinned).
 func TestCrossWsPromptOrder(t *testing.T) {
+	t.Parallel()
 	ml := memoryLayers{wiki: "WIKI-LAYER", cross: "## Cross-workstream context\n\nCROSS-LAYER", memoryMap: "## Memory read-back\n\nMAP-LAYER"}
 	p := buildPrompt("msg", nil, ml)
 	iW := strings.Index(p, "WIKI-LAYER")
@@ -433,6 +440,7 @@ func retractNote(t *testing.T, st *store.Store, convID int64, note, by string) {
 // nothing is pushed; an un-retracted newer note still wins while the
 // gate is active.
 func TestCrossSiblingRetractionOwnWorkstream(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeEpochNote(t, root, "ui-epoch-2", "zeta in ui epoch two\n")
 	writeEpochNote(t, root, "ui-epoch-3", "newer zeta in ui epoch three\n")
@@ -466,6 +474,7 @@ func TestCrossSiblingRetractionOwnWorkstream(t *testing.T) {
 // the CURRENT conversation names home-workstream notes only — it must
 // not leak onto a sibling candidate.
 func TestCrossSiblingRetractionScopedToOwnWs(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeEpochNote(t, root, "main-epoch-1", "zeta in the current workstream\n")
 	writeEpochNote(t, root, "ui-epoch-2", "zeta from the ui sibling\n")
@@ -486,6 +495,7 @@ func TestCrossSiblingRetractionScopedToOwnWs(t *testing.T) {
 // before the budget guard, the negative content allowance slice-panicked
 // inside capAtLineBoundary.
 func TestCrossSiblingOversizeHeaderNoPanic(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	terms := make([]string, 0, 90)
 	for i := 0; i < 90; i++ {
@@ -522,6 +532,7 @@ func TestCrossSiblingOnlyHeader(t *testing.T) {
 // held back with the LIMIT marker — distinct from the 3KB cap marker
 // pinned by TestCrossTopicPageBoundaryCap.
 func TestCrossTopicLimitMarker(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeTopicPage(t, root, "a-gamma", "gamma small page a\n")
 	writeTopicPage(t, root, "b-gamma", "gamma small page b\n")

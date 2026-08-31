@@ -102,6 +102,7 @@ func evaluate(srv *Server, convID int64) {
 // TestAutoCapResumeAtMath pins the horizon formula: the cap releases when
 // the (len-cap+1)-th oldest counted marker ages out of the 24h window.
 func TestAutoCapResumeAtMath(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	ts := func(age time.Duration) string {
 		return now.Add(-age).UTC().Format(autoEventTimeLayout)
@@ -395,6 +396,7 @@ func TestHealRowsExcludedFromWindow(t *testing.T) {
 // heal_resolved renders too). Scheduler bookkeeping of the identical
 // shape stays excluded (foldExcludedMemoryUpdate unchanged).
 func TestHealRowsStillRenderInDistillPrompt(t *testing.T) {
+	t.Parallel()
 	rows := []struct {
 		layer, cause string
 	}{

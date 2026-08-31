@@ -311,7 +311,7 @@ func waitLoop(t *testing.T, st *store.Store, convID int64, desc string, match fu
 			t.Fatalf("timed out waiting for %s; kinds=%v verdicts=%v causes=%v blocked=%v",
 				desc, sc.kinds(), sc.verdicts(), sc.causes(), sc.blockedReasonsLoop())
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -340,6 +340,7 @@ func loopBoot(t *testing.T, rig *testRig) int64 {
 // --- pure-machine table tests ---------------------------------------------------------
 
 func TestParseFindingsBlock(t *testing.T) {
+	t.Parallel()
 	row := "- sev: P2 | file: internal/ipc/loop.go | symbol: tickLoop | title: budget check races resume"
 	f, ok := parseFindingsBlock(auditFindings(row))
 	if !ok || len(f) != 1 {
@@ -373,6 +374,7 @@ func TestParseFindingsBlock(t *testing.T) {
 }
 
 func TestUnionFindings(t *testing.T) {
+	t.Parallel()
 	mk := func(sev, file, sym, title string) finding {
 		f := finding{Severity: sev, File: file, Symbol: sym, Title: title}
 		f.FP = findingFingerprint(f)
@@ -401,6 +403,7 @@ func TestUnionFindings(t *testing.T) {
 // (+ optional rule) is the fingerprint; title/evidence wording is mutable
 // description and must never fork a phantom finding.
 func TestFindingFingerprintV4(t *testing.T) {
+	t.Parallel()
 	base := finding{Severity: "P2", File: "a.go", Symbol: "f", Title: "races the resume", Category: "contract"}
 	fp := findingFingerprint(base)
 	// Same file/symbol/cat, different title wording ⇒ same FP (V3 hashed
@@ -444,6 +447,7 @@ func TestFindingFingerprintV4(t *testing.T) {
 // FP before leg support is counted (same-leg re-citations can't inflate
 // Legs), and leg_ids names the supporting fan-out positions.
 func TestUnionPerLegDedup(t *testing.T) {
+	t.Parallel()
 	mk := func(sev, title string) finding {
 		f := finding{Severity: sev, File: "a.go", Symbol: "f", Title: title, Category: "contract"}
 		f.FP = findingFingerprint(f)
@@ -475,6 +479,7 @@ func TestUnionPerLegDedup(t *testing.T) {
 // rows parse with cat=other, and the new optional cat/rule fields parse
 // and normalize additively.
 func TestParseBackwardCompat(t *testing.T) {
+	t.Parallel()
 	old := "- sev: P2 | file: internal/ipc/loop.go | symbol: tickLoop | title: budget check races resume"
 	f, ok := parseFindingsBlock(auditFindings(old))
 	if !ok || len(f) != 1 {
@@ -514,6 +519,7 @@ func TestParseBackwardCompat(t *testing.T) {
 // logical findings after a landed fix. The changed FP set must read as
 // new findings for one round — never as an unchanged-set stall.
 func TestUpgradeBoundaryNoFalseStall(t *testing.T) {
+	t.Parallel()
 	st := &loopState{
 		rounds: []loopRound{
 			{seq: 2, round: 1, subjectSHA16: "s1", blockingFPS: []string{"v3fp-of-finding-a"}},
@@ -539,6 +545,7 @@ func TestUpgradeBoundaryNoFalseStall(t *testing.T) {
 }
 
 func TestBlockingFindingsHoldGate(t *testing.T) {
+	t.Parallel()
 	mk := func(sev string) finding {
 		return finding{Severity: sev, File: "a.go", Symbol: "f", Title: "t"}
 	}
@@ -552,6 +559,7 @@ func TestBlockingFindingsHoldGate(t *testing.T) {
 }
 
 func TestDeriveLoopStatesFold(t *testing.T) {
+	t.Parallel()
 	mk := func(seq int, payload string) store.Event {
 		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
 	}
@@ -617,6 +625,7 @@ func TestDeriveLoopStatesFold(t *testing.T) {
 // the receipt journaled but is never budgeted. The writer stamps the
 // same cumulative the fold derives (C1: fold is the truth).
 func TestFoldUsageCoversEstimate(t *testing.T) {
+	t.Parallel()
 	mk := func(seq int, payload string) store.Event {
 		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
 	}
@@ -661,6 +670,7 @@ func TestFoldUsageCoversEstimate(t *testing.T) {
 // covering the same spawn fold newest-wins — a journal re-fold (the
 // bootstrap replay) yields the identical cumulative, not usage×2.
 func TestUsageRowIdempotent(t *testing.T) {
+	t.Parallel()
 	mk := func(seq int, payload string) store.Event {
 		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
 	}
@@ -1013,6 +1023,7 @@ func TestLoopHoldSeverityTightened(t *testing.T) {
 // satisfy a .([]interface{}) assertion — leg output_tokens must
 // accumulate through the JSON wire shape.
 func TestLoopRowSpendConcreteSlices(t *testing.T) {
+	t.Parallel()
 	legs := []auditLegResult{
 		{Model: "rm1@test", Verdict: "complete", OutputTokens: 120},
 		{Model: "rm2@test", Verdict: "infra"}, // zero-token leg contributes 0
@@ -1573,6 +1584,7 @@ func TestLoopRestartMidRunSuspends(t *testing.T) {
 // text is inert, and the body keeps everything from the first non-flag
 // token on.
 func TestLoopLeadingFlagsOnly(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		args  string
 		wantN int // expected flag count
@@ -1902,6 +1914,7 @@ func TestLoopAdjudicateBlockedAttribution(t *testing.T) {
 // task. The start row's seed_diffs stay folded for the recovery
 // exclusion.
 func TestLoopDiffBoundFold(t *testing.T) {
+	t.Parallel()
 	mk := func(seq int, payload string) store.Event {
 		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
 	}

@@ -336,6 +336,7 @@ func TestReplayJournalPagingEquivalence(t *testing.T) {
 // pairing) — and the pruning never breaks the newest candidate's
 // propose→apply pairing.
 func TestLaneMemReceiptFoldProposePrune(t *testing.T) {
+	t.Parallel()
 	propose := func(epoch int) store.Event {
 		return store.Event{Type: store.EventReviewAction, ConversationID: 1, Payload: json.RawMessage(mustJSON(map[string]interface{}{
 			"action":    "memory_propose",
@@ -1000,6 +1001,7 @@ func TestResolveHealConflictDismiss(t *testing.T) {
 // (Tauri maps camelCase args onto snake_case params that serialize to
 // these keys), and decodes back losslessly.
 func TestResolveHealConflictWireShape(t *testing.T) {
+	t.Parallel()
 	req := Request{
 		Cmd:                  CmdResolveHealConflict,
 		ConversationID:       7,
@@ -1041,6 +1043,7 @@ func TestResolveHealConflictWireShape(t *testing.T) {
 // the pending_counts stranded_memory_ops semantic (conflict minus
 // resolved, project-wide, tuple-deduped).
 func TestFoldHealLedger(t *testing.T) {
+	t.Parallel()
 	row := func(seq int, conv int64, cause, layer string, rSeq int) store.Event {
 		payload := map[string]interface{}{
 			"cause":                 cause,

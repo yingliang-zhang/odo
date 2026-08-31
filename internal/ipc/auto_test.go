@@ -1269,6 +1269,7 @@ func TestAutoCurateDeadCitationGate(t *testing.T) {
 // marker) → the line is STRIPPED, not dead; non-epoch parens are not
 // citations.
 func TestCheckTopicCitations(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeNote(t, root, "main-epoch-1", "x\n")
 	writeNote(t, root, "main-epoch-2", "x\n")
@@ -1337,6 +1338,7 @@ func TestCheckTopicCitations(t *testing.T) {
 // cited ghost epochs is pure confabulation — the page is dropped from the
 // generation, never written as an empty shell.
 func TestCheckTopicCitationsAllGhostEmptiesTopic(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeNote(t, root, "main-epoch-1", "x\n")
 	noMarkers := func(int) bool { return false }

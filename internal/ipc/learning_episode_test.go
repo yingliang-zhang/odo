@@ -21,6 +21,7 @@ func epEv(seq int, typ string, p map[string]interface{}, createdAt string) store
 // every §1.1 outcome class and asserts the full row — outcomes, context
 // counts, cohort join, usage sum, verify_ms total, flags.
 func TestFoldLearningEpisodeOutcomes(t *testing.T) {
+	t.Parallel()
 	const t1 = "2026-08-30T00:00:03Z"
 	const t2 = "2026-08-30T00:00:39Z"
 	events := []store.Event{
@@ -159,6 +160,7 @@ func TestFoldLearningEpisodeOutcomes(t *testing.T) {
 // human's later accept on the same diff is NOT weak, and an outcome whose
 // send predates the window is counted raw but never cohort-attributed.
 func TestFoldLearningEpisodeWeakAndBoundaries(t *testing.T) {
+	t.Parallel()
 	at := "2026-08-30T00:00:00Z"
 	// Send at seq 50 is BEFORE the window: the accept inside the window
 	// resolves to nothing in the cohort join (attribution boundary).
@@ -196,6 +198,7 @@ func TestFoldLearningEpisodeWeakAndBoundaries(t *testing.T) {
 // TestFoldLearningEpisodeEmptyWindow: an empty pinned window yields the
 // full zero row (stable shape — consumers never branch on key presence).
 func TestFoldLearningEpisodeEmptyWindow(t *testing.T) {
+	t.Parallel()
 	events := []store.Event{
 		epEv(1, store.EventUserMessage, map[string]interface{}{"text": "before"}, "2026-08-30T00:00:00Z"),
 	}
@@ -230,6 +233,7 @@ func TestFoldLearningEpisodeEmptyWindow(t *testing.T) {
 // receipt landing mid-fold never aborts the fold, and any UNRELATED
 // action above the pin still trips the guard (fail-closed direction).
 func TestLearningEpisodeFoldWhitelist(t *testing.T) {
+	t.Parallel()
 	base := []store.Event{
 		epEv(10, store.EventUserMessage, map[string]interface{}{"text": "content"}, "2026-08-30T00:00:00Z"),
 	}

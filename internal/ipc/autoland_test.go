@@ -123,6 +123,7 @@ func TestAutoLandCheck(t *testing.T) {
 }
 
 func TestVerifyCommands(t *testing.T) {
+	t.Parallel()
 	write := func(t *testing.T, content string) string {
 		t.Helper()
 		dir := t.TempDir()
@@ -341,6 +342,7 @@ func TestRunVerifyGatePersistsLog(t *testing.T) {
 // TestWriteVerifyLogPrune bounds the audit directory: retention keeps the
 // newest verifyLogKeepCount logs, oldest age out.
 func TestWriteVerifyLogPrune(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	for i := 0; i < verifyLogKeepCount+3; i++ {
 		if p := writeVerifyLog(root, "prune", []byte("payload")); p == "" {
@@ -359,6 +361,7 @@ func TestWriteVerifyLogPrune(t *testing.T) {
 // TestKeepTail pins the shared tail cutter: byte budget, suffix fidelity
 // (diagnostics live at the end), rune-safe leading cut.
 func TestKeepTail(t *testing.T) {
+	t.Parallel()
 	if got := keepTail("short", 8); got != "short" {
 		t.Errorf("undersized input = %q, want unchanged", got)
 	}
@@ -377,6 +380,7 @@ func TestKeepTail(t *testing.T) {
 // shell/toolchain vars and GO*/GIT_* passthrough, never the daemon's
 // credential-shaped vars (the panel's API keys are process env).
 func TestVerifyEnviron(t *testing.T) {
+	t.Parallel()
 	in := []string{
 		"PATH=/usr/bin", "HOME=/u", "TMPDIR=/tmp", "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8",
 		"GOPATH=/u/go", "GOMODCACHE=/u/go/pkg/mod", "GOFLAGS=-mod=mod", "GIT_EDITOR=vim", "CGO_ENABLED=1",

@@ -26,6 +26,7 @@ import (
 // injected. The 128 KB hard bound — the actual model-context guard — is
 // unchanged.
 func TestPromptBudgetSumsWithinBounds(t *testing.T) {
+	t.Parallel()
 	const (
 		softBound = 55 * 1024 // re-based for the D-cross rows (see header)
 		hardBound = 128 * 1024
@@ -52,6 +53,7 @@ func TestPromptBudgetSumsWithinBounds(t *testing.T) {
 // paths exist somewhere, clamp-max never below default) so the ledger can
 // never silently undercount.
 func TestPromptBudgetRegistryShape(t *testing.T) {
+	t.Parallel()
 	seenPath := map[string]bool{}
 	for _, b := range PromptBudgets {
 		if b.Name == "" || b.Constant == "" || b.Layer == "" {

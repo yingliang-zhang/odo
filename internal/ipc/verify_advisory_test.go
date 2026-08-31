@@ -314,6 +314,7 @@ func TestVerifyAdvisorySuppressedForReclaimedWorktree(t *testing.T) {
 }
 
 func TestVerifySetupAdviceToolchainHint(t *testing.T) {
+	t.Parallel()
 	mk := func(t *testing.T, manifest, content string) string {
 		t.Helper()
 		dir := t.TempDir()

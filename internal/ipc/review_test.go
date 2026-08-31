@@ -22,6 +22,7 @@ import (
 )
 
 func TestBuildReviewPrompt(t *testing.T) {
+	t.Parallel()
 	// Real patch bytes so the facts block derives real stats: one
 	// protected hit (wiki/), one plain file, known +- counts.
 	patch := "diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go\n@@ -1,2 +1,3 @@\n-removed\n+added1\n+added2\n" +
@@ -149,6 +150,7 @@ func TestBuildReviewPrompt(t *testing.T) {
 // package-ok lines, or non-zero pass counts count as evidence; everything
 // else is zero-evidence (fail closed).
 func TestVerifyPassEvidence(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		tail string
@@ -181,6 +183,7 @@ func TestVerifyPassEvidence(t *testing.T) {
 // TestScrubBaseURL pins B3: the journaled endpoint never carries
 // credential material, and garbage earns "" rather than a partial lie.
 func TestScrubBaseURL(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"https://coding.sudoai.cc/anthropic", "https://coding.sudoai.cc/anthropic"},
 		{"http://127.0.0.1:8080", "http://127.0.0.1:8080"},
@@ -373,6 +376,7 @@ func TestReviewWithModelJournals(t *testing.T) {
 // ledger row's tallies (a tainted producing run is exactly what the manual
 // panel needs weighed), and clean conversations surface "".
 func TestLatestRunVerdictFacts(t *testing.T) {
+	t.Parallel()
 	f := newAutonomyFixture(t)
 	s := &Server{store: f.st}
 	ctx := context.Background()

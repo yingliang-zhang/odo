@@ -25,6 +25,7 @@ import (
 // shape: walk internal/ipc/*.go ⇒ true; internal/modelspec, gui/src,
 // root cmd_*.go ⇒ false; INTERNAL/IPC/x.go ⇒ true.
 func TestIsGateSourcePathStructural(t *testing.T) {
+	t.Parallel()
 	entries, err := os.ReadDir(".") // test cwd is internal/ipc itself
 	if err != nil {
 		t.Fatal(err)
@@ -511,6 +512,7 @@ func TestLoopFixSuspendTier0(t *testing.T) {
 // (fail-closed) — a human accept of an unrelated inbox diff stays a
 // fact, never a loop outcome.
 func TestLoopFoldAttributesPanelLandedFix(t *testing.T) {
+	t.Parallel()
 	mk := func(seq int, payload string) store.Event {
 		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
 	}
@@ -581,6 +583,7 @@ func TestLoopFoldAttributesPanelLandedFix(t *testing.T) {
 // stats, so classifyDiff must treat them as ordinary paths (they get
 // their own gates: Tier annotations + panelVerdictAttestsDiff).
 func TestClassifyDiffC0Purity(t *testing.T) {
+	t.Parallel()
 	gate := func(path string) git.PatchStat {
 		return git.PatchStat{Files: []git.FileStat{fs(path, 5, 1)}, Added: 5, Removed: 1}
 	}

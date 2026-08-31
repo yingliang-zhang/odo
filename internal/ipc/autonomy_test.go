@@ -26,6 +26,7 @@ func fs(path string, added, removed int) git.FileStat {
 }
 
 func TestClassifyDiffBoundaries(t *testing.T) {
+	t.Parallel()
 	fileCount := func(n int) git.PatchStat {
 		var st git.PatchStat
 		for i := range n {
@@ -91,6 +92,7 @@ func TestClassifyDiffBoundaries(t *testing.T) {
 // TestPatchStatsCommentOnly pins the comment-only detection over real
 // patch text (classifyDiff consumes FileStat.CommentOnly).
 func TestPatchStatsCommentOnly(t *testing.T) {
+	t.Parallel()
 	patch := strings.Join([]string{
 		"diff --git a/src/f.go b/src/f.go",
 		"--- a/src/f.go",
@@ -120,6 +122,7 @@ func TestPatchStatsCommentOnly(t *testing.T) {
 }
 
 func TestPatchStatsNotCommentOnly(t *testing.T) {
+	t.Parallel()
 	patch := "diff --git a/src/f.go b/src/f.go\n--- a/src/f.go\n+++ b/src/f.go\n@@ -1 +1,2 @@\n // c\n+x := 1\n"
 	path := filepath.Join(t.TempDir(), "n.diff")
 	if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {

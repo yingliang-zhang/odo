@@ -603,7 +603,7 @@ func (s *Server) curateCore(ctx context.Context, projectID, convID int64, trigge
 		if ad == nil {
 			ad = s.adapterFor("") // same fallback as runDistillAgent
 		}
-		raw, err = runOneShot(ctx, ad, prompt, curatorTimeout)
+		raw, err = runOneShot(ctx, ad, prompt, curatorTimeout, s.resolvedOneShotPoll())
 	}
 	if err != nil {
 		return fail(fmt.Errorf("curate: curator run: %w", err), err.Error())

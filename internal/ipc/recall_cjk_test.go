@@ -15,6 +15,7 @@ import (
 // TestTokenizeQueryLatinUnchanged pins the pre-CJK behavior: same tokens,
 // same order, same dedup for ASCII input.
 func TestTokenizeQueryLatinUnchanged(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want []string
@@ -36,6 +37,7 @@ func TestTokenizeQueryLatinUnchanged(t *testing.T) {
 // TestTokenizeQueryCJK: pure-Chinese queries yield overlapping bigrams; an
 // isolated char degrades to a unigram; kana and hangul tokenize too.
 func TestTokenizeQueryCJK(t *testing.T) {
+	t.Parallel()
 	got := tokenizeQuery("改一下侧边栏宽度")
 	want := []string{"改一", "一下", "下侧", "侧边", "边栏", "栏宽", "宽度"}
 	if !reflect.DeepEqual(got, want) {
@@ -58,6 +60,7 @@ func TestTokenizeQueryCJK(t *testing.T) {
 // TestTokenizeQueryMixed: latin tokens keep their exact pre-CJK order, with
 // the CJK bigrams appended after them in reading order.
 func TestTokenizeQueryMixed(t *testing.T) {
+	t.Parallel()
 	got := tokenizeQuery("fix 侧边栏 bug")
 	want := []string{"fix", "bug", "侧边", "边栏"}
 	if !reflect.DeepEqual(got, want) {
@@ -69,6 +72,7 @@ func TestTokenizeQueryMixed(t *testing.T) {
 // so Chinese queries rank skills with Chinese descriptions — there was no
 // skills.go change to test around.
 func TestMatchSkillsCJK(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "ui-layout", Description: "调整侧边栏样式", Keywords: []string{"ui"}}, body: "steps"},
 		{info: SkillInfo{Name: "schema-migrations", Description: "database work", Keywords: []string{"db"}}, body: "steps"},

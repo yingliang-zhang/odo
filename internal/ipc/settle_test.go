@@ -134,7 +134,7 @@ func waitSettle(t *testing.T, st *store.Store, convID int64, desc string, match 
 			t.Fatalf("timed out waiting for %s; journal: rounds=%v blocked=%v memory=%v markers=%v",
 				desc, sc.rounds, sc.blocked, sc.memory, sc.markers)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -171,7 +171,7 @@ func pollDone(t *testing.T, rig *testRig, convID int64) Response {
 		if time.Now().After(deadline) {
 			t.Fatal("agent did not finish within 20s")
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -243,6 +243,7 @@ func (sc settleScan) memoryCauses() []string {
 // ≥2 reject legs from ≥2 distinct model families; anything short is a
 // minority suspend.
 func TestSettlementClass(t *testing.T) {
+	t.Parallel()
 	// Each entry "model:verdict" — the family rides the model label.
 	mk := func(pairs ...string) []ReviewResult {
 		out := make([]ReviewResult, len(pairs))
@@ -294,6 +295,7 @@ func TestSettlementClass(t *testing.T) {
 // needs ≥2 reject legs from ≥2 distinct families. Provider labels never
 // count as families — label diversity is not model diversity.
 func TestSettlementMinority(t *testing.T) {
+	t.Parallel()
 	mk := func(pairs ...string) []ReviewResult {
 		out := make([]ReviewResult, len(pairs))
 		for i, pv := range pairs {
@@ -329,6 +331,7 @@ func TestSettlementMinority(t *testing.T) {
 // original goal verbatim, grouped verbatim comments, the diff verbatim
 // fenced as data, the demotion directive, and the locked caps.
 func TestSettleRepairPromptUnit(t *testing.T) {
+	t.Parallel()
 	reviews := []ReviewResult{
 		{Model: "rm1@test", Verdict: "accept", Comments: "fine"},
 		{Model: "rm2@test", Verdict: "needs_fixes", Comments: "fix the off-by-one\n(second line)"},
@@ -400,6 +403,7 @@ func TestSettleRepairPromptUnit(t *testing.T) {
 // section explicitly so any drift in the shared cores fails here, not in
 // some downstream prompt-evaluation.
 func TestSettleRevisePromptBytes(t *testing.T) {
+	t.Parallel()
 	worktree := "WORKTREE (canonical): your checkout is /wt — make ALL edits and stage ALL changes there. " +
 		"Other directories under .odo/worktrees/ belong to earlier runs of this same task: treat them as read-only reference; do NOT edit, stage, or commit in them. " +
 		"Your diff is extracted from your own checkout only.\n\n"
@@ -663,6 +667,7 @@ func TestIndependentRejectAutoRejects(t *testing.T) {
 // other non-infra blocked outcome stays terminal on landing; panel_infra
 // stays retryable.
 func TestRepanelBounded(t *testing.T) {
+	t.Parallel()
 	ev := func(payload string) store.Event {
 		return store.Event{Type: store.EventReviewAction, Payload: json.RawMessage(payload)}
 	}
@@ -698,6 +703,7 @@ func TestRepanelBounded(t *testing.T) {
 // loop suspension). Fold-level, TestLoopFoldAttributesPanelLandedFix
 // pattern.
 func TestLoopFixMinorityUnlanded(t *testing.T) {
+	t.Parallel()
 	mk := func(seq int, payload string) store.Event {
 		return store.Event{Seq: seq, Type: store.EventLoopEvent, Payload: json.RawMessage(payload)}
 	}
@@ -992,6 +998,7 @@ func TestSettleReviseDiffDigest(t *testing.T) {
 // bare and a//-quoted paths match, longer tokens and absent-from-diff
 // guesses never do.
 func TestFeedbackNamesPath(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		feedback, path string
 		want           bool
@@ -1022,6 +1029,7 @@ func TestFeedbackNamesPath(t *testing.T) {
 // The section's bytes stay whole regardless (an elision is a stat line,
 // not a mutilated quote).
 func TestSettleSplitPatchSectionsQuoted(t *testing.T) {
+	t.Parallel()
 	diff := "diff --git \"a/src/qu\\tted.go\" \"b/src/qu\\tted.go\"\n" +
 		"--- \"a/src/qu\\tted.go\"\n+++ \"b/src/qu\\tted.go\"\n" +
 		"@@ -1 +1,2 @@\n package src\n+quoted-marker-line\n"

@@ -169,6 +169,7 @@ func ruleRow(t *testing.T, r RulesAuditReport, text string) *RulesAuditRow {
 // post-land outcomes only; the rule present in EVERY snapshot is
 // pre-window (no counterfactual) and earns no row.
 func TestRulesAuditAttributionWindow(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	oldContent := memoryRuleLine("old rule", "n1", 1) + "\n"
 	newContent := oldContent + memoryRuleLine("always test first", "n2", 2) + "\n"
@@ -218,6 +219,7 @@ func TestRulesAuditAttributionWindow(t *testing.T) {
 // bleeding into the next outcome, and reviews of an errored run's partial
 // diff label nothing.
 func TestRulesAuditBoundarySemantics(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	content := memoryRuleLine("rule x", "n", 1) + "\n"
 	f.writeMemory(t, content)
@@ -264,6 +266,7 @@ func TestRulesAuditBoundarySemantics(t *testing.T) {
 // weak outcome (0.5 weight in the reject-rate); a human action on the same
 // diff replaces it.
 func TestRulesAuditWeakRejectAndOverride(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	content := memoryRuleLine("rule x", "n", 1) + "\n"
 	f.writeMemory(t, content)
@@ -300,6 +303,7 @@ func TestRulesAuditWeakRejectAndOverride(t *testing.T) {
 // terminal exclusion the paneldone would close the window and hide the
 // earlier real send's cohort.
 func TestRulesAuditSlashAndPanelExclusion(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	content := memoryRuleLine("rule x", "n", 1) + "\n"
 	f.writeMemory(t, content)
@@ -328,6 +332,7 @@ func TestRulesAuditSlashAndPanelExclusion(t *testing.T) {
 // TestRulesAuditAutoActorExcluded: auto_panel resolutions feed neither
 // rule rows nor the baseline — the loop never grades itself (M17 F5).
 func TestRulesAuditAutoActorExcluded(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	content := memoryRuleLine("rule x", "n", 1) + "\n"
 	f.writeMemory(t, content)
@@ -365,6 +370,7 @@ func TestRulesAuditAutoActorExcluded(t *testing.T) {
 // unknown cohorts — counted in totals, attributed to no rule, and the
 // report says per-rule attribution is unavailable.
 func TestRulesAuditNoSnapshots(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	f.writeMemory(t, memoryRuleLine("rule x", "n", 1)+"\n")
 	f.seedConv(t, "main", []raStep{
@@ -391,6 +397,7 @@ func TestRulesAuditNoSnapshots(t *testing.T) {
 // TestRulesAuditNoData: an unresolved journal computes to a zero report
 // (never a crash).
 func TestRulesAuditNoData(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	f.seedConv(t, "main", []raStep{{sec: 1, kind: "msg", text: "hello"}})
 	r := f.compute(t)
@@ -419,6 +426,7 @@ func mkRuleOutcomes(kind string, n, startSeq, convID int, memHash string) []rule
 // resolutions (task spec), so a row's own outcomes dilute its margin —
 // the fixtures below budget for it.
 func TestRulesAuditFlagThresholds(t *testing.T) {
+	t.Parallel()
 	const X = "sha-x"
 	// The empty cohort is the counterfactual that makes "rule x" in-window
 	// (some journaled snapshot lacks it) — without it the rule is
@@ -521,6 +529,7 @@ func TestRulesAuditFlagThresholds(t *testing.T) {
 // that halves BOTH rates needs rate mass with nowhere to go — there is
 // no precedence case to pin.
 func TestRulesAuditEffectiveFlag(t *testing.T) {
+	t.Parallel()
 	const X = "sha-x"
 	cohorts := map[string]map[string]bool{X: {"rule x": true}, "sha-empty": {}}
 	current := []memoryRule{{text: "rule x", cites: "n"}}
@@ -570,6 +579,7 @@ func TestRulesAuditEffectiveFlag(t *testing.T) {
 // rules earn no rows, retracted rules earn no rows, memory-free and
 // unknown-cohort outcomes feed only totals.
 func TestRulesAuditEligibilityGates(t *testing.T) {
+	t.Parallel()
 	current := []memoryRule{{text: "rule x", cites: "n"}}
 
 	// Pre-window: rule x in EVERY cohort.
@@ -613,6 +623,7 @@ func TestRulesAuditEligibilityGates(t *testing.T) {
 // level: a flagged rule journals once; an unchanged re-measure adds
 // nothing; a moved measurement re-flags.
 func TestRulesAuditPriorFlagsDedupe(t *testing.T) {
+	t.Parallel()
 	f := newRAFixture(t)
 	ruleText := "never skip regression tests"
 	cohortContent := memoryRuleLine(ruleText, "n2", 2) + "\n"
@@ -751,6 +762,7 @@ func TestRulesAuditPriorFlagsDedupe(t *testing.T) {
 // TestRulesAuditFlagPayloadShape pins the journal contract: the fields a
 // Wave-3 learner read-back (DATA) and the ledger citation rely on.
 func TestRulesAuditFlagPayloadShape(t *testing.T) {
+	t.Parallel()
 	row := RulesAuditRow{Rule: "r", Cites: "n", Flag: "harmful", Injections: 10, Rejects: 3, RejectConversations: 3}
 	base := RulesAuditBaseline{Outcomes: 24, RejectRate: 0.125}
 	b, _ := json.Marshal(RulesAuditFlagPayload(row, base))

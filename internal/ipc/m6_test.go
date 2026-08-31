@@ -149,6 +149,7 @@ func eventSeqByAction(t *testing.T, events []store.Event, action string) int {
 // not, so a query for "authentication" injects epoch 1 FIRST even though it
 // is the oldest note, followed by the unmatched tier newest-first.
 func TestKeywordRecallRanksMatches(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	seedAuthVsBuildNotes(t, root)
 
@@ -177,6 +178,7 @@ func TestKeywordRecallRanksMatches(t *testing.T) {
 // note degrades to pure newest-first with all matchedTerms empty — the
 // pre-M6 behavior, unchanged.
 func TestKeywordRecallFallsBackWhenNoMatch(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	seedAuthVsBuildNotes(t, root)
 
@@ -197,6 +199,7 @@ func TestKeywordRecallFallsBackWhenNoMatch(t *testing.T) {
 // TestKeywordRecallStopWords (spec test 3): stop-words are filtered from
 // the query, and the surviving tokens drive matching.
 func TestKeywordRecallStopWords(t *testing.T) {
+	t.Parallel()
 	if got := fmt.Sprint(tokenizeQuery("how does the auth work")); got != "[auth work]" {
 		t.Fatalf("tokenizeQuery = %s, want [auth work]", got)
 	}
@@ -458,6 +461,7 @@ func TestContradictionPassNoFalsePositive(t *testing.T) {
 // retracted all six. The guard (signals gate the candidate, never join the
 // overlap; ≥2 non-signal salient overlaps to retract) kills it.
 func TestContradictionGuardM17Production(t *testing.T) {
+	t.Parallel()
 	old := []epochNote{
 		{name: "main-epoch-2", content: "The auto-distill window measures eligible bytes with the render formula.\n"},
 		{name: "main-epoch-3", content: "Ledger rows persist the distill duration metric.\n"},
@@ -616,6 +620,7 @@ func TestLedgerWriteFailureJournalsNotFails(t *testing.T) {
 // payload passes; a fabricated number fails. The mechanical gate that keeps
 // any future LLM-selected ledger row honest (inv 4).
 func TestVerifyLedgerQuote(t *testing.T) {
+	t.Parallel()
 	ev := store.Event{Payload: json.RawMessage(`{"action":"distill","duration_ms":187000,"epoch":6}`)}
 	if !verifyLedgerQuote(`"duration_ms":187000`, ev) {
 		t.Error("verbatim quote must verify")
@@ -912,6 +917,7 @@ func TestLedgerZeroProposalsNoCrossEpoch(t *testing.T) {
 // never fires, and git pathspecs built from the raw escapes match nothing.
 // (Only the non-ASCII tail is octal-escaped; the .odo/ prefix stays literal.)
 func TestDiffGuardCQuotedPath(t *testing.T) {
+	t.Parallel()
 	patch := filepath.Join(t.TempDir(), "quoted.diff")
 	content := "diff --git \"a/.odo/m\\303\\251mory.md\" \"b/.odo/m\\303\\251mory.md\"\n" +
 		"index 1111111..2222222 100644\n" +

@@ -277,6 +277,7 @@ func TestConcurrentDrainNoDoubleJournal(t *testing.T) {
 func TestPollDuringDistill(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	t.Setenv("ODO_STUB_SCALE", "1") // W4.5 WINDOW: the 1s lead-in must sit inside the ~6s distill span
 	rig := startRig(t, root)
 	defer rig.stop(t)
 	convID := bootstrapConvWithRun(t, rig, root)
@@ -306,6 +307,7 @@ func TestPollDuringDistill(t *testing.T) {
 func TestDoubleDistillGuard(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	t.Setenv("ODO_STUB_SCALE", "1") // W4.5 WINDOW: second distill must arrive mid-flight (in-progress guard)
 	rig := startRig(t, root)
 	defer rig.stop(t)
 	convID := bootstrapConvWithRun(t, rig, root)
@@ -335,6 +337,7 @@ func TestDoubleDistillGuard(t *testing.T) {
 func TestCancelDuringDistill(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("ODO_OMP_WRAPPER", writeStub(t, slowStubWrapper))
+	t.Setenv("ODO_STUB_SCALE", "1") // W4.5 WINDOW: cancel must arrive mid-flight (~6s distill span)
 	rig := startRig(t, root)
 	defer rig.stop(t)
 	convID := bootstrapConvWithRun(t, rig, root)

@@ -40,6 +40,7 @@ func learningCandidateFixture() LearningCandidate {
 // fields hash identically across calls (⇒ the canonical map marshal is
 // byte-deterministic), and the hash is a full lowercase SHA-256 hex.
 func TestLearningArtifactHash_Stability(t *testing.T) {
+	t.Parallel()
 	c := learningCandidateFixture()
 	h1, h2 := LearningArtifactHash(c), LearningArtifactHash(c)
 	if h1 != h2 {
@@ -57,6 +58,7 @@ func TestLearningArtifactHash_Stability(t *testing.T) {
 // created_seq, and artifact_hash are creation-time metadata — mutating ONLY
 // those fields never changes the artifact (re-creation idempotence).
 func TestLearningArtifactHash_ProvenanceExcluded(t *testing.T) {
+	t.Parallel()
 	base := learningCandidateFixture()
 	want := LearningArtifactHash(base)
 
@@ -80,6 +82,7 @@ func TestLearningArtifactHash_ProvenanceExcluded(t *testing.T) {
 // TestLearningArtifactHash_TruthFields: every truth field must perturb the
 // hash — a field dropped from the canonical map would silently collide.
 func TestLearningArtifactHash_TruthFields(t *testing.T) {
+	t.Parallel()
 	base := learningCandidateFixture()
 	want := LearningArtifactHash(base)
 
@@ -134,6 +137,7 @@ func TestLearningArtifactHash_TruthFields(t *testing.T) {
 // fields intact; the dir is created on first write and the second append
 // grows the file (append-only, never truncated).
 func TestLearningCandidateStore_Roundtrip(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	first := learningCandidateFixture()
 	second := learningCandidateFixture()
@@ -187,6 +191,7 @@ func TestLearningCandidateStore_Roundtrip(t *testing.T) {
 // TestLearningCandidateStore_Dedupe: re-appending the same artifact is a
 // no-op returning the existing row — hash dedupe keeps the file append-only.
 func TestLearningCandidateStore_Dedupe(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	c := learningCandidateFixture()
 
@@ -218,6 +223,7 @@ func TestLearningCandidateStore_Dedupe(t *testing.T) {
 // TestLearningCandidateStore_MissingFile: reading a project with no
 // candidates file is (nil, nil), never an error.
 func TestLearningCandidateStore_MissingFile(t *testing.T) {
+	t.Parallel()
 	rows, err := ReadLearningCandidates(t.TempDir())
 	if err != nil {
 		t.Fatalf("missing file read: %v", err)
@@ -231,6 +237,7 @@ func TestLearningCandidateStore_MissingFile(t *testing.T) {
 // BOTH reads and appends — never a partial read, never silently writing
 // around a torn file.
 func TestLearningCandidateStore_Corrupt(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if _, _, err := AppendLearningCandidate(root, learningCandidateFixture()); err != nil {
 		t.Fatalf("seed append: %v", err)

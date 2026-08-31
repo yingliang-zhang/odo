@@ -336,6 +336,7 @@ func lastDistillMarker(t *testing.T, rig *testRig, convID int64) store.Event {
 // and the empty-window shapes (no events at all / nothing new since the
 // last marker both yield lastSeq < firstSeq).
 func TestFoldWindow(t *testing.T) {
+	t.Parallel()
 	ev := func(seq int, typ, action string) store.Event {
 		p := "{}"
 		if action != "" {
@@ -436,6 +437,7 @@ func TestDistillFoldSchema(t *testing.T) {
 // first-ever distill); a trailing marker yields an empty window, which
 // handleDistill rejects before running the agent.
 func TestWindowEvents(t *testing.T) {
+	t.Parallel()
 	marker := func(seq int) store.Event {
 		return store.Event{Seq: seq, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"distill"}`)}
 	}
@@ -474,6 +476,7 @@ func TestWindowEvents(t *testing.T) {
 // while marker rows themselves are never window content. Legacy
 // payload-less markers keep the marker-seq boundary.
 func TestFoldWindowPinnedSchema(t *testing.T) {
+	t.Parallel()
 	pinned := func(seq, last int) store.Event {
 		return store.Event{Seq: seq, Type: store.EventReviewAction,
 			Payload: json.RawMessage(fmt.Sprintf(`{"action":"distill","last_seq":%d}`, last))}
@@ -533,6 +536,7 @@ func TestFoldWindowPinnedSchema(t *testing.T) {
 // event is dropped whole (never half-rendered), and a single oversized
 // event is still kept — dropping it would distill nothing.
 func TestCapEvents(t *testing.T) {
+	t.Parallel()
 	ev := func(seq, size int) store.Event {
 		// type "agent_text" (10 bytes) + size payload + 64 render pad = one event's cost
 		return store.Event{Seq: seq, Type: "agent_text", Payload: json.RawMessage(strings.Repeat("x", size))}
@@ -569,6 +573,7 @@ func seqsOf(events []store.Event) []int {
 // prompt's omission line declares (threaded from the one capEvents cut);
 // under budget both are zero.
 func TestDistillPromptOmission(t *testing.T) {
+	t.Parallel()
 	ev := func(seq int, fill byte, size int) store.Event {
 		return store.Event{Seq: seq, Type: "agent_text", Payload: json.RawMessage("key-" + strings.Repeat(string(fill), size))}
 	}
@@ -609,6 +614,7 @@ func TestDistillPromptOmission(t *testing.T) {
 // (measureWindow/capEvents via distillRenderSize) matches the render
 // byte-for-byte.
 func TestDistillRenderFilter(t *testing.T) {
+	t.Parallel()
 	thinking := `{"text":"` + strings.Repeat("T", 5000) + `"}`
 	toolRes := `{"tool":"bash","result":"` + strings.Repeat("R", 8000) + `"}`
 	toolCall := `{"tool":"write","args":{"path":"main.go","content":"` + strings.Repeat("C", 12000) + `"}}`
@@ -686,6 +692,7 @@ func TestDistillRenderFilter(t *testing.T) {
 // key and auto_land_blocked additionally carries its reason; human rows
 // (no actor) render byte-identical to the pre-whitelist shape.
 func TestDistillRenderAutoPanelWhitelist(t *testing.T) {
+	t.Parallel()
 	excluded := []store.Event{
 		{Seq: 1, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"moa_review","actor":"auto_panel","diff_id":7,"consensus_verdict":"accept","reviews":[{"model":"m1","verdict":"accept","body":"long panel verdict body"}]}`)},
 		{Seq: 2, Type: store.EventReviewAction, Payload: json.RawMessage(`{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":7,"origin_diff_id":7,"patch_sha16":"0123456789abcdef","comments_sha16":"fedcba9876543210"}`)},
@@ -738,6 +745,7 @@ func TestDistillRenderAutoPanelWhitelist(t *testing.T) {
 // row renders "" if and only if its size is 0 — eligibility accounting and
 // the fold prompt agree byte-for-byte across every row shape.
 func TestDistillRenderSizeWhitelistAgreement(t *testing.T) {
+	t.Parallel()
 	payloads := []string{
 		`{"action":"moa_review","actor":"auto_panel","diff_id":7,"consensus_verdict":"accept","reviews":[{"model":"m1","verdict":"accept","body":"long"}]}`,
 		`{"action":"auto_revise_round","actor":"auto_panel","round":1,"diff_id":7,"origin_diff_id":7,"patch_sha16":"aaa","comments_sha16":"bbb"}`,

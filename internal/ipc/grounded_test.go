@@ -431,6 +431,7 @@ func TestGateDiffRequiresGroundedLeg(t *testing.T) {
 // for the scoped-repo-reads clause while the UNGROUNDED contract (and the
 // ungrounded review prompt) stay byte-identical.
 func TestAuditLegGroundedPrompt(t *testing.T) {
+	t.Parallel()
 	grounded := auditSystemGrounded()
 	if grounded == auditSystem {
 		t.Fatal("grounded audit system == auditSystem — the clause swap no-op'd")

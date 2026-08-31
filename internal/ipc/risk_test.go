@@ -50,6 +50,7 @@ func riskyPatch(path string, isNew bool, body ...string) string {
 // including the per-hunk scoping of data_exfil and the case rules of the
 // supplied snippets.
 func TestClassifyRiskPerClassTriggers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		diff         string
@@ -265,6 +266,7 @@ func TestClassifyRiskPerClassTriggers(t *testing.T) {
 // TestClassifyRiskSeverityOrder: a multi-hit diff returns every class in
 // the locked leak-cost rank (element 0 = the primary class), once each.
 func TestClassifyRiskSeverityOrder(t *testing.T) {
+	t.Parallel()
 	diff := "diff --git a/src/leak.go b/src/leak.go\n--- a/src/leak.go\n+++ b/src/leak.go\n@@ -1,0 +1,5 @@\n" +
 		`+	key := os.Getenv("OPENAI_API_KEY")` + "\n" +
 		`+	blob, _ := os.ReadFile("x")` + "\n" +
@@ -292,6 +294,7 @@ func TestClassifyRiskSeverityOrder(t *testing.T) {
 // TestClassifyRiskRemovedOnlyIsNotWeakening (lock): removing a
 // weakening/destructive shape is an improvement — added-lines only.
 func TestClassifyRiskRemovedOnlyIsNotWeakening(t *testing.T) {
+	t.Parallel()
 	diff := riskyPatch("src/http.go", false,
 		`-	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}`,
 		`-	key, _ := hex.DecodeString(s) //nosec G101`,
@@ -308,6 +311,7 @@ func TestClassifyRiskRemovedOnlyIsNotWeakening(t *testing.T) {
 // TestClassifyRiskNoneForDocsDiff: a docs-only diff rates explicit
 // "none" (the rated-clean posture; distinct from pre-W5 unrated).
 func TestClassifyRiskNoneForDocsDiff(t *testing.T) {
+	t.Parallel()
 	classes, evidence := classifyRisk(patchDoc("README.md", 3))
 	if len(classes) != 1 || classes[0] != "none" {
 		t.Errorf("classes = %v, want [none]", classes)
@@ -331,6 +335,7 @@ func TestClassifyRiskNoneForDocsDiff(t *testing.T) {
 // TestRiskReceiptUnreadablePatch (lock): an unreadable patch attests
 // LESS — the empty receipt merges nothing (all three keys absent).
 func TestRiskReceiptUnreadablePatch(t *testing.T) {
+	t.Parallel()
 	if receipt := riskReceipt(filepath.Join(t.TempDir(), "missing.diff")); len(receipt) != 0 {
 		t.Errorf("receipt = %v, want empty for an unreadable patch", receipt)
 	}
@@ -340,6 +345,7 @@ func TestRiskReceiptUnreadablePatch(t *testing.T) {
 // autoLandSupplyChainFiles directly — a newly denied basename classifies
 // supply_chain with NO second list to edit.
 func TestClassifyRiskSupplyChainMapSSOT(t *testing.T) {
+	t.Parallel()
 	diff := riskyPatch("vendor/odebian.lock", false, "+{}")
 	if classes, _ := classifyRisk(diff); len(classes) != 1 || classes[0] != "none" {
 		t.Fatalf("pre-map classes = %v, want [none] (basename not yet denied)", classes)
@@ -358,6 +364,7 @@ func TestClassifyRiskSupplyChainMapSSOT(t *testing.T) {
 // TestRiskReceiptFromDisk: the on-disk receipt carries all three keys on
 // a dirty patch, two on a clean one.
 func TestRiskReceiptFromDisk(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dirty := filepath.Join(dir, "dirty.diff")
 	if err := os.WriteFile(dirty, []byte(riskyPatch("src/k.go", false,

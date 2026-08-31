@@ -394,6 +394,7 @@ func TestStartReviseRunWorktreeCreateFailure(t *testing.T) {
 // section: the same declaration repair prompts carry (both ladder prompts
 // are wander-prone the same way), verbatim path, before the goal fence.
 func TestSettleRebasePromptUnit(t *testing.T) {
+	t.Parallel()
 	prompt := settleRebasePrompt("THE ORIGINAL GOAL", "THE DIFF BODY", "MERGE DIAGNOSTICS", "/abs/rebase/worktree")
 	wtAt := strings.Index(prompt, "/abs/rebase/worktree")
 	goalAt := strings.Index(prompt, "THE ORIGINAL GOAL")

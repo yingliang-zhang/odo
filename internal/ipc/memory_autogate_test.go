@@ -24,6 +24,7 @@ import (
 // --- decision functions ---
 
 func TestPanelAcceptsDecision(t *testing.T) {
+	t.Parallel()
 	accepts := []ReviewResult{
 		{Model: "m1", Verdict: "accept"},
 		{Model: "m2", Verdict: "accept"},
@@ -58,6 +59,7 @@ func TestPanelAcceptsDecision(t *testing.T) {
 }
 
 func TestRuleReviewPromptContent(t *testing.T) {
+	t.Parallel()
 	p := MemoryProposal{Target: "user.md", Rule: "Always run the suite after landing."}
 	prompt := ruleReviewPrompt(p, "# Epoch 3\n\nThe note.\n")
 	for _, want := range []string{"user.md", "all projects", "The note.", "Always run the suite after landing.", "ACCEPT, REJECT, NEEDS_FIXES"} {
@@ -68,6 +70,7 @@ func TestRuleReviewPromptContent(t *testing.T) {
 }
 
 func TestReviewsRideOn(t *testing.T) {
+	t.Parallel()
 	if reviewsRideOn(nil, 3) {
 		t.Error("empty proposals must not read as gated")
 	}
@@ -85,6 +88,7 @@ func TestReviewsRideOn(t *testing.T) {
 }
 
 func TestAutoApplyRefused(t *testing.T) {
+	t.Parallel()
 	mk := func(seq int, cause string, epoch int) store.Event {
 		return store.Event{Seq: seq, Type: store.EventMemoryUpdate, Payload: json.RawMessage(mustJSON(map[string]interface{}{
 			"layer": "apply", "cause": cause, "epoch": epoch,
@@ -110,6 +114,7 @@ func TestAutoApplyRefused(t *testing.T) {
 // self-aborts on its own memory bookkeeping, while real conversation
 // growth still aborts.
 func TestUnownedFoldGrowthMemoryPipelineRows(t *testing.T) {
+	t.Parallel()
 	owned := []store.Event{
 		{Seq: 1, Type: store.EventReviewAction, Payload: json.RawMessage(mustJSON(map[string]interface{}{"action": "memory_apply"}))},
 		{Seq: 2, Type: store.EventReviewAction, Payload: json.RawMessage(mustJSON(map[string]interface{}{"action": "memory_gate"}))},
@@ -466,6 +471,7 @@ func TestDistillSweepSkipsRefusedBatch(t *testing.T) {
 // aligned (the receipt's only consumer is an auditor reading the journal;
 // catch a shape regression here).
 func TestMemoryGateReceiptShape(t *testing.T) {
+	t.Parallel()
 	reviews := [][]ReviewResult{
 		{{Model: "m1", Verdict: "accept"}, {Model: "m2", Verdict: "reject"}},
 		{{Model: "m1", Verdict: "accept"}, {Model: "m2", Verdict: "accept"}},

@@ -12,6 +12,7 @@ import (
 // keywords, and injection cap boundary.
 
 func TestParseFrontmatter_Standard(t *testing.T) {
+	t.Parallel()
 	content := "---\nname: my-skill\ndescription: Use when testing.\nkeywords: [tdd, test, refactor]\norigin: ported\n---\n\n# My Skill\n\nBody text here.\n"
 	name, desc, origin, keywords, body := parseFrontmatter(content)
 	if name != "my-skill" {
@@ -32,6 +33,7 @@ func TestParseFrontmatter_Standard(t *testing.T) {
 }
 
 func TestParseFrontmatter_BlockListKeywords(t *testing.T) {
+	t.Parallel()
 	content := "---\nname: list-skill\nkeywords:\n  - alpha\n  - beta\n  - gamma\n---\n\nBody\n"
 	_, _, _, keywords, _ := parseFrontmatter(content)
 	if len(keywords) != 3 || keywords[0] != "alpha" || keywords[2] != "gamma" {
@@ -40,6 +42,7 @@ func TestParseFrontmatter_BlockListKeywords(t *testing.T) {
 }
 
 func TestParseFrontmatter_NoFrontmatter(t *testing.T) {
+	t.Parallel()
 	content := "# Just a title\n\nNo frontmatter here."
 	name, _, origin, keywords, body := parseFrontmatter(content)
 	if name != "" {
@@ -57,6 +60,7 @@ func TestParseFrontmatter_NoFrontmatter(t *testing.T) {
 }
 
 func TestParseFrontmatter_BOMPrefix(t *testing.T) {
+	t.Parallel()
 	content := "\uFEFF---\nname: bom-skill\ndescription: BOM test\n---\n\nBody"
 	name, _, _, _, _ := parseFrontmatter(content)
 	if name != "bom-skill" {
@@ -65,6 +69,7 @@ func TestParseFrontmatter_BOMPrefix(t *testing.T) {
 }
 
 func TestParseFrontmatter_NoTrailingNewline(t *testing.T) {
+	t.Parallel()
 	content := "---\nname: eof-skill\ndescription: EOF test\n---"
 	name, _, _, _, _ := parseFrontmatter(content)
 	if name != "eof-skill" {
@@ -73,6 +78,7 @@ func TestParseFrontmatter_NoTrailingNewline(t *testing.T) {
 }
 
 func TestParseFrontmatter_EmptyKeywords(t *testing.T) {
+	t.Parallel()
 	content := "---\nname: no-kw\ndescription: No keywords\nkeywords: []\n---\n\nBody\n"
 	_, _, _, keywords, _ := parseFrontmatter(content)
 	if len(keywords) != 0 {
@@ -81,6 +87,7 @@ func TestParseFrontmatter_EmptyKeywords(t *testing.T) {
 }
 
 func TestParseFrontmatter_OriginDefault(t *testing.T) {
+	t.Parallel()
 	content := "---\nname: test\n---\n\nBody"
 	_, _, origin, _, _ := parseFrontmatter(content)
 	if origin != "human" {
@@ -89,6 +96,7 @@ func TestParseFrontmatter_OriginDefault(t *testing.T) {
 }
 
 func TestParseFrontmatter_QuotedValues(t *testing.T) {
+	t.Parallel()
 	content := "---\nname: \"quoted-name\"\ndescription: \"Use when quoted\"\n---\n\nBody"
 	name, desc, _, _, _ := parseFrontmatter(content)
 	if name != "quoted-name" {
@@ -100,6 +108,7 @@ func TestParseFrontmatter_QuotedValues(t *testing.T) {
 }
 
 func TestParseFrontmatter_CRLF(t *testing.T) {
+	t.Parallel()
 	content := "---\r\nname: crlf-skill\r\ndescription: CRLF test\r\n---\r\n\r\nBody\r\n"
 	name, _, _, _, _ := parseFrontmatter(content)
 	if name != "crlf-skill" {
@@ -108,6 +117,7 @@ func TestParseFrontmatter_CRLF(t *testing.T) {
 }
 
 func TestMatchSkills_KeywordMatch(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "tdd-workflow", Keywords: []string{"tdd", "test"}}},
 		{info: SkillInfo{Name: "deploy-checklist", Keywords: []string{"deploy", "ship"}}},
@@ -119,6 +129,7 @@ func TestMatchSkills_KeywordMatch(t *testing.T) {
 }
 
 func TestMatchSkills_ScoringOrder(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "low-match", Keywords: []string{"test"}}},         // score 2 (keyword)
 		{info: SkillInfo{Name: "high-match", Keywords: []string{"test", "tdd"}}}, // score 4 (2 keywords)
@@ -133,6 +144,7 @@ func TestMatchSkills_ScoringOrder(t *testing.T) {
 }
 
 func TestMatchSkills_UnmatchedExcluded(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "tdd-workflow", Keywords: []string{"tdd"}}},
 		{info: SkillInfo{Name: "unrelated-skill", Keywords: []string{"cooking"}}},
@@ -144,6 +156,7 @@ func TestMatchSkills_UnmatchedExcluded(t *testing.T) {
 }
 
 func TestMatchSkills_EmptyQueryReturnsNil(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "skill-1"}},
 		{info: SkillInfo{Name: "skill-2"}},
@@ -155,6 +168,7 @@ func TestMatchSkills_EmptyQueryReturnsNil(t *testing.T) {
 }
 
 func TestMatchSkills_StopWordOnlyQueryReturnsNil(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "skill-1", Keywords: []string{"test"}}},
 	}
@@ -165,6 +179,7 @@ func TestMatchSkills_StopWordOnlyQueryReturnsNil(t *testing.T) {
 }
 
 func TestFormatSkillsForInjection_CapBoundary(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "big-skill"}, body: string(make([]byte, 3000))},
 		{info: SkillInfo{Name: "second-skill"}, body: string(make([]byte, 3000))},
@@ -185,6 +200,7 @@ func TestFormatSkillsForInjection_CapBoundary(t *testing.T) {
 }
 
 func TestFormatSkillsForInjection_EmptyInput(t *testing.T) {
+	t.Parallel()
 	block, receipts := formatSkillsForInjection(nil, 8192)
 	if block != "" {
 		t.Errorf("empty input should return empty block, got %q", block)
@@ -195,6 +211,7 @@ func TestFormatSkillsForInjection_EmptyInput(t *testing.T) {
 }
 
 func TestFormatSkillsForInjection_SingleUnderCap(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "small-skill", Path: ".odo/skills/small.md"}, body: "Small body"},
 	}

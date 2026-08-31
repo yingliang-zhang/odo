@@ -121,6 +121,7 @@ func TestRegistryAllowsOrdinaryProjects(t *testing.T) {
 }
 
 func TestIsOdoWorktreePath(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		path string
 		want bool

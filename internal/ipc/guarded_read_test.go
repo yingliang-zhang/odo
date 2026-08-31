@@ -50,6 +50,7 @@ func guardedFixture(t *testing.T) (root, dir, plain, external, externalBody stri
 // TestGuardedReadPlainFile: a regular file inside dir reads exactly as
 // os.ReadFile — the guard adds no behavior for the common path.
 func TestGuardedReadPlainFile(t *testing.T) {
+	t.Parallel()
 	root, dir, plain, _, _ := guardedFixture(t)
 	b, err := readWithinDir(root, dir, plain)
 	if err != nil {
@@ -65,6 +66,7 @@ func TestGuardedReadPlainFile(t *testing.T) {
 // resolved≠clean fast path must not refuse containment-correct links; on
 // macOS even /var→/private/var resolution must not false-positive).
 func TestGuardedReadSymlinkWithin(t *testing.T) {
+	t.Parallel()
 	root, dir, plain, _, _ := guardedFixture(t)
 	link := filepath.Join(dir, "link.md")
 	if err := os.Symlink(plain, link); err != nil {
@@ -83,6 +85,7 @@ func TestGuardedReadSymlinkWithin(t *testing.T) {
 // fail with an escape error that is NOT IsNotExist (a swallow-as-missing
 // regression would silently pass a stronger assertion).
 func TestGuardedReadSymlinkEscape(t *testing.T) {
+	t.Parallel()
 	root, dir, _, external, externalBody := guardedFixture(t)
 	link := filepath.Join(dir, "evil.md")
 	if err := os.Symlink(external, link); err != nil {
@@ -106,6 +109,7 @@ func TestGuardedReadSymlinkEscape(t *testing.T) {
 // TestGuardedReadMissing: an absent path keeps the raw os error so callers
 // that skip on err — or discriminate with os.IsNotExist — behave untouched.
 func TestGuardedReadMissing(t *testing.T) {
+	t.Parallel()
 	root, dir, _, _, _ := guardedFixture(t)
 	_, err := readWithinDir(root, dir, filepath.Join(dir, "absent.md"))
 	if err == nil {
@@ -120,6 +124,7 @@ func TestGuardedReadMissing(t *testing.T) {
 // full chain; containment decides on the FINAL target, so a two-hop launder
 // is refused exactly like the direct escape.
 func TestGuardedReadSymlinkChainEscape(t *testing.T) {
+	t.Parallel()
 	root, dir, _, external, externalBody := guardedFixture(t)
 	mid := filepath.Join(dir, "mid.md")
 	if err := os.Symlink(external, mid); err != nil {
@@ -145,6 +150,7 @@ func TestGuardedReadSymlinkChainEscape(t *testing.T) {
 // inside dir still reads — containment is decided on resolution, never on
 // hop count.
 func TestGuardedReadWithinChain(t *testing.T) {
+	t.Parallel()
 	root, dir, plain, _, _ := guardedFixture(t)
 	mid := filepath.Join(dir, "mid.md")
 	if err := os.Symlink(plain, mid); err != nil {
@@ -172,6 +178,7 @@ func TestGuardedReadWithinChain(t *testing.T) {
 // legitimate in-project directory, because daemon-owned dirs are never
 // links and the stronger rule needs no intent judgment.
 func TestGuardedReadRootNodeSymlinkRefused(t *testing.T) {
+	t.Parallel()
 	root, _, _, external, externalBody := guardedFixture(t)
 
 	// Case A: root node -> external dir holding a same-named file. The
@@ -221,6 +228,7 @@ func TestGuardedReadRootNodeSymlinkRefused(t *testing.T) {
 // topics node itself) resolves outside the canonical project root — the
 // anchor refuses where resolution-against-dir saw a coherent tree.
 func TestGuardedReadAncestorSymlinkCaught(t *testing.T) {
+	t.Parallel()
 	root, _, _, _, _ := guardedFixture(t)
 
 	// wiki -> external: dir = wiki/topics must not contain against the
@@ -260,6 +268,7 @@ func TestGuardedReadAncestorSymlinkCaught(t *testing.T) {
 // symlinked path is legitimate — the canonical anchor resolves it, so
 // ordinary in-tree reads under the linked registration path still work.
 func TestGuardedReadCanonicalRootAnchor(t *testing.T) {
+	t.Parallel()
 	root, dir, plain, _, _ := guardedFixture(t)
 	linkRoot := filepath.Join(t.TempDir(), "project-link")
 	if err := os.Symlink(root, linkRoot); err != nil {
@@ -282,6 +291,7 @@ func TestGuardedReadCanonicalRootAnchor(t *testing.T) {
 // through the file itself, passes real trees, and lets a symlinked
 // PROJECT ROOT (a legitimate registration shape) write in-tree.
 func TestGuardedWritePath(t *testing.T) {
+	t.Parallel()
 	root, _, _, _, _ := guardedFixture(t)
 	ext := t.TempDir()
 
@@ -357,6 +367,7 @@ func TestGuardedWritePath(t *testing.T) {
 // byte-identically — AT the cap included, since max+1 reads classify
 // only "over", never truncate "exactly at".
 func TestGuardedReadCappedPlainFile(t *testing.T) {
+	t.Parallel()
 	root, dir, plain, _, _ := guardedFixture(t)
 	const body = "plain body\n"
 	b, err := readWithinDirCapped(root, dir, plain, int64(len(body)))
@@ -380,6 +391,7 @@ func TestGuardedReadCappedPlainFile(t *testing.T) {
 // deterministically (no sleeps); the twin must refuse with the sentinel
 // having read only max+1 bytes: the megabyte beyond never allocates.
 func TestGuardedReadCappedGrowthRace(t *testing.T) {
+	t.Parallel()
 	root, dir, _, _, _ := guardedFixture(t)
 	grower := filepath.Join(dir, "grow.md")
 	if err := os.WriteFile(grower, []byte("small"), 0o644); err != nil {
@@ -415,6 +427,7 @@ func TestGuardedReadCappedGrowthRace(t *testing.T) {
 // error land identically (the full escape matrix above already guards
 // the shared prologue).
 func TestGuardedReadCappedEscape(t *testing.T) {
+	t.Parallel()
 	root, dir, _, external, _ := guardedFixture(t)
 	link := filepath.Join(dir, "link.md")
 	if err := os.Symlink(external, link); err != nil {

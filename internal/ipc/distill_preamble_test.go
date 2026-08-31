@@ -3,6 +3,7 @@ package ipc
 import "testing"
 
 func TestStripPreamble(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		input string

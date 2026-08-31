@@ -385,6 +385,10 @@ type Server struct {
 	// production never sets it (the M12 default-ON posture).
 	livenessDisabled atomic.Bool
 	livenessInterval atomic.Int64 // nanoseconds; 0 → livenessDrainInterval
+	// oneShotPollNs overrides the runOneShot event-poll cadence when >0
+	// (the resolvedIdle/livenessInterval pattern): tests shrink it,
+	// production leaves it at oneShotPollInterval.
+	oneShotPollNs atomic.Int64 // nanoseconds
 	// Shutdown: Wait (and rig teardown) close livenessStop once BEFORE
 	// draining wg — a tick journals under s.mu and must not race the store
 	// close. livenessWG joins the goroutine so teardown is deterministic.
@@ -6601,7 +6605,7 @@ func (s *Server) runDistillAgent(ctx context.Context, prompt string) (string, *d
 	if ad == nil {
 		ad = s.adapterFor("") // fallback to default if distill adapter not configured
 	}
-	note, err := runOneShot(ctx, ad, prompt, distillTimeout)
+	note, err := runOneShot(ctx, ad, prompt, distillTimeout, s.resolvedOneShotPoll())
 	return note, nil, err
 }
 
@@ -6718,7 +6722,22 @@ func runMoaOneShot(ctx context.Context, client *moa.Client, task, prompt string)
 // agent_text output. Distill (OMP route), learner, and curator use it
 // (review migrated to moa.Query in D5; distill/learner/curator migrate on
 // their prefs `*_via: moa` routes, R-W2/R-W3).
-func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout time.Duration) (string, error) {
+// oneShotPollInterval is the production event-poll cadence of runOneShot
+// (the distill/learner/curator one-shots). Tests shrink it through the
+// Server's oneShotPollNs seam — 200ms of dead poll latency per one-shot
+// is unnoticeable to users but significant across ~150 suite one-shots.
+const oneShotPollInterval = 200 * time.Millisecond
+
+// resolvedOneShotPoll applies the test-seam override to the one-shot
+// event-poll cadence (the resolvedIdle/livenessInterval pattern).
+func (s *Server) resolvedOneShotPoll() time.Duration {
+	if v := s.oneShotPollNs.Load(); v > 0 {
+		return time.Duration(v)
+	}
+	return oneShotPollInterval
+}
+
+func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout, poll time.Duration) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "odo-oneshot-")
 	if err != nil {
 		return "", fmt.Errorf("oneshot dir: %w", err)
@@ -6773,7 +6792,7 @@ func runOneShot(ctx context.Context, ad adapter.Adapter, prompt string, timeout 
 			_ = ad.Cancel(ctx, runID)
 			return "", fmt.Errorf("run timed out")
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(poll)
 	}
 	out := strings.Join(texts, "\n\n")
 	if runErr != "" {

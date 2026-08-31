@@ -41,6 +41,7 @@ func runUsageReceipts(t *testing.T, st *store.Store, convID int64) (int, map[str
 // honestly (usage_available:false + reason) instead of vanishing or
 // fabricating zeros.
 func TestJournalRunUsageFailSoft(t *testing.T) {
+	t.Parallel()
 	f := newAutonomyFixture(t)
 	mgr := worktree.NewManager(f.dir)
 	if err := mgr.EnsureDirs(); err != nil {
@@ -73,6 +74,7 @@ func TestJournalRunUsageFailSoft(t *testing.T) {
 // (adapter.SessionUsage's own wire-shape pins live in the adapter; this
 // pins the RECEIPT wiring).
 func TestJournalRunUsageMeasured(t *testing.T) {
+	t.Parallel()
 	f := newAutonomyFixture(t)
 	mgr := worktree.NewManager(f.dir)
 	if err := mgr.EnsureDirs(); err != nil {
@@ -165,6 +167,7 @@ exit 0
 // finished runs owe one receipt; unfinished runs, loop runs, and an
 // already-receipted run owe none.
 func TestRunUsageReceiptGate(t *testing.T) {
+	t.Parallel()
 	var m runMeta
 	if m.runUsageReceiptDue() {
 		t.Fatal("unfinished run owes no receipt")

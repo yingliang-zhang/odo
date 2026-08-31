@@ -21,6 +21,7 @@ import (
 // ---------------------------------------------------------------- scanner
 
 func TestFindTodoBlocks(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		text string
@@ -50,6 +51,7 @@ func TestFindTodoBlocks(t *testing.T) {
 // ------------------------------------------------------------------ parser
 
 func TestParseTodoBlock(t *testing.T) {
+	t.Parallel()
 	valid := `[{"op":"add","text":"x"},{"op":"done","id":"t1"},{"op":"strike","id":"t2"},{"op":"reword","id":"t3","text":"y"}]`
 	if ops, err := parseTodoBlock(valid, false); err != nil || len(ops) != 4 {
 		t.Fatalf("valid block: ops=%v err=%v", ops, err)
@@ -116,6 +118,7 @@ func FuzzTodoBlockParse(f *testing.F) {
 // ------------------------------------------------------- merge op semantics
 
 func TestTodoOpSemantics(t *testing.T) {
+	t.Parallel()
 	var st todoState
 	var rejects []todoReject
 	apply := func(ops []todoOp, seq int) int {
@@ -162,6 +165,7 @@ func TestTodoOpSemantics(t *testing.T) {
 }
 
 func TestTodoTextGuards(t *testing.T) {
+	t.Parallel()
 	var st todoState
 	var rejects []todoReject
 	ops := []todoOp{
@@ -186,6 +190,7 @@ func TestTodoTextGuards(t *testing.T) {
 }
 
 func TestTodoDuplicateReaffirm(t *testing.T) {
+	t.Parallel()
 	var st todoState
 	var rejects []todoReject
 	st.applyTodoOps([]todoOp{{Op: todoOpAdd, Text: "Write the migration plan"}}, 20, &rejects)
@@ -209,6 +214,7 @@ func TestTodoDuplicateReaffirm(t *testing.T) {
 }
 
 func TestTodoIDMonotonicNeverReused(t *testing.T) {
+	t.Parallel()
 	var st todoState
 	var rejects []todoReject
 	st.applyTodoOps([]todoOp{{Op: todoOpAdd, Text: "a"}, {Op: todoOpAdd, Text: "b"}}, 10, &rejects)
@@ -234,6 +240,7 @@ func TestTodoIDMonotonicNeverReused(t *testing.T) {
 }
 
 func TestTodoOpenCap(t *testing.T) {
+	t.Parallel()
 	var st todoState
 	var rejects []todoReject
 	ops := make([]todoOp, 0, todoOpenCap+5)
@@ -262,6 +269,7 @@ func todoEvent(seq int, typ, payload string) store.Event {
 }
 
 func TestTodoSweepAtFoldBoundary(t *testing.T) {
+	t.Parallel()
 	// Marker at seq 5: items updated at/before it sweep, items after stay.
 	snapshot := `{"action":"todo_merge","snapshot":[
 		{"id":"t1","text":"still open","status":"open","origin_seq":2,"updated_seq":2},
@@ -306,6 +314,7 @@ func TestTodoSweepAtFoldBoundary(t *testing.T) {
 }
 
 func TestTodoStaleAfterThreeFolds(t *testing.T) {
+	t.Parallel()
 	snapshot := `{"action":"todo_merge","snapshot":[
 		{"id":"t1","text":"aging item","status":"open","origin_seq":2,"updated_seq":2},
 		{"id":"t2","text":"fresh item","status":"open","origin_seq":6,"updated_seq":6}
@@ -349,6 +358,7 @@ func TestTodoStaleAfterThreeFolds(t *testing.T) {
 // ------------------------------------------------------------ render block
 
 func TestRenderTodoBlockOmitsAndCaps(t *testing.T) {
+	t.Parallel()
 	if got := renderTodoBlock(nil); got != "" {
 		t.Errorf("empty state block = %q, want absent", got)
 	}
@@ -390,6 +400,7 @@ func TestRenderTodoBlockOmitsAndCaps(t *testing.T) {
 }
 
 func TestRenderTodoLineMarks(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		v    TodoViewItem
 		want string
@@ -409,6 +420,7 @@ func TestRenderTodoLineMarks(t *testing.T) {
 // Prompt-injection order is a pure buildPrompt property: todo between the
 // resume card and the replay (send path only — slash never sees either).
 func TestTodoInjectionPosition(t *testing.T) {
+	t.Parallel()
 	ml := memoryLayers{resume: "RESUME-CARD", todo: "PLAN-BLOCK", replay: "REPLAY-BLOCK"}
 	p := buildPrompt("msg", nil, ml)
 	iR := strings.Index(p, "RESUME-CARD")
@@ -428,6 +440,7 @@ func TestTodoInjectionPosition(t *testing.T) {
 // ------------------------------------------------ snapshot cap + journal
 
 func TestSnapshotForJournalCap(t *testing.T) {
+	t.Parallel()
 	var items []todoEntry
 	for i := 1; i <= 12; i++ {
 		items = append(items, todoEntry{
@@ -611,6 +624,7 @@ func TestTodoAdversarialThousandOpsBounded(t *testing.T) {
 }
 
 func TestTodoAdversarialThousandAddsCap(t *testing.T) {
+	t.Parallel()
 	ops := make([]todoOp, 0, 1000)
 	for i := 0; i < 1000; i++ {
 		ops = append(ops, todoOp{Op: todoOpAdd, Text: fmt.Sprintf("adversarial %d", i)})

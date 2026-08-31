@@ -144,6 +144,7 @@ func TestScanSkillsSkipsOversizedFile(t *testing.T) {
 }
 
 func TestFormatSkillsSkipsOversizedKeepsSmaller(t *testing.T) {
+	t.Parallel()
 	entries := []skillEntry{
 		{info: SkillInfo{Name: "big", Path: "big.md"}, body: strings.Repeat("x", 9000)},
 		{info: SkillInfo{Name: "small", Path: "small.md"}, body: "tiny procedure"},
@@ -340,6 +341,7 @@ func TestDeleteWorkstreamRefusesActiveWork(t *testing.T) {
 // --- P1: /loop tasks file containment --------------------------------------
 
 func TestReadLoopTaskFileContainment(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	s := &Server{projectRoot: root}
 
@@ -417,6 +419,7 @@ func TestReadLoopTaskFileGrowthPastCap(t *testing.T) {
 // path+sha16; recovery must re-check BOTH the containment and the hash —
 // replaced bytes previously steered the next round as if attested.
 func TestLoopArtifactBodyIntegrity(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	s := &Server{projectRoot: root}
 
