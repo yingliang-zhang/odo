@@ -514,11 +514,13 @@ func orEmpty(s string) string {
 
 // learnerAutoEnabled reports whether the learner one-shot may ride an
 // AUTOMATIC distill (a manual /distill always runs it). Default off: 28
-// automatic learner runs over 4 days produced zero applied rules, so the
-// unconditional one-shot on every auto fold was pure spend — an epoch
-// stride (every N folds) would only thin a zero-yield run instead of
-// removing it, hence manual-only. Escape hatch: `learner_auto: on`
-// restores the pre-P1-12 always-on shape.
+// automatic learner runs over 4 days produced zero applied rules — a
+// statistic now known to be measurement-corrupted: the pre-31198ff
+// parseVerdict bug misfiled decorated ACCEPT verdicts as needs_fixes,
+// making unanimous accept structurally impossible (2026-08-31 quad-model
+// audit, 61% of accept-grade legs misfiled). Trial LEA-1 re-enables it
+// pending fresh post-fix yield data. Escape hatch: `learner_auto: off`
+// restores the P1-12 manual-only shape.
 func learnerAutoEnabled() bool {
 	return adapter.LoadPrefsRaw("learner_auto") == "on"
 }

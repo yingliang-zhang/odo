@@ -4997,10 +4997,12 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 
 	// Learner pass (M4 §2 + M9): propose behavior rules and skill procedures
 	// from the note just written. Automatic triggers skip the learner by
-	// default (P1-12, learnerAutoEnabled: 28 automatic runs over 4 days
-	// produced zero applied rules, so the one-shot is manual-only unless
-	// the prefs escape hatch opts back in). The policy narrows HERE in
-	// distillCore because this is where manual and automatic folds meet —
+	// default (P1-12, learnerAutoEnabled: the "28 automatic runs over 4
+	// days produced zero applied rules" statistic was measurement-corrupted
+	// by the pre-31198ff parseVerdict bug — decorated ACCEPTs misfiled as
+	// needs_fixes made unanimous accept impossible; trial LEA-1 re-enables
+	// pending fresh yield data, see docs/trials/). The policy narrows HERE
+	// in distillCore because this is where manual and automatic folds meet —
 	// runLearner itself stays trigger-blind. runLearner no longer journals —
 	// distillCore journals after gating the proposals. A learner
 	// failure degrades to a journaled memory_update and never fails the

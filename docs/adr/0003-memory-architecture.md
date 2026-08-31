@@ -23,7 +23,7 @@ journal-anchored architecture instead.
 | topic pages | `wiki/topics/*.md` (M5) | project | curator | via index | — |
 | `index.md` | `wiki/index.md` (M5) | project | curator | always (M5+) | ≤2 KB |
 | `memory.md` | `.odo/memory.md` (M4) | project | distiller, human | always | ≤4 KB |
-| `user.md` | `~/.odo/user.md` (M3) | global | human (P1 #12: learner promotion removed) | always | ≤4 KB |
+| `user.md` | `~/.odo/user.md` (M3) | global | human (P1 #12: learner promotion removed; the P1-12 "zero yield" evidence was later shown measurement-corrupted by the pre-31198ff verdict-parse bug — 2026-08-31 quad-model audit; trial LEA-1 re-enabled `learner_auto` for project-scope rules) | always | ≤4 KB |
 | `ledger.md` | `.odo/ledger.md` (M6) | project | daemon only | never (pulled) | — |
 | `memory-archive.md` | `.odo/memory-archive.md` (M4) | project | distiller | never | append-only |
 
