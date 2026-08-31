@@ -81,14 +81,22 @@ func foldLearningStages(lanes ...[]store.Event) map[string]learningStageInfo {
 // learningStageOf resolves one artifact's folded stage across the
 // project's active conversations. Absent = (zero value, false).
 func (s *Server) learningStageOf(ctx context.Context, projectID int64, hash string) (learningStageInfo, bool) {
+	return learningStageOfStore(ctx, s.store, projectID, hash)
+}
+
+// learningStageOfStore is the store-keyed twin of the method above (one
+// fold, one cross-lane walk): daemon gates ride the method, the W6
+// human-action cores (learning_actions.go) ride this free form from CLI
+// processes.
+func learningStageOfStore(ctx context.Context, st *store.Store, projectID int64, hash string) (learningStageInfo, bool) {
 	var lanes [][]store.Event
-	if wss, err := s.store.ListWorkstreams(ctx, projectID); err == nil {
+	if wss, err := st.ListWorkstreams(ctx, projectID); err == nil {
 		for _, w := range wss {
-			c, cerr := s.store.GetActiveConversation(ctx, w.ID)
+			c, cerr := st.GetActiveConversation(ctx, w.ID)
 			if cerr != nil {
 				continue
 			}
-			if events, lerr := s.store.ListEvents(ctx, c.ID, 0); lerr == nil {
+			if events, lerr := st.ListEvents(ctx, c.ID, 0); lerr == nil {
 				lanes = append(lanes, events)
 			}
 		}

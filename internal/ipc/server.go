@@ -792,6 +792,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleAutonomyStatus(ctx, req)
 	case CmdLearningStatus:
 		resp, err = s.handleLearningStatus(ctx, req)
+	case CmdLearningAction:
+		resp, err = s.handleLearningAction(ctx, req)
 	case CmdGetSettings:
 		resp, err = s.handleGetSettings(ctx, req)
 	case CmdUpdateSettings:

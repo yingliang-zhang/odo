@@ -118,6 +118,13 @@ const (
 	// surface), and the candidate stage list — for the Memory panel's
 	// Learning tab. The GUI renders this payload and never re-folds.
 	CmdLearningStatus = "learning_status"
+	// D9-W6: learning_action is the daemon's exposure of the human
+	// learning actions — Request.Action drop | apply | promote_global
+	// with Request.Hash naming the candidate (full hash or unique
+	// prefix). The handler rides the same exported cores as
+	// `odo learning drop|apply|promote --global` (learning_actions.go):
+	// one actuation path, journaled with actor:"human".
+	CmdLearningAction = "learning_action"
 )
 
 // Request is one command line on the socket.
@@ -178,6 +185,9 @@ type Request struct {
 	ReceiptSeq           int    `json:"receipt_seq,omitempty"`
 	Dismissed            bool   `json:"dismissed,omitempty"`
 	StrandedConversation int64  `json:"stranded_conversation,omitempty"`
+	// learning_action (D9-W6): the candidate artifact hash or its unique
+	// prefix.
+	Hash string `json:"hash,omitempty"`
 }
 
 // AutoDistillInfo is one scheduled auto-distill for the pending_counts
@@ -483,6 +493,9 @@ type Response struct {
 	// learning_status: the D9-W3 learning fold (episodes + audit flags +
 	// candidate stages).
 	Learning *LearningStatusReport `json:"learning,omitempty"`
+	// learning_action: the D9-W6 human-action outcome (drop / apply /
+	// promote_global).
+	LearningAction *LearningActionResult `json:"learning_action,omitempty"`
 	// R-W4 (design_moa): the consolidated DESIGN LOCK document plus every
 	// leg's proposal/metadata ("proposals" is already the memory_proposals
 	// wire key, hence design_proposals).

@@ -13,11 +13,16 @@ import { Badge } from "./ui/badge";
 // accounting, and the candidate lifecycle (an empty state until W4 writes
 // .odo/learning/candidates.jsonl). Read-only — no decision path consumes it.
 //
+// D9-W6 (stall closeout): learning_stall advisories (W5 journal rows)
+// render as stall rows INSIDE the Candidates stage feed — one per
+// (hash, stage), deduped upstream, advisory-only. No new panel.
+//
 // Class hooks: learning-panel / learning-section / learning-flag-row /
-// learning-episode-row / learning-candidate-row; section headers reuse the
-// shared mem-section-title, empty states wiki-hint, the error banner
-// settings-error — no new app.css rules needed (Tailwind utilities carry
-// layout, same P1-P4 doctrine as MemoryPanel).
+// learning-episode-row / learning-candidate-row / learning-stall-row;
+// section headers reuse the shared mem-section-title, empty states
+// wiki-hint, the error banner settings-error — no new app.css rules
+// needed (Tailwind utilities carry layout, same P1-P4 doctrine as
+// MemoryPanel).
 
 interface Props {
   // All reads route to this project's daemon; null = bridge default. App
@@ -122,6 +127,11 @@ function LearningPanel({ projectRoot, active }: Props) {
   const t = status?.flag_thresholds;
   const totals = status?.episode_totals;
 
+  // D9-W6: stall advisories (W5's learning_stall journal rows) render
+  // as rows inside the Candidates stage feed — advisory-only, one per
+  // (hash, stage), deduped upstream; no new panel.
+  const stalls = status?.stalls ?? [];
+
   return (
     <div className="learning-panel h-full flex flex-col">
       {error && <div className="settings-error">{error}</div>}
@@ -196,32 +206,48 @@ function LearningPanel({ projectRoot, active }: Props) {
 
           <div className="learning-section mb-4">
             <div className="mem-section-title">Candidates</div>
-            {status.candidates.length === 0 ? (
+            {status.candidates.length === 0 && stalls.length === 0 ? (
               <div className="wiki-hint">
                 No learning candidates yet — the candidate lifecycle lands in wave W4; this list will read
                 .odo/learning/candidates.jsonl + stage rows.
               </div>
             ) : (
               // Forward-compat (W4+): nothing writes candidates in W3, but
-              // the locked shape renders without a GUI change then.
-              status.candidates.map((c) => (
-                <div
-                  key={c.artifact_hash}
-                  className="learning-candidate-row flex items-center gap-2 px-3 py-2.5 border-b border-[var(--border)] bg-[var(--bg-raised)]"
-                >
-                  <Badge variant="other" className="capitalize">
-                    {c.stage}
-                  </Badge>
-                  <span className="learning-candidate-hash font-mono text-[11px] text-[var(--text-dim)]">
-                    {c.artifact_hash.slice(0, 12)}
-                  </span>
-                  <span className="learning-candidate-scope text-[11px] text-[var(--text-dim)]">{c.scope}</span>
-                  <span className="learning-candidate-seq text-[11px] text-[var(--text-dim)]">{`seq ${c.created_seq}`}</span>
-                  {c.invalid && (
-                    <span className="learning-candidate-invalid text-[11px] text-[var(--err-text)]">invalid</span>
-                  )}
-                </div>
-              ))
+              // the locked shape renders without a GUI change then. D9-W6:
+              // stall advisories ride as rows in the same feed — each names
+              // its candidate hash, stage, epoch, and the emitter's reason.
+              <>
+                {status.candidates.map((c) => (
+                  <div
+                    key={c.artifact_hash}
+                    className="learning-candidate-row flex items-center gap-2 px-3 py-2.5 border-b border-[var(--border)] bg-[var(--bg-raised)]"
+                  >
+                    <Badge variant="other" className="capitalize">
+                      {c.stage}
+                    </Badge>
+                    <span className="learning-candidate-hash font-mono text-[11px] text-[var(--text-dim)]">
+                      {c.artifact_hash.slice(0, 12)}
+                    </span>
+                    <span className="learning-candidate-scope text-[11px] text-[var(--text-dim)]">{c.scope}</span>
+                    <span className="learning-candidate-seq text-[11px] text-[var(--text-dim)]">{`seq ${c.created_seq}`}</span>
+                    {c.invalid && (
+                      <span className="learning-candidate-invalid text-[11px] text-[var(--err-text)]">invalid</span>
+                    )}
+                  </div>
+                ))}
+                {stalls.map((s) => (
+                  <div
+                    key={`${s.artifact_hash}-${s.stage}-${s.seq}`}
+                    className="learning-stall-row px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-raised)] text-[11px] text-[var(--text-dim)]"
+                  >
+                    <Badge variant="other" className="learning-stall-badge mr-2">
+                      stalled
+                    </Badge>
+                    <span className="font-mono">{s.artifact_hash.slice(0, 12)}</span>
+                    {` aged at ${s.stage} · epoch ${s.epoch} — ${s.reason}`}
+                  </div>
+                ))}
+              </>
             )}
           </div>
         </>

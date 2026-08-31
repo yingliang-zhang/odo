@@ -123,21 +123,29 @@ func (in learningReplayInput) laneEvents() [][]store.Event {
 // half-readable conversation must not sink the gate; its slice simply
 // contributes nothing).
 func (s *Server) gatherLearningReplayInput(ctx context.Context, projectID int64) learningReplayInput {
+	return gatherLearningReplayInputStore(ctx, s.store, projectID)
+}
+
+// gatherLearningReplayInputStore is the store-keyed twin of the method
+// above (one walk, one convention): the daemon's gates ride the method,
+// the W6 human-action cores (learning_actions.go) ride this free form
+// from CLI processes — an identical gather, never two.
+func gatherLearningReplayInputStore(ctx context.Context, st *store.Store, projectID int64) learningReplayInput {
 	var in learningReplayInput
-	wss, err := s.store.ListWorkstreams(ctx, projectID)
+	wss, err := st.ListWorkstreams(ctx, projectID)
 	if err != nil {
 		return in
 	}
 	for _, w := range wss {
-		c, cerr := s.store.GetActiveConversation(ctx, w.ID)
+		c, cerr := st.GetActiveConversation(ctx, w.ID)
 		if cerr != nil {
 			continue
 		}
-		events, lerr := s.store.ListEvents(ctx, c.ID, 0)
+		events, lerr := st.ListEvents(ctx, c.ID, 0)
 		if lerr != nil {
 			continue
 		}
-		diffs, derr := s.store.ListDiffs(ctx, c.ID)
+		diffs, derr := st.ListDiffs(ctx, c.ID)
 		if derr != nil {
 			continue
 		}

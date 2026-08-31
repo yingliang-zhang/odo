@@ -642,6 +642,20 @@ export interface LearningCandidateRow {
   created_seq: number;
   created_at: string; // RFC 3339
   invalid: boolean; // hash-chain unresolvable ⇒ fold marks invalid, refuses transitions
+  // D9-W6: daemon-folded stall marker — a learning_stall advisory exists
+  // for this candidate (advisory only; never auto-promoted/auto-dropped).
+  stalled?: boolean;
+}
+
+// D9-W6: one journaled learning_stall advisory (W5 emits the row, W6
+// surfaces it). Rendered in the Candidates stage feed — no new panel.
+export interface LearningStallRow {
+  seq: number;
+  conversation_id: number;
+  artifact_hash: string;
+  stage: string; // the stage the candidate aged in
+  epoch: number; // main-lane epoch the advisory fired
+  reason: string;
 }
 
 // Daemon-folded learning report (single fold; the GUI renders, never
@@ -655,6 +669,7 @@ export interface LearningStatus {
   flags: LearningFlagRow[];
   flag_thresholds: LearningFlagThresholds;
   candidates: LearningCandidateRow[];
+  stalls: LearningStallRow[]; // D9-W6, newest-first per seq
 }
 
 export interface LearningStatusResponse {

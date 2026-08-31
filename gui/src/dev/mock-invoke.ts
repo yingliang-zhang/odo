@@ -426,7 +426,29 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
             { seq: 977, rule: "Always run go vet before accepting", verdict: "harmful", injections: 12, rejects: 4, reject_conversations: 3 },
           ],
           flag_thresholds: { min_injections: 10, min_rejects: 3, min_reject_conversations: 3, rate_factor: 2 },
-          candidates: [],
+          candidates: [
+            {
+              artifact_hash: "9f2c1a3b44dd55ee661788aa99bb00cc11dd22ee33ff44aa55bb66cc77dd880011",
+              version: 1,
+              scope: "project:memory",
+              stage: "shadow",
+              created_seq: 460,
+              created_at: "2026-08-30T01:12:44Z",
+              invalid: false,
+              stalled: true,
+            },
+          ],
+          // D9-W6: one stall advisory for the mocked shadow candidate.
+          stalls: [
+            {
+              seq: 521,
+              conversation_id: 3,
+              artifact_hash: "9f2c1a3b44dd55ee661788aa99bb00cc11dd22ee33ff44aa55bb66cc77dd880011",
+              stage: "shadow",
+              epoch: 14,
+              reason: "shadow aged 13 main epochs without reaching canary (replay re-pass failing, frozen, or canary slot occupied)",
+            },
+          ],
         },
       };
     }

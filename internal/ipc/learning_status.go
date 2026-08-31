@@ -79,6 +79,23 @@ type LearningCandidateRow struct {
 	// candidates.jsonl row (tamper/drift — the fold surfaces it;
 	// transitions W4+ will refuse it, fail-closed §7).
 	Invalid bool `json:"invalid"`
+	// Stalled (D9-W6) marks a candidate carrying a learning_stall
+	// advisory — aging past the floor without its stage's next-step
+	// minimums (the promotion-starvation visibility pin; advisory ONLY,
+	// never auto-promoted, never auto-dropped).
+	Stalled bool `json:"stalled,omitempty"`
+}
+
+// LearningStallRow is one journaled learning_stall advisory (W5 emits
+// the rows, W6 surfaces them): deduped per (hash, stage) by the emitter
+// — the GUI feed and `odo learning list --stalled` render exactly these.
+type LearningStallRow struct {
+	Seq            int    `json:"seq"`
+	ConversationID int64  `json:"conversation_id"`
+	ArtifactHash   string `json:"artifact_hash"`
+	Stage          string `json:"stage"`
+	Epoch          int    `json:"epoch"`
+	Reason         string `json:"reason"`
 }
 
 // LearningStatusReport is the learning_status payload (and the CLI's
@@ -92,6 +109,7 @@ type LearningStatusReport struct {
 	Flags          []LearningFlagRow      `json:"flags"` // newest first
 	FlagThresholds map[string]int         `json:"flag_thresholds"`
 	Candidates     []LearningCandidateRow `json:"candidates"`
+	Stalls         []LearningStallRow     `json:"stalls"` // D9-W6; newest first (per seq)
 }
 
 // ComputeLearningStatus folds the project's journals + candidates.jsonl
@@ -105,6 +123,7 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 		Flags:          []LearningFlagRow{},
 		FlagThresholds: RulesAuditThresholds(),
 		Candidates:     []LearningCandidateRow{},
+		Stalls:         []LearningStallRow{},
 	}
 	for _, k := range learningEpisodeOutcomeKeys {
 		rep.EpisodeTotals[k] = 0
@@ -134,6 +153,28 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 		}
 		lanes = append(lanes, events)
 		for _, ev := range events {
+			if ev.Type == store.EventMemoryUpdate {
+				// D9-W6 stall advisories: memory_update{layer:"learning",
+				// cause:"learning_stall"} rows (W5 emitter). Read-only —
+				// listing them never moves a stage.
+				var su struct {
+					Layer  string `json:"layer"`
+					Cause  string `json:"cause"`
+					Hash   string `json:"artifact_hash"`
+					Stage  string `json:"stage"`
+					Epoch  int    `json:"epoch"`
+					Reason string `json:"reason"`
+				}
+				if json.Unmarshal(ev.Payload, &su) == nil && su.Layer == "learning" &&
+					su.Cause == "learning_stall" && su.Hash != "" {
+					rep.Stalls = append(rep.Stalls, LearningStallRow{
+						Seq: ev.Seq, ConversationID: c.ID,
+						ArtifactHash: su.Hash, Stage: su.Stage,
+						Epoch: su.Epoch, Reason: su.Reason,
+					})
+				}
+				continue
+			}
 			if ev.Type != store.EventReviewAction {
 				continue
 			}
@@ -189,6 +230,7 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 	}
 	sort.Slice(episodes, func(i, j int) bool { return episodes[i].Seq > episodes[j].Seq })
 	sort.Slice(rep.Flags, func(i, j int) bool { return rep.Flags[i].Seq > rep.Flags[j].Seq })
+	sort.Slice(rep.Stalls, func(i, j int) bool { return rep.Stalls[i].Seq > rep.Stalls[j].Seq })
 	rep.EpisodeCount = len(episodes)
 	for i, er := range episodes {
 		if i >= learningStatusEpisodesCap {
@@ -203,6 +245,10 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 	if cerr != nil {
 		return rep, cerr
 	}
+	stalled := map[string]bool{}
+	for _, r := range rep.Stalls {
+		stalled[r.ArtifactHash] = true
+	}
 	known := map[string]bool{}
 	for _, c := range cands {
 		known[c.ArtifactHash] = true
@@ -214,6 +260,7 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 		rep.Candidates = append(rep.Candidates, LearningCandidateRow{
 			ArtifactHash: c.ArtifactHash, Version: c.Version, Scope: c.Scope,
 			Stage: stg, CreatedSeq: c.CreatedSeq, CreatedAt: c.CreatedAt,
+			Stalled: stalled[c.ArtifactHash],
 		})
 	}
 	for hash, stg := range stage { // stage rows without a resolvable artifact

@@ -85,6 +85,7 @@ function makeStatus(overrides?: Partial<LearningStatus>): LearningStatus {
     ],
     flag_thresholds: { min_injections: 10, min_rejects: 3, min_reject_conversations: 3, rate_factor: 2 },
     candidates: [],
+    stalls: [],
     ...overrides,
   };
 }
@@ -199,6 +200,47 @@ describe("LearningPanel", () => {
     screen.getByText("candidate");
     screen.getByText("project:memory");
     screen.getByText("seq 460");
+  });
+
+  it("renders W6 stall advisories as rows in the candidates feed (advisory-only, deduped upstream)", async () => {
+    const hash = "9f2c0011223344556677889900aabbccddeeff0011223344556677889900aabbccdd";
+    mockedStatus.mockResolvedValue({
+      ok: true,
+      learning: makeStatus({
+        candidates: [
+          {
+            artifact_hash: hash,
+            version: 1,
+            scope: "project:memory",
+            stage: "shadow",
+            created_seq: 460,
+            created_at: "2026-08-30T01:12:44Z",
+            invalid: false,
+            stalled: true,
+          },
+        ],
+        stalls: [
+          {
+            seq: 521,
+            conversation_id: 3,
+            artifact_hash: hash,
+            stage: "shadow",
+            epoch: 14,
+            reason: "shadow aged 13 main epochs without reaching canary",
+          },
+        ],
+      }),
+    });
+    const { container } = render(<LearningPanel projectRoot="/repo" active={true} />);
+    // The stage feed keeps its candidate row; the stall advisory is a row
+    // in the same section (no new panel).
+    await screen.findByText("shadow");
+    const stallRows = [...container.querySelectorAll<HTMLElement>(".learning-stall-row")];
+    expect(stallRows).toHaveLength(1);
+    expect(stallRows[0].textContent).toContain("stalled");
+    expect(stallRows[0].textContent).toContain("9f2c00112233");
+    expect(stallRows[0].textContent).toContain("aged at shadow · epoch 14");
+    expect(stallRows[0].textContent).toContain("shadow aged 13 main epochs without reaching canary");
   });
 
   it("surfaces daemon failures in the settings-error banner", async () => {

@@ -2,14 +2,25 @@ import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 // Review finding 8 (2026-08-24): context-panel tab strip overflow.
-// Six tabs total ~457px vs 403px at the default 420px (U2.3) panel width (and 194px
-// of clipping at the 280px MIN) — active-tab scrollIntoView + ‹ › controls.
+// Nine tabs total ~616px vs ~359px of strip at the default 420px (U2.3) panel
+// width (~397px of clipping at the 280px MIN) — active-tab scrollIntoView + ‹ › controls.
 
 async function openPanel(page: Page) {
   await page.goto("/");
   await expect(page.locator(".sidebar .proj-tree")).toBeVisible();
   await page.keyboard.press("Meta+j");
   await expect(page.locator(".context-panel")).toBeVisible();
+  // The aside slides in over ~0.2s (panel-in: translateX(10px)) and the
+  // absolute-positioned grip rides with it: a grip box sampled before the
+  // entrance finishes is stale by mousedown, pointerdown misses the 8px hit
+  // strip, and the drag silently never engages (panel stuck at 420px). An
+  // x-stability probe cannot tell "pre-animation-start" from "settled"
+  // (both read two equal frames) — drain the element's animations instead:
+  // the CSS animation object exists the moment style applies, so finished
+  // covers the whole window.
+  await page.locator(".context-panel").evaluate(async (el) => {
+    await Promise.allSettled(el.getAnimations().map((a) => a.finished));
+  });
 }
 
 async function dragGripBy(page: Page, dx: number) {
@@ -86,17 +97,20 @@ test("‹ › controls appear at 280px and move the strip; active tab stays in v
 });
 
 test("‹ › controls disappear once every tab fits", async ({ page }) => {
+  // 9 tabs (~616px) legitimately overflow the 640px MAX clamp the default
+  // 1280px viewport permits (640−61=579 < 616) — widen so the strip fits.
+  await page.setViewportSize({ width: 1440, height: 900 });
   await openPanel(page);
 
   await dragGripBy(page, 160); // → 280px, overflowing
   await expect.poll(() => panelWidth(page)).toBe("280px");
   await expect(page.getByRole("button", { name: "Scroll tabs right" })).toBeVisible();
 
-  // Drag far past MAX: the grip clamps at the U2.1 drag max —
-  // min(720, window − sidebar − 400) = 640px at this 1280px viewport —
-  // where all tabs fit.
-  await dragGripBy(page, -400);
-  await expect.poll(() => panelWidth(page)).toBe("640px");
+  // Drag far past MAX: the grip clamps at the U2.1 CSS ceiling —
+  // min(720, window − sidebar − 400) = 720px at this 1440px viewport —
+  // strip width 720−61 ≈ 659px > ~616px of tabs, so every tab fits.
+  await dragGripBy(page, -520);
+  await expect.poll(() => panelWidth(page)).toBe("720px");
   await expect(page.getByRole("button", { name: "Scroll tabs left" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Scroll tabs right" })).toHaveCount(0);
   await expectActiveTabInStrip(page);
