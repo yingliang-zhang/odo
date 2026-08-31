@@ -122,15 +122,17 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 		}
 	}
 	var episodes []LearningEpisodeRow
-	// Stage fold (W4 begins journaling these): the LATEST "to" per
-	// artifact_hash is the stage — the fold is the only state (§1.3).
-	stage := map[string]string{}
-	stageSeq := map[string]int{}
+	// Stage fold (W4 journals these): the LATEST "to" per artifact_hash
+	// is the stage — the fold is the only state (§1.3). Shared with the
+	// W4 gates/checkpoints (learning_stages.go) — a second stage fold
+	// would skew against the daemon's own.
+	var lanes [][]store.Event
 	for _, c := range convs {
 		events, lerr := st.ListEvents(ctx, c.ID, 0)
 		if lerr != nil {
 			return rep, lerr
 		}
+		lanes = append(lanes, events)
 		for _, ev := range events {
 			if ev.Type != store.EventReviewAction {
 				continue
@@ -175,19 +177,15 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 					RejectConversations: p.RejectConversations,
 				})
 			case "learning_stage":
-				var p struct {
-					Hash string `json:"artifact_hash"`
-					To   string `json:"to"`
-				}
-				if json.Unmarshal(ev.Payload, &p) != nil || p.Hash == "" || p.To == "" {
-					continue
-				}
-				if ev.Seq > stageSeq[p.Hash] {
-					stageSeq[p.Hash] = ev.Seq
-					stage[p.Hash] = p.To
-				}
+				// absorbed by foldLearningStages below (global-id ordered —
+				// per-lane seqs never compare across lanes).
 			}
 		}
+	}
+	stageTable := foldLearningStages(lanes...)
+	stage := map[string]string{}
+	for hash, info := range stageTable {
+		stage[hash] = info.To
 	}
 	sort.Slice(episodes, func(i, j int) bool { return episodes[i].Seq > episodes[j].Seq })
 	sort.Slice(rep.Flags, func(i, j int) bool { return rep.Flags[i].Seq > rep.Flags[j].Seq })
@@ -199,9 +197,7 @@ func ComputeLearningStatus(ctx context.Context, st *store.Store, p store.Project
 		rep.Episodes = append(rep.Episodes, er)
 	}
 
-	// Candidate stages (W3: candidates.jsonl is the writer deliverable —
-	// nothing appends yet; learning_stage rows start in W4. The fold is
-	// complete for both: last stage table per hash, refs to a hash absent
+	// Candidate stages: last stage table per hash; refs to a hash absent
 	// from candidates.jsonl read invalid (fail-closed surface, §7).
 	cands, cerr := ReadLearningCandidates(p.RootPath)
 	if cerr != nil {

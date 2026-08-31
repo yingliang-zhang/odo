@@ -132,6 +132,14 @@ func renderRulesAuditHuman(r ipc.RulesAuditReport, sinkNote string) {
 		fmt.Printf("auto outcomes: %d (auto-land actor %q: accepts %d · rejects %d — excluded from labels and baseline)\n",
 			auto, ipc.AutoActor, r.AutoAccepts, r.AutoRejects)
 	}
+	if r.CanaryOutcomes > 0 {
+		fmt.Printf("canary outcomes: %d (learning-canary cohort — excluded from live rows and baseline, D9-W4 audit isolation)\n",
+			r.CanaryOutcomes)
+	}
+	if r.ScoringExcluded > 0 {
+		fmt.Printf("scoring-excluded outcomes: %d (gate-source/C0/memory-path diffs — never-score-own-changes, lock §5)\n",
+			r.ScoringExcluded)
+	}
 	if r.UnknownCohortOutcomes > 0 {
 		fmt.Printf("unknown cohorts: %d outcome(s) (memory receipt with no matching snapshot — pre-W2 journal; counted in totals, never attributed)\n",
 			r.UnknownCohortOutcomes)

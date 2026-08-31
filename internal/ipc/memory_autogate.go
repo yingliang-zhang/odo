@@ -66,7 +66,11 @@ func (s *Server) autoApplyProposals(ctx context.Context, c store.Conversation, b
 	if s.holdUserScopeBatch(ctx, c.ID, batch, accepted) {
 		return
 	}
-	if _, err := s.applyResolvedBatch(ctx, c, batch, accepted, autoActor); err != nil {
+	// D9-W4: accepted memory.md adds ride the candidate lane
+	// (learning_stages: on); reaffirms/skills/retract intents apply as
+	// always. Legacy when the pref is off.
+	if _, err := s.applyResolvedBatch(ctx, c, batch, accepted, autoActor,
+		s.divertAcceptedAddsToCandidate(ctx, c, batch, accepted, events)); err != nil {
 		s.journalAutoApplyFailed(ctx, c.ID, batch.epoch, err)
 	}
 }
@@ -160,7 +164,9 @@ func (s *Server) sweepPendingBatch(ctx context.Context, c store.Conversation, w 
 	if s.holdUserScopeBatch(ctx, c.ID, batch, accepted) {
 		return
 	}
-	if _, err := s.applyResolvedBatch(ctx, c, batch, accepted, autoActor); err != nil {
+	// D9-W4: same candidate diversion as the post-fold apply.
+	if _, err := s.applyResolvedBatch(ctx, c, batch, accepted, autoActor,
+		s.divertAcceptedAddsToCandidate(ctx, c, batch, accepted, events)); err != nil {
 		s.journalAutoApplyFailed(ctx, c.ID, batch.epoch, err)
 	}
 }

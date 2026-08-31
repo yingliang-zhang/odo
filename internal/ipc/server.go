@@ -1379,7 +1379,7 @@ func (s *Server) handleSendMessage(ctx context.Context, req Request) (Response, 
 	// assembleRunPrompt (M18 W2 item 4) additionally checks the
 	// model-visible ⇔ logged closure; on a breach the payload is still
 	// returned so the user_message attempt lands BEFORE the refusal.
-	prompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, c.ID, req.Text, req.Attachments...)
+	prompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, c.ID, req.Text, learningCohortRoot, req.Attachments...)
 
 	// Journal the user message with attachments (spec item 5) and the
 	// unified receipt closure (W2 item 4: receipt, recall, replay
@@ -1546,7 +1546,7 @@ func (s *Server) memoryLayers(ctx context.Context, wsName string, conversationID
 // with zero trace — the one silent hole on the fail-closed chain. Every
 // caller funnels through assembleRunPrompt, which refuses the run on this
 // error with a journaled agent_error.
-func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversationID int64, text string) (memoryLayers, error) {
+func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversationID int64, text string, mode learningCohortMode) (memoryLayers, error) {
 	events, lerr := s.store.ListEvents(ctx, conversationID, 0)
 	if lerr != nil {
 		return memoryLayers{}, fmt.Errorf("memory layers: list journal events: %w", lerr)
@@ -1557,6 +1557,14 @@ func (s *Server) runMemoryLayers(ctx context.Context, wsName string, conversatio
 	// user_message the prompt serves, so the snapshot rows land ahead of
 	// it; a nil-but-fresh event list (zero rows) still snapshots.
 	s.journalRuleSnapshots(ctx, conversationID, events)
+	// D9-W4: canary cohort substitution (learning_canary.go). A cohort-
+	// assigned send rides the candidate's projected block under the
+	// EXISTING receipt key — the rules-audit join cohorts the run with
+	// zero new receipt keys. Ride-live keeps the readProjectMemory bytes.
+	if block := s.learningCanaryBlock(ctx, conversationID, events, mode); block != "" {
+		ml.project = block
+		ml.receipt[".odo/memory.md"] = sha16([]byte(block))
+	}
 	if events == nil {
 		return ml, nil
 	}
@@ -1895,8 +1903,8 @@ func assertPromptReceipts(ml memoryLayers, prompt string, payload map[string]int
 // the prompt and payload are still returned (both derived from the same ml)
 // so the caller can journal the attempt before refusing — evidence-first.
 // attachments ride the send path only (revise/continuation pass none).
-func (s *Server) assembleRunPrompt(ctx context.Context, wsName string, conversationID int64, text string, attachments ...string) (prompt string, payload map[string]interface{}, err error) {
-	ml, lerr := s.runMemoryLayers(ctx, wsName, conversationID, text)
+func (s *Server) assembleRunPrompt(ctx context.Context, wsName string, conversationID int64, text string, mode learningCohortMode, attachments ...string) (prompt string, payload map[string]interface{}, err error) {
+	ml, lerr := s.runMemoryLayers(ctx, wsName, conversationID, text, mode)
 	if lerr != nil {
 		// Fail closed on a journal read failure: no blind prompt assembles,
 		// and callers' existing assertErr handling journals the refusal.
@@ -2241,7 +2249,7 @@ func (s *Server) startFollowupRunLocked(conversationID, workstreamID int64, queu
 
 	// R1: continuation runs replay the current epoch too — the previous
 	// run's agent_text is in the journal and the steering agent must see it.
-	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, conversationID, prompt)
+	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, conversationID, prompt, learningCohortInherit)
 	if assertErr != nil {
 		// M18 W2 item 4: fail closed, no silent drop — the breach is a
 		// journaled agent_error, the adapter never starts.
@@ -5202,6 +5210,14 @@ func (s *Server) distillCore(ctx context.Context, c store.Conversation, trigger 
 		})
 	}
 
+	// D9-W4: shadow checkpoints run at MAIN-lane distills only (the
+	// project-scoped aging clock keys on main; per-candidate frozen
+	// replay re-pass against the grown slice). Best-effort bookkeeping —
+	// never fails the fold.
+	if w.Name == RulesAuditMainWorkstream {
+		s.learningShadowCheckpoints(ctx, c, newEpoch)
+	}
+
 	// M12: the fold retired the window. Evaluate the conditional
 	// auto-curate (never chained: it fires only when the notes/age
 	// thresholds say so).
@@ -5362,6 +5378,11 @@ func unownedFoldGrowth(events []store.Event, lastSeq int) bool {
 				// conversation coverage; a finishing run must not abort
 				// an in-flight fold on the same conversation.
 				p.Layer == "run_usage" ||
+				// D9-W4: learning-plane bookkeeping (shadow checkpoints,
+				// queued signals, canary snapshot pins) is fold-authored
+				// control-plane state — never conversation coverage the
+				// note claims. Same attribution class as run_usage.
+				p.Layer == "learning" || p.Layer == "learning_canary" ||
 				p.Layer == "curator" || p.Layer == "index" || p.Layer == "pins") {
 				continue
 			}
@@ -6143,7 +6164,7 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 		}
 		accepted[a.Index] = true
 	}
-	return s.applyResolvedBatch(ctx, c, batch, accepted, "")
+	return s.applyResolvedBatch(ctx, c, batch, accepted, "", nil)
 }
 
 // applyResolvedBatch consumes a pending batch all-or-nothing (spec §5):
@@ -6157,9 +6178,19 @@ func (s *Server) handleApplyMemory(ctx context.Context, req Request) (Response, 
 // actor names the decision-maker on the apply marker: "" for the human
 // path (additive — pre-panel rows carry no actor), autoActor for the
 // panel-gated auto-apply and legacy sweep.
-func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, batch pendingBatch, accepted []bool, actor string) (Response, error) {
+//
+// diverted (D9-W4) names accepted memory.md add proposals that rode the
+// learning-candidate lane instead of the file-write lane: they journal on
+// the apply marker as `diverted` refs (never faked as accepted or
+// rejected), skip every write/plan below, and count as their own metric.
+// Nil from every legacy call — byte-identical markers.
+func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, batch pendingBatch, accepted []bool, actor string, diverted []int) (Response, error) {
 	s.memMu.Lock()
 	defer s.memMu.Unlock()
+	divertSet := map[int]bool{}
+	for _, i := range diverted {
+		divertSet[i] = true
+	}
 	// D4 scope assert (ruling ④): planUserApply is unreachable from the
 	// auto path — the hold in memory_autogate flips user.md proposals off
 	// BEFORE this core runs. Reaching here with an accepted user.md
@@ -6202,11 +6233,16 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 		}
 	}
 	var acceptedRefs []MemoryAccept
+	var divertedRefs []MemoryAccept // D9-W4: staged into learning candidates
 	var memAccepted []acceptedRule
 	var retractCands []MemoryProposal // D4: accepted deletion-class (never applied)
 	var userAccepted []acceptedUserRule
 	var skillWrites []skillWrite // M9: pre-computed skill file writes
 	for i, p := range batch.proposals {
+		if divertSet[i] {
+			divertedRefs = append(divertedRefs, MemoryAccept{Target: p.Target, Index: i})
+			continue
+		}
 		if !accepted[i] {
 			continue
 		}
@@ -6332,13 +6368,18 @@ func (s *Server) applyResolvedBatch(ctx context.Context, c store.Conversation, b
 			Body:      sw.content,
 		})
 	}
+	metrics := map[string]int{"accepted": len(acceptedRefs), "rejected": len(rejected)}
 	applyPayload := map[string]interface{}{
 		"action":   "memory_apply",
 		"epoch":    batch.epoch,
 		"accepted": acceptedRefs,
 		"rejected": rejected,
-		"metrics":  map[string]int{"accepted": len(acceptedRefs), "rejected": len(rejected)},
+		"metrics":  metrics,
 		"recovery": recovery,
+	}
+	if len(divertedRefs) > 0 {
+		applyPayload["diverted"] = divertedRefs
+		metrics["diverted"] = len(divertedRefs)
 	}
 	if actor != "" {
 		applyPayload["actor"] = actor

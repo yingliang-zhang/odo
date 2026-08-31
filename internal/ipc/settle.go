@@ -1170,7 +1170,7 @@ func (s *Server) startReviseRun(ctx context.Context, d store.Diff, round int, or
 	// revise_spawn_failed ledger row closes the contract before any
 	// adapter start (nothing journaled; the worktree created above is
 	// removed, leaving the round's only trace in the caller's row).
-	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, d.ConversationID, prompt)
+	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, d.ConversationID, prompt, learningCohortLive)
 	if assertErr != nil {
 		_ = s.mgr.Remove(wtPath) // no run will ever use it; don't orphan
 		return false, "receipt_assert_failed"

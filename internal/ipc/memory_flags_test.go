@@ -100,7 +100,7 @@ func TestAutoPathUserPlanUnreachable(t *testing.T) {
 	if !batch.exists || batch.consumed {
 		t.Fatalf("seeded batch = exists %v consumed %v", batch.exists, batch.consumed)
 	}
-	_, err := rig.server.applyResolvedBatch(context.Background(), *boot.Conversation, batch, []bool{true}, autoActor)
+	_, err := rig.server.applyResolvedBatch(context.Background(), *boot.Conversation, batch, []bool{true}, autoActor, nil)
 	if err == nil || !strings.Contains(err.Error(), "never plan user.md") {
 		t.Fatalf("auto user.md apply = %v, want the scope assert error", err)
 	}
@@ -112,7 +112,7 @@ func TestAutoPathUserPlanUnreachable(t *testing.T) {
 		t.Errorf("assert path left %d memory_apply marker(s), want none", len(applies))
 	}
 	// The HUMAN path stays reachable (legacy batches are human-consumed).
-	if _, err = rig.server.applyResolvedBatch(context.Background(), *boot.Conversation, batch, []bool{true}, ""); err != nil {
+	if _, err = rig.server.applyResolvedBatch(context.Background(), *boot.Conversation, batch, []bool{true}, "", nil); err != nil {
 		t.Fatalf("human user.md apply = %v — the human path must stay legal", err)
 	}
 	if got := readFileStr(t, userPath); !strings.Contains(got, "- Prefer boring solutions. — seen: odo\n") {

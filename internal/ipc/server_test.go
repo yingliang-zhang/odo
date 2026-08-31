@@ -4863,7 +4863,7 @@ func TestMemoryLayersReceiptCoverageReflect(t *testing.T) {
 		}
 	}
 
-	cold, err := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	cold, err := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps", learningCohortLive)
 	if err != nil {
 		t.Fatalf("cold runMemoryLayers: %v", err)
 	}
@@ -4886,7 +4886,7 @@ func TestMemoryLayersReceiptCoverageReflect(t *testing.T) {
 
 	append(store.EventUserMessage, map[string]interface{}{"text": "zeta follow-up"})
 	append(store.EventAgentText, map[string]interface{}{"text": "zeta done"})
-	warm, err := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps")
+	warm, err := s.runMemoryLayers(ctx, "main", c.ID, "zeta next steps", learningCohortLive)
 	if err != nil {
 		t.Fatalf("warm runMemoryLayers: %v", err)
 	}
@@ -4975,11 +4975,11 @@ func TestRunMemoryLayersJournalReadFailure(t *testing.T) {
 	if err := s.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.runMemoryLayers(context.Background(), "main", convID, "hi"); err == nil ||
+	if _, err := s.runMemoryLayers(context.Background(), "main", convID, "hi", learningCohortLive); err == nil ||
 		!strings.Contains(err.Error(), "list journal events") {
 		t.Errorf("runMemoryLayers error = %v, want a list journal events refusal", err)
 	}
-	prompt, payload, err := s.assembleRunPrompt(context.Background(), "main", convID, "hi")
+	prompt, payload, err := s.assembleRunPrompt(context.Background(), "main", convID, "hi", learningCohortLive)
 	if err == nil || !strings.Contains(err.Error(), "journal read failed") {
 		t.Errorf("assembleRunPrompt error = %v, want the blind-prompt refusal", err)
 	}

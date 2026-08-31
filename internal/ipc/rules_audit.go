@@ -143,17 +143,30 @@ type RulesAuditFlag struct {
 // RulesAuditReport is ComputeRulesAudit's result (and the CLI's --json
 // shape).
 type RulesAuditReport struct {
-	ProjectRoot           string             `json:"project_root"`
-	Journal               string             `json:"journal"`
-	WorkstreamsScanned    int                `json:"workstreams_scanned"`
-	ConversationsScanned  int                `json:"conversations_scanned"`
-	Resolutions           int                `json:"resolutions"` // accepts+rejects+weak (non-auto)
-	Accepts               int                `json:"accepts"`
-	Rejects               int                `json:"rejects"`
-	WeakRejects           int                `json:"weak_rejects"`
-	MemoryFreeOutcomes    int                `json:"memory_free_outcomes"`
-	AutoAccepts           int                `json:"auto_accepts"` // excluded from rows and baseline (M17 F5)
-	AutoRejects           int                `json:"auto_rejects"`
+	ProjectRoot          string `json:"project_root"`
+	Journal              string `json:"journal"`
+	WorkstreamsScanned   int    `json:"workstreams_scanned"`
+	ConversationsScanned int    `json:"conversations_scanned"`
+	Resolutions          int    `json:"resolutions"` // accepts+rejects+weak (non-auto)
+	Accepts              int    `json:"accepts"`
+	Rejects              int    `json:"rejects"`
+	WeakRejects          int    `json:"weak_rejects"`
+	MemoryFreeOutcomes   int    `json:"memory_free_outcomes"`
+	AutoAccepts          int    `json:"auto_accepts"` // excluded from rows and baseline (M17 F5)
+	AutoRejects          int    `json:"auto_rejects"`
+	// CanaryOutcomes / ScoringExcluded (D9-W4, lock §5 never-score):
+	// outcomes resolving to a learning_canary snapshot cohort, or whose
+	// diff is READABLE and gate-source/C0/memory-path (learning_scoring.go's
+	// shared excludedFromScoring predicate), feed NEITHER rule rows nor
+	// the baseline — counted here like the auto lines so the drop is
+	// honest. An UNREADABLE patch keeps the audit's legacy truth posture
+	// (counted — the autonomy report's unreadable_diffs precedent is the
+	// honesty surface); fail-closed-unknown⇒excluded applies only inside
+	// the frozen replay, per the lock's own scoping sentence
+	// ("Classification over a frozen slice: patch file missing ⇒ class
+	// unknown ⇒ EXCLUDED", learningReplayReport.ScoringExcluded).
+	CanaryOutcomes        int                `json:"canary_outcomes"`
+	ScoringExcluded       int                `json:"scoring_excluded"`
 	UnknownCohortOutcomes int                `json:"unknown_cohort_outcomes"`
 	SnapshotCohorts       int                `json:"snapshot_cohorts"`
 	NoSnapshots           bool               `json:"no_snapshots"`
@@ -199,12 +212,15 @@ type rulesConvScan struct {
 }
 
 // rulesOutcome is one resolved outcome plus its memory cohort (the newest
-// .odo/memory.md receipt hash within its window).
+// .odo/memory.md receipt hash within its window) and producing diff
+// (D9-W4: the never-score exclusion joins per diff — gate-source/C0 and
+// canary traffic feed neither rows nor baseline).
 type rulesOutcome struct {
 	convID     int64
 	resolveSeq int
 	kind       string // "accept" | "reject" | "weak_reject" | "auto_*"
 	memHash    string // "" = memory-free outcome
+	diffID     int64
 }
 
 // rulesAuditSlashCommands mirrors the slash routes in handleSendMessage
@@ -424,6 +440,7 @@ func rulesConvOutcomes(cs rulesConvScan, diffs []store.Diff, convID int64) []rul
 		outcomes = append(outcomes, rulesOutcome{
 			convID: convID, resolveSeq: r.seq, kind: kind,
 			memHash: rulesWindowMemHash(cs.sends, boundary, end),
+			diffID:  r.diffID,
 		})
 	}
 	return outcomes
@@ -748,8 +765,13 @@ func ComputeRulesAudit(ctx context.Context, st *store.Store, project store.Proje
 	// Pass 1 (global): every journaled memory.md cohort — snapshot sha ->
 	// injected rule set. Global because a receipt's snapshot row may live
 	// on another conversation (snapshots journal per conversation on its
-	// first send after a change).
+	// first send after a change). D9-W4: learning_canary snapshots are
+	// folded SEPARATELY — experiment traffic never grades live rules and
+	// never enters the baseline (audit isolation, lock §3.2/§5.2); the
+	// outcomes resolve to the canary table and drop to the
+	// canary_outcomes line.
 	cohorts := map[string]map[string]bool{}
+	canaryCohorts := map[string]bool{}
 	for _, cd := range convs {
 		for _, ev := range cd.events {
 			if ev.Type != store.EventMemoryUpdate {
@@ -761,21 +783,49 @@ func ComputeRulesAudit(ctx context.Context, st *store.Store, project store.Proje
 				Content string `json:"content"`
 				Sha     string `json:"sha"`
 			}
-			if json.Unmarshal(ev.Payload, &p) != nil || p.Layer != "memory" || p.Cause != "snapshot" || p.Sha == "" {
+			if json.Unmarshal(ev.Payload, &p) != nil || p.Cause != "snapshot" || p.Sha == "" {
 				continue
 			}
-			if _, seen := cohorts[p.Sha]; !seen {
-				cohorts[p.Sha] = rulesOfContent(p.Content)
+			switch p.Layer {
+			case "memory":
+				if _, seen := cohorts[p.Sha]; !seen {
+					cohorts[p.Sha] = rulesOfContent(p.Content)
+				}
+			case "learning_canary":
+				canaryCohorts[p.Sha] = true
 			}
 		}
 	}
 	report.SnapshotCohorts = len(cohorts)
 	report.NoSnapshots = report.SnapshotCohorts == 0
 
-	// Pass 2: outcomes per conversation.
+	// Pass 2: outcomes per conversation, with the D9-W4 never-score
+	// exclusions applied (learning_scoring.go — the SAME predicate the
+	// frozen replay applies; second conventions are prohibited):
+	//   - canary-cohort outcomes → canary_outcomes (isolated),
+	//   - READABLE gate-source/C0/memory-path diff outcomes →
+	//     scoring_excluded (unreadable patches stay counted — legacy
+	//     truth posture; the frozen replay's exclusion is fail-closed
+	//     instead).
 	var outcomes []rulesOutcome
 	for _, cd := range convs {
-		outcomes = append(outcomes, rulesConvOutcomes(rulesScanConversation(cd.events), cd.diffs, cd.id)...)
+		excludedDiffs := map[int64]bool{}
+		for _, d := range cd.diffs {
+			if ex, readable := learningScoringClassify(d.PathOnDisk); ex && readable {
+				excludedDiffs[d.ID] = true
+			}
+		}
+		for _, o := range rulesConvOutcomes(rulesScanConversation(cd.events), cd.diffs, cd.id) {
+			if o.memHash != "" && canaryCohorts[o.memHash] {
+				report.CanaryOutcomes++
+				continue
+			}
+			if excludedDiffs[o.diffID] {
+				report.ScoringExcluded++
+				continue
+			}
+			outcomes = append(outcomes, o)
+		}
 	}
 	for _, o := range outcomes {
 		switch o.kind {

@@ -164,7 +164,7 @@ func armedDistillRig(t *testing.T, note, learnerJSON string, reply func(call int
 	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", learnerJSON)
 	// skills_distill: procedure distillation is off by default (P1-12);
 	// this suite pins the panel GATE, so its learner output opts back in.
-	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\nskills_distill: on\n")
+	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\nskills_distill: on\nlearning_stages: off\n")
 	calls := startPanelStub(t, reply)
 	rig := startRig(t, root)
 	return rig, root, home, calls
@@ -330,7 +330,9 @@ func TestDistillSweepsLegacyBatch(t *testing.T) {
 	}
 
 	// Arm the panel; the second distill sweeps batch one and decides its own.
-	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\n")
+	// learning_stages: off — this test pins the LEGACY lane (swept rules
+	// apply to memory.md directly); the armedDistillRig suite's posture.
+	writePrefs(t, home, "review: rm1@test, rm2@test, rm3@test\nlearning_stages: off\n")
 	calls := startPanelStub(t, acceptAll)
 	setOneShotEnv(t, "ODO_DISTILL_OUTPUT", "# Epoch 2\n\nSecond note.\n")
 	setOneShotEnv(t, "ODO_LEARNER_OUTPUT", `{"memory":[{"rule":"Rebase the later diff before reviewing it.","evidence":"main-epoch-2","contradicts":""}],"procedures":[],"reaffirm":[]}`)

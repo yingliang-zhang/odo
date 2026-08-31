@@ -535,7 +535,7 @@ func (s *Server) startLoopRunLocked(ctx context.Context, conversationID, loopID 
 		return false, "workstream_deleted"
 	}
 
-	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, conversationID, prompt)
+	fullPrompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, conversationID, prompt, learningCohortLive)
 	if assertErr != nil {
 		return false, "receipt_assert_failed"
 	}

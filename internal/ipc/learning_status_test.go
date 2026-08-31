@@ -33,17 +33,17 @@ func TestComputeLearningStatus(t *testing.T) {
 	// Two episode rows (older first), one flag, one forward stage row.
 	epOld := journalLearningRow(t, f.st, f.c.ID, map[string]interface{}{
 		"action": "learning_episode", "epoch": 2, "workstream": "main",
-		"window":    map[string]int{"first_seq": 1, "last_seq": 5},
-		"outcomes":  map[string]int{"accepted": 3, "auto_rejected": 1},
-		"context":   map[string]int{"panel_infra": 1},
+		"window":          map[string]int{"first_seq": 1, "last_seq": 5},
+		"outcomes":        map[string]int{"accepted": 3, "auto_rejected": 1},
+		"context":         map[string]int{"panel_infra": 1},
 		"verify_ms_total": 4200, "distill_ms": 900,
 	})
 	epNew := journalLearningRow(t, f.st, f.c.ID, map[string]interface{}{
 		"action": "learning_episode", "epoch": 3, "workstream": "main",
-		"window":     map[string]int{"first_seq": 6, "last_seq": 9},
-		"outcomes":   map[string]int{"accepted": 1, "rejected": 2},
-		"context":    map[string]int{},
-		"usage":      map[string]interface{}{"available": true, "input": 10, "output": 4},
+		"window":        map[string]int{"first_seq": 6, "last_seq": 9},
+		"outcomes":      map[string]int{"accepted": 1, "rejected": 2},
+		"context":       map[string]int{},
+		"usage":         map[string]interface{}{"available": true, "input": 10, "output": 4},
 		"flags_emitted": []int{42},
 	})
 	flagEv := journalLearningRow(t, f.st, f.c.ID, map[string]interface{}{

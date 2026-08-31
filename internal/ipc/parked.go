@@ -251,7 +251,7 @@ func (s *Server) startParkedGoalRunLocked(ctx context.Context, c store.Conversat
 	// park row is still waiting at this point (consumption journals below),
 	// so collectReplayTurns excludes it — its text lands verbatim at the
 	// prompt's end, the send path's exact shape.
-	prompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, c.ID, goal.text)
+	prompt, receiptPayload, assertErr := s.assembleRunPrompt(ctx, w.Name, c.ID, goal.text, learningCohortLive)
 	if assertErr != nil {
 		// M18 W2 item 4 parity: fail closed, no silent drop — the breach
 		// is a journaled agent_error, the goal stays queued.
