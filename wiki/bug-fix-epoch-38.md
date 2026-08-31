@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # W5 Worktree Drain + D9-C Grounded Tool-Round Cap (Quad-Blind Design Lock v2)
 
 ## Context

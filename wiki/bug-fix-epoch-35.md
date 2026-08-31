@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D9-W5 Learning Control Plane: rollback, freeze, stall, never-score (plus W4.5 re-snapshot and rescue)
 
 ## Context

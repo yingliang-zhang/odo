@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Diff #119 repair: fresh candidate demoted `shadow → dropped` in `TestDistillStagesCandidateEndToEnd`
 
 ## Context

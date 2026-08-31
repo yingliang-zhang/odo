@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D9-W5 — rollback, freeze stage-interrupt, stall advisory, never-score (odo learning control plane)
 
 ## Context

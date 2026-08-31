@@ -1,0 +1,17 @@
+# Security & Path Containment
+
+- Canonical projectRoot is the final trust anchor: the guard verifies the resolved directory stays inside the project and rejects symlinks at the root nodes (.odo, wiki, wiki/topics) — and the write side gets the same guard as reads, not just reads. (main-epoch-34)
+- Containment violations degrade to vanished/absent semantics rather than new error faces, and global ~/.odo files stay outside the threat model so legitimate dotfile symlinks keep working. (main-epoch-30)
+- Skill directory chains resolve through guardedBase and delete handlers carry the same guardProjectWritePath as update handlers — a symlinked .odo or .odo/skills degrades the whole project skill scope to absent. (main-epoch-38)
+- Loop file reads are bounded during the read itself (capped reader enforcing the limit before allocation), replacing os.Stat, unbounded ReadFile, then post-hoc length check where file growth in the window forced a full allocation. (main-epoch-42)
+- readLoopTaskFile uses an os.Stat size pre-check plus readWithinDir anchored at resolvedRoot, closing both symlink escape and read-then-limit memory pressure. (main-epoch-38)
+- Loop artifacts (findings, design_lock) fail closed at both read sites: guarded containment plus a sha16 comparison catches tampered, escaped, or symlinked artifacts. (main-epoch-38)
+- /preview validates redirects per hop with final-URL capture and drives the browser through an in-process loopback-only proxy that denies off-loopback dials before connect; JS/meta-refresh bypasses remain a documented v1 boundary. (main-epoch-32)
+- Playwright in /preview is pinned to the lockfile version (1.62.1) with an explicit setup phase — unpinned npx playwright@^1 meant an unpinned remote-code surface. (main-epoch-34)
+- AGENTS.md generation reads project memory/pins through the containment helper and writes refuse symlinked components, closing the symlink prompt-injection path into agent context. (main-epoch-32)
+- The risk classifier hardened split-rm tokenization (rm -r -f, rm -Rf, --recursive --force), env-dump forms hit credential_probe only when suffix-paired, and CI workflow paths moved behind one SSOT supply-chain predicate shared with the gate. (main-epoch-23)
+- The supply-chain gate is fail-closed and must be kept out of diff scope: adding @types/node as a devDep with lockfile changes blocked two U1 diffs; the human committed the dependency separately and implementations restrict scope to gui/src and gui/e2e. (bug-fix-epoch-23)
+- Diff PathOnDisk (adapter/test-generated) and user-supplied vision attachment paths are deliberate non-goals for the guard. (main-epoch-34)
+- Accept refuses when the patch's own paths carry staged, unstaged, or untracked content (git.DirtyPaths / IndexEditsBeyondHEAD), with the M20 identical-content rescue ordered before the refusal so identical unstaged edits land via bookkeeping. (main-epoch-28)
+- The dirty-path refusal is deliberately not wrapped as errBaseStale — wrapping would drive the auto-revise loop to burn ~8.5min of verify per round regenerating a patch that hits the same refusal; user dirt requires human triage. (main-epoch-28)
+- Skill scan enforces a 64KB per-file limit (oversized files skipped entirely) and injection failures continue rather than break, so one large skill cannot block smaller relevant ones. (main-epoch-38)
