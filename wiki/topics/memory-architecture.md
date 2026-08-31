@@ -1,0 +1,18 @@
+# Memory Architecture & Recovery
+
+- The daemon is the sole memory writer; all-user.md batches are intercepted by holdUserScopeBatch in both auto paths before any panel spend (scope_held_for_human), and apply-core fail-closed asserts make the auto user.md plan provably unreachable (bug-fix-epoch-19)
+- AGENTS.md carries only the stable protocol (Project Rules + odo-todo contract) — dynamic memory/pins copy blocks were removed so the model sees exactly one receipted copy (main-epoch-38)
+- Marker-first apply: applyResolvedBatch journals the intent marker before performing writes; heal walks all stranded markers per-layer newest-wins and also runs on the consumed-refusal path and in the auto-gate sweep (main-epoch-39)
+- Heal-response contract: a consumed-batch retry whose heal actually completes this call's epoch work returns Applied:true, while a heal no-op (already persisted / foreign state) keeps rejecting — reconciling idempotent-retry with crash-window pins (main-epoch-40)
+- Project-level memory outbox: a boot-time replayer across all workstreams, globally ordered by store Event.ID, re-runs the original planner against current files — replaying intents (idempotent rebase), not raw content, with a retract filter preventing rule resurrection (main-epoch-42)
+- Explanation-set gating: a file hash is writable only if explained by journal after_sha values or outbox receipts, so manual edits are neither clobbered nor cause rule revival (main-epoch-42)
+- Human memory revert is authoritative downstream: an evaluate-time revert-ledger check runs before any recovery action, fails closed on lookup error, and the suppression row doubles as an idempotence record keyed by (epoch, receipt_layer) (bug-fix-epoch-20)
+- Retract-intents never auto-apply: they ride batches as additive intents gated by the panel; a deterministic oscillation guard freezes rules that retract→re-land within 3 epochs (bug-fix-epoch-19)
+- Memory-audit flags are consumed by the learner as verbatim DATA blocks (evidence, not instructions), LLM-free vetted: a flag:<seq> citation must resolve to an existing flag row and a live rule or it is dropped (bug-fix-epoch-19)
+- Pins journal-first with heal-before-RMW; reaffirm is set-to-epoch (not a counter), so marker-first journaling closes the double-apply class (main-epoch-39)
+- Single-writer memMu leaf lock (never nested under s.mu/acceptMu) with journal re-fold under it for pending/consumed recheck closes double-consumption and cross-workstream last-rename-wins for batches and pins (main-epoch-38)
+- The file-before-journal crash window is kept by design: planMemoryApply's normalizeRule dedupe makes replay idempotent, so the window is benign — the real gap was the missing concurrent single-writer (main-epoch-38)
+- Contradiction detection is advisory-only: the 2-token-overlap heuristic mass-retracted notes (28 distills → 25 retracts), so candidates no longer filter recall and retraction happens only via curator supersede or the odo retract CLI (main-epoch-14)
+- The memory-rule learner never closed in production (30 batches proposed, 0 applied) — instrumentation was fixed first (batch_superseded journal rows, per-epoch accepted/rejected ledger, deploy staleness warning) before touching any gate threshold (main-epoch-14)
+- runMemoryLayers returns errors and assembleRunPrompt refuses to assemble a blind prompt when journal reads fail — a blind run is impossible; all four callers already had fail-closed paths (main-epoch-15)
+- Fix ordering runs by expected value: the race with a stable reproducer first, the heaviest new durable semantics (the project-level outbox) last (main-epoch-42)

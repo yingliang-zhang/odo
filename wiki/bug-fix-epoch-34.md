@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # W4.5 Revise — Pin `ODO_STUB_SCALE=1` in Missed WINDOW-Class Test
 
 ## Context

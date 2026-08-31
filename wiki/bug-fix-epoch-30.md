@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo replay series — settle digest repair, P2 GUI bundle, P3 quality infra, D9-W3 learning observability
 
 ## Context

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D9-W4 test-regression fixes & W4.5 IPC suite acceleration
 
 ## Context

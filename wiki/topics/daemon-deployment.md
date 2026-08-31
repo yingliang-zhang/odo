@@ -1,11 +1,10 @@
-# Daemon Deployment & Runtime Operations
+# Daemon Deployment & Lifecycle
 
-- Deployment rule: build in the main checkout, cp-to-temp plus mv atomic replace at BOTH <project>/odo and ~/.odo/bin/odo, THEN kill the daemon - ensure_daemon_running would otherwise resurrect the old binary; the mv inode swap is safe for a running process. (main-epoch-21)
-- Stale daemons misjudge diffs as a recurring incident class: an old binary ran abolished one-vote-veto rules, lacked schema v3, and could not enforce new daemon-side fixes (same incident class struck twice) - check binary revision before diagnosing panel or gate behavior. (main-epoch-41)
-- Verify deployments behaviorally, not by process liveness: go version -m vcs.revision at both install paths equals HEAD, the socket answers (odo journal tail), and the new schema/columns are live in the running process; the installed Odo.app odo-gui SHA-256 must match the Tauri build bundle. (main-epoch-33)
-- Serving produces no per-request log lines - log silence is not death; use full ps (pgrep gives false negatives) and PPID orchestration evidence (the user message's harness PPID equals the daemon PID) as the strongest live proof. (main-epoch-33)
-- Graceful exit SIGKILLs in-flight agents, so restarts go through the GUI (a full app restart respawns the daemon as a sidecar; the project daemon and hermes daemon both refresh to the new binary, per-project stores unaffected). (main-epoch-41)
-- Restarting the shared hermes-agent daemon kills its sessions - a standing user decision pending since epoch-23 (same binary, per-project stores, no divergence urgency). (main-epoch-23)
-- Deploy-staleness witness: binary mtime more than 5 minutes older than HEAD triggers a WARNING (log-only). (main-epoch-14)
-- Rust build output dominates disk: gui/src-tauri/target held 6.3GB of 6.6GB - deleting target/ and node_modules (gitignored, rebuildable via npm --prefix gui ci plus cargo) shrank the project to 128MB; archive tracked source via git archive HEAD. (main-epoch-27)
-- IPC write failure in the Tauri bridge is terminal (no retry) - retrying risks duplicate daemon execution. (main-epoch-30)
+- Deployment rule: atomically replace the binary first (cp-to-temp + mv at both <project>/odo and ~/.odo/bin/odo), then kill the daemon — killing first lets ensure_daemon_running resurrect the old binary (main-epoch-21)
+- Stale daemons silently misgovern: #36 was auto-rejected under the abolished one-vote-veto rule because the running binary predated current policy; live schema_version, diffs.goal and vcs.revision are the behavioral proof of which code runs (main-epoch-21)
+- diff52's daemon-side fixes were inert until a day-old stale binary (shared sha at both install paths) was rebuilt from HEAD and atomically replaced — the same incident class as the #36 misjudgment (main-epoch-41)
+- Landing source ≠ landing behavior: after an accept, running daemons and the GUI still execute old code until redeploy + restart (main-epoch-31)
+- Post-restart verification is evidence-based: new PID, vcs.revision == HEAD at both binary locations, socket health via journal tail, per-project stores unaffected; pgrep false negatives are corrected with full ps (main-epoch-33)
+- Graceful daemon exit SIGKILLs in-flight agents, so restarts sequence through the GUI daemon_restart path or armed, setsid-isolated resurrect scripts (main-epoch-41)
+- hermes-agent daemon restarts are a standing user decision — restarting kills its sessions; it shares ~/.odo/bin/odo, so swaps leave it on the old image until restarted (main-epoch-23)
+- Disk hygiene: Rust target/ + node_modules dominated 6.6GB of the dev directory; both are gitignored and rebuildable — archive tracked source via git archive HEAD, not product copies (main-epoch-27)

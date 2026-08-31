@@ -1,0 +1,16 @@
+# Review-Panel Hardening & Model Verdicts
+
+- Exactly one grounded reviewer leg per fan-out with verdict weight identical to every other leg; scope is a one-hop import neighborhood computed daemon-side (touched paths ∪ same-dir siblings ∪ importers ∪ imported packages), and every tool read — allowed or denied — is journaled before the output returns, making citing-without-calling test-detectable (bug-fix-epoch-18)
+- Gate-source grounding fails closed: a degraded grounded leg on a gate-source diff is Infra and fails the round; budget exhaustion still owes a verdict token (journaled tool_budget_exhausted, no token ⇒ forced needs_fixes); an empty diff scope is legal, not init failure (bug-fix-epoch-18)
+- loop_budget_tokens constrains real measured executor spend — per-assistant usage summed from run transcripts — not spawn-row estimates; usage rows are idempotent (newest per spawnSeq wins), over-budget suspends before autoLand, and cacheRead is journaled but not budgeted (bug-fix-epoch-15)
+- Finding identity is structural (fingerprint v4 = sha16 of norm(file|symbol|category[|rule])) with title/evidence demoted to mutable description, so model-wording drift cannot mint phantom findings; per-leg dedup precedes cross-leg fold, with leg_ids aligned to journaled legs[] (bug-fix-epoch-16)
+- Design-MoA diversity gate: the auto design gate admits only ≥2 successful legs from ≥2 distinct model families; refusal journals auto_gate:refused_diversity, skips spawn, and leaves the lock pending for the human gate — the same state loop_design_gate:human produces (bug-fix-epoch-21)
+- Tool-loop exhaustion marks a review leg Infra regardless of posture; panelInfraLeg parks the round blocked-pending instead of counting a synthesized needs_fixes as real dissent (bug-fix-epoch-27)
+- Panel legs carry an outer WithTimeout(legTimeout) deadline — the same unbounded defect was fixed across reviewWithModel, /vision and /preview funnels; a single configured review model disarms the panel with a once-per-lifetime single_judge_panel advisory (main-epoch-15)
+- Unanimity is single-sourced: consensusVerdict's accept branch delegates to panelAccepts — infra-accept ≠ accept, and a reject overrides an infra leg (main-epoch-23)
+- A server-level shared moa client converges all NewClientFromEnv call sites, pinned by concurrency-cap tests (main-epoch-16)
+- Panel claims are verified against source before acting: sameAutoDistillList's duplicate-blind equality was a real contract hole (fixed with consume semantics mirroring sameIdList), while memo-defeat and intermediate-symlink claims were rejected with code evidence (main-epoch-33)
+- Escalation retries record InputTokens so the re-paid prompt cost of abandoned requests is visible on each bump (main-epoch-23)
+- Prompt-token estimation counts 1 token per non-ASCII rune plus ASCII/4 — plain len/4 underestimated CJK ~3× and under-triggered the 87K escalation breaker (main-epoch-23)
+- The /panel consolidator stays out: divergence is the product; any future merge must be a lazy single-orchestrator pass over journaled answers (additive agent_text{panel_merge}), never inline in the fan-out path (main-epoch-14)
+- Deliberate non-goals on record: embedding recall, per-entry memory review queue, WAL checkpoint timers, fold memory cache, moa SSE streaming, infra-leg fallback models (main-epoch-14)

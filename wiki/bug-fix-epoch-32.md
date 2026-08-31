@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D9-W4 — Learning Control Plane lifecycle core (candidate / lint / frozen replay / stages / canary seam)
 
 Wave W4 of the D9 design lock (`docs/design/d9-learning-control-plane-lock.md`), built on the landed W3 layer (`learning_episode` / `learning_store` / `learning_status`). Scope: candidate lifecycle, LLM-free lint and frozen replay gates, journaled stage machine, canary injection seam, and the never-score-own-changes predicate. Constraints honored: Go `internal/ipc/**` only, GUI untouched, no Tier-0/supply-chain files, `settle.go` untouched, zero LLM in any gate, `planMemoryApply` reused not duplicated.
