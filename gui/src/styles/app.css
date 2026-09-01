@@ -433,7 +433,11 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: 16px;
+  /* UX-1 D1 (ux-batch-lock-2026-09-01): park the action cluster at the
+     right edge — margin-left:auto absorbs the free space; the container's
+     gap:8px stays the minimum spacing to the left neighbors. NOT
+     justify-content:space-between (would spread all 7 header children). */
+  margin-left: auto;
 }
 
 .topbar-action {
@@ -508,7 +512,10 @@ body {
 .topbar-pin-popover {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
+  /* UX-1 D1: the cluster now parks at the right edge — anchor the
+     popover's right edge or a left-anchored ~260px popover overflows
+     the viewport (GLM P1). */
+  right: 0;
   z-index: 60;
   display: flex;
   align-items: center;
@@ -530,7 +537,7 @@ body {
 .topbar-pin-error {
   position: absolute;
   top: 100%;
-  left: 8px;
+  right: 8px;
   white-space: nowrap;
   margin-top: 2px;
   color: var(--err-text);

@@ -17,14 +17,13 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { basename } from "../files";
 import { deriveTurnStats, formatBytes, formatTokens } from "../stats";
 import type { TurnStats } from "../stats";
-import type { AutoDistillCountdown, OdoEvent, PanelProgress, PreviewEvent } from "../types";
+import type { AutoDistillCountdown, OdoEvent, PanelProgress, PreviewEvent, TodoViewItem } from "../types";
 import MessageBubble from "./MessageBubble";
 import Markdown from "./Markdown";
 import PlanChip from "./PlanChip";
 import LoopChip from "./LoopChip";
 import QueueDock from "./QueueDock";
 import { saveAttachment } from "../api";
-import { deriveTodoState } from "../todo";
 import { deriveParkedGoals } from "../parked";
 import { deriveActivePrompt, deriveSteerQueue, latestRunSteerSeqs } from "../steer_queue";
 import { isAdvisorySlash } from "../slash";
@@ -44,6 +43,11 @@ import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 import { diffFilesChanged, looksLikeUnifiedDiff } from "./DiffViewer";
 import { SLOT } from "../slots";
+
+// UX-1 D2: module-level empty plan for an omitted todoItems prop (perf
+// fixtures) — a literal [] default would allocate a fresh reference every
+// render and defeat the memo surface.
+const NO_TODOS: TodoViewItem[] = [];
 
 // M3 run-status formatting (spec §3a): `<m>m <s>s`, bare seconds under a
 // minute ("35s").
@@ -108,8 +112,11 @@ interface Props {
   // send-cancelled (cancel-before-note) and never blocks typing.
   distillLocked?: boolean;
   // M12 (D-todo): the composer "Plan" chip — read from the journaled
-  // events, written via todo_update. projectRoot routes the IPC in the
-  // multi-project case; onTodoChanged re-polls promptly after an op.
+  // events, folded ONCE in App (UX-1 D2: one derive feeds this chip AND
+  // the Tasks panel tab) and handed down as todoItems; ops go out via
+  // todo_update. projectRoot routes the IPC in the multi-project case;
+  // onTodoChanged re-polls promptly after an op.
+  todoItems?: TodoViewItem[];
   projectRoot?: string | null;
   onTodoChanged?: () => void;
   onTodoError?: (message: string) => void;
@@ -547,6 +554,7 @@ function ChatSurface({
   focusSeq = null,
   onFocusSeqLanded,
   distillLocked = false,
+  todoItems = NO_TODOS,
   projectRoot = null,
   onTodoChanged,
   onTodoError,
@@ -567,9 +575,10 @@ function ChatSurface({
       textareaRef.current?.setSelectionRange(len, len);
     });
   }, []);
-  // M12 (D-todo): the plan layer's read side — derived from the journaled
-  // event history already in memory (bootstrap replay + poll appends).
-  const todoItems = useMemo(() => deriveTodoState(events), [events]);
+  // M12 (D-todo): the plan layer's read side. UX-1 D2: the deriveTodoState
+  // memo LIFTED to App — one O(journal) fold per poll tick feeds this chip
+  // and the Tasks tab (previously the chip folded privately and the tab
+  // would have folded again).
   // W6 (goal queue): the QueueDock's read side — same derivation rule as
   // todoItems (full journal, same as the daemon), so a workstream switch
   // or daemon restart repopulates the dock on bootstrap replay.

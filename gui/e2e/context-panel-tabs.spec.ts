@@ -2,8 +2,12 @@ import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 // Review finding 8 (2026-08-24): context-panel tab strip overflow.
-// Nine tabs total ~616px vs ~359px of strip at the default 420px (U2.3) panel
-// width (~397px of clipping at the 280px MIN) — active-tab scrollIntoView + ‹ › controls.
+// UX-1 D2 (2026-09-01): TEN tabs now measure ~730px of strip content
+// (measured live, mock fixtures) vs ~359px of strip at the default 420px
+// (U2.3) panel width — ~511px of clipping at the 280px MIN, and ~71px even
+// at the 720px MAX (clientWidth 659). The "every tab fits" state is
+// UNREACHABLE at the CSS ceiling with ten tabs — active-tab scrollIntoView
+// + ‹ › controls are the permanent resting posture.
 
 async function openPanel(page: Page) {
   await page.goto("/");
@@ -67,7 +71,7 @@ async function expectActiveTabInStrip(page: Page) {
 test("‹ › controls appear at 280px and move the strip; active tab stays in view", async ({ page }) => {
   await openPanel(page);
 
-  // Drag the panel to the 280px MIN: 194px of tabs clip without navigation.
+  // Drag the panel to the 280px MIN: ~511px of tabs clip without navigation.
   await dragGripBy(page, 160); // 160px past the 420px default, into the MIN clamp
   await expect.poll(() => panelWidth(page)).toBe("280px");
 
@@ -96,9 +100,11 @@ test("‹ › controls appear at 280px and move the strip; active tab stays in v
   await expectActiveTabInStrip(page);
 });
 
-test("‹ › controls disappear once every tab fits", async ({ page }) => {
-  // 9 tabs (~616px) legitimately overflow the 640px MAX clamp the default
-  // 1280px viewport permits (640−61=579 < 616) — widen so the strip fits.
+test("‹ › controls persist at MAX — 10 tabs overflow the 720px ceiling, every tab stays reachable", async ({ page }) => {
+  // Measured truth (UX-1 D2): ten tabs lay out ~730px wide but the widest
+  // achievable strip is 720−61 = 659px (U2.1 CSS ceiling) — the fit state
+  // the old test pinned no longer exists at ANY viewport, so the controls
+  // must stay and reachability comes from scrollIntoView, never from fit.
   await page.setViewportSize({ width: 1440, height: 900 });
   await openPanel(page);
 
@@ -108,10 +114,21 @@ test("‹ › controls disappear once every tab fits", async ({ page }) => {
 
   // Drag far past MAX: the grip clamps at the U2.1 CSS ceiling —
   // min(720, window − sidebar − 400) = 720px at this 1440px viewport —
-  // strip width 720−61 ≈ 659px > ~616px of tabs, so every tab fits.
+  // strip width 720−61 = 659px < ~730px of tabs: controls persist.
   await dragGripBy(page, -520);
   await expect.poll(() => panelWidth(page)).toBe("720px");
-  await expect(page.getByRole("button", { name: "Scroll tabs left" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Scroll tabs right" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Scroll tabs right" })).toBeVisible();
+
+  // The rightmost tab (deepest in the overflow) is still exactly one
+  // click away: real click → selected AND pulled inside the strip.
+  await page.getByRole("tab", { name: "Learning", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Learning", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expectActiveTabInStrip(page);
+
+  // …and the leftmost tab pulls back into view the same way.
+  await page.getByRole("tab", { name: /^Tasks/ }).click();
   await expectActiveTabInStrip(page);
 });

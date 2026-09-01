@@ -47,6 +47,7 @@ import SettingsPanel from "./components/SettingsPanel";
 import ShortcutsPanel from "./components/ShortcutsPanel";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
+import TasksPanel from "./components/TasksPanel";
 import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
@@ -59,6 +60,7 @@ import {
   SwitchCache,
 } from "./switch_cache";
 import { deriveLoopStates, loopMode } from "./loop";
+import { deriveTodoState, visibleTodoItems } from "./todo";
 import { sameAutoDistillList, sameCountMap, sameDiff, sameDiffInfoExList, sameDiffList, sameIdList, sameStrandedOpsList } from "./diff_stable";
 import { deriveGateDrift, derivePipelineStates } from "./pipeline";
 import { isAdvisorySlash } from "./slash";
@@ -180,7 +182,10 @@ export default function App() {
   );
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     const stored = localStorage.getItem("odo-panel-tab");
-    return stored && (PANEL_TAB_IDS as readonly string[]).includes(stored) ? (stored as PanelTab) : "changes";
+    return stored && (PANEL_TAB_IDS as readonly string[]).includes(stored) ? (stored as PanelTab) : "tasks";
+    // UX-1 D2: the default tab is "tasks" (the plan layer's panel
+    // surface); persisted selections stay valid — PANEL_TAB_IDS derives
+    // from the registry, so an older stored id always matches.
   });
 
   // Keep-alive panel tabs (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
@@ -346,7 +351,7 @@ export default function App() {
   const panelOpenRef = useRef(false);
   // P1a: the poll loop reads the active tab through a ref (the interval
   // callback closes over the boot cycle, not the render cycle).
-  const panelTabRef = useRef<PanelTab>("changes");
+  const panelTabRef = useRef<PanelTab>("tasks");
   // U2.1: the panel's docked↔overlay posture follows the MEASURED chat
   // width (ResizeObserver on .app-main, 560/600px hysteresis) — the old
   // max-[999px] window-width breakpoint is deleted; one mechanism only.
@@ -586,6 +591,16 @@ export default function App() {
   // Pure re-derivation — loops continue daemon-side while the GUI is
   // closed, so state can never be latched here.
   const loopStates = useMemo(() => deriveLoopStates(events), [events]);
+  // M12 (D-todo) + UX-1 D2: the plan layer's SINGLE derive — folded once
+  // per poll tick from the journaled events and feeding three consumers:
+  // the composer Plan chip, the Tasks panel tab, and the strip badge.
+  const todoItems = useMemo(() => deriveTodoState(events), [events]);
+  // UX-1 D2 strip badge: visible (unswept) open rows — exactly what the
+  // chip's "N open" label counts, so badge and surfaces never disagree.
+  const openTodoCount = useMemo(
+    () => visibleTodoItems(todoItems).filter((t) => t.status === "open").length,
+    [todoItems],
+  );
   const reviewPanel = useMemo(
     () => parseReviewModels(appSettings?.review_models ?? ""),
     [appSettings],
@@ -821,7 +836,14 @@ export default function App() {
       setPreview(null); // bootstrap carries no preview; the next poll restores it
       setPanelProgress(null); // same for the /panel tally — the next poll restores it
       setDiff(resp.diff ?? null);
-      setDiffs([]);
+      // Seed the list from the bootstrap diff (the wire carries only the
+      // singular). Clearing to [] here and letting the first poll refill
+      // flips the Changes tab between its singular and list render
+      // branches — an unmount/remount ~one tick after boot that destroys
+      // DiffViewer-local state (an open commit editor dies mid-flow;
+      // Playwright sees "element was detached"). Seeded, the first poll
+      // is content-equal (sameDiffList) and the card never remounts.
+      setDiffs(resp.diff ? [resp.diff] : []);
       // M9 P2: reset the bootstrap latch so the first poll after a new
       // bootstrap (switch workstream, session restore) doesn't auto-open.
       bootstrappedRef.current = false;
@@ -2047,6 +2069,11 @@ export default function App() {
       const resp = unwrap(await acceptDiff(diffId, projectRootRef.current ?? undefined, commitMessage));
       if (resp.applied) {
         setDiff((d) => (d && d.id === diffId ? { ...d, status: "accepted" } : d));
+        // The Changes tab renders from the LIST branch once the first
+        // poll filled it, so the singular setDiff above is invisible
+        // there: resolve the list row in the same optimistic step or the
+        // record card sits "pending" until a poll contradicts it.
+        setDiffs((rows) => rows.map((r) => (r.id === diffId ? { ...r, status: "accepted" } : r)));
         // P1a: the inbox row resolves instantly (accept works cross-
         // workstream by diffID); badges + dataset re-sync right behind it.
         setInboxDiffs((rows) => rows.filter((r) => r.id !== diffId));
@@ -2063,6 +2090,8 @@ export default function App() {
     try {
       unwrap(await rejectDiff(diffId, projectRootRef.current ?? undefined));
       setDiff((d) => (d && d.id === diffId ? { ...d, status: "rejected" } : d));
+      // Same list-branch resolution as accept (Changes card parity).
+      setDiffs((rows) => rows.map((r) => (r.id === diffId ? { ...r, status: "rejected" } : r)));
       // P1a: same optimistic inbox resolution as accept.
       setInboxDiffs((rows) => rows.filter((r) => r.id !== diffId));
       void refreshPendingCounts();
@@ -2471,8 +2500,10 @@ export default function App() {
           distillInFlight={conversation != null && distillingConvs.includes(conversation.id)}
           onDisarmAutoDistill={handleDisarmAutoDistill}
           distillLocked={distillBusy}
-          // M12 (D-todo): the Plan chip reads the journaled events and its
-          // ops re-poll promptly through the normal path.
+          // M12 (D-todo) + UX-1 D2: the Plan chip reads App's single
+          // journaled derive (same array the Tasks tab renders); its ops
+          // re-poll promptly through the normal path.
+          todoItems={todoItems}
           projectRoot={project?.root_path ?? null}
           onTodoChanged={handlePollNow}
           onTodoError={handleSurfaceError}
@@ -2504,6 +2535,7 @@ export default function App() {
           pendingReview: pendingTotal,
           wikiNotes: wikiNoteCount,
           memoryProposals: pendingMemoryProposals,
+          openTodos: openTodoCount,
         }}
       >
         {/* Keep-alive (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
@@ -2517,6 +2549,29 @@ export default function App() {
             collapses the inactive ones. Existing keys/comments on the
             panels are unchanged. RunGroupBoundary in ContextPanel still
             scopes an error to its tab's subtree. */}
+        <div hidden={panelTab !== "tasks"}>
+          {mountedPanelTabs.has("tasks") && (conversation?.id != null ? (
+            // UX-1 D2: the plan layer's panel surface — conversation-
+            // scoped (the fold reads the active conversation's journal,
+            // same scope guarantee as the chip). Items are App's single
+            // derive handed down live: the memo'd panel skips quiet ticks
+            // on the stable reference, and an events change re-renders at
+            // zero re-derivation cost — no freeze ref needed (RunsPanel's
+            // freeze exists to protect an inner O(journal) fold, which
+            // this panel does not have).
+            <TasksPanel
+              conversationId={conversation.id}
+              projectRoot={project?.root_path ?? null}
+              items={todoItems}
+              onChanged={handlePollNow}
+              onError={handleSurfaceError}
+              active={panelTab === "tasks"}
+              disabled={!booted || distillBusy}
+            />
+          ) : (
+            <div className="panel-empty">No active conversation.</div>
+          ))}
+        </div>
         <div hidden={panelTab !== "changes"}>
           {mountedPanelTabs.has("changes") && (diffs.length > 0
             ? diffs.map((d) => (

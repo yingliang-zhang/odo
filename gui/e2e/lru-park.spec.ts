@@ -41,19 +41,19 @@ async function mountedBodyCount(page: Page): Promise<number> {
 test("park beyond 3 mounted: badge appears; re-activation remounts and clears it", async ({ page }) => {
   await openPanel(page);
 
-  // changes is the seed tab (persisted default). Activate three more in
-  // sequence: mru = skills, review, wiki, changes → changes parks.
+  // tasks is the seed tab (UX-1 D2 default). Activate three more in
+  // sequence: mru = skills, review, wiki, tasks → tasks parks.
   await clickTab(page, "Wiki");
   await clickTab(page, "Review");
   await clickTab(page, "Skills");
 
-  await expect(tabButton(page, "Changes").locator('[data-slot="parked-badge"]')).toBeVisible(POLL);
+  await expect(tabButton(page, "Tasks").locator('[data-slot="parked-badge"]')).toBeVisible(POLL);
   await expect.poll(() => mountedBodyCount(page), POLL).toBe(3);
 
   // Re-activation remounts the body and clears the badge; the LRU tail
   // (Wiki) parks instead.
-  await clickTab(page, "Changes");
-  await expect(tabButton(page, "Changes").locator('[data-slot="parked-badge"]')).toHaveCount(0);
+  await clickTab(page, "Tasks");
+  await expect(tabButton(page, "Tasks").locator('[data-slot="parked-badge"]')).toHaveCount(0);
   await expect(tabButton(page, "Wiki").locator('[data-slot="parked-badge"]')).toBeVisible(POLL);
   await expect.poll(() => mountedBodyCount(page), POLL).toBe(3);
 });
@@ -74,6 +74,7 @@ test("draft-exempt: a Wiki search draft keeps the tab mounted outside the cap", 
   await expect.poll(() => tabButton(page, "Wiki").locator('[data-slot="parked-badge"]').count(), POLL).toBe(0);
   await expect(page.locator(".context-panel input").first()).toHaveValue("epoch");
   await expect.poll(() => mountedBodyCount(page), POLL).toBe(4);
-  // Wiki was exempt, so the evicted depth-3 seat belongs to Changes.
-  await expect(tabButton(page, "Changes").locator('[data-slot="parked-badge"]')).toBeVisible(POLL);
+  // Wiki was exempt, so the evicted depth-3 seat belongs to the seed tab
+  // (Tasks — UX-1 D2 default; Changes was never mounted in this flow).
+  await expect(tabButton(page, "Tasks").locator('[data-slot="parked-badge"]')).toBeVisible(POLL);
 });

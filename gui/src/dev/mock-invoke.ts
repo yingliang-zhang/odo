@@ -359,10 +359,18 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
     // ---------- Diffs ----------
     case "accept_diff": {
       fx.resolveInboxDiff(args?.diffId ?? 0);
+      // Poll parity: the daemon's next tick reports the resolved status
+      // (the Changes card persists as a record card, DiffViewer), so the
+      // fixture's poll-side row flips too — otherwise the next poll
+      // regresses App's optimistic resolution back to "pending".
+      const resolved = fx.changesDiffs.find((d) => d.id === (args?.diffId ?? 0));
+      if (resolved) resolved.status = "accepted";
       return { ok: true, diff_id: args?.diffId, applied: true };
     }
     case "reject_diff": {
       fx.resolveInboxDiff(args?.diffId ?? 0);
+      const rejected = fx.changesDiffs.find((d) => d.id === (args?.diffId ?? 0));
+      if (rejected) rejected.status = "rejected";
       return { ok: true, diff_id: args?.diffId, applied: false };
     }
     // P1a (review inbox): the Review tab's dataset — same rows the sidebar

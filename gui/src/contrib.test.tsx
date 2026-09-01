@@ -19,8 +19,10 @@ globalThis.ResizeObserver ??= class {
 HTMLElement.prototype.setPointerCapture = () => {};
 
 describe("PANEL_CONTRIBUTIONS", () => {
-  it("declares exactly the 9 shipped panels, in strip order", () => {
+  it("declares exactly the 10 shipped panels, in strip order", () => {
     expect(PANEL_TAB_IDS).toEqual([
+      // UX-1 D2: the plan layer's surface opens the strip (default tab).
+      "tasks",
       "changes",
       "review",
       "wiki",
@@ -48,11 +50,13 @@ describe("PANEL_CONTRIBUTIONS", () => {
       pendingReview: 2,
       wikiNotes: 5,
       memoryProposals: 4,
+      openTodos: 6,
     };
     const byId = Object.fromEntries(
       PANEL_CONTRIBUTIONS.map((c) => [c.id, badgeFor(c, input)]),
     );
     expect(byId).toEqual({
+      tasks: 6,
       changes: 3,
       review: 2,
       wiki: 5,
@@ -71,6 +75,7 @@ describe("PANEL_CONTRIBUTIONS", () => {
       pendingReview: 0,
       wikiNotes: null,
       memoryProposals: 0,
+      openTodos: 0,
     };
     for (const c of PANEL_CONTRIBUTIONS) expect(badgeFor(c, input) ?? null).toBeNull();
     // Wiki is a passthrough of pending_counts: an explicit 0 is a real
@@ -104,10 +109,11 @@ describe("ContextPanel renders from the registry", () => {
         open
         activeTab="changes"
         onTabChange={() => {}}
-        badgeInput={{ pendingDiffs: 7, pendingReview: 0, wikiNotes: 6, memoryProposals: 1 }}
+        badgeInput={{ pendingDiffs: 7, pendingReview: 0, wikiNotes: 6, memoryProposals: 1, openTodos: 2 }}
       />,
     );
     expect(badgesFor(container, "Changes")).toBe("7");
+    expect(badgesFor(container, "Tasks")).toBe("2");
     expect(badgesFor(container, "Review")).toBeNull(); // zero → no badge
     expect(badgesFor(container, "Wiki")).toBe("6");
     expect(badgesFor(container, "Memory")).toBe("1");

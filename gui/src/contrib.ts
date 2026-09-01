@@ -29,6 +29,7 @@ import {
   GraduationCap,
   History,
   Inbox,
+  ListChecks,
   MapPin,
 } from "lucide-react";
 
@@ -44,6 +45,10 @@ export interface PanelBadgeInput {
   wikiNotes: number | null;
   // Unapplied memory proposals.
   memoryProposals: number;
+  // Open (visible, unswept) todo items from the lifted deriveTodoState —
+  // UX-1 D2: the chip and the Tasks tab read one derive, so the badge
+  // counts exactly what the tabs render.
+  openTodos: number;
 }
 
 // Zero state renders no badge — every derivation funnels through this so
@@ -65,6 +70,11 @@ export interface PanelContribution {
 }
 
 const CONTRIBUTIONS = [
+  // UX-1 D2 (ux-batch-lock-2026-09-01): the plan layer's panel surface —
+  // journal SSOT via deriveTodoState, zero new IPC. FIRST entry: the
+  // default tab (Changes stays — accept/reject flows through it; just
+  // deprioritized by position).
+  { id: "tasks", title: "Tasks", icon: ListChecks, badge: (i: PanelBadgeInput) => positive(i.openTodos) },
   { id: "changes", title: "Changes", icon: GitCompareArrows, badge: (i: PanelBadgeInput) => positive(i.pendingDiffs) },
   // P1a: cross-workstream pending-review inbox (Changes stays per-conversation).
   { id: "review", title: "Review", icon: Inbox, badge: (i: PanelBadgeInput) => positive(i.pendingReview) },

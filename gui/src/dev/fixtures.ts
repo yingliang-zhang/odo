@@ -389,6 +389,13 @@ index 789abc..012def 100644
 `,
 };
 
+// The Changes tab's poll-visible pending-diff list. Mutable (module
+// array) so e2e can drive a genuine 1→0→1 transition through the poll
+// path — clear, wait a poll, re-add — which the bootstrap-latched seeded
+// state alone can never produce (App M9 P2 auto-open fires only on that
+// edge, and only while the panel is closed).
+export const changesDiffs: Diff[] = [pendingDiff];
+
 // P1a (review inbox): the same two pending diffs the Review tab lists —
 // diff 1 on workstream main (the Changes tab's fixture), diff 2 on
 // feat-sidebar-tree, so dev/e2e exercise the cross-workstream accept path.
@@ -850,7 +857,7 @@ export function makePollResponse(convId: number, afterSeq?: number): PollEventsR
     streaming: false,
     panel_progress: panelProgressState.current,
     diff: convId === 1 ? pendingDiff : null,
-    diffs: convId === 1 ? [pendingDiff] : [],
+    diffs: convId === 1 ? [...changesDiffs] : [],
   };
 }
 

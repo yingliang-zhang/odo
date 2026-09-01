@@ -217,6 +217,11 @@ test("panel reviewing locks the human-action buttons on card and inbox row", asy
   // stage, so a stray click can't race the panel verdict. Hard stops hand
   // the decision back: blocked re-enables everything.
   await page.keyboard.press("Meta+j");
+  await expect(page.locator(".context-panel")).toBeVisible();
+  // UX-1 D2: the panel opens on the default tab (Tasks); this test
+  // asserts Changes-tab content, so activate it explicitly (badge counts
+  // accrue into the accessible name — prefix regex).
+  await page.getByRole("tab", { name: /^Changes/ }).click();
   await expect(page.locator(".diff-card")).toBeVisible();
   // Baseline (queued — nothing running yet): fully actionable.
   await expect(page.locator(".diff-header .btn-accept")).toBeEnabled();

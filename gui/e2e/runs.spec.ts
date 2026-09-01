@@ -125,5 +125,13 @@ test("empty states: a workstream with no runs shows the empty message", async ({
   // against a filtered zero-state instead (component behavior is pinned in
   // runspanel.test.tsx — this guards the tab mount path).
   await openRunsTab(page);
-  await expect(page.locator(".context-panel .mem-body, .context-panel .panel-empty").first()).toBeVisible(POLL);
+  // UX-1 D2: Tasks is the default tab and mounts at boot — its hidden
+  // keep-alive body also carries .mem-body, so the old unscoped locator's
+  // .first() hit the HIDDEN Tasks body. Scope to the one visible wrapper
+  // (`.panel-body > div:not([hidden])`); RunsPanel renders .mem-body in
+  // both its empty and rows branches, so the mount-path contract holds
+  // for either state.
+  await expect(
+    page.locator(".context-panel .panel-body > div:not([hidden]) .mem-body").first(),
+  ).toBeVisible(POLL);
 });

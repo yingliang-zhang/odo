@@ -16,7 +16,9 @@ export default defineConfig({
   workers: 1,
   reporter: "list",
   use: {
-    baseURL: "http://localhost:1420",
+    // Overridable per-run (worktree dev server on another port) — same
+    // getEnv posture as the CI retries knob below.
+    baseURL: getEnv("PLAYWRIGHT_BASE_URL") ?? "http://localhost:1420",
     headless: true,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
@@ -24,7 +26,10 @@ export default defineConfig({
   retries: getEnv("CI") ? 2 : 0,
   webServer: {
     command: "npm run dev",
-    url: "http://localhost:1420",
+    // Probe the URL the tests will actually hit: with PLAYWRIGHT_BASE_URL
+    // set, an already-running override server is reused, otherwise the
+    // stock 1420 check stands.
+    url: getEnv("PLAYWRIGHT_BASE_URL") ?? "http://localhost:1420",
     reuseExistingServer: true,
     timeout: 30_000,
   },

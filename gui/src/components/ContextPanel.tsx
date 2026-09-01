@@ -32,6 +32,7 @@ const NO_BADGES: PanelBadgeInput = {
   pendingReview: 0,
   wikiNotes: null,
   memoryProposals: 0,
+  openTodos: 0,
 };
 
 interface Props {
