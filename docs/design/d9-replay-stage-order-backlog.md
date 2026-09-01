@@ -1,5 +1,7 @@
 # D9 backlog: replay gate stage-ordering tension (audit #5)
 
+**RESOLVED 2026-09-01 by Amendment A1 (b649ee0, implemented a8410af).**
+
 Date: 2026-08-31. Source: quad-model architecture audit (Sol + DSF legs,
 K3/GLM corroborate). Status: OPEN — needs design-lock amendment, not an
 in-place tweak (settled semantics, protected by lock §2.3).

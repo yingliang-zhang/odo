@@ -54,6 +54,10 @@
 
 ## Frozen design (authoritative; K3 doc §1-§7 as amended here)
 
+> **AMENDED 2026-09-01** — replay checks f/g are DELETED; efficacy moves to
+> the canary layer. See `docs/design/d9-lock-amendment-a1-fg-canary.md`
+> (authoritative).
+
 The K3 long-form (`docs/design/learning-control-plane-d9.md`) is the base
 skeleton — densest file:line verification and the most complete pass
 criteria. The following amendments from the other legs are merged in:
@@ -65,6 +69,10 @@ criteria. The following amendments from the other legs are merged in:
   over journaled fields, then: route_human|block|advisory` — loosening is
   grammatically impossible; numeric gate mutation excluded (that circularity
   is what D1 exists to prevent).
+
+  > **AMENDED 2026-09-01** — replay checks f/g are DELETED; efficacy moves
+  > to the canary layer. See `docs/design/d9-lock-amendment-a1-fg-canary.md`
+  > (authoritative).
 - **From DSF**: candidate status and `uses` fold from the journal
   (`learning_stage` rows + canary receipt key), keeping candidates.jsonl
   content-addressing honest. `global_active` = folded receipt of a HUMAN's
