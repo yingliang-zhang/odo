@@ -64,10 +64,11 @@ test("draft-exempt: a Wiki search draft keeps the tab mounted outside the cap", 
   // Arm the Wiki draft (non-empty search query is the draft contract).
   await clickTab(page, "Wiki");
   await page.locator(".context-panel input").first().fill("epoch");
-  // Push three more activations deep: Review → Skills → Ledger.
+  // Push three more activations deep: Review → Skills → Runs (A3-2:
+  // the Ledger tab is gone; Runs carries the receipts fold now).
   await clickTab(page, "Review");
   await clickTab(page, "Skills");
-  await clickTab(page, "Ledger");
+  await clickTab(page, "Runs");
 
   // Wiki never parks: no badge, and the browser stayed mounted (the
   // typed query still sits in its input). 4 bodies mount (cap 3 + exempt).

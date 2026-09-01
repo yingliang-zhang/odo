@@ -16,7 +16,6 @@ import type {
   DiffInfoEx,
   DistillResponse,
   GetSettingsResponse,
-  LedgerResponse,
   ListTopicsResponse,
   ListWikiResponse,
   K8sJob,
@@ -820,6 +819,9 @@ export const topics: WikiNoteInfo[] = [
 
 // ---------- Ledger ----------
 
+// A3-2 (UX-4): the ledger IPC mock case is gone with the Ledger tab —
+// this content now arms previewFiles[".odo/ledger.md"] for the TopBar
+// overflow Ledger → Preview pathway (ledger.spec.ts).
 export const ledgerContent = `# Ledger
 
 | Date | Action | Target | SHA Before | SHA After |
@@ -938,7 +940,6 @@ export {
   type CurateResponse,
   type DistillResponse,
   type GetSettingsResponse,
-  type LedgerResponse,
   type ListTopicsResponse,
   type ListWikiResponse,
   type ListWorkstreamsResponse,

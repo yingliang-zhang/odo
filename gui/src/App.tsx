@@ -39,7 +39,6 @@ import { PANEL_TAB_IDS, type PanelTab } from "./contrib";
 import { ESC_PRIORITY, dispatchEscape, useEscLayer } from "./esc-registry";
 import DiffViewer from "./components/DiffViewer";
 import LearningPanel from "./components/LearningPanel";
-import LedgerPanel from "./components/LedgerPanel";
 import MemoryPanel from "./components/MemoryPanel";
 import ReviewInbox from "./components/ReviewInbox";
 import SkillsPanel from "./components/SkillsPanel";
@@ -186,7 +185,9 @@ export default function App() {
     return stored && (PANEL_TAB_IDS as readonly string[]).includes(stored) ? (stored as PanelTab) : "tasks";
     // UX-1 D2: the default tab is "tasks" (the plan layer's panel
     // surface); persisted selections stay valid — PANEL_TAB_IDS derives
-    // from the registry, so an older stored id always matches.
+    // from the registry, so an older stored id always matches. A3-2
+    // (UX-4): a stored "ledger" from before the fold fails the allowlist
+    // and lands on "tasks" — pinned in app_keepalive.test.tsx.
   });
 
   // Keep-alive panel tabs (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
@@ -693,20 +694,14 @@ export default function App() {
     }
   }, [loopStates, appSettings, conversation?.id]);
 
-  // 2026-08-25 review P2 (keep-alive Ledger): `events` is a fresh array
-  // on every poll and streaming batch; handing it straight to the
-  // CSS-hidden keep-alive LedgerPanel would bust its memo each tick —
-  // filter+sort over the full journal for a surface nobody sees. While
-  // the ledger tab is hidden, freeze the prop at the array from its last
-  // active commit (the ref only follows active-tab commits); the subtree
-  // renders ZERO times while hidden and re-syncs in the activation
-  // render, where the panel's own activation edge also refetches
-  // ledger.md.
-  const ledgerEventsRef = useRef(events);
-  useEffect(() => {
-    if (panelTab === "ledger") ledgerEventsRef.current = events;
-  });
-  // P2.2: same freeze contract for the Runs tab's journal fold.
+  // 2026-08-25 review P2 (ex keep-alive Ledger; A3-2 folded its receipts
+  // into the Runs tab): `events` is a fresh array on every poll and
+  // streaming batch; handing it straight to the CSS-hidden keep-alive
+  // RunsPanel would bust its memo each tick — filter+sort over the full
+  // journal for a surface nobody sees. While the runs tab is hidden,
+  // freeze the prop at the array from its last active commit (the ref
+  // only follows active-tab commits); the subtree renders ZERO times
+  // while hidden and re-syncs in the activation render.
   const runsEventsRef = useRef(events);
   useEffect(() => {
     if (panelTab === "runs") runsEventsRef.current = events;
@@ -1944,7 +1939,9 @@ export default function App() {
     dismissedFailureRef.current = null;
     handlePollNow();
   }, [handlePollNow]);
-  const handleFailureOpenJournal = useCallback(() => openPanelTab("ledger"), [openPanelTab]);
+  // A3-2: verify_infra/panel_infra failures point at the receipts, which
+  // now fold inside the Runs tab (the Ledger tab is gone).
+  const handleFailureOpenJournal = useCallback(() => openPanelTab("runs"), [openPanelTab]);
   // Diagnostics snapshot: the poll counters and raw error the overlay
   // shows, plus routing context — the P2.5 design-lock JSON (daemon log
   // tail omitted: no fs-read surface without a supply-chain change).
@@ -2348,7 +2345,9 @@ export default function App() {
         onCurate={handleCurate}
         onPin={handlePin}
         onOpenSettings={() => setSettingsOpen(true)}
-        onOpenLedger={() => openPanelTab("ledger")}
+        // A3-2: the Ledger tab is gone — the overflow item opens ledger.md
+        // through the Preview tab's file pathway instead.
+        onOpenLedger={() => handlePreviewFile(".odo/ledger.md")}
         wikiNoteCount={wikiNoteCount}
         pendingMemoryProposals={pendingMemoryProposals}
         distillBusy={distillBusy}
@@ -2439,7 +2438,7 @@ export default function App() {
               title={lastLedgerFailure}
               onClick={() => {
                 handleLedgerFailureDismiss();
-                openPanelTab("ledger");
+                openPanelTab("runs"); // A3-2: receipts live under Runs now
               }}
             >
               ⚠ ledger write failed
@@ -2663,22 +2662,6 @@ export default function App() {
               // still carries a resume time; unset settings read as the
               // daemon's default-ON posture.
               autoDistillEnabled={appSettings?.auto_distill !== "never"}
-            />
-          ) : (
-            <div className="panel-empty">No active conversation.</div>
-          ))}
-        </div>
-        <div hidden={panelTab !== "ledger"}>
-          {mountedPanelTabs.has("ledger") && (conversation?.id != null ? (
-            <LedgerPanel
-              key={`${project?.root_path ?? "default"}:${conversation.id}`}
-              conversationId={conversation.id}
-              projectRoot={project?.root_path ?? null}
-              active={panelTab === "ledger"}
-              // A-P0 #1: the review-action cells read the same journaled
-              // events ChatSurface renders — live, no extra IPC. Frozen
-              // while hidden (2026-08-25 review P2, ledgerEventsRef).
-              events={panelTab === "ledger" ? events : ledgerEventsRef.current}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>

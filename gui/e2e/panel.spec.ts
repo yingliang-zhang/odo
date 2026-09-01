@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Context panel: ⌘J toggle, tab switching between Changes/Wiki/Memory/Ledger.
+// Context panel: ⌘J toggle, tab switching between Changes/Wiki/Memory/Runs.
 // Panel is NOT open by default (localStorage empty in fresh browser context).
 
 test.beforeEach(async ({ page }) => {
@@ -36,10 +36,10 @@ test("switch panel tabs", async ({ page }) => {
   await memoryTab.click();
   await expect(memoryTab).toHaveAttribute("aria-selected", "true");
 
-  // Click Ledger tab
-  const ledgerTab = page.getByRole("tab", { name: /Ledger/ });
-  await ledgerTab.click();
-  await expect(ledgerTab).toHaveAttribute("aria-selected", "true");
+  // Click Runs tab
+  const runsTab = page.getByRole("tab", { name: /Runs/ });
+  await runsTab.click();
+  await expect(runsTab).toHaveAttribute("aria-selected", "true");
 
   // Click Changes tab
   const changesTab = page.getByRole("tab", { name: /Changes/ });

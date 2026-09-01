@@ -1,11 +1,15 @@
 // P2.4 (docs/design/adoption-lock.md, 2026-08-29): the ContextPanel
 // "Runs" tab body — outcome, duration, and measured tokens per run,
 // folded purely from the journal (deriveRuns in ../runs.ts; zero new
-// IPC). Rows keep LedgerPanel's compact tabular-receipt posture. Keep-
-// alive contract: App mounts this once behind the `active` flag and
-// FREEZES the events prop off-tab, so the memo'd subtree re-derives only
-// when events actually change and needs no activation refetch — the
-// journal is the cache.
+// IPC), plus the A3-2 receipts section (ux-batch-lock-amendment-a3,
+// UX-4): the review_action journal receipts that owned the deleted
+// Ledger tab render here as a second section (ReviewReceipts.tsx), off
+// the same frozen events prop — the two folds were adjacent journal refs
+// in App already (ex ledgerEventsRef/runsEventsRef). Keep-alive
+// contract: App mounts this once behind the `active` flag and FREEZES
+// the events prop off-tab, so the memo'd subtree re-derives only when
+// events actually change and needs no activation refetch — the journal
+// is the cache.
 
 import { memo, useMemo } from "react";
 import type { KeyboardEvent } from "react";
@@ -14,6 +18,7 @@ import { cn } from "../lib/utils";
 import { deriveRuns, type RunRow } from "../runs";
 import { formatBytes, formatTokens } from "../stats";
 import { SLOT } from "../slots";
+import { reviewReceipts, ReviewRow } from "./ReviewReceipts";
 
 interface Props {
   // The conversation's journaled events — App's bootstrap replay + poll
@@ -177,7 +182,8 @@ function RunRowView({ run, onJumpToSeq }: { run: RunRow; onJumpToSeq?: (seq: num
 
 function RunsPanel({ events, currentModel, onJumpToSeq }: Props) {
   const runs = useMemo(() => deriveRuns(events), [events]);
-  if (runs.length === 0) {
+  const receipts = useMemo(() => reviewReceipts(events), [events]);
+  if (runs.length === 0 && receipts.length === 0) {
     return (
       <div className="mem-body">
         {currentModel != null && (
@@ -195,11 +201,23 @@ function RunsPanel({ events, currentModel, onJumpToSeq }: Props) {
       {runs.map((run) => (
         <RunRowView key={run.startSeq} run={run} onJumpToSeq={onJumpToSeq} />
       ))}
+      {receipts.length > 0 && (
+        // A3-2: the Ledger tab's review-receipts fold. Section title kept
+        // verbatim from the deleted LedgerPanel so row identity classes
+        // (.ledger-review-*) stay e2e-stable.
+        <>
+          <div className="mem-section-title">review actions — journal receipts, newest first</div>
+          {receipts.map((ev) => (
+            <ReviewRow key={ev.seq} event={ev} />
+          ))}
+        </>
+      )}
     </div>
   );
 }
 
-// Keep-alive panel (LedgerPanel convention, tri-review P2 #5): App hands
-// only referentially stable props to the mounted-off-tab subtree, so the
-// default shallow compare skips quiet poll ticks — no custom comparator.
+// Keep-alive panel (tri-review P2 #5, ex LedgerPanel convention): App
+// hands only referentially stable props to the mounted-off-tab subtree,
+// so the default shallow compare skips quiet poll ticks — no custom
+// comparator.
 export default memo(RunsPanel);

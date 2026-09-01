@@ -993,14 +993,10 @@ export interface ListTopicsResponse {
 
 // ---------- M6: precision + ledger ----------
 
-// ledger: .odo/ledger.md content ("" when absent) — same shape as read_pins.
-// The daemon is the only writer; the UI renders it read-only.
-export interface LedgerResponse {
-  ok: boolean;
-  error?: string;
-  memory_content?: string;
-}
-
+// Note: the ledger IPC query keeps its daemon command; the GUI reads
+// ledger.md through read_file now (A3-2 Preview pathway), so the response
+// type went with it.
+//
 // contradictions: the conversation's note-retraction events
 // (memory_update{layer:"note", cause:"retract"}) for the wiki browser's
 // retracted badges.

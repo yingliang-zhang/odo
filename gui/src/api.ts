@@ -40,7 +40,6 @@ import type {
   CurateResponse,
   DistillResponse,
   GetSettingsResponse,
-  LedgerResponse,
   LearningStatusResponse,
   ListAllPendingDiffsResponse,
   ListTopicsResponse,
@@ -487,13 +486,6 @@ export async function listTopics(projectRoot?: string): Promise<ListTopicsRespon
   return unwrap(await invoke<ListTopicsResponse>("list_topics", {
     projectRoot: projectRoot ?? null,
   }));
-}
-
-// M6 precision+ledger: .odo/ledger.md content for the review panel's Ledger
-// tab; same shape and unwrap semantics as readMemory/readPins. The daemon
-// is the only writer; the file is never injected into prompts (pull-only).
-export async function ledger(projectRoot?: string): Promise<LedgerResponse> {
-  return unwrap(await invoke<LedgerResponse>("ledger", { projectRoot: projectRoot ?? null }));
 }
 
 // M6 precision+ledger: the conversation's note-retraction events for the

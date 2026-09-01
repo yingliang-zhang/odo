@@ -136,14 +136,24 @@ describe("keep-alive panel tabs (tri-review P1 #5, 2026-08-24)", () => {
     fireEvent.click(screen.getByRole("tab", { name: /^memory/i }));
     expect(stubApi("memoryProposals").mock.calls.length).toBe(batchCalls + 1);
   });
+
+  it("A3-2 (UX-4): a stored pre-fold 'ledger' selection orphans onto the tasks default", async () => {
+    // The allowlist (PANEL_TAB_IDS) derives from the registry — "ledger"
+    // left it in the fold, so the panelTab initializer's fallback ("tasks")
+    // takes over for anyone holding the old value. One line, per A3-2.4.
+    localStorage.setItem("odo-panel-tab", "ledger");
+    render(<App />);
+    const tasks = await screen.findByRole("tab", { name: /^tasks/i });
+    expect(tasks.getAttribute("aria-selected")).toBe("true");
+  });
 });
 
 describe("panel activation refresh (2026-08-25 review P1)", () => {
   // Every keep-alive panel used to freeze at first-mount bytes: a daemon
-  // distill adding an epoch note, a new memory batch, a ledger append, or
-  // an externally added skill never surfaced because nothing refetched.
-  // On the inactive→active edge each panel re-pulls its surface — these
-  // cases pin the four contracts down on the real App.
+  // distill adding an epoch note, a new memory batch, or an externally
+  // added skill never surfaced because nothing refetched. On the
+  // inactive→active edge each panel re-pulls its surface — these cases
+  // pin the three contracts down on the real App.
 
   const note = (n: number) => ({
     path: `/tmp/proj/wiki/main-epoch-${n}.md`,
@@ -215,18 +225,9 @@ describe("panel activation refresh (2026-08-25 review P1)", () => {
     expect((await screen.findByRole("button", { name: /^reject$/i })).className).not.toContain("selected");
   });
 
-  it("ledger: ledger.md appended while hidden re-reads on re-activation", async () => {
-    stubApi("ledger").mockResolvedValue({ ok: true, memory_content: "LEDGER-V1" });
-    render(<App />);
-    await screen.findByLabelText("Search wiki");
-    fireEvent.click(screen.getByRole("tab", { name: /^ledger/i }));
-    await screen.findByText("LEDGER-V1");
-
-    fireEvent.click(screen.getByRole("tab", { name: /^wiki/i }));
-    stubApi("ledger").mockResolvedValue({ ok: true, memory_content: "LEDGER-V2" });
-    fireEvent.click(screen.getByRole("tab", { name: /^ledger/i }));
-    await screen.findByText("LEDGER-V2");
-  });
+  // A3-2 (UX-4): the ledger.md re-read contract moved to PreviewPanel's
+  // activation edge (pinned in previewpanel.test.tsx); the ledger.md file
+  // itself opens through the TopBar overflow → Preview pathway.
 
   it("skills: skills added while hidden re-list on re-activation", async () => {
     stubApi("listSkills").mockResolvedValue({ ok: true, skills: [] });

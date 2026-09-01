@@ -40,7 +40,8 @@ test("app boots with chat surface and composer", async ({ page }) => {
 });
 
 // PR3: TopBar decluttered to Distill (labeled) + ⋯ overflow + Settings (gear).
-// Wiki/Curate/Pin/Ledger moved to ⋯ overflow menu; Wiki/Ledger also in panel tabs.
+// Wiki/Curate/Pin/Ledger moved to ⋯ overflow menu; Wiki is a panel tab too,
+// and A3-2 retargeted Ledger to the Preview tab's ledger.md file view.
 test("app boots with TopBar actions", async ({ page }) => {
   await page.goto("/");
 

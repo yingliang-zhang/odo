@@ -1,34 +1,17 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { errorMessage, ledger } from "../api";
 import type { EventPayload, OdoEvent } from "../types";
 import { cn } from "../lib/utils";
-import LoadingInline from "./LoadingInline";
 
-// M9 P3: the ledger view, lifted out of the memory review modal into the
-// right panel's Ledger tab. The panel stays mounted under App's keep-alive
-// tabs; the activation edge (below) re-reads .odo/ledger.md (the daemon is
-// the only writer) on every re-visit — same cadence the pre-keep-alive
-// remount gave it. conversationId is part of the panel-tab wiring
-// contract; the ledger itself is project-global.
-interface Props {
-  conversationId: number;
-  // M11 P1: the ledger read routes to this project's daemon; null =
-  // bridge default. App remounts the panel on project switch.
-  projectRoot?: string | null;
-  // Keep-alive activation edge (2026-08-25 review P1): App mounts the
-  // panel once and CSS-hides it; ledger.md (daemon-written at distill,
-  // curate, apply, loop receipts) keeps appending while hidden. On
-  // inactive→active the file re-reads. App also FREEZES the events prop
-  // while hidden, so this memo'd subtree renders zero times off-tab.
-  active: boolean;
-  // A-P0 #1 (Guardian risk taxonomy): the conversation's journaled events —
-  // App's bootstrap replay + poll appends are the ONLY source (no new IPC);
-  // the review_action rows are rendered below as decision cells (codex
-  // history_cell/approvals.rs parity: who decided, what, outcome).
-  events: OdoEvent[];
-}
-
-// The review-decision actions this panel rows out of the journal. Memory
+// UX-4 / A3-2 (ux-batch-lock-amendment-a3, 2026-09-01): the review-receipt
+// renderer folded out of the deleted Ledger tab into the Runs panel
+// (design-lock A3-1 disposition: receipts → Runs section, ledger.md file →
+// Preview). Both Reads fold the same conversation journal, newest first —
+// RunsPanel derives run rows and receipts from one frozen events prop
+// (App's runsEventsRef keep-alive freeze, ex ledgerEventsRef).
+//
+// The review-decision receipts: A-P0 #1 (Guardian risk taxonomy) journal
+// rows — accept/reject/auto_land_blocked/moa_review/auto_revise_round/
+// refresh_attempted — rendered as decision cells (codex
+// history_cell/approvals.rs parity: who decided, what, outcome). Memory
 // and queue bookkeeping rows (distill, curate, todo_merge, memory_propose,
 // memory_apply, run_prompt, parked_goal_dropped) keep their own surfaces —
 // Plan chip, MemoryPanel, transcript badges — and would only spam here.
@@ -53,6 +36,15 @@ const RISK_ELIGIBLE_ACTIONS: Record<string, true> = {
   auto_revise_round: true,
 };
 
+// The receipts section's filter+sort: journal rows for the decision
+// actions above, newest first — the same scan ComputeAutonomy does,
+// rendered. RunsPanel memos this on the same frozen events prop.
+export function reviewReceipts(events: OdoEvent[]): OdoEvent[] {
+  return events
+    .filter((e) => e.type === "review_action" && REVIEW_DECISION_ACTIONS[e.payload?.action ?? ""] === true)
+    .sort((a, b) => b.seq - a.seq);
+}
+
 // Severity ramp → the five CSS stops. Order mirrors risk.go's
 // leak-cost-ranked riskClassOrder: leaking a credential or a local file
 // tops it; supply-chain touches rate lowest (observational wave). A class
@@ -69,8 +61,8 @@ const RISK_LEVEL_STYLE: Record<string, string> = {
 
 // Outcome badges the transcript doesn't already style. The .badge base +
 // badge-accept/badge-reject/badge-other rules stay in app.css for this
-// panel alone — MessageBubble/DiffViewer/MemoryPanel now use the shared CVA
-// Badge (ui/badge.tsx). Delete the four rules when this panel migrates.
+// renderer alone — MessageBubble/DiffViewer/MemoryPanel now use the shared
+// CVA Badge (ui/badge.tsx). Delete the four rules when this migrates.
 // Values translated 1:1 from the deleted rules.
 const OUTCOME_BADGE_UTIL: Record<string, string> = {
   "badge-blocked": "bg-[rgba(204,167,66,0.14)] text-[var(--warn)] border border-[var(--warn)]",
@@ -114,13 +106,18 @@ function actionBadge(p: EventPayload): { label: string; cls: string } {
     }
     case "auto_revise_round":
       return { label: `Revise round ${p.round ?? "?"}`, cls: "badge-other" };
-    // Forward-compat: a write site this panel predates still lists, plainly.
+    // Forward-compat: a write site this renderer predates still lists, plainly.
     default:
       return { label: p.action ?? "review", cls: "badge-other" };
   }
 }
 
-function ReviewRow({ event }: { event: OdoEvent }) {
+// One receipt row: seq anchor, outcome badge, diff ref, actor chip, Guardian
+// risk-class badges (honest "unrated" for pre-W5 rows), timed-out chip,
+// blocked-reason/refresh-phase detail, and the collapsed run-output log.
+// The .ledger-review-* classes survive as inert identity markers (e2e hooks
+// in ledger.spec.ts — MemoryPanel P1-P4 convention).
+export function ReviewRow({ event }: { event: OdoEvent }) {
   const p = event.payload ?? {};
   const { label, cls } = actionBadge(p);
   // The colored tail of one row: outcome evidence. Blocked rows name their
@@ -131,10 +128,10 @@ function ReviewRow({ event }: { event: OdoEvent }) {
       : p.action === "refresh_attempted" && p.phase
         ? p.phase
         : null;
-  // Tri-model right sidebar gap (read-only run/verify log): full verify
-  // output where journaled — blocked rows carry it in `detail` (capped),
-  // landed moa_review rows in verify_cmd/verify_tail. Rendered collapsed
-  // so the ledger stays scannable and the run log stays one click away.
+  // Read-only run/verify log: full verify output where journaled — blocked
+  // rows carry it in `detail` (capped), landed moa_review rows in
+  // verify_cmd/verify_tail. Rendered collapsed so the section stays
+  // scannable and the run log stays one click away.
   const runLog: { cmd?: string; output: string } | null =
     p.action === "auto_land_blocked" && typeof p.detail === "string" && p.detail !== ""
       ? { output: p.detail }
@@ -270,83 +267,3 @@ function ReviewRow({ event }: { event: OdoEvent }) {
     </div>
   );
 }
-
-function LedgerPanel({ projectRoot, events, active }: Props) {
-  const [content, setContent] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  // fetchNonce bumps re-run the read; the activation edge is the only
-  // producer besides "never" (the read is silent — the old content stays
-  // until the fresh one lands).
-  const [fetchNonce, setFetchNonce] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const resp = await ledger(projectRoot ?? undefined);
-        if (cancelled) return;
-        setContent(resp.memory_content ?? "");
-        setError(null);
-      } catch (e) {
-        if (!cancelled) setError(errorMessage(e));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [projectRoot, fetchNonce]);
-
-  // Activation edge (the Props contract).
-  const wasActiveRef = useRef(active);
-  useEffect(() => {
-    if (!wasActiveRef.current && active) setFetchNonce((n) => n + 1);
-    wasActiveRef.current = active;
-  }, [active]);
-
-  // Newest first — the same scan ComputeAutonomy does, rendered.
-  const reviewRows = useMemo(
-    () =>
-      events
-        .filter((e) => e.type === "review_action" && REVIEW_DECISION_ACTIONS[e.payload?.action ?? ""] === true)
-        .sort((a, b) => b.seq - a.seq),
-    [events],
-  );
-
-  return (
-    <div className="mem-body">
-      {loading && <LoadingInline />}
-      {error && <div className="wiki-hint">read failed: {error}</div>}
-      {!loading && (
-        <>
-          {reviewRows.length > 0 && (
-            <>
-              <div className="mem-section-title">
-                review actions — journal receipts, newest first
-              </div>
-              {reviewRows.map((ev) => (
-                <ReviewRow key={ev.seq} event={ev} />
-              ))}
-            </>
-          )}
-          {content !== null && (
-            <>
-              <div className="mem-section-title">ledger.md (daemon-written, verified metrics)</div>
-              <pre className="wiki-content mem-file">{content || "(empty — distill to write the first section)"}</pre>
-            </>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-// Keep-alive panel (tri-review P2 #5, 2026-08-24): App keeps this
-// component mounted under the ContextPanel `hidden` tabs and hands it
-// only referentially stable props (useCallback handlers + diff_stable
-// prev-bails), so the default shallow compare skips re-rendering the
-// hidden subtree on quiet poll ticks. Same convention as
-// memo(ChatSurface) — no custom comparator.
-export default memo(LedgerPanel);

@@ -19,7 +19,7 @@ globalThis.ResizeObserver ??= class {
 HTMLElement.prototype.setPointerCapture = () => {};
 
 describe("PANEL_CONTRIBUTIONS", () => {
-  it("declares exactly the 10 shipped panels, in strip order", () => {
+  it("declares exactly the 9 shipped panels, in strip order", () => {
     expect(PANEL_TAB_IDS).toEqual([
       // UX-1 D2: the plan layer's surface opens the strip (default tab).
       "tasks",
@@ -28,12 +28,21 @@ describe("PANEL_CONTRIBUTIONS", () => {
       "wiki",
       "memory",
       "skills",
-      "ledger",
       "runs",
       "preview",
       // D9-W3: learning control-plane observability tab, appended last.
       "learning",
     ]);
+  });
+
+  // A3-3 strip budget (ux-batch-lock-amendment-a3): the strip stays at
+  // or below the measured no-arrow fit — 9 badge-laden tabs ≈ 665px vs
+  // the 703px client at the 720px MAX (measured live 2026-09-01; UX-1
+  // D2's 10 tabs ≈ 730px overflowed the 659px with-controls client at
+  // rest). A new entry must pay for its tab width or the strip regresses
+  // to the arrows posture.
+  it("holds the A3-3 strip budget: at most 9 entries fit the MAX panel without arrows", () => {
+    expect(PANEL_CONTRIBUTIONS.length).toBeLessThanOrEqual(9);
   });
 
   it("ids are unique and titles/icons present on every entry", () => {
@@ -62,7 +71,6 @@ describe("PANEL_CONTRIBUTIONS", () => {
       wiki: 5,
       memory: 4,
       skills: undefined,
-      ledger: undefined,
       runs: undefined,
       preview: undefined,
       learning: undefined,
@@ -132,14 +140,14 @@ describe("ContextPanel renders from the registry", () => {
         open
         activeTab="changes"
         onTabChange={() => {}}
-        parked={new Set(["ledger", "runs"])}
+        parked={new Set(["runs", "learning"])}
       />,
     );
     const tabs = [...container.querySelectorAll<HTMLElement>(".panel-tab")];
     const parkedOf = (title: string) =>
       tabs.find((b) => b.textContent?.includes(title))?.querySelector("[data-slot='parked-badge']") != null;
-    expect(parkedOf("Ledger")).toBe(true);
     expect(parkedOf("Runs")).toBe(true);
+    expect(parkedOf("Learning")).toBe(true);
     expect(parkedOf("Changes")).toBe(false);
     expect(parkedOf("Skills")).toBe(false);
   });

@@ -566,10 +566,6 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true, memory_content: fx.pinsContent };
     }
 
-    // ---------- Ledger ----------
-    case "ledger": {
-      return { ok: true, memory_content: fx.ledgerContent };
-    }
     case "contradictions": {
       return { ok: true, events: [] };
     }

@@ -18,11 +18,19 @@
 //
 // Internal-only per the lock: no external plugin loading. Same pattern as
 // keybinds.ts (static table > per-call-site strings).
+//
+// A3-3 strip budget (ux-batch-lock-amendment-a3): CONTRIBUTIONS.length
+// must stay ≤ 9 — measured live 2026-09-01: 9 badge-laden tabs lay out
+// ≈ 665px vs the strip's 703px client at the 720px MAX, so the no-arrow
+// fit holds at rest (UX-1 D2's 10 tabs ≈ 730px overflowed the 659px
+// with-controls client at EVERY viewport). The ledger entry folded out
+// of the strip in A3-2 (receipts → Runs section, ledger.md → Preview);
+// jobs (UX-2b) arrives only while k8s is configured, so this bound holds
+// by construction in the no-k8s posture — contrib.test.tsx pins it.
 
 import type { LucideIcon } from "lucide-react";
 import {
   BookMarked,
-  BookOpen,
   Eye,
   FileText,
   GitCompareArrows,
@@ -65,7 +73,7 @@ export interface PanelContribution {
   // Lucide glyph, rendered at size 12 by ContextPanel.
   icon: LucideIcon;
   // Badge derivation (null/undefined = no badge — read via badgeFor).
-  // Entries without one never badge — skills/ledger/runs/preview today.
+  // Entries without one never badge — skills/runs/preview today.
   badge?: (input: PanelBadgeInput) => number | null | undefined;
 }
 
@@ -82,7 +90,6 @@ const CONTRIBUTIONS = [
   { id: "wiki", title: "Wiki", icon: FileText, badge: (i: PanelBadgeInput) => i.wikiNotes ?? undefined },
   { id: "memory", title: "Memory", icon: MapPin, badge: (i: PanelBadgeInput) => positive(i.memoryProposals) },
   { id: "skills", title: "Skills", icon: BookMarked },
-  { id: "ledger", title: "Ledger", icon: BookOpen },
   // P2.2: journal-folded runs history (pure journal read, no daemon IPC).
   { id: "runs", title: "Runs", icon: History },
   // P2.1: file/URL preview surface (read_file text + sandboxed localhost

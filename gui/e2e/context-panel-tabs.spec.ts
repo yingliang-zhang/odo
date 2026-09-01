@@ -2,12 +2,14 @@ import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 // Review finding 8 (2026-08-24): context-panel tab strip overflow.
-// UX-1 D2 (2026-09-01): TEN tabs now measure ~730px of strip content
-// (measured live, mock fixtures) vs ~359px of strip at the default 420px
-// (U2.3) panel width — ~511px of clipping at the 280px MIN, and ~71px even
-// at the 720px MAX (clientWidth 659). The "every tab fits" state is
-// UNREACHABLE at the CSS ceiling with ten tabs — active-tab scrollIntoView
-// + ‹ › controls are the permanent resting posture.
+// UX-4 / A3-3 (2026-09-01): the diet dropped the Ledger tab — NINE tabs
+// measure ≈665px of strip content (badge-laden fixtures, measured live
+// 2026-09-01) vs a 219px client at the 280px MIN (clip ≈ 446px) and
+// ~359px at the 420px default — but the 720px MAX leaves the strip a
+// 703px client with the controls unmounted: the "every tab fits" state
+// is reachable again at the CSS ceiling and the no-arrow resting posture
+// at MAX is pinned below (UX-1 D2's 10-tab, ~730px-at-MAX posture — fit
+// unreachable at 659 — is archived in the epoch notes).
 
 async function openPanel(page: Page) {
   await page.goto("/");
@@ -81,8 +83,8 @@ test("‹ › controls appear at 280px and move the strip; active tab stays in v
   await expect(navRight).toBeVisible();
 
   // Rightmost tab: real click → selected AND visible inside the strip.
-  await page.getByRole("tab", { name: "Ledger", exact: true }).click();
-  await expect(page.getByRole("tab", { name: "Ledger", exact: true })).toHaveAttribute(
+  await page.getByRole("tab", { name: "Learning", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Learning", exact: true })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -100,35 +102,37 @@ test("‹ › controls appear at 280px and move the strip; active tab stays in v
   await expectActiveTabInStrip(page);
 });
 
-test("‹ › controls persist at MAX — 10 tabs overflow the 720px ceiling, every tab stays reachable", async ({ page }) => {
-  // Measured truth (UX-1 D2): ten tabs lay out ~730px wide but the widest
-  // achievable strip is 720−61 = 659px (U2.1 CSS ceiling) — the fit state
-  // the old test pinned no longer exists at ANY viewport, so the controls
-  // must stay and reachability comes from scrollIntoView, never from fit.
+test("‹ › controls DISAPPEAR at MAX — 9 tabs fit the 720px ceiling, every tab visible at rest", async ({ page }) => {
+  // Measured truth (UX-4 / A3-3): nine tabs lay out ≈665px vs the 703px
+  // strip client at the 720px MAX with the controls unmounted (U2.1
+  // ceiling; the 10-tab posture overflowed at ANY viewport — ~730px vs
+  // the 659px with-controls client). Controls hide; reachability is the
+  // resting layout, not scrollIntoView — pinned WITHOUT widening past
+  // 1440px because the drag clamp rides the CSS ceiling, not the window.
   await page.setViewportSize({ width: 1440, height: 900 });
   await openPanel(page);
 
-  await dragGripBy(page, 160); // → 280px, overflowing
+  await dragGripBy(page, 160); // → 280px MIN, overflowing
   await expect.poll(() => panelWidth(page)).toBe("280px");
   await expect(page.getByRole("button", { name: "Scroll tabs right" })).toBeVisible();
 
-  // Drag far past MAX: the grip clamps at the U2.1 CSS ceiling —
-  // min(720, window − sidebar − 400) = 720px at this 1440px viewport —
-  // strip width 720−61 = 659px < ~730px of tabs: controls persist.
+  // Drag far past MAX: the grip clamps at the U2.1 CSS ceiling — 720px at
+  // this viewport — and the 9-tab strip fits its 659px client, so the
+  // controls unmount entirely.
   await dragGripBy(page, -520);
   await expect.poll(() => panelWidth(page)).toBe("720px");
-  await expect(page.getByRole("button", { name: "Scroll tabs right" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Scroll tabs right" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Scroll tabs left" })).toHaveCount(0);
 
-  // The rightmost tab (deepest in the overflow) is still exactly one
-  // click away: real click → selected AND pulled inside the strip.
-  await page.getByRole("tab", { name: "Learning", exact: true }).click();
-  await expect(page.getByRole("tab", { name: "Learning", exact: true })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  // Every tab is visible at rest: the rightmost needs no scroll to reach,
+  // and clicking it keeps the strip settled (scrollLeft stays clamped 0).
+  const learning = page.getByRole("tab", { name: "Learning", exact: true });
+  await expect(learning).toBeVisible();
+  await learning.click();
+  await expect(learning).toHaveAttribute("aria-selected", "true");
   await expectActiveTabInStrip(page);
+  await expect.poll(() => scrollLeft(page)).toBe(0);
 
-  // …and the leftmost tab pulls back into view the same way.
-  await page.getByRole("tab", { name: /^Tasks/ }).click();
-  await expectActiveTabInStrip(page);
+  // …and the leftmost tab likewise sits in view at rest.
+  await expect(page.getByRole("tab", { name: /^Tasks/ })).toBeVisible();
 });

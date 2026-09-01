@@ -118,3 +118,65 @@ describe("RunsPanel", () => {
     expect(getByText("coding model: t9s/kimi-k3")).toBeTruthy();
   });
 });
+
+// UX-4 / A3-2 (ux-batch-lock-amendment-a3): the review_action receipts
+// that owned the deleted Ledger tab fold into this panel as a second
+// section, off the same events prop. Pins: outcome/actor badges, Guardian
+// risk badges with honest "unrated" for pre-W5 rows, the timed-out chip,
+// the collapsed run log, newest-first order, and the exclusion of
+// bookkeeping rows (todo_merge et al. keep their own surfaces).
+describe("receipts section (A3-2)", () => {
+  it("renders decision receipts newest-first with actor, outcome, and risk badges", () => {
+    const { container, getByText } = renderPanel([
+      ev(1, "review_action", { action: "moa_review", consensus_verdict: "accept", actor: "auto_panel", risk_class: ["none"] }),
+      ev(2, "review_action", { action: "accept", actor: "auto_panel", diff_id: 7, risk_class: ["credential_probe", "supply_chain"] }),
+      ev(3, "review_action", { action: "auto_revise_round", round: 2, risk_class: ["none"] }),
+      // Bookkeeping rows keep their own surfaces — never receipts.
+      ev(4, "review_action", { action: "todo_merge" }),
+    ]);
+    expect(getByText("review actions — journal receipts, newest first")).toBeTruthy();
+    const rows = [...container.querySelectorAll<HTMLElement>(".ledger-review-row")];
+    expect(rows).toHaveLength(3);
+    expect(rows[0].dataset.seq).toBe("3");
+    expect(rows[0].textContent).toContain("Revise round 2");
+    expect(rows[2].textContent).toContain("Review · accept");
+    const accept = rows.find((r) => r.dataset.action === "accept")!;
+    expect(accept.querySelector(".badge-actor-auto")!.textContent).toBe("Auto");
+    expect(accept.textContent).toContain("diff #7");
+    expect(accept.querySelector(".risk-critical")!.textContent).toBe("credential_probe");
+    expect(accept.querySelector(".risk-low")!.textContent).toBe("supply_chain");
+    expect(accept.querySelector(".risk-clean")).toBeNull();
+  });
+
+  it("renders honest unrated rows, the timed-out chip, and the collapsed run log", () => {
+    const { container } = renderPanel([
+      ev(1, "review_action", { action: "reject" }), // pre-W5: no risk receipt journaled
+      ev(2, "review_action", { action: "moa_review", consensus_verdict: "mixed", timed_out: true, risk_class: ["security_weakening"] }),
+      ev(3, "review_action", { action: "auto_land_blocked", reason: "base_stale", detail: "go test ./... FAILED", actor: "auto_panel", risk_class: ["destructive"] }),
+      ev(4, "review_action", { action: "refresh_attempted", outcome: "conflict", phase: "pre_spend_probe" }),
+    ]);
+    const rows = [...container.querySelectorAll<HTMLElement>(".ledger-review-row")];
+    expect(rows).toHaveLength(4);
+    const reject = rows.find((r) => r.dataset.action === "reject")!;
+    expect(reject.querySelector(".risk-unrated")!.textContent).toBe("unrated");
+    expect(reject.querySelector(".badge-actor-human")!.textContent).toBe("Human"); // no actor journaled
+    const mixed = rows.find((r) => r.dataset.action === "moa_review")!;
+    expect(mixed.querySelector(".risk-timeout")!.textContent).toBe("timed out");
+    const blocked = rows.find((r) => r.dataset.action === "auto_land_blocked")!;
+    expect(blocked.querySelector(".ledger-review-detail")!.textContent).toBe("base_stale");
+    expect(blocked.querySelector(".ledger-run-log-pre")!.textContent).toBe("go test ./... FAILED");
+    // A refresh is a rebase, not a verdict: no risk chip at all, and the
+    // phase rides the detail cell.
+    const refresh = rows.find((r) => r.dataset.action === "refresh_attempted")!;
+    expect(refresh.querySelectorAll(".risk-badge")).toHaveLength(0);
+    expect(refresh.querySelector(".ledger-review-detail")!.textContent).toBe("pre_spend_probe");
+  });
+
+  it("shows the empty state only when neither runs nor receipts exist", () => {
+    const { container, queryByText } = renderPanel([
+      ev(1, "review_action", { action: "accept", risk_class: ["none"] }),
+    ]);
+    expect(queryByText(/No runs yet/)).toBeNull();
+    expect(container.querySelectorAll(".ledger-review-row")).toHaveLength(1);
+  });
+});
