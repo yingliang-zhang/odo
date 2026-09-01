@@ -194,3 +194,39 @@ describe("deriveRuns", () => {
     expect(rows[0].usage).toBeUndefined();
   });
 });
+
+// UX-3b (A2-6b): daemon advisories (agent_error with odo:true) are not
+// terminals — same semantic as switch_cache.terminalError. They close no
+// run and fabricate no error row; the run's real terminal decides.
+describe("deriveRuns advisory handling (UX-3b)", () => {
+  it("an advisory mid-run does not close the open run; the later agent_done does", () => {
+    const rows = deriveRuns([
+      ev(1, "user_message", { text: "do a thing" }),
+      ev(2, "agent_error", { error: "odo: verify unconfigured", odo: true }),
+      ev(3, "agent_done", { summary: "did the thing" }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "ok", endSeq: 3, endSummary: "did the thing" });
+    expect(rows[0].endError).toBeUndefined();
+  });
+
+  it("an advisory mid-run does not shadow the later real error", () => {
+    const rows = deriveRuns([
+      ev(1, "user_message", { text: "do a thing" }),
+      ev(2, "agent_error", { error: "odo: 1 parked goal remains queued", odo: true }),
+      ev(3, "agent_error", { error: "adapter exploded" }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "error", endSeq: 3, endError: "adapter exploded" });
+  });
+
+  it("an advisory with no open run produces no row at all", () => {
+    const rows = deriveRuns([
+      ev(1, "user_message", { text: "do a thing" }),
+      ev(2, "agent_done", { summary: "done" }),
+      ev(3, "agent_error", { error: "odo: drain blocked", odo: true }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "ok", endSeq: 2 });
+  });
+});

@@ -7,7 +7,10 @@
 // latestStarterIndex: steers and parked goals never start runs) or a
 // review_action{action:"run_prompt"} receipt (continuation / retry /
 // parked-goal dequeue), and CLOSES on the next agent_done{summary} |
-// agent_error{error}. Measured tokens exist ONLY on D3 loop_run_usage
+// agent_error{error} — an agent_error carrying odo:true is a daemon
+// advisory (journalRunAdvisory), not a terminal: it closes nothing and
+// produces no row (same semantic as switch_cache.terminalError, which
+// walks past advisory rows; UX-3b). Measured tokens exist ONLY on D3 loop_run_usage
 // receipts (internal/ipc/loop_journal.go) — plain chat runs journal no
 // usage row, so they fall back to the send's total_prompt_bytes as a
 // clearly-labeled estimate, never a fabricated token count.
@@ -114,10 +117,12 @@ export function deriveRuns(events: OdoEvent[], cap: number = 100): RunRow[] {
       open = startRun(ev, p);
       runs.push(open);
       byStart.set(ev.seq, open);
-    } else if (ev.type === "agent_done" || ev.type === "agent_error") {
+    } else if (ev.type === "agent_done" || (ev.type === "agent_error" && p.odo !== true)) {
       // A terminal closes the currently open run; consecutive terminals
       // (double drain receipts, replay overlap) close nothing — defensive
-      // no-op, never an error.
+      // no-op, never an error. Advisory rows (odo:true) are filtered at
+      // the arm above: closing an open run on a daemon advisory would
+      // fabricate a failure row for a run that later ends fine.
       if (open == null) continue;
       open.endSeq = ev.seq;
       open.finishedAt = ev.created_at;

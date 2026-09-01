@@ -70,6 +70,34 @@ describe("bubble timestamp reservation (U2.5)", () => {
   });
 });
 
+describe("UX-3b (A2-6b): daemon advisory styling", () => {
+  it("agent_error with odo:true renders an amber advisory bubble, never the red failure one", () => {
+    const { container } = render(
+      <MessageBubble
+        event={eventWithPayload("agent_error", { error: "odo: 1 parked goal remains queued", odo: true })}
+      />,
+    );
+    const advisory = container.querySelector<HTMLElement>(".bubble-advisory");
+    expect(advisory).not.toBeNull();
+    expect(advisory!.classList.contains("border-warn")).toBe(true);
+    expect(advisory!.classList.contains("text-warn-text")).toBe(true);
+    expect(container.querySelector(".bubble-error")).toBeNull();
+    expect(container.querySelector(".bubble-advisory-label")?.textContent).toBe("odo advisory");
+    expect(advisory!.textContent).toContain("odo: 1 parked goal remains queued");
+  });
+
+  it("a plain agent_error stays the red failure bubble with no advisory label", () => {
+    const { container } = render(
+      <MessageBubble event={eventWithPayload("agent_error", { error: "adapter exploded" })} />,
+    );
+    const error = container.querySelector<HTMLElement>(".bubble-error");
+    expect(error).not.toBeNull();
+    expect(error!.classList.contains("bg-err-surface")).toBe(true);
+    expect(container.querySelector(".bubble-advisory")).toBeNull();
+    expect(container.querySelector(".bubble-advisory-label")).toBeNull();
+  });
+});
+
 describe("P2.1 image attachments (adoption-lock)", () => {
   it("renders loaded bytes inline as a zoomable image", async () => {
     readFileMock.mockResolvedValue({ file_data_base64: "aGk=", file_mime: "image/png" });

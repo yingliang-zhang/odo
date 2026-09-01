@@ -1,6 +1,7 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useEffect, useRef, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins, resolveHealConflict } from "../api";
-import type { AutoDistillCapResume, MemoryProposal, PendingMemoryBatch, ReadMemoryResponse, ReviewResult, StrandedOp } from "../types";
+import type { AutoDistillCapResume, MemoryProposal, OdoEvent, PendingMemoryBatch, ReadMemoryResponse, ReviewResult, StrandedOp } from "../types";
+import { deriveAutoBackoff } from "../memory";
 import LoadingInline from "./LoadingInline";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -71,6 +72,12 @@ interface Props {
   // Accept/Reject flips — App keeps this tab draft-exempt so a park can
   // never unmount away the decisions. Fires on change only.
   onDraftChange?: (dirty: boolean) => void;
+  // UX-3c (A2-6c): the conversation's journaled events (App's bootstrap
+  // replay + poll appends, frozen off-tab like RunsPanel) — the ONLY
+  // source for the auto-curate/auto-distill backoff footer line
+  // (deriveAutoBackoff). Optional so existing mounts/tests without a
+  // journal source render as quiet.
+  events?: OdoEvent[];
 }
 
 // Split the mixed proposals array into per-target sections while keeping
@@ -228,7 +235,10 @@ function SkillProposalRow({
   );
 }
 
-function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved, autoDistillCapResume, autoDistillEnabled = true, onDraftChange }: Props) {
+function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved, autoDistillCapResume, autoDistillEnabled = true, onDraftChange, events }: Props) {
+  // UX-3c: latest-row-per-layer fold over the same poll events the chat
+  // has; empty array = no events prop (quiet) and renders no line.
+  const backoff = useMemo(() => deriveAutoBackoff(events ?? []), [events]);
   const [tab, setTab] = useState<"proposals" | "files">(focus?.tab ?? "proposals");
   // External sub-tab requests. This effect is what keeps deep links
   // working under the panel's keep-alive tabs: the panel now survives
@@ -663,6 +673,12 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
               <pre className="wiki-content mem-file">{pins || "(empty)"}</pre>
             </>
           )}
+        </div>
+      )}
+      {(backoff.curate != null || backoff.distill != null) && (
+        <div className="mem-backoff mt-3 px-1 text-[11px] text-[var(--text-dim)]">
+          {backoff.curate != null && <div className="mem-backoff-line">{backoff.curate.text}</div>}
+          {backoff.distill != null && <div className="mem-backoff-line">{backoff.distill.text}</div>}
         </div>
       )}
     </div>

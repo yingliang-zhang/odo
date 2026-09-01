@@ -706,6 +706,13 @@ export default function App() {
   useEffect(() => {
     if (panelTab === "runs") runsEventsRef.current = events;
   });
+  // Same freeze contract for MemoryPanel (UX-3c A2-6c): the backoff
+  // footer derives from the journal; a hidden tab keeps its last-seen
+  // events and re-syncs in the activation render.
+  const memoryEventsRef = useRef(events);
+  useEffect(() => {
+    if (panelTab === "memory") memoryEventsRef.current = events;
+  });
 
   // Background runs: daemon-reported running workstreams minus the one in
   // view. Invisible from the chat surface (panel sessions, other ws) — the
@@ -2662,6 +2669,7 @@ export default function App() {
               // still carries a resume time; unset settings read as the
               // daemon's default-ON posture.
               autoDistillEnabled={appSettings?.auto_distill !== "never"}
+              events={panelTab === "memory" ? events : memoryEventsRef.current}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>

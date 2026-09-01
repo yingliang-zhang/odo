@@ -405,7 +405,11 @@ function RunHeader({ group, onOpenChanges }: { group: RunGroup; onOpenChanges?: 
   if (!start) return null;
   const toolCalls = group.events.filter((e) => e.type === "agent_tool_call").length;
   const done = group.events.find((e) => e.type === "agent_done");
-  const failed = group.events.find((e) => e.type === "agent_error");
+  // UX-3b (A2-6b): advisories (agent_error with odo:true) carry no failure
+  // — a run that ended ok keeps its ✓ even when the daemon journaled an
+  // advisory into the same group; the advisory's surface is the amber
+  // transcript bubble (MessageBubble), never this ✗.
+  const failed = group.events.find((e) => e.type === "agent_error" && e.payload?.odo !== true);
   // Item 10: surface the diff review outcome in the run header.
   const reviewAction = group.events.find(
     (e) => e.type === "review_action" && (e.payload?.action === "accept" || e.payload?.action === "reject"),

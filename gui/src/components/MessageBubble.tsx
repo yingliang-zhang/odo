@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, Copy, ExternalLink, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, ExternalLink, X } from "lucide-react";
 import { basename } from "../files";
 import { openPath, readFile } from "../api";
 import { extractHttpUrls, findImageRefs, imageDataUrl, isImagePath, isLocalPreviewUrl, looksLikeFilePath } from "../preview";
@@ -487,11 +487,28 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       break;
 
     case "agent_error":
-      body = (
-        <div className="bubble bubble-error self-start bg-err-surface border border-err text-err-surface-text max-w-[82%] px-3.5 py-2.5 rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
-          <span className="bubble-icon font-bold mr-1"><X size={14} /></span> {highlightText(p.error ?? "Agent failed", highlight, "e")}
-        </div>
-      );
+      // UX-3b (A2-6b): daemon advisories (journalRunAdvisory) journal as
+      // agent_error with odo:true — housekeeping ("verify unconfigured",
+      // parked-queue notes), never a run failure. Rendering them in the
+      // red failure bubble trained users to ignore red, so the flag the
+      // daemon already sends finally gets a consumer here too: amber
+      // surface + explicit label (notification/tint exclusions live in
+      // App.tsx recordEvents and switch_cache.terminalError).
+      if (p.odo === true) {
+        body = (
+          <div className="bubble bubble-advisory self-start bg-transparent border border-warn text-warn-text max-w-[82%] px-3.5 py-2.5 rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <span className="bubble-icon font-bold mr-1"><AlertTriangle size={14} /></span>
+            <span className="bubble-advisory-label font-semibold mr-1">odo advisory</span>
+            {highlightText(p.error ?? "Daemon advisory", highlight, "e")}
+          </div>
+        );
+      } else {
+        body = (
+          <div className="bubble bubble-error self-start bg-err-surface border border-err text-err-surface-text max-w-[82%] px-3.5 py-2.5 rounded-lg whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
+            <span className="bubble-icon font-bold mr-1"><X size={14} /></span> {highlightText(p.error ?? "Agent failed", highlight, "e")}
+          </div>
+        );
+      }
       break;
 
     case "review_action":

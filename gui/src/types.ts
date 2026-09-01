@@ -167,9 +167,10 @@ export interface EventPayload {
   input_tokens?: number;
   output_tokens?: number;
   // memory_update payload fields (M4, extended M5): which layer changed
-  // (memory | user | learner | curator | index | pins), why
-  // (apply | rotate | retract | failed | curate | pin), and a
-  // human-readable summary.
+  // (memory | user | learner | curator | index | pins | auto_distill —
+  // the scheduler journals layer:"auto_distill" decision rows), why
+  // (apply | rotate | retract | failed | curate | pin | scheduled |
+  // fired | skipped | cancelled_by_send), and a human-readable summary.
   layer?: string;
   cause?: string;
   detail?: string;
