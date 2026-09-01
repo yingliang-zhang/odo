@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # UX-4 — ContextPanel tab diet (ledger folds into Runs, per ux-batch-lock-amendment-a3)
 
 ## Scope & user rulings

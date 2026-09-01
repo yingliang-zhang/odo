@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D9-C v3 revision (auto-revise round 1): grounded tool-round cap 16→40, budget tests at lock-literal 40 rounds
 
 ## Context

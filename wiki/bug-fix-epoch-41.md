@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # W6 v2: re-apply archived W6 diff + context-panel-tabs spec recalibration — all 7 gates green
 
 ## Context

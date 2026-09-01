@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D9 Lock Amendment A1: replace replay f/g gates with canary-side f′
 
 ## Context

@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # D9-W6 — `odo learning` promote --global, drop/apply, and stall closeout
 
 ## Context

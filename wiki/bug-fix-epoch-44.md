@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # GUI surfaces for gate-drift latch + design-gate verb (audit actions #3+#4)
 
 ## Background

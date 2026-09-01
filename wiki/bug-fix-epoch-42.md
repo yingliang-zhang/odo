@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # W6 v3 re-apply — archived W6 v2 diff clean-applied, fast gates green, 14 files staged uncommitted
 
 ## Background

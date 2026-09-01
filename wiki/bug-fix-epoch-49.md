@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # UX-1 patch re-apply (diff #132) and default-tab ripple fixes (diff #133)
 
 ## Background

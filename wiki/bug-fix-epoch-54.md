@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo — UX-3b/c flake re-apply and D5b multi-namespace K8s Jobs tab + batch bridge (2026-09-01)
 
 Two sequential one-shot tasks in the Odo auto-land pipeline: re-apply a flake-rejected patch (diff #139 content), then implement the locked D5b UX batch as a single pipeline diff.

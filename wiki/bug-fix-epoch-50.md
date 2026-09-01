@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # UX-2: k8s_status IPC, Jobs status-bar chip, and UX-3a failure notification
 
 Implemented per `docs/design/ux-batch-lock-amendment-a2.md` (§A2-1..A2-5 + §A2-6a; UX lock base `docs/design/ux-batch-lock-2026-09-01.md` §D5, quad-blind 4/4 accepted). Delivered in a dedicated worktree: 24 files staged (7 added / 17 modified, +1555/−17), worktree left dirty, zero commits. UX-2b (Stage-1 jobs tab) deliberately excluded to keep the diff small.

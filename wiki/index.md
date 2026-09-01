@@ -1,11 +1,13 @@
 # Project Wiki Index
 
 ## Topics
-- Auto-Land Pipeline & Diff Governance → topics/auto-land-pipeline.md
-- Memory Architecture & Distillation → topics/memory-architecture.md
-- Learning Control Plane (D9) → topics/learning-control-plane.md
-- Review Panels & MoA Grounding → topics/review-panel-grounding.md
-- Security & Path Containment → topics/security-containment.md
-- GUI Frontend (React/Tauri) → topics/gui-frontend.md
-- Testing & Suite Reliability → topics/testing-reliability.md
-- Deployment & Worktree Lifecycle → topics/deployment-lifecycle.md
+- Kubernetes Status Integration → topics/kubernetes-status.md
+- Panel & Tab Architecture → topics/panel-architecture.md
+- GUI UX Surfaces & Notifications → topics/ux-surfaces.md
+- D9 Learning Control Plane → topics/learning-control-plane.md
+- Review Panel & Grounded Legs → topics/review-panel.md
+- Auto-Land Pipeline & Landing Discipline → topics/auto-land-pipeline.md
+- Test Infrastructure & Flake Management → topics/test-infrastructure.md
+- Agent Worktree & Environment Conventions → topics/worktree-conventions.md
+- Memory System & Distill Reliability → topics/memory-system.md
+- Daemon Security & Path Containment → topics/security-containment.md

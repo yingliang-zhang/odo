@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # UX-2 revise round 1 — JobsChip poll visibility gate + kubectl stderr tail delivery (diff #135 base)
 
 ## Context

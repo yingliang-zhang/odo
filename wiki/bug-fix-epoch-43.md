@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # parseVerdict markdown-tolerance fix — Tier-1 memory gate unblocked (2026-08-31)
 
 ## Problem

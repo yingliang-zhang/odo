@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Odo dev session 2026-09-01 — diff #137 replay, auto-land hardening, UX-3b/c advisories, k8s settings fix
 
 Four tasks across isolated worktrees; all work left staged-dirty, zero commits, per task contract. One run was killed mid-flight by a daemon restart and resumed from its staged worktree.

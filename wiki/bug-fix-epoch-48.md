@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # UX-1: TopBar right alignment + Tasks tab (ux-batch-lock-2026-09-01, D1 + D2)
 
 ## Context
