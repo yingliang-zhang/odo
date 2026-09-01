@@ -26,7 +26,14 @@ package ipc
 // Epistemic honesty (locked): this is a hygiene + known-harm recall gate,
 // not a behavior predictor. Everything gated here IS deterministic.
 //
-// PASS CRITERIA (all must pass; K3 §2.3 + GLM/Sol amendments):
+// PASS CRITERIA (all must pass; K3 §2.3 + Sol double-execution pin.
+// D9 Lock Amendment A1 (2026-09-01, docs/design/d9-lock-amendment-a1-fg-canary.md)
+// DELETED checks f/g from replay: anti-vacuity/friction measured zero by
+// construction on a newborn candidate (starved freeze pool — both
+// historical candidates died at f+g with hygiene green or hygiene-failing
+// independent of f/g). The prevented-harm/friction counters stay journaled
+// as telemetry with zero verdict weight; the live-exercise check f′ moved
+// to the canary promotion predicate, learning_measure.go):
 //
 //	a  no candidate-added rule's counterfactual row meets the harmful
 //	   tuple (rules_audit.go:94-97 constants, verbatim join).
@@ -35,11 +42,6 @@ package ipc
 //	c  rotation projection EMPTY — no silent third-party eviction.
 //	d  injected-block growth vs live ≤ +512B AND final ≤ memoryCap.
 //	e  double-execution byte-identical (Sol non-determinism pin).
-//	f  ≥1 prevented-harm (GLM anti-vacuity): human reject, weak reject,
-//	   auto reject, or human revert covered by the candidate cohort.
-//	g  friction ≤ 3 × prevented-harm (GLM): human/auto accepts covered
-//	   (integer inequality — the rules_audit.go:553-556 float-trap
-//	   precedent).
 //	h  loosened == 0: every retract target carries harmful-flag evidence
 //	   in journal history (a retraction without harmful evidence is a
 //	   loosening — excluded from the conservative grammar; the W4
@@ -178,7 +180,7 @@ func learningFreezeBounds(events []store.Event) (learningFreezeBound, bool) {
 }
 
 // learningReplayReport is the replay gate's full deterministic result:
-// the freeze manifest, the a–h + provenance verdicts, and the counters
+// the freeze manifest, the a–e, h + provenance verdicts, and the counters
 // the checkpoint journals.
 type learningReplayReport struct {
 	Gate       string                 `json:"gate"`    // "replay"
@@ -280,8 +282,8 @@ func computeLearningReplayOnce(in learningReplayInput, cand LearningCandidate) l
 
 	// --- slice extraction + project-wide snapshot tables -----------------
 	var slices []learningReplaySlice
-	snapshots := map[string]string{}     // sha -> content, layer:memory
-	canarySnapshots := map[string]bool{} // sha set, layer:learning_canary
+	snapshots := map[string]string{} // sha -> content, layer:memory
+	canaryOf := map[string]string{}  // sha -> owning artifact hash, layer:learning_canary
 	for _, lane := range in.lanes {
 		for _, ev := range lane.events {
 			if ev.Type != store.EventMemoryUpdate {
@@ -290,6 +292,7 @@ func computeLearningReplayOnce(in learningReplayInput, cand LearningCandidate) l
 			var p struct {
 				Layer   string `json:"layer"`
 				Cause   string `json:"cause"`
+				Hash    string `json:"artifact_hash"`
 				Content string `json:"content"`
 				Sha     string `json:"sha"`
 			}
@@ -302,7 +305,7 @@ func computeLearningReplayOnce(in learningReplayInput, cand LearningCandidate) l
 					snapshots[p.Sha] = p.Content
 				}
 			case "learning_canary":
-				canarySnapshots[p.Sha] = true
+				canaryOf[p.Sha] = p.Hash
 			}
 		}
 		bound, ok := learningFreezeBounds(lane.events)
@@ -338,11 +341,18 @@ func computeLearningReplayOnce(in learningReplayInput, cand LearningCandidate) l
 				continue
 			}
 			rep.Outcomes++
-			switch {
-			case o.memHash != "" && canarySnapshots[o.memHash]:
+			// A1 Amendment 5: the ONE shared attribution predicate
+			// (learning_measure.go) classifies for the covered join here
+			// AND the measure fold's live-harm cohorts — no dual
+			// implementation drift. Overlap corner: a canary-cohort
+			// outcome on a scoring-excluded diff now buckets scoring
+			// side (pre-A1: canary side) — counter label only; the
+			// covered set is identical under either order.
+			switch learningClassifyOutcome(cand.ArtifactHash, canaryOf, excludedDiffs, o) {
+			case learningClassOwnCanary, learningClassOtherCanary:
 				rep.CanaryExcluded++
 				continue
-			case excludedDiffs[o.diffID]:
+			case learningClassScoringExcluded:
 				rep.ScoringExcluded++
 				continue
 			}
@@ -380,7 +390,7 @@ func computeLearningReplayOnce(in learningReplayInput, cand LearningCandidate) l
 				Reason: "snapshot row absent for cohort " + h + " (fail-closed; rotated-away inputs are never interpolated)",
 			})
 		}
-		for _, name := range []string{"a", "b", "c", "d", "f", "g", "h", "provenance"} {
+		for _, name := range []string{"a", "b", "c", "d", "h", "provenance"} {
 			rep.Checks[name] = false
 		}
 		rep.finFreezeInput(consulted)
@@ -615,7 +625,10 @@ func computeLearningReplayOnce(in learningReplayInput, cand LearningCandidate) l
 		})
 	}
 
-	// --- checks f/g: GLM anti-vacuity ----------------------------------------
+	// --- anti-vacuity counters: telemetry only (post-A1) ----------------------
+	// f/g are no longer replay checks (the header pins the deletion); the
+	// counters stay journaled — checkpoint metrics + gate report detail —
+	// with zero verdict weight.
 	for _, o := range covered {
 		if o.memHash == "" {
 			continue
@@ -628,18 +641,6 @@ func computeLearningReplayOnce(in learningReplayInput, cand LearningCandidate) l
 		}
 	}
 	rep.PreventedHarm += rep.Reverts
-	rep.Checks["f"] = rep.PreventedHarm >= 1
-	rep.Checks["g"] = rep.Friction <= 3*rep.PreventedHarm
-	if !rep.Checks["f"] {
-		rep.Violations = append(rep.Violations, learningViolation{
-			Reason: "replay_fail: no prevented harm (vacuous candidate — zero reject/revert evidence in the covered slice)",
-		})
-	}
-	if !rep.Checks["g"] {
-		rep.Violations = append(rep.Violations, learningViolation{
-			Reason: "friction " + strconv.Itoa(rep.Friction) + " exceeds 3× prevented harm (" + strconv.Itoa(3*rep.PreventedHarm) + ")",
-		})
-	}
 
 	// --- check h: conservative-only -------------------------------------------
 	var loosened []string

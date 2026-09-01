@@ -236,6 +236,17 @@ func (s *Server) learningShadowCheckpoints(ctx context.Context, mainConv store.C
 			s.journalLearningFrozen(ctx, mainConv.ID, cand.ArtifactHash, "shadow", hits, mainEpoch)
 			continue
 		}
+		// Seam-disabled gate (D9 Lock Amendment A1, Amendment 4 — GLM
+		// finding): a project-wide disabled canary seam
+		// (learning_canary_fraction ≤ 0, R3) must NEVER flip
+		// shadow→canary — learningCurrentCanary returns nil at fraction
+		// 0, so a flipped candidate could never inject a cohort: a
+		// structurally permanent squatter in the single slot. The
+		// checkpoints and the frozen interrupt above stay live; aging
+		// surfaces through the stall advisory.
+		if learningCanaryFraction() <= 0 {
+			continue
+		}
 		if slotOccupied {
 			// Promotion-eligible but the single canary slot is taken:
 			// the W4 never-stuck signal stays the honest surface.
@@ -437,28 +448,35 @@ func (s *Server) learningMeasureTick(ctx context.Context, mainConv store.Convers
 		case "canary":
 			s.learningCanaryMeasure(ctx, mainConv, in, cand, newEpoch, frozen)
 		case "shadow":
-			age := newEpoch - learningCandidateMainEpoch(lanes, cand.ArtifactHash)
+			entryEpoch := learningCandidateMainEpoch(lanes, cand.ArtifactHash)
+			age := newEpoch - entryEpoch
 			if age > learningStallMainEpochs {
 				s.journalLearningStall(ctx, mainConv.ID, cand.ArtifactHash, "shadow",
-					"shadow aged "+strconv.Itoa(age)+" main epochs without reaching canary (replay re-pass failing, frozen, or canary slot occupied)", newEpoch)
+					"shadow aged "+strconv.Itoa(age)+" main epochs without reaching canary (replay re-pass failing, frozen, or canary slot occupied)", newEpoch, entryEpoch)
 			}
 		}
 	}
 }
 
 // learningCanaryMeasure is the canary arm of the tick: measure (journaled
-// every epoch — the cadence), gate, actuate. Never promotes on vacuity:
-// the gate returns "" below the paired minimums and the measure row is
-// the only output.
+// every epoch — the cadence, A1: stage_epoch rides the row), gate,
+// actuate. Below the paired minimums the gate returns "" (keep
+// measuring) — unless the candidate squats past 2× the stall floor
+// (canary_starved drop); at full floors with zero live harm past the
+// grace window it drops efficacy_vacuity (A1 Amendment 3; both vacuous
+// exits write ZERO freeze-set entries). Promotions still never ride age
+// or vacuity (promotion-starvation pin's operative half stands).
 func (s *Server) learningCanaryMeasure(ctx context.Context, mainConv store.Conversation, in learningReplayInput, cand LearningCandidate, epoch int, frozen map[string]string) {
 	lanes := in.laneEvents()
 	since := learningStageSince(lanes, cand.ArtifactHash, "canary")
 	m := computeLearningMeasure(in, cand, since, epoch)
 	m.Kind = "canary"
+	m.StageEpoch = learningStageMainEpochAt(lanes, cand.ArtifactHash, "canary")
 	measureSeq := s.journalLearningUpdate(ctx, mainConv.ID, "measure", map[string]interface{}{
 		"artifact_hash": m.ArtifactHash,
 		"kind":          m.Kind,
 		"epoch":         epoch,
+		"stage_epoch":   m.StageEpoch,
 		"window_from":   m.WindowFrom,
 		"canary":        m.Canary,
 		"live":          m.Live,
@@ -485,19 +503,36 @@ func (s *Server) learningCanaryMeasure(ctx context.Context, mainConv store.Conve
 		s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "canary", "held_for_human", "retract_delta_held", detail)
 		s.journalLearningAdvisory(ctx, mainConv.ID, cand, "held for human: stats pass but the delta carries retractions (D4 preserved) — resolve via apply_memory / `odo rules retract`")
 	case "drop":
-		s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "canary", "dropped", "harmful_tuple", detail)
-		s.journalLearningAdvisory(ctx, mainConv.ID, cand, "dropped: its own canary cohort met the harmful tuple — the experiment hurt")
+		// A1 Amendment 3: three drop exits. cause rides the verdict
+		// detail (drop_cause — never "cause", which the stage row owns);
+		// the two vacuous-drop causes write ZERO freeze-set entries by
+		// construction (no rollback, R2 untouched — vacuity ≠ harmful).
+		cause, _ := detail["drop_cause"].(string)
+		if cause == "" {
+			cause = "harmful_tuple" // defensive: the verdict always sets modern drops
+		}
+		s.journalLearningStage(ctx, mainConv.ID, cand.ArtifactHash, "canary", "dropped", cause, detail)
+		switch cause {
+		case "efficacy_vacuity":
+			s.journalLearningAdvisory(ctx, mainConv.ID, cand, "dropped (efficacy_vacuity): paired floors met but zero live harm across the window — the rule's harm class is absent from live traffic (vacuity ≠ harmful; the freeze set is untouched)")
+		case "canary_starved":
+			s.journalLearningAdvisory(ctx, mainConv.ID, cand, "dropped (canary_starved): squatting the single slot past 2× the stall floor with the paired minimums still unmet (the exclusion counters ride the drop row; the freeze set is untouched)")
+		default:
+			s.journalLearningAdvisory(ctx, mainConv.ID, cand, "dropped: its own canary cohort met the harmful tuple — the experiment hurt")
+		}
 	default:
 		// Keep measuring. Stall advisory only: aging without the cohort
-		// minimums is surfaced, never auto-promoted.
-		canarySince := learningStageMainEpochAt(lanes, cand.ArtifactHash, "canary")
+		// minimums is surfaced, never auto-promoted. The A1 drop exits
+		// (efficacy_vacuity / canary_starved) subsume the busy-but-
+		// vacuous hole; the stall dedupe is epoch-keyed so a re-cycled
+		// candidate re-advises honestly (Sol fix, Amendment 3).
 		age := 0
-		if canarySince > 0 { // pre-W5 stage rows carry no epoch: the stall clock reads unknown as "not yet", never as ancient
-			age = epoch - canarySince
+		if m.StageEpoch > 0 { // pre-W5 stage rows carry no epoch: the stall clock reads unknown as "not yet", never as ancient
+			age = epoch - m.StageEpoch
 		}
 		if age > learningStallMainEpochs && m.Canary.Outcomes < learningPromotionMinOutcomes {
 			s.journalLearningStall(ctx, mainConv.ID, cand.ArtifactHash, "canary",
-				"canary aged "+strconv.Itoa(age)+" main epochs with "+strconv.Itoa(m.Canary.Outcomes)+" resolved outcome(s), short of the "+strconv.Itoa(learningPromotionMinOutcomes)+" floor", epoch)
+				"canary aged "+strconv.Itoa(age)+" main epochs with "+strconv.Itoa(m.Canary.Outcomes)+" resolved outcome(s), short of the "+strconv.Itoa(learningPromotionMinOutcomes)+" floor", epoch, m.StageEpoch)
 		}
 	}
 }
@@ -590,30 +625,37 @@ func (s *Server) learningPromoteApply(ctx context.Context, mainConv store.Conver
 }
 
 // journalLearningStall journals ONE learning_stall advisory per
-// (hash, stage) — aging without cohort minimums is surfaced for the
-// LearningPanel (GUI render rides W6; the journal row is the truth), and
-// NEVER auto-promotes, never auto-drops.
-func (s *Server) journalLearningStall(ctx context.Context, convID int64, hash, stage, reason string, epoch int) {
+// (hash, stage, stage_epoch) — the epoch key is the candidate's CURRENT
+// stage-cycle entry epoch (A1 Amendment 3, Sol fix for the re-cycle
+// blind spot): within a cycle the row dedupes; a re-cycled artifact
+// (re-entering the same stage at a new epoch) re-advises honestly.
+// Aging without cohort minimums is surfaced for the LearningPanel (GUI
+// render rides W6; the journal row is the truth), and NEVER
+// auto-promotes, never auto-drops. Pre-A1 stall rows carry no
+// stage_epoch (decode 0): one honest re-advice across the A1 boundary.
+func (s *Server) journalLearningStall(ctx context.Context, convID int64, hash, stage, reason string, epoch, stageEpoch int) {
 	if events, err := s.store.ListEvents(ctx, convID, 0); err == nil {
 		for _, ev := range events {
 			if ev.Type != store.EventMemoryUpdate {
 				continue
 			}
 			var p struct {
-				Layer string `json:"layer"`
-				Cause string `json:"cause"`
-				Hash  string `json:"artifact_hash"`
-				Stage string `json:"stage"`
+				Layer      string `json:"layer"`
+				Cause      string `json:"cause"`
+				Hash       string `json:"artifact_hash"`
+				Stage      string `json:"stage"`
+				StageEpoch int    `json:"stage_epoch"`
 			}
 			if jsonUnmarshalOK(ev.Payload, &p) && p.Layer == "learning" && p.Cause == "learning_stall" &&
-				p.Hash == hash && p.Stage == stage {
-				return // already surfaced for this hash+stage
+				p.Hash == hash && p.Stage == stage && p.StageEpoch == stageEpoch {
+				return // already surfaced for this hash+stage+cycle
 			}
 		}
 	}
 	s.journalLearningUpdate(ctx, convID, "learning_stall", map[string]interface{}{
 		"artifact_hash": hash,
 		"stage":         stage,
+		"stage_epoch":   stageEpoch,
 		"epoch":         epoch,
 		"reason":        reason,
 	})

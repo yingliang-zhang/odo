@@ -282,17 +282,25 @@ func TestLearningPromoteFullPassE2E(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		w5SeedLaneOutcome(t, rig, lanes["ui"], canSHA, patch, "accept", "")
 	}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 9; i++ {
 		w5SeedLaneOutcome(t, rig, convID, liveSHA, patch, "accept", "")
 	}
+	// A1: one live reject — liveHarm ≥ 1 satisfies f′ (zero live harm at
+	// full floors past the 3-epoch grace is the efficacy_vacuity drop).
+	w5SeedLaneOutcome(t, rig, convID, liveSHA, patch, "reject", "")
 
 	w5RunTick(t, rig, convID, 5)
 	rows := allEvents(t, rig, convID)
 
-	// The measure row journaled this epoch (cadence).
+	// The measure row journaled this epoch (cadence); stage_epoch rides
+	// it (A1 additive key — the canary-entry epoch the grace/starve
+	// clocks read).
 	measures := memoryUpdatesByCause(t, rows, "measure")
 	if len(measures) != 1 || measures[0]["artifact_hash"] != cand.ArtifactHash || measures[0]["kind"] != "canary" {
 		t.Fatalf("measure rows = %+v, want one canary measure", measures)
+	}
+	if measures[0]["stage_epoch"] != float64(1) {
+		t.Errorf("measure stage_epoch = %v, want 1 (canary staged at epoch 1)", measures[0]["stage_epoch"])
 	}
 
 	// Stage flipped with the measured cause.
@@ -337,7 +345,8 @@ func TestLearningPromoteFullPassE2E(t *testing.T) {
 	}
 
 	// Steady state: a second tick keeps the stage (project_active
-	// rollback check: zero rejects ⇒ no targets).
+	// rollback check: one reject is far short of the harmful tuple ⇒
+	// no targets).
 	w5RunTick(t, rig, convID, 6)
 	if info, _ := rig.server.learningStageOf(ctx, 1, cand.ArtifactHash); info.To != "project_active" {
 		t.Errorf("stage after re-tick = %q, want project_active", info.To)
@@ -404,10 +413,14 @@ func TestLearningPromotionHoldRetractions(t *testing.T) {
 	w5RollForward(t, rig, convID, cand.ArtifactHash, "canary", 1)
 	canSHA := w5PinCanarySnapshot(t, rig, convID, cand)
 	liveSHA := w5SeedSnapshot(t, rig, convID, base)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 9; i++ {
 		w5SeedLaneOutcome(t, rig, convID, canSHA, patch, "accept", "")
 		w5SeedLaneOutcome(t, rig, convID, liveSHA, patch, "accept", "")
 	}
+	// A1: a 10th canary outcome + one live reject (liveHarm ≥ 1 — f′
+	// must pass before the retract hold can fire).
+	w5SeedLaneOutcome(t, rig, convID, canSHA, patch, "accept", "")
+	w5SeedLaneOutcome(t, rig, convID, liveSHA, patch, "reject", "")
 
 	w5RunTick(t, rig, convID, 5)
 	rows := allEvents(t, rig, convID)
@@ -461,6 +474,214 @@ func TestLearningCanaryHarmfulDrop(t *testing.T) {
 	}
 	if mem := readFileStr(t, filepath.Join(root, ".odo", "memory.md")); mem != base {
 		t.Errorf("memory.md changed under a drop:\n%s", mem)
+	}
+}
+
+// TestLearningCanaryVacuityDrop (A1 Amendment 3): floors met over
+// accept-only traffic — inside the grace window (age 2 < 3) the tick
+// keeps measuring; at age 4 ≥ 3 with zero live harm the candidate drops
+// efficacy_vacuity (the measured do-nothing class) with f_prime:false
+// riding the detail's checks map, ZERO freeze-set entries (vacuity ≠
+// harmful — R2 untouched), memory.md byte-untouched, and the advisory
+// journaled.
+func TestLearningCanaryVacuityDrop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := initRepo(t)
+	rig, convID, _ := w5RigWithLanes(t, root)
+	defer rig.stop(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	patch := w4Patch(t, dir, "v.diff", "src/feature.go")
+
+	base := "- Base rule — cites: main-epoch-1; reaffirmed: 1\n"
+	block := base + "- Vacuous rule — cites: main-epoch-1; reaffirmed: 0\n"
+	writeProjFile(t, root, ".odo/memory.md", base)
+	cand := w5Candidate(t, root, block, []LearningRuleAdd{{Rule: "Vacuous rule", Evidence: "main-epoch-1"}}, nil)
+	w5Lineage(t, rig, convID, cand.ArtifactHash, 1)
+	w5RollForward(t, rig, convID, cand.ArtifactHash, "canary", 1)
+	canSHA := w5PinCanarySnapshot(t, rig, convID, cand)
+	liveSHA := w5SeedSnapshot(t, rig, convID, base)
+	for i := 0; i < 10; i++ {
+		w5SeedLaneOutcome(t, rig, convID, canSHA, patch, "accept", "")
+		w5SeedLaneOutcome(t, rig, convID, liveSHA, patch, "accept", "")
+	}
+
+	// Grace window (age 2 < 3): keep measuring, measure row still
+	// journals stage_epoch every epoch (cadence).
+	w5RunTick(t, rig, convID, 3)
+	if info, _ := rig.server.learningStageOf(ctx, 1, cand.ArtifactHash); info.To != "canary" {
+		t.Fatalf("stage at grace = %q, want canary (vacuity drop needs the 3-epoch grace)", info.To)
+	}
+	// Age 4 ≥ 3 with floors met and liveHarm 0: efficacy_vacuity.
+	w5RunTick(t, rig, convID, 5)
+	rows := allEvents(t, rig, convID)
+	if info, _ := rig.server.learningStageOf(ctx, 1, cand.ArtifactHash); info.To != "dropped" {
+		t.Fatalf("stage = %q, want dropped (efficacy_vacuity)", info.To)
+	}
+	var drop map[string]interface{}
+	for _, s := range w5EventsByAction(t, rows, "learning_stage") {
+		if s["to"] == "dropped" && s["cause"] == "efficacy_vacuity" {
+			drop = s
+		}
+	}
+	if drop == nil {
+		t.Fatalf("no efficacy_vacuity drop row in %+v", w5EventsByAction(t, rows, "learning_stage"))
+	}
+	if drop["drop_cause"] != "efficacy_vacuity" {
+		t.Errorf("drop_cause = %v, want efficacy_vacuity", drop["drop_cause"])
+	}
+	if checks, _ := drop["checks"].(map[string]interface{}); checks["f_prime"] != false {
+		t.Errorf("checks = %v, want f_prime false riding the drop detail", checks)
+	}
+	for _, ms := range memoryUpdatesByCause(t, rows, "measure") {
+		if ms["artifact_hash"] == cand.ArtifactHash && ms["stage_epoch"] != float64(1) {
+			t.Errorf("measure stage_epoch = %v, want 1 (canary staged at epoch 1)", ms["stage_epoch"])
+		}
+	}
+	// R2 untouched: vacuity ≠ harmful — ZERO freeze-set entries.
+	if frozen := learningCandidateFreezeSet(rows, 6); len(frozen) != 0 {
+		t.Errorf("freeze set = %v, want EMPTY — vacuous drops write zero freeze entries", frozen)
+	}
+	if mem := readFileStr(t, filepath.Join(root, ".odo", "memory.md")); mem != base {
+		t.Errorf("memory.md changed under a vacuity drop:\n%s", mem)
+	}
+	if !hasRunAdvisory(t, rows, "efficacy_vacuity") {
+		t.Error("no efficacy_vacuity advisory journaled")
+	}
+	// Never a stall row for a floors-met, full-sample candidate (the
+	// busy-but-vacuous hole is subsumed by the drop exit).
+	if stalls := memoryUpdatesByCause(t, rows, "learning_stall"); len(stalls) != 0 {
+		t.Errorf("learning_stall rows = %d, want 0 (drop exit subsumes the busy-but-vacuous hole)", len(stalls))
+	}
+}
+
+// TestLearningCanaryStarvedDrop (A1 Amendment 3): floors unmet — at the
+// boundary age 24 (NOT > 24) the candidate stays canary with exactly one
+// stall advisory; past 2× the stall floor (age 25) it drops
+// canary_starved with the exclusion counters riding the detail, ZERO
+// freeze-set entries, memory.md byte-untouched.
+func TestLearningCanaryStarvedDrop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := initRepo(t)
+	rig, convID, _ := w5RigWithLanes(t, root)
+	defer rig.stop(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	patch := w4Patch(t, dir, "s.diff", "src/feature.go")
+
+	base := "- Base rule — cites: main-epoch-1; reaffirmed: 1\n"
+	block := base + "- Starved rule — cites: main-epoch-1; reaffirmed: 0\n"
+	writeProjFile(t, root, ".odo/memory.md", base)
+	cand := w5Candidate(t, root, block, []LearningRuleAdd{{Rule: "Starved rule", Evidence: "main-epoch-1"}}, nil)
+	w5Lineage(t, rig, convID, cand.ArtifactHash, 1)
+	w5RollForward(t, rig, convID, cand.ArtifactHash, "canary", 1)
+	canSHA := w5PinCanarySnapshot(t, rig, convID, cand)
+	liveSHA := w5SeedSnapshot(t, rig, convID, base)
+	for i := 0; i < 3; i++ { // both cohorts far under the floor
+		w5SeedLaneOutcome(t, rig, convID, canSHA, patch, "accept", "")
+		w5SeedLaneOutcome(t, rig, convID, liveSHA, patch, "accept", "")
+	}
+
+	// Boundary: age 24 = 2× the stall floor exactly — the drop needs
+	// age > 24. Stays canary; the stall advisory (age > 12, outcomes
+	// short of the floor) fires once for this stage cycle.
+	w5RunTick(t, rig, convID, 25)
+	rows := allEvents(t, rig, convID)
+	if info, _ := rig.server.learningStageOf(ctx, 1, cand.ArtifactHash); info.To != "canary" {
+		t.Fatalf("stage at age 24 = %q, want canary (starve drop needs age > 2×12)", info.To)
+	}
+	stalls := memoryUpdatesByCause(t, rows, "learning_stall")
+	if len(stalls) != 1 || stalls[0]["stage"] != "canary" || stalls[0]["stage_epoch"] != float64(1) {
+		t.Fatalf("stall rows at boundary = %+v, want one canary row keyed stage_epoch 1", stalls)
+	}
+
+	// Age 25 > 24: canary_starved.
+	w5RunTick(t, rig, convID, 26)
+	rows = allEvents(t, rig, convID)
+	if info, _ := rig.server.learningStageOf(ctx, 1, cand.ArtifactHash); info.To != "dropped" {
+		t.Fatalf("stage at age 25 = %q, want dropped (canary_starved)", info.To)
+	}
+	var drop map[string]interface{}
+	for _, s := range w5EventsByAction(t, rows, "learning_stage") {
+		if s["to"] == "dropped" && s["cause"] == "canary_starved" {
+			drop = s
+		}
+	}
+	if drop == nil || drop["drop_cause"] != "canary_starved" {
+		t.Fatalf("drop row = %+v, want cause/drop_cause canary_starved", drop)
+	}
+	if _, ok := drop["excluded"]; !ok {
+		t.Errorf("canary_starved drop detail missing the exclusion counters: %+v", drop)
+	}
+	if frozen := learningCandidateFreezeSet(rows, 27); len(frozen) != 0 {
+		t.Errorf("freeze set = %v, want EMPTY — starved drops write zero freeze entries", frozen)
+	}
+	if mem := readFileStr(t, filepath.Join(root, ".odo", "memory.md")); mem != base {
+		t.Errorf("memory.md changed under a starved drop:\n%s", mem)
+	}
+	if !hasRunAdvisory(t, rows, "canary_starved") {
+		t.Error("no canary_starved advisory journaled")
+	}
+	if stalls := memoryUpdatesByCause(t, rows, "learning_stall"); len(stalls) != 1 {
+		t.Errorf("learning_stall rows after drop = %d, want still 1 (the drop is not a stall)", len(stalls))
+	}
+}
+
+// TestLearningStallEpochKeyedReAdvise (A1 Amendment 3, Sol fix): the
+// stall dedupe is epoch-keyed per stage cycle — within a cycle it fires
+// once (promotion-starvation pin), and a re-cycled artifact re-entering
+// the same stage at a new epoch re-advises honestly (the pre-A1
+// (hash,stage)-only dedupe was blind to re-cycles).
+func TestLearningStallEpochKeyedReAdvise(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := initRepo(t)
+	rig, convID, _ := w5RigWithLanes(t, root)
+	defer rig.stop(t)
+
+	base := "- Base rule — cites: main-epoch-1; reaffirmed: 1\n"
+	block := base + "- Recycled rule — cites: main-epoch-1; reaffirmed: 0\n"
+	writeProjFile(t, root, ".odo/memory.md", base)
+	cand := w5Candidate(t, root, block, []LearningRuleAdd{{Rule: "Recycled rule", Evidence: "main-epoch-1"}}, nil)
+	w5Lineage(t, rig, convID, cand.ArtifactHash, 1)
+	w5RollForward(t, rig, convID, cand.ArtifactHash, "canary", 1)
+	// Zero cohort outcomes: the canary stalls under the floor.
+
+	w5RunTick(t, rig, convID, 14) // age 13 > 12
+	rows := allEvents(t, rig, convID)
+	stalls := memoryUpdatesByCause(t, rows, "learning_stall")
+	if len(stalls) != 1 || stalls[0]["stage_epoch"] != float64(1) {
+		t.Fatalf("stall rows = %+v, want one keyed stage_epoch 1 (first cycle)", stalls)
+	}
+	w5RunTick(t, rig, convID, 15)
+	if stalls := memoryUpdatesByCause(t, allEvents(t, rig, convID), "learning_stall"); len(stalls) != 1 {
+		t.Fatalf("stall rows after re-tick = %d, want still 1 (cycle dedupe)", len(stalls))
+	}
+
+	// Re-cycle the SAME artifact into the slot at a new epoch.
+	w5Stage(t, rig, convID, cand.ArtifactHash, "canary", "dropped", 20)
+	w5Stage(t, rig, convID, cand.ArtifactHash, "dropped", "shadow", 21)
+	w5Stage(t, rig, convID, cand.ArtifactHash, "shadow", "canary", 22)
+
+	w5RunTick(t, rig, convID, 36) // age 14 > 12 in the new cycle
+	rows = allEvents(t, rig, convID)
+	stalls = memoryUpdatesByCause(t, rows, "learning_stall")
+	if len(stalls) != 2 {
+		t.Fatalf("stall rows after re-cycle = %d, want 2 (one per stage cycle)", len(stalls))
+	}
+	seen := map[float64]bool{}
+	for _, s := range stalls {
+		se, _ := s["stage_epoch"].(float64)
+		seen[se] = true
+	}
+	if !seen[1] || !seen[22] {
+		t.Errorf("stall stage_epochs = %v, want cycles 1 and 22 keyed distinctly", seen)
+	}
+	w5RunTick(t, rig, convID, 37)
+	if stalls := memoryUpdatesByCause(t, allEvents(t, rig, convID), "learning_stall"); len(stalls) != 2 {
+		t.Errorf("stall rows after second-cycle re-tick = %d, want still 2", len(stalls))
+	}
+	if info, _ := rig.server.learningStageOf(context.Background(), 1, cand.ArtifactHash); info.To != "canary" {
+		t.Errorf("stage = %q, want canary (age 14 < the starve drop floor — advisory only, never an auto-drop)", info.To)
 	}
 }
 

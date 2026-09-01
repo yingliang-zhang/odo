@@ -95,25 +95,57 @@ type learningExclusionCounters struct {
 // counts. Deterministic: folds the gathered replay input; the double-
 // execution pin in the test suite asserts byte-identical marshals.
 type learningCohortMeasure struct {
-	ArtifactHash string                    `json:"artifact_hash"`
-	Kind         string                    `json:"kind"` // "canary" | "project_active"
-	Epoch        int                       `json:"epoch"`
-	WindowFrom   string                    `json:"window_from"` // created_at lower bound ("" = unbounded)
-	Canary       learningCohortStats       `json:"canary"`
-	Live         learningCohortStats       `json:"live"`
-	Rules        []learningRuleMeasure     `json:"rules"`
-	Baseline     learningCohortStats       `json:"baseline"` // canary ∪ live (the harmful legs' rate pool)
-	Excluded     learningExclusionCounters `json:"excluded"`
+	ArtifactHash string `json:"artifact_hash"`
+	Kind         string `json:"kind"` // "canary" | "project_active"
+	Epoch        int    `json:"epoch"`
+	// StageEpoch is the canary-entry main-lane epoch (A1, additive,
+	// ADR-0002-safe): the promotion verdict's grace/starve clocks read
+	// it. The driver (learningCanaryMeasure) populates it from
+	// learningStageMainEpochAt; 0 = unknown (pre-A1 stage rows carry no
+	// epoch — the verdict reads that as "not yet", never as ancient).
+	StageEpoch int                       `json:"stage_epoch"`
+	WindowFrom string                    `json:"window_from"` // created_at lower bound ("" = unbounded)
+	Canary     learningCohortStats       `json:"canary"`
+	Live       learningCohortStats       `json:"live"`
+	Rules      []learningRuleMeasure     `json:"rules"`
+	Baseline   learningCohortStats       `json:"baseline"` // canary ∪ live (the harmful legs' rate pool)
+	Excluded   learningExclusionCounters `json:"excluded"`
 }
 
-// learningOutcomeKind classifies a rulesOutcome for the measure cohorts.
-type learningOutcomeKind int
+// learningOutcomeClass is the shared outcome→cohort attribution class
+// (D9 Lock Amendment A1, Amendment 5): ONE predicate classifies every
+// journal-joined outcome for BOTH the frozen replay's covered-outcome
+// join and this fold's cohort bucketing (f′'s live-harm attribution) —
+// no dual-implementation drift; the double-execution fixture in
+// learning_measure_test.go pins the cross-fold agreement.
+type learningOutcomeClass int
 
 const (
-	learningOutcomeCanary      learningOutcomeKind = iota // this candidate's canary block
-	learningOutcomeOtherCanary                            // another artifact's canary block (isolated)
-	learningOutcomeLive
+	learningClassLive            learningOutcomeClass = iota // attributing to live traffic (memHash "" = memory-free outcome: a cohort data point, never a rule signal)
+	learningClassOwnCanary                                   // this candidate's pinned canary block
+	learningClassOtherCanary                                 // another artifact's canary block (isolated)
+	learningClassScoringExcluded                             // producing diff is gate-source / C0 / memory-path (learningScoringClassify)
 )
+
+// learningClassifyOutcome classifies one joined outcome: the producing
+// diff's scoring class gates FIRST (fail-closed — excluded traffic never
+// grades a candidate, at either consumer), then canary ownership by the
+// pinned block sha, else live. excluded may be nil (the send-window
+// taint join carries no producing diff).
+func learningClassifyOutcome(artifactHash string, canaryOf map[string]string, excluded map[int64]bool, o rulesOutcome) learningOutcomeClass {
+	if excluded[o.diffID] {
+		return learningClassScoringExcluded
+	}
+	if o.memHash != "" {
+		if owner, ok := canaryOf[o.memHash]; ok {
+			if owner == artifactHash {
+				return learningClassOwnCanary
+			}
+			return learningClassOtherCanary
+		}
+	}
+	return learningClassLive
+}
 
 // learningStageSince folds the created_at of the newest learning_stage row
 // flipping artifact hash INTO one of the given stages — the cross-lane
@@ -197,16 +229,6 @@ func computeLearningMeasure(in learningReplayInput, cand LearningCandidate, sinc
 		}
 	}
 
-	classify := func(memHash string) learningOutcomeKind {
-		if owner, ok := canaryOf[memHash]; ok {
-			if owner == cand.ArtifactHash {
-				return learningOutcomeCanary
-			}
-			return learningOutcomeOtherCanary
-		}
-		return learningOutcomeLive
-	}
-
 	convSeen := map[string]map[int64]bool{"canary": {}, "live": {}}
 	noteConv := func(which string, id int64) {
 		if !convSeen[which][id] {
@@ -257,18 +279,18 @@ func computeLearningMeasure(in learningReplayInput, cand LearningCandidate, sinc
 			if term == nil {
 				continue // pending run: no verdict, no taint
 			}
-			switch classify(sd.memHash) {
-			case learningOutcomeCanary:
+			switch learningClassifyOutcome(cand.ArtifactHash, canaryOf, nil, rulesOutcome{memHash: sd.memHash}) {
+			case learningClassOwnCanary:
 				m.Canary.Sends++
 				if term.errored {
 					m.Canary.ErroredSends++
 				}
-			case learningOutcomeLive:
+			case learningClassLive:
 				m.Live.Sends++
 				if term.errored {
 					m.Live.ErroredSends++
 				}
-			case learningOutcomeOtherCanary:
+			default:
 				// another experiment's traffic: isolated from both legs
 			}
 		}
@@ -295,21 +317,17 @@ func computeLearningMeasure(in learningReplayInput, cand LearningCandidate, sinc
 			if !human {
 				continue
 			}
-			kind := classify(o.memHash)
-			switch kind {
-			case learningOutcomeOtherCanary:
+			// The shared attribution predicate (Amendment 5) decides
+			// cohort membership; the frozen replay joins with the SAME
+			// classification — one implementation, no drift.
+			cls := learningClassifyOutcome(cand.ArtifactHash, canaryOf, excludedDiffs, o)
+			switch cls {
+			case learningClassOtherCanary:
 				m.Excluded.OtherCanary++
 				continue
-			case learningOutcomeLive:
-				if excludedDiffs[o.diffID] {
-					m.Excluded.ScoringExcluded++
-					continue
-				}
-			case learningOutcomeCanary:
-				if excludedDiffs[o.diffID] {
-					m.Excluded.ScoringExcluded++
-					continue
-				}
+			case learningClassScoringExcluded:
+				m.Excluded.ScoringExcluded++
+				continue
 			}
 			// Rule-set resolution: the outcome's cohort content must be
 			// journaled — skipped and counted otherwise (never
@@ -321,7 +339,7 @@ func computeLearningMeasure(in learningReplayInput, cand LearningCandidate, sinc
 			case o.memHash == "":
 				// memory-free outcome: no rule signal, still a cohort data
 				// point (the audit's memFree convention).
-			case kind == learningOutcomeCanary:
+			case cls == learningClassOwnCanary:
 				if content, ok := canaryBlocks[o.memHash]; ok {
 					ruleSet = rulesOfContent(content)
 				} else {
@@ -338,7 +356,7 @@ func computeLearningMeasure(in learningReplayInput, cand LearningCandidate, sinc
 			}
 			st := &m.Live
 			which := "live"
-			if kind == learningOutcomeCanary {
+			if cls == learningClassOwnCanary {
 				st = &m.Canary
 				which = "canary"
 			}
@@ -428,17 +446,25 @@ func containsNormalized(set map[string]bool, normalized string) bool {
 }
 
 // learningPromotionVerdict is the canary→project_active GATE (K3 §3.4 +
-// lock stage machine; a §5.3 gate — consumes the journaled measure ONLY,
-// never raw evidence). Returns:
+// lock stage machine + D9 Lock Amendment A1; a §5.3 gate — consumes the
+// journaled measure ONLY, never raw evidence). Returns:
 //
 //	"promote" + detail — all legs pass, additive-only delta,
 //	"hold"    + detail — all legs pass BUT delta carries retractions (D4
 //	             preserved: flips to held_for_human for human resolution),
-//	"drop"    + detail — a canary-scoped harmful tuple on the candidate's
-//	             own adds (gate fail — the experiment hurts),
-//	""        + nil    — minimums unmet: keep measuring (NEVER promotes on
-//	             age or vacuity; the stall advisory is the visibility
-//	             answer, learning_stages.go).
+//	"drop"    + detail — drop_cause tells the tick which exit fired:
+//	             "harmful_tuple"    — a canary-scoped harmful tuple on the
+//	             candidate's own adds (gate fail — the experiment hurts),
+//	             "efficacy_vacuity" — floors met but zero live harm past
+//	             the grace window (A1 Amendment 3: the measured
+//	             do-nothing class),
+//	             "canary_starved"   — floors unmet past 2× the stall floor
+//	             (A1 Amendment 3: anti-squat on the single R3 slot);
+//	             BOTH vacuous-drop causes write ZERO freeze-set entries,
+//	""        + nil    — keep measuring (minimums unmet, inside the f′
+//	             grace window, or a stats miss — NEVER promotes on age or
+//	             vacuity; the stall advisory is the visibility answer,
+//	             learning_stages.go).
 func learningPromotionVerdict(m learningCohortMeasure, cand LearningCandidate) (string, map[string]interface{}) {
 	detail := map[string]interface{}{
 		"epoch":         m.Epoch,
@@ -449,6 +475,7 @@ func learningPromotionVerdict(m learningCohortMeasure, cand LearningCandidate) (
 	// under its own canary cohort is a gate fail (any gate ⇒ dropped).
 	for _, r := range m.Rules {
 		if r.Harmful {
+			detail["drop_cause"] = "harmful_tuple"
 			detail["harmful_rule"] = r
 			return "drop", detail
 		}
@@ -456,6 +483,43 @@ func learningPromotionVerdict(m learningCohortMeasure, cand LearningCandidate) (
 	// Paired minimums (both cohorts ≥ floor — a canary with no live
 	// contrast never promotes: the self-reinforcing cohort guard).
 	if m.Canary.Outcomes < learningPromotionMinOutcomes || m.Live.Outcomes < learningPromotionMinOutcomes {
+		// canary_starved (A1 Amendment 3): squatting the single R3 slot
+		// past 2× the stall floor with the floors still unmet is a
+		// measured structural dead end — age-based DROP is not age-based
+		// promotion (the promotion-starvation pin's operative half
+		// stands). Error asymmetry: a wrong drop costs one re-proposal;
+		// a wrong squatter costs all future candidates. StageEpoch 0
+		// (pre-A1 rows) reads as "not yet"; the exclusion counters ride
+		// the drop row (exclusion-rate visibility).
+		if m.StageEpoch > 0 && m.Epoch-m.StageEpoch > 2*learningStallMainEpochs {
+			detail["drop_cause"] = "canary_starved"
+			detail["excluded"] = m.Excluded
+			return "drop", detail
+		}
+		return "", nil
+	}
+	// f′ (A1 Amendment 2): live EXERCISE — the candidate's harm class
+	// exists in live traffic during the observation window (integer, no
+	// division, over the shared attribution join; the per-check boolean
+	// rides the detail map, replay checks convention). Semantic bound:
+	// f′ proves EXERCISE, not PREVENTION — post-promotion efficacy
+	// backstops stay the harmful tuple + R1 rollback. Vacuity at full
+	// sample is a MEASURED property of the rule: inside the grace window
+	// (canary residence < learningShadowAgingEpochs), keep measuring;
+	// at/past it, the do-nothing class drops (efficacy_vacuity — freeze
+	// set untouched, vacuity ≠ harmful).
+	liveHarm := m.Live.Rejects + m.Live.WeakRejects
+	fPrime := liveHarm >= 1
+	detail["checks"] = map[string]bool{"f_prime": fPrime}
+	if !fPrime {
+		age := 0
+		if m.StageEpoch > 0 {
+			age = m.Epoch - m.StageEpoch
+		}
+		if age >= learningShadowAgingEpochs {
+			detail["drop_cause"] = "efficacy_vacuity"
+			return "drop", detail
+		}
 		return "", nil
 	}
 	// Reject-rate leg: canary ≤ live × 5/4, integer cross-multiplied:

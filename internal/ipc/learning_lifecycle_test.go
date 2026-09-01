@@ -433,6 +433,85 @@ func TestLearningShadowCheckpoints(t *testing.T) {
 	}
 }
 
+// TestLearningShadowCheckpointCanaryDisabled (D9 Lock Amendment A1,
+// Amendment 4 regression): with the canary seam disabled project-wide
+// (learning_canary_fraction: 0, R3), an aged replay-passing shadow
+// candidate must NOT flip shadow→canary — the flip would strand a
+// structurally permanent squatter (learningCurrentCanary returns nil at
+// fraction 0, so no cohort outcome can ever accrue). Checkpoints still
+// run and journal; the candidate stays shadow with no actuation row.
+func TestLearningShadowCheckpointCanaryDisabled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writePrefs(t, home, "learning_canary_fraction: 0\n")
+	root := initRepo(t)
+	rig := startRig(t, root)
+	defer rig.stop(t)
+	boot := rig.call(t, Request{Cmd: CmdBootstrap, ProjectRoot: root})
+	convID := boot.Conversation.ID
+	ctx := context.Background()
+
+	writeProjFile(t, root, "wiki/main-epoch-1.md", "# epoch 1\n")
+	base := "- Base rule — cites: main-epoch-1; reaffirmed: 1\n"
+	writeProjFile(t, root, ".odo/memory.md", base)
+	dir := t.TempDir()
+	w4SeedCoveredReject(t, rig, convID, w4Patch(t, dir, "cd.diff", "src/feature.go"))
+	proposals := w4Proposals("Aged shadow candidate")
+	seedProposeBatch(t, rig, convID, 1, proposals, nil)
+	proposeSeq := 0
+	for _, ev := range allEvents(t, rig, convID) {
+		if ev.Type == store.EventReviewAction {
+			var p struct{ Action string }
+			if json.Unmarshal(ev.Payload, &p) == nil && p.Action == "memory_propose" {
+				proposeSeq = ev.Seq
+			}
+		}
+	}
+	cand := w4ProjCandidate(base, []LearningRuleAdd{{Rule: "Aged shadow candidate", Evidence: "main-epoch-1"}}, proposeSeq)
+	row, created, err := AppendLearningCandidate(root, cand)
+	if err != nil || !created {
+		t.Fatalf("seed jsonl: %v %v", created, err)
+	}
+	if _, err := rig.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action": "learning_candidate", "artifact_hash": row.ArtifactHash, "main_epoch": 2,
+	})); err != nil {
+		t.Fatalf("seed lineage: %v", err)
+	}
+	if _, err := rig.store.AppendEvent(ctx, convID, store.EventReviewAction, mustJSON(map[string]interface{}{
+		"action": "learning_stage", "artifact_hash": row.ArtifactHash,
+		"from": "candidate", "to": "shadow", "cause": "gates_passed",
+	})); err != nil {
+		t.Fatalf("seed stage: %v", err)
+	}
+
+	// Aged (5−2 = 3 ≥ the aging floor), replay passing, slot free — the
+	// exact pre-A1 actuation shape; with the seam disabled it must NOT
+	// flip.
+	rig.server.learningShadowCheckpoints(ctx, *boot.Conversation, 5)
+	rows := allEvents(t, rig, convID)
+
+	if info, _ := rig.server.learningStageOf(ctx, 1, row.ArtifactHash); info.To != "shadow" {
+		t.Errorf("stage = %q, want shadow (seam disabled: a flipped candidate could never inject)", info.To)
+	}
+	for _, s := range payloadsByAction(t, rows, "learning_stage") {
+		if s["cause"] == "checkpoint_promoted" {
+			t.Errorf("checkpoint_promoted row journaled at fraction 0: %+v", s)
+		}
+	}
+	if queued := memoryUpdatesByCause(t, rows, "shadow_queued"); len(queued) != 0 {
+		t.Errorf("shadow_queued rows = %+v, want none (nothing waits on a disabled seam)", queued)
+	}
+	// The checkpoint itself stays live: replay re-runs journal with the
+	// pass verdict — only the actuation is gated.
+	checkpoints := memoryUpdatesByCause(t, rows, "shadow_checkpoint")
+	if len(checkpoints) != 1 {
+		t.Fatalf("shadow_checkpoint rows = %d, want 1", len(checkpoints))
+	}
+	if m, _ := checkpoints[0]["metrics"].(map[string]interface{}); m["verdict"] != "pass" {
+		t.Errorf("checkpoint verdict = %v, want pass", m["verdict"])
+	}
+}
+
 // --- end-to-end: distill with learning stages ON -----------------------------
 
 func TestDistillStagesCandidateEndToEnd(t *testing.T) {
@@ -455,10 +534,12 @@ func TestDistillStagesCandidateEndToEnd(t *testing.T) {
 	// can wedge under machine load (full-suite oversubscription) and the
 	// liveness ladder replays it — the replayed send + second terminal +
 	// extra diff row scramble the terminal→diff attribution for the
-	// seeded reject (same-second claims are FIFO by seq), the replay
-	// then counts ZERO covered outcomes (check f: vacuous ⇒ fail) and
-	// the creation gates legitimately drop the fresh candidate
-	// (diff #119 verify_failed: stage "dropped", want shadow).
+	// seeded reject (same-second claims are FIFO by seq); the replay
+	// then counts ZERO covered outcomes — pre-A1 that failed check f
+	// (vacuous ⇒ fail) and the creation gates legitimately dropped the
+	// fresh candidate (diff #119 verify_failed: stage "dropped", want
+	// shadow); post-A1 the replay would pass, but the distorted
+	// attribution is still unfit for the e2e's evidence shape.
 	dir := t.TempDir()
 	w4SeedActivity(t, rig, convID, "Create hello.txt", "Created hello.txt as requested.", w4Patch(t, dir, "hello.diff", "hello.txt"))
 	// Cohort-covered negative evidence so the candidate's replay is

@@ -1,9 +1,11 @@
 package ipc
 
-// D9-W4 tests: the frozen replay's per-criterion fixtures (a–h +
-// provenance + unverifiable + determinism + friction boundary), built as
-// synthetic journal slices (computeLearningReplay is pure given its
-// gathered input — never a store).
+// D9-W4 tests (+ D9 Lock Amendment A1 moved-out proof): the frozen
+// replay's per-criterion fixtures (a–e, h, provenance + unverifiable +
+// determinism; f/g deleted by A1 — the vacuity/friction shapes now PASS
+// and the counters stay journaled as telemetry), built as synthetic
+// journal slices (computeLearningReplay is pure given its gathered input
+// — never a store).
 //
 // Structure note (pinned by TestLearningReplayCheckAUniform): for an
 // adds-only candidate every covered cohort counterfactually carries the
@@ -158,9 +160,14 @@ func TestLearningReplayPassAllChecks(t *testing.T) {
 	if rep.Verdict != "pass" {
 		t.Fatalf("verdict = %q, want pass; violations %+v checks %v", rep.Verdict, rep.Violations, rep.Checks)
 	}
-	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "provenance"} {
+	for _, name := range []string{"a", "b", "c", "d", "e", "h", "provenance"} {
 		if !rep.Checks[name] {
 			t.Errorf("check %s = false in a passing replay", name)
+		}
+	}
+	for _, name := range []string{"f", "g"} {
+		if _, ok := rep.Checks[name]; ok {
+			t.Errorf("check %s present — D9 Lock Amendment A1 deleted f/g from replay", name)
 		}
 	}
 	if rep.PreventedHarm != 1 || rep.Friction != 2 {
@@ -306,40 +313,58 @@ func TestLearningReplayCheckDGrowthBudget(t *testing.T) {
 	}
 }
 
-// Checks f/g: anti-vacuity and the friction budget (integer boundary).
-func TestLearningReplayCheckFGVacuityAndFriction(t *testing.T) {
+// Checks f/g moved to the canary layer (D9 Lock Amendment A1): the two
+// pre-A1 failure shapes — vacuous (zero prevented harm) and friction
+// over the retired 3× budget — now PASS at replay (the moved-out proof);
+// the counters stay journaled as telemetry with zero verdict weight, no
+// f/g keys ever appear in the checks map, and auto rejects still count
+// toward the prevented-harm telemetry (GLM's class list).
+func TestLearningReplayPostA1VacuityPasses(t *testing.T) {
+	const proposeSeq = 10
 	baseHash := sha16([]byte(w4Base))
-	mk := func(specs []w4OutcomeSpec) learningReplayInput {
+	propose := []store.Event{w4Review(proposeSeq, "memory_propose", map[string]interface{}{
+		"epoch":     1,
+		"proposals": []MemoryProposal{{Target: "memory.md", Rule: "Candidate rule", Evidence: "main-epoch-1"}},
+	})}
+	cand := w4PassCandidate(proposeSeq)
+	mk := func(conv int64, specs []w4OutcomeSpec) learningReplayInput {
 		return learningReplayInput{lanes: []learningReplayLane{
-			w4BuildLane(t, 51, map[string]string{baseHash: w4Base}, specs, nil),
+			w4BuildLane(t, conv, map[string]string{baseHash: w4Base}, specs, propose),
 		}}
 	}
-	cand := w4PassCandidate(0)
-	// Vacuous: accepts only — zero preventable harm.
-	rep := computeLearningReplay(mk([]w4OutcomeSpec{{hash: baseHash, kind: "accept"}, {hash: baseHash, kind: "accept"}}), cand)
-	if rep.Checks["f"] || rep.Verdict != "fail" {
-		t.Errorf("vacuous slice: f = %v verdict %q, want false/fail", rep.Checks["f"], rep.Verdict)
+	// Vacuous: accepts only — pre-A1 f fail (zero preventable harm).
+	rep := computeLearningReplay(mk(51, []w4OutcomeSpec{{hash: baseHash, kind: "accept"}, {hash: baseHash, kind: "accept"}}), cand)
+	if rep.Verdict != "pass" {
+		t.Fatalf("vacuous slice: verdict = %q, want pass post-A1 (f/g moved to canary); violations %+v", rep.Verdict, rep.Violations)
 	}
-	// Boundary: prevented 2, friction exactly 3×2 = 6 passes; 7 fails.
-	pass := make([]w4OutcomeSpec, 0, 8)
-	pass = append(pass, w4OutcomeSpec{hash: baseHash, kind: "reject"}, w4OutcomeSpec{hash: baseHash, kind: "reject"})
-	for i := 0; i < 6; i++ {
-		pass = append(pass, w4OutcomeSpec{hash: baseHash, kind: "accept"})
+	if rep.PreventedHarm != 0 || rep.Friction != 2 {
+		t.Errorf("vacuous counters = %d/%d, want 0/2 (telemetry still journaled)", rep.PreventedHarm, rep.Friction)
 	}
-	rep = computeLearningReplay(mk(pass), cand)
-	if !rep.Checks["g"] {
-		t.Errorf("friction 6 at prevented 2 must pass (6 ≤ 3×2): %+v", rep.Violations)
+	// Friction over the retired budget: 7 accepts at 2 prevented (> 3×2,
+	// pre-A1 g fail) passes now.
+	specs := []w4OutcomeSpec{{hash: baseHash, kind: "reject"}, {hash: baseHash, kind: "reject"}}
+	for i := 0; i < 7; i++ {
+		specs = append(specs, w4OutcomeSpec{hash: baseHash, kind: "accept"})
 	}
-	fail := append(append([]w4OutcomeSpec{}, pass...), w4OutcomeSpec{hash: baseHash, kind: "accept"})
-	rep = computeLearningReplay(mk(fail), cand)
-	if rep.Checks["g"] {
-		t.Error("friction 7 at prevented 2 must fail (7 > 3×2)")
+	rep = computeLearningReplay(mk(52, specs), cand)
+	if rep.Verdict != "pass" {
+		t.Fatalf("friction 7 at prevented 2: verdict = %q, want pass post-A1; violations %+v", rep.Verdict, rep.Violations)
 	}
-	// Auto rejects count toward prevented harm (GLM's class list).
-	rep = computeLearningReplay(mk([]w4OutcomeSpec{{hash: baseHash, kind: "reject", auto: true}}), cand)
-	if rep.PreventedHarm != 1 || !rep.Checks["f"] {
-		t.Errorf("auto_reject coverage: prevented = %d f = %v, want 1/true", rep.PreventedHarm, rep.Checks["f"])
+	if rep.PreventedHarm != 2 || rep.Friction != 7 {
+		t.Errorf("friction counters = %d/%d, want 2/7", rep.PreventedHarm, rep.Friction)
 	}
+	// Auto rejects still count toward prevented-harm telemetry.
+	rep = computeLearningReplay(mk(53, []w4OutcomeSpec{{hash: baseHash, kind: "reject", auto: true}}), cand)
+	if rep.PreventedHarm != 1 {
+		t.Errorf("auto_reject coverage: prevented = %d, want 1", rep.PreventedHarm)
+	}
+	for name := range rep.Checks {
+		if name == "f" || name == "g" {
+			t.Errorf("check %s present — A1 deleted f/g from replay", name)
+		}
+	}
+	// The live-exercise check landed at the canary promotion predicate
+	// instead — pinned in learning_measure_test.go (f′ table).
 }
 
 // Check-h: retract without harmful-flag evidence is a loosening.
