@@ -1278,6 +1278,97 @@ func TestAcceptRefusesStagedPatchPaths(t *testing.T) {
 	}
 }
 
+// TestAcceptAlreadyLandedUncommittedRenameStagesRename pins the M20
+// already-landed branch's rename contract under StageExistingPaths
+// (pitfall #57's sibling site, 2026-09-01): the diff is a pure rename
+// whose post-image sits UNCOMMITTED in the main checkout — the
+// reverse-apply probe routes the accept to the already-landed branch,
+// nothing is applied, and the branch's own stage must record the rename
+// so the bookkeeping commit lands it. (Remembered-path staging also
+// survived this shape — the index-resident pre-image and the untracked
+// post-image each match a pathspec — so this row is a characterization
+// pin, not a red/green pin; the fresh-apply wedge it guards against is
+// TestApplyDiffStagesByState in internal/git.)
+func TestAcceptAlreadyLandedUncommittedRenameStagesRename(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.Rename(filepath.Join(dir, "src", "a.go"), filepath.Join(dir, "src", "receipts.go")); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	// The already-landed trigger: the SAME rename sits in the main
+	// checkout uncommitted (mv without add) — the worktree holds the
+	// post-image, the reverse-apply probe passes, and the accept must
+	// record, never re-apply.
+	if err := os.Rename(filepath.Join(root, "src", "a.go"), filepath.Join(root, "src", "receipts.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", ""); err != nil {
+		t.Fatalf("accept already-landed uncommitted rename: %v", err)
+	}
+	row := resolutionRow(t, f, d, "accept")
+	if row["already_landed"] != true {
+		t.Errorf("accept row already_landed = %v, want true (the test must ride the M20 branch)", row["already_landed"])
+	}
+	// The bookkeeping commit recorded exactly the rename.
+	got := gitOut(t, root, "show", "--format=", "--name-status", "HEAD")
+	for _, want := range []string{"R", "src/a.go", "src/receipts.go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("accept commit name-status = %q, want it to carry %q (rename recorded)", got, want)
+		}
+	}
+	// Nothing is left dangling: a clean tree means both sides resolved.
+	if status := gitStatus(t, root); status != "" {
+		t.Errorf("status = %q, want clean after the accept commit", status)
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+}
+
+// TestAcceptAlreadyLandedCommittedRenameSkipsCommit pins the same branch's
+// other placement: the rename already landed COMMITTED, so the pre-image
+// is a ghost in worktree AND index. There remembered-path staging DID hit
+// #57's unmatched pathspec — non-fatally logged, and the differing check
+// happened to still skip the commit correctly; StageExistingPaths removes
+// the noise and the reliance on that ordering. The accept must close with
+// HEAD untouched (no bookkeeping commit — the rename is already durable).
+func TestAcceptAlreadyLandedCommittedRenameSkipsCommit(t *testing.T) {
+	f := newAutonomyFixture(t)
+	root, _ := autolandRepo(t)
+	s := &Server{store: f.st, projectRoot: root}
+	d := baseBoundDiff(t, f, root, "p.diff", realPatch(t, root, func(dir string) {
+		if err := os.Rename(filepath.Join(dir, "src", "a.go"), filepath.Join(dir, "src", "receipts.go")); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	// The committed placement: land the rename in main as a real commit.
+	gitIn(t, root, "mv", "src/a.go", "src/receipts.go")
+	gitIn(t, root, "commit", "-m", "manual rename landing")
+	head := gitOut(t, root, "rev-parse", "HEAD")
+
+	if _, err := s.handleDiffAction(context.Background(), d.ID, "accept", "", ""); err != nil {
+		t.Fatalf("accept already-landed committed rename: %v", err)
+	}
+	row := resolutionRow(t, f, d, "accept")
+	if row["already_landed"] != true {
+		t.Errorf("accept row already_landed = %v, want true (the test must ride the M20 branch)", row["already_landed"])
+	}
+	if got := gitOut(t, root, "rev-parse", "HEAD"); got != head {
+		t.Errorf("HEAD = %q, want %q (committed landing records no bookkeeping commit)", got, head)
+	}
+	if got, gerr := f.st.GetDiff(context.Background(), d.ID); gerr != nil {
+		t.Fatal(gerr)
+	} else if got.Status != store.DiffAccepted {
+		t.Errorf("diff status = %q, want accepted", got.Status)
+	}
+}
+
 // TestAcceptStaleBaseRefreshConflict (P0a; supersedes fix-INT's
 // TestAcceptBlocksStaleBase): a stale base no longer hard-refuses — the
 // accept path attempts a --3way REBASE under acceptMu. When main and the

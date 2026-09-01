@@ -208,6 +208,214 @@ func TestApplyDiffRefusesUnmerged(t *testing.T) {
 	}
 }
 
+// snapshotPatch captures the current worktree-vs-HEAD state exactly like
+// the drain does (ExtractDiff: `git add -A`, `git diff --cached HEAD`),
+// then restores the tree to HEAD so the repo can go on playing the
+// main-checkout role. The staged post-image blobs stay in the object
+// store, so --3way can always build them at apply time.
+func snapshotPatch(t *testing.T, repo string) string {
+	t.Helper()
+	mustRun(t, repo, "add", "-A")
+	patch, err := run(repo, "diff", "--cached", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(patch) == "" {
+		t.Fatal("snapshot is empty; the scenario mutation is missing")
+	}
+	mustRun(t, repo, "reset", "-q", "--hard", "HEAD")
+	path := filepath.Join(t.TempDir(), "scenario.diff")
+	if err := os.WriteFile(path, []byte(patch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestApplyDiffStagesByState pins pitfall #57 (diff #138, 2026-09-01): the
+// accept's post-apply staging derives its path list from ACTUAL tree/index
+// state, never from the patch's remembered paths — `apply --3way` records
+// a rename in the index as it applies, the pre-image path vanishes from
+// both tree and index, and the old remembered-path `git add -- <pre-image>`
+// died on "fatal: pathspec ... did not match any files", wedging every
+// accept of a rename diff. Every row also re-pins P0: an unrelated dirty
+// user file is never swept into staging.
+func TestApplyDiffStagesByState(t *testing.T) {
+	write := func(t *testing.T, dir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name     string
+		base     map[string]string               // committed pre-image (plus the base commit itself)
+		mutate   func(t *testing.T, dir string)  // the agent's change
+		drift    func(t *testing.T, repo string) // main-checkout HEAD drift after the base was cut
+		inIndex  []string                        // must be in ls-files after ApplyDiff
+		notIndex []string                        // must be ABSENT from ls-files after ApplyDiff
+		check    func(t *testing.T, repo string) // pinned staged state
+	}{
+		{
+			// The diff #138 shape verbatim: rename + edit near the top,
+			// HEAD drifted disjointly at the tail — --3way merges, records
+			// the rename in the index, and the pre-image becomes a ghost
+			// pathspec. The merged post-image must carry BOTH edits.
+			name: "rename pre-image vanishes mid-apply (pitfall #57)",
+			base: map[string]string{"panel.txt": strings.Repeat("panel line\n", 20)},
+			mutate: func(t *testing.T, dir string) {
+				if err := os.Rename(filepath.Join(dir, "panel.txt"), filepath.Join(dir, "receipts.txt")); err != nil {
+					t.Fatal(err)
+				}
+				body, err := os.ReadFile(filepath.Join(dir, "receipts.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				write(t, dir, "receipts.txt", strings.Replace(string(body), "panel line\n", "receipts line\n", 1))
+			},
+			drift: func(t *testing.T, repo string) {
+				body, err := os.ReadFile(filepath.Join(repo, "panel.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				write(t, repo, "panel.txt", string(body)+"drift tail\n")
+				mustRun(t, repo, "add", "panel.txt")
+				mustRun(t, repo, "commit", "-q", "-m", "drift")
+			},
+			inIndex:  []string{"receipts.txt", "user.txt"},
+			notIndex: []string{"panel.txt"},
+			check: func(t *testing.T, repo string) {
+				staged := mustRun(t, repo, "cat-file", "-p", ":receipts.txt")
+				for _, want := range []string{"receipts line", "drift tail"} {
+					if !strings.Contains(staged, want) {
+						t.Errorf("staged receipts.txt missing %q (3-way merge loss):\n%s", want, staged)
+					}
+				}
+				status := mustRun(t, repo, "status", "--porcelain")
+				if !strings.Contains(status, "R  panel.txt -> receipts.txt") {
+					t.Errorf("status missing staged rename:\n%s", status)
+				}
+			},
+		},
+		{
+			// A clean delete applies to the working tree only, so the
+			// index still lists the path: exercises the index-resident
+			// branch of the state filter (stage the deletion via add -A).
+			name: "delete stages the index-resident pre-image",
+			base: map[string]string{"old.txt": "old\n"},
+			mutate: func(t *testing.T, dir string) {
+				if err := os.Remove(filepath.Join(dir, "old.txt")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			inIndex:  []string{"user.txt"},
+			notIndex: []string{"old.txt"},
+			check: func(t *testing.T, repo string) {
+				status := mustRun(t, repo, "status", "--porcelain")
+				if !strings.Contains(status, "D  old.txt") {
+					t.Errorf("status missing staged deletion:\n%s", status)
+				}
+			},
+		},
+		{
+			// Baseline preserved: a modify + an untracked new file both
+			// stage (the new file via the working-tree-resident branch).
+			name: "modify plus new file",
+			base: map[string]string{"base.txt": "base\n"},
+			mutate: func(t *testing.T, dir string) {
+				write(t, dir, "base.txt", "patched\n")
+				write(t, dir, "new.txt", "new\n")
+			},
+			inIndex:  []string{"base.txt", "new.txt", "user.txt"},
+			notIndex: nil,
+			check: func(t *testing.T, repo string) {
+				status := mustRun(t, repo, "status", "--porcelain")
+				for _, want := range []string{"M  base.txt", "A  new.txt"} {
+					if !strings.Contains(status, want) {
+						t.Errorf("status missing %q:\n%s", want, status)
+					}
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			mustRun(t, repo, "init", "-b", "main")
+			mustRun(t, repo, "config", "user.email", "odo@test")
+			mustRun(t, repo, "config", "user.name", "odo")
+			for name, body := range tc.base {
+				writeAndCommit(t, repo, name, body)
+			}
+			writeAndCommit(t, repo, "user.txt", "user file\n")
+			tc.mutate(t, repo)
+			patch := snapshotPatch(t, repo)
+			if tc.drift != nil {
+				tc.drift(t, repo)
+			}
+			// P0 obstacle: an unrelated unstaged user edit must survive
+			// exactly as it was, never swept by the accept's staging.
+			write(t, repo, "user.txt", "user edit\n")
+
+			if err := ApplyDiff(repo, patch); err != nil {
+				t.Fatalf("ApplyDiff: %v", err)
+			}
+			index := mustRun(t, repo, "ls-files")
+			for _, p := range tc.inIndex {
+				if !strings.Contains(index, p) {
+					t.Errorf("ls-files missing %q:\n%s", p, index)
+				}
+			}
+			for _, p := range tc.notIndex {
+				if strings.Contains(index, p) {
+					t.Errorf("ls-files unexpectedly carries %q:\n%s", p, index)
+				}
+			}
+			if tc.check != nil {
+				tc.check(t, repo)
+			}
+			if status := mustRun(t, repo, "status", "--porcelain"); !strings.Contains(status, " M user.txt") {
+				t.Errorf("unrelated edit swept or lost, want \" M user.txt\":\n%s", status)
+			}
+		})
+	}
+}
+
+// TestExtractDiffRename pins the drain side of pitfall #57: worktree
+// extraction has always been rename-aware (`git add -A` + `diff --cached`),
+// so a bare rename inside the run's worktree lands in the archived patch
+// as a rename hunk — the accept path then relies on its rename from/to
+// headers. (The remembered-path failure only ever existed at accept time.)
+func TestExtractDiffRename(t *testing.T) {
+	repo := t.TempDir()
+	mustRun(t, repo, "init", "-b", "main")
+	mustRun(t, repo, "config", "user.email", "odo@test")
+	mustRun(t, repo, "config", "user.name", "odo")
+	writeAndCommit(t, repo, "panel.txt", strings.Repeat("panel line\n", 20))
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := CreateWorktree(repo, wt); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := RemoveWorktree(repo, wt); err != nil {
+			t.Errorf("remove worktree: %v", err)
+		}
+	}()
+	// A bare mv — the agent's usual rename shape; nothing else staged.
+	if err := os.Rename(filepath.Join(wt, "panel.txt"), filepath.Join(wt, "receipts.txt")); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := ExtractDiff(wt)
+	if err != nil {
+		t.Fatalf("ExtractDiff: %v", err)
+	}
+	for _, want := range []string{"rename from panel.txt", "rename to receipts.txt"} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("extracted diff missing %q:\n%s", want, diff)
+		}
+	}
+}
+
 // TestDiffPaths pins the patch-path parser: which side carries a path for
 // adds/deletes/modifies, header fallback for mode-only and pure renames,
 // and C-quote resolution into real filesystem names.

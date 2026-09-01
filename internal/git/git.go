@@ -140,17 +140,63 @@ func ApplyDiff(repoPath, diffPath string) error {
 	if _, err := run(repoPath, "apply", "--3way", diffPath); err != nil {
 		return err
 	}
-	if err := StagePaths(repoPath, unionPaths(aPaths, bPaths)); err != nil {
+	if err := StageExistingPaths(repoPath, unionPaths(aPaths, bPaths)); err != nil {
 		return fmt.Errorf("stage patch paths: %w", err)
 	}
 	return nil
 }
 
+// StageExistingPaths stages the patch's path set by ACTUAL state, not by the
+// remembered path list (pitfall #57, diff #138): `apply --3way` records a
+// rename in the index AS IT APPLIES, and the pre-image path then matches
+// neither the working tree nor the index, so a bare `git add -- <pre-image>`
+// dies on "pathspec ... did not match any files" — every accept of a rename
+// diff wedged at staging. A path absent from both can only be such an
+// already-recorded deletion (index absence IS the staged-delete record —
+// there is no third state), so skipping it loses nothing. Survivors go to
+// pathspec-scoped `git add --`, which since Git 2.0 records modifications,
+// unrecorded deletions (clean working-tree-only hunks), and untracked
+// post-image files alike. The scope stays exactly the patch's paths — P0
+// (never sweep unrelated main-checkout changes) is unchanged. The M20
+// already-landed accept routes its patch paths through the same filter: a
+// rename that already landed leaves the pre-image a ghost there too, and an
+// unmatched pathspec would void the bookkeeping stage silently.
+func StageExistingPaths(repoPath string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	indexed, err := run(repoPath, append([]string{"ls-files", "-z", "--"}, paths...)...)
+	if err != nil {
+		return fmt.Errorf("probe index paths: %w", err)
+	}
+	inIndex := make(map[string]struct{}, len(paths))
+	for _, p := range strings.Split(strings.TrimRight(indexed, "\x00"), "\x00") {
+		if p != "" {
+			inIndex[p] = struct{}{}
+		}
+	}
+	stage := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if _, ok := inIndex[p]; ok {
+			stage = append(stage, p)
+			continue
+		}
+		// Untracked post-image: a clean working-tree-only hunk created the
+		// file without recording it. Patch paths are slash-separated;
+		// translate for the filesystem probe.
+		if _, statErr := os.Lstat(filepath.Join(repoPath, filepath.FromSlash(p))); statErr == nil {
+			stage = append(stage, p)
+		}
+	}
+	return StagePaths(repoPath, stage)
+}
+
 // StagePaths stages exactly paths — both pre- and post-image, so deletions
-// and renames record correctly. ApplyDiff runs it post-apply; the M20
-// already-landed accept runs it without an apply (nothing was applied to
-// stage, and `git commit -- <untracked>` would refuse an untracked
-// post-image file the user produced out-of-band).
+// and renames record correctly. ApplyDiff runs it post-apply over
+// StageExistingPaths' survivors; the M20 already-landed accept reaches it
+// through StageExistingPaths for the same ghost-path reason (nothing was
+// applied to stage, and `git commit -- <untracked>` would refuse an
+// untracked post-image file the user produced out-of-band).
 func StagePaths(repoPath string, paths []string) error {
 	if len(paths) == 0 {
 		return nil

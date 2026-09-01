@@ -8,5 +8,12 @@
 # line runs whenever the diff TOUCHES that scope (>=1 path matches); the
 # bare fallback line additionally runs when any diff path sits outside
 # every glob's scope. A mixed go+gui diff therefore runs BOTH commands.
-gui/**: cd gui && npx tsc --noEmit && npx vitest run && npx playwright test --reporter=line --retries=1
+#
+# vitest runs capped at --maxWorkers=2 ONLY here (pitfall #42 family,
+# 2026-09-01: verify's vitest segment flaked act/timing-sensitive tests
+# under full parallelism — every failure passed isolated and in warm local
+# runs). vitest.config.ts stays untouched so dev/test runs keep full
+# parallelism; no --retry: the worker cap is the honest fix, a retry would
+# only mask a real flake.
+gui/**: cd gui && npx tsc --noEmit && npx vitest run --maxWorkers=2 && npx playwright test --reporter=line --retries=1
 go build ./... && go vet ./... && go test -timeout=20m ./...

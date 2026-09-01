@@ -3760,7 +3760,15 @@ func (s *Server) handleDiffAction(ctx context.Context, diffID int64, action, act
 			// is blind to untracked files (it would report "no
 			// difference" and skip the very commit that must record the
 			// file) and git commit -- paths refuses untracked pathspecs.
-			if err := git.StagePaths(s.projectRoot, patchPaths); err != nil {
+			// State-filtered staging (pitfall #57's sibling site): an
+			// already-landed COMMITTED rename has its pre-image in neither
+			// worktree nor index, and remembered-path staging failed that
+			// pathspec non-fatally — the differing check below happened to
+			// skip the commit anyway, so the outcome was right only by
+			// ordering accident. StageExistingPaths drops ghosts up front;
+			// both placements' outcomes are pinned by the
+			// TestAcceptAlreadyLanded*Rename tests.
+			if err := git.StageExistingPaths(s.projectRoot, patchPaths); err != nil {
 				log.Printf("accept_diff: already-landed stage for diff %d (non-fatal): %v", diffID, err)
 			}
 			differs, derr := git.PathsDifferFromHEAD(s.projectRoot, patchPaths)
