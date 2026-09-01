@@ -96,3 +96,52 @@ func TestAutoApplyPref(t *testing.T) {
 		t.Errorf("CodingModel = %q, want glm-5.2 (other keys preserved)", s.CodingModel)
 	}
 }
+
+// TestK8sPrefsRoundTrip pins the k8s settings write path: the three
+// UX-2 (A2-3) keys previously mapped in ReadSettings but silently
+// dropped by UpdateSettings (GUI writes vanished). Writing them must
+// persist verbatim and read back unchanged; charset validation stays
+// with the k8s_status handler (fail loud at read time, not at write).
+func TestK8sPrefsRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Absent prefs read back empty (feature off).
+	if s := ReadSettings(); s.K8sNamespace != "" || s.K8sContext != "" || s.K8sJobSelector != "" {
+		t.Errorf("empty prefs = %+q, want all k8s keys empty", []string{s.K8sNamespace, s.K8sContext, s.K8sJobSelector})
+	}
+
+	writePrefsForTest(t, home, "coding: glm-5.2@sudo\n")
+	if err := UpdateSettings(Settings{
+		K8sNamespace:   "lab",
+		K8sContext:     "prod",
+		K8sJobSelector: "app=training",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := ReadSettings()
+	if s.K8sNamespace != "lab" {
+		t.Errorf("K8sNamespace = %q, want lab", s.K8sNamespace)
+	}
+	if s.K8sContext != "prod" {
+		t.Errorf("K8sContext = %q, want prod", s.K8sContext)
+	}
+	if s.K8sJobSelector != "app=training" {
+		t.Errorf("K8sJobSelector = %q, want app=training", s.K8sJobSelector)
+	}
+	if s.CodingModel != "glm-5.2" {
+		t.Errorf("CodingModel = %q, want glm-5.2 (other keys preserved)", s.CodingModel)
+	}
+
+	// In-place update of an existing key (not just append).
+	if err := UpdateSettings(Settings{K8sNamespace: "lab2"}); err != nil {
+		t.Fatal(err)
+	}
+	s = ReadSettings()
+	if s.K8sNamespace != "lab2" {
+		t.Errorf("after in-place update K8sNamespace = %q, want lab2", s.K8sNamespace)
+	}
+	if s.K8sContext != "prod" || s.K8sJobSelector != "app=training" {
+		t.Errorf("context/selector = %q/%q, want prod/app=training (untouched)", s.K8sContext, s.K8sJobSelector)
+	}
+}

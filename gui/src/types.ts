@@ -708,7 +708,8 @@ export interface Settings {
   // UX-2 (D5 Stage 0 / A2-3): k8s observability prefs. Always sent
   // (Settings has no omitempty on the Go side); "" namespace = feature
   // OFF — the k8s_status handler answers reason:"off" without exec'ing.
-  // Read-only over IPC (update_settings never writes them).
+  // Writable over IPC (settings writes round-trip through update_settings;
+  // hand-editing prefs.md also works).
   k8s_namespace?: string;
   k8s_context?: string;
   k8s_job_selector?: string;

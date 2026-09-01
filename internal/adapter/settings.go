@@ -45,9 +45,8 @@ type Settings struct {
 	// the pref is hand-edited in prefs.md).
 	LoopNotifyOnComplete bool `json:"loop_notify_on_complete"`
 	// UX-2 (D5 Stage 0 / A2-3): k8s observability, settings-gated, default
-	// OFF (empty namespace). Read-only over IPC — hand-edited in prefs.md
-	// (the loop_notify_on_complete posture); the GUI's k8s_status poll is
-	// the only consumer. k8s_context: "" = kubectl's current context.
+	// OFF (empty namespace). Writable over IPC (UpdateSettings round-trips
+	// them); hand-editing prefs.md still works. k8s_context: "" = kubectl's current context.
 	// k8s_job_selector: "" = all jobs in the namespace with a hard row cap
 	// (50 + declared truncation); non-empty passes through to argv
 	// --selector. Globals today — per-project override is an explicit
@@ -251,6 +250,18 @@ func UpdateSettings(up Settings) error {
 			return fmt.Errorf("prefs: auto_apply must be one of off|branch|main|all, got %q", up.AutoApply)
 		}
 		set("auto_apply", up.AutoApply)
+	}
+	// UX-2 (A2-3): k8s observability prefs. Namespace charset validation
+	// stays at the k8s_status handler (fail loud at read time); the write
+	// path persists values verbatim, same as every other pref string.
+	if up.K8sNamespace != "" {
+		set("k8s_namespace", up.K8sNamespace)
+	}
+	if up.K8sContext != "" {
+		set("k8s_context", up.K8sContext)
+	}
+	if up.K8sJobSelector != "" {
+		set("k8s_job_selector", up.K8sJobSelector)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
