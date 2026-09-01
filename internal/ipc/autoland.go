@@ -224,8 +224,13 @@ const (
 	// tests) fits comfortably; a hanging build must not wedge the
 	// serialization mutex. Raised 10m→15m on 2026-08-28: the suite grew
 	// past 10m under daemon-side load and the default 600s go-test
-	// timeout panicked verify (diff #87).
-	autoLandVerifyTimeout = 15 * time.Minute
+	// timeout panicked verify (diff #87). Raised 15m→30m on 2026-09-01:
+	// diff #142's GUI segment ALONE (tsc + vitest 513 + playwright 168
+	// single-worker 14.8m) measured 952s — the deadline killed the go
+	// segment before it ran (verify_ms 952493, all executed segments
+	// green). The cap bounds ONE runVerify command; scope-union diffs
+	// pay it per command at worst.
+	autoLandVerifyTimeout = 30 * time.Minute
 	// verifyLogKeepBytes caps one persisted .odo/verify log (tail-biased:
 	// diagnostics sit at the end); verifyLogKeepCount bounds the directory.
 	verifyLogKeepBytes = 1 << 20
