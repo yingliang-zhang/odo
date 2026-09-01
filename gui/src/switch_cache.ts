@@ -143,6 +143,31 @@ export class SwitchCache {
     }
   }
 
+  // UX-3a (A2-6a): true when the newest terminal row in this workstream's
+  // cached journal is a REAL agent_error — the finished flash's ✗ tint.
+  // Advisory rows (agent_error with odo:true, journalRunAdvisory) close no
+  // run, so the scan walks PAST them; the first non-advisory terminal
+  // decides. Only session-seen conversations resolve (resolutions + warm
+  // are bootstrap-owned), and a cached tail that starts after the terminal
+  // sees nothing — unknown reads "✓", declaring it would fabricate.
+  terminalError(root: string | null, workstreamId: number): boolean {
+    if (root == null) return false;
+    const cid = this.resolutions.get(SwitchCache.wsKey(root, workstreamId));
+    if (cid == null) return false;
+    // Peek WITHOUT the LRU touch — observing a finished run is not a use.
+    const journal = this.journals.get(SwitchCache.convKey(root, cid));
+    if (journal == null) return false;
+    for (let i = journal.events.length - 1; i >= 0; i--) {
+      const ev = journal.events[i];
+      if (ev.type === "agent_error") {
+        if (ev.payload?.odo === true) continue;
+        return true;
+      }
+      if (ev.type === "agent_done") return false;
+    }
+    return false;
+  }
+
   // journal looks a snapshot up and refreshes its LRU position (a switch
   // to it IS a use).
   journal(root: string, conversationId: number): CachedJournal | undefined {

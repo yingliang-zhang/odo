@@ -44,6 +44,17 @@ type Settings struct {
 	// loop_notified. Read-only over IPC (UpdateSettings never writes it;
 	// the pref is hand-edited in prefs.md).
 	LoopNotifyOnComplete bool `json:"loop_notify_on_complete"`
+	// UX-2 (D5 Stage 0 / A2-3): k8s observability, settings-gated, default
+	// OFF (empty namespace). Read-only over IPC — hand-edited in prefs.md
+	// (the loop_notify_on_complete posture); the GUI's k8s_status poll is
+	// the only consumer. k8s_context: "" = kubectl's current context.
+	// k8s_job_selector: "" = all jobs in the namespace with a hard row cap
+	// (50 + declared truncation); non-empty passes through to argv
+	// --selector. Globals today — per-project override is an explicit
+	// non-goal (A2-3).
+	K8sNamespace   string `json:"k8s_namespace"`
+	K8sContext     string `json:"k8s_context"`
+	K8sJobSelector string `json:"k8s_job_selector"`
 }
 
 // loopNotifyOff marks the loop_notify_on_complete: off pref values.
@@ -173,6 +184,11 @@ func ReadSettings() Settings {
 	s.PrewalkModel = LoadPrefsRaw("prewalk_model")
 	// M19 (V11): default on; any explicit off-shape value disables.
 	s.LoopNotifyOnComplete = !loopNotifyOff(LoadPrefsRaw("loop_notify_on_complete"))
+	// UX-2 (A2-3): k8s prefs pass through raw — an empty namespace means
+	// off; validation is the k8s_status handler's job (fail loud, not exec).
+	s.K8sNamespace = LoadPrefsRaw("k8s_namespace")
+	s.K8sContext = LoadPrefsRaw("k8s_context")
+	s.K8sJobSelector = LoadPrefsRaw("k8s_job_selector")
 	return s
 }
 

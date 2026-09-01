@@ -97,6 +97,13 @@ const (
 	// merged into one JSON blob. Read-only display — the data is
 	// never journaled as facts.
 	CmdOmpUsage = "omp_usage"
+	// UX-2 (D5 Stage 0 / A2-1): k8s_status is the one-shot k8s snapshot —
+	// kubectl get jobs,pods -n <ns> -o json, read-only get ONLY, argv-only
+	// exec (the runOmpJSON posture), NEVER journaled (cluster state never
+	// enters the journal). Degradation contract: off-by-config answers
+	// available:false reason:"off" with no exec; a configured broken sensor
+	// answers available:false WITH a cause class — never silently.
+	CmdK8sStatus = "k8s_status"
 	// read_file: inline file preview (tri-model right sidebar gap). Reads a
 	// project-contained text file with the same containment rule as the
 	// GUI's open_path (canonicalize-then-prefix-check); binary files and
@@ -505,6 +512,10 @@ type Response struct {
 	// StatusBar's read-only stats chip. Raw JSON passthrough — the
 	// daemon does not parse or journal this data.
 	OmpUsage json.RawMessage `json:"omp_usage,omitempty"`
+	// UX-2 (D5 Stage 0): the StatusBar Jobs chip's k8s snapshot. Jobs/Pods
+	// are the kubectl `get jobs,pods -o json` item slices (swap-friendly
+	// passthrough — the daemon splits kinds and caps, never interprets).
+	K8sStatus *K8sStatus `json:"k8s_status,omitempty"`
 	// read_file: inline file preview (tri-model right sidebar gap). Content
 	// capped at readFileMaxBytes; truncated=true when the cap was hit.
 	// Binary files return an error; req.Path/journal are untouched (the
@@ -512,6 +523,29 @@ type Response struct {
 	FileContent   string `json:"file_content,omitempty"`
 	FileResolved  string `json:"file_resolved,omitempty"`
 	FileTruncated bool   `json:"file_truncated,omitempty"`
+}
+
+// K8sStatus is the k8s_status payload (UX-2 / A2-1). Reason carries the
+// cause class when Available is false: "off" (feature disabled), "ENOENT"
+// (kubectl missing), "timeout", "auth", "unreachable", "bad_namespace"
+// (pref charset rejected daemon-side before any exec). Data may be
+// absent, the reason may never be absent (A2-1, verbatim).
+type K8sStatus struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	// Detail is kubectl's stderr tail behind a non-off Reason — the
+	// diagnosis the GUI popover renders below the canned class sentence.
+	// Bounded at capture (k8sStderrCap via a LimitReader pipe); absent on
+	// pre-exec failures (off/bad_namespace/ENOENT produce no output).
+	Detail string `json:"detail,omitempty"`
+	// Raw kubectl list-item slices (kind Job/Pod from `get jobs,pods -o
+	// json`), kept as passthrough so the GUI shape matches kubectl's own
+	// schema one-for-one. Truncated marks the 50-row job cap tripping
+	// (only reachable with an empty k8s_job_selector pref).
+	Jobs        json.RawMessage `json:"jobs,omitempty"`
+	Pods        json.RawMessage `json:"pods,omitempty"`
+	Truncated   bool            `json:"truncated"`
+	FetchedUnix int64           `json:"fetched_unix"`
 }
 
 // AutoCapResumeInfo discloses an auto-distill daily-cap suspension through

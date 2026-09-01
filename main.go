@@ -296,6 +296,14 @@ func enrichDaemonEnv() {
 			os.Setenv("SUDO_CODING_KEY", key)
 		}
 	}
+	// UX-2 (A2-2): same scrape for KUBECONFIG — Finder-launched daemons
+	// don't source ~/.zshrc, and kubectl's exec env comes from the
+	// daemon's (EnrichedEnv reads os.Environ()).
+	if os.Getenv("KUBECONFIG") == "" {
+		if cfg := adapter.ExtractExportFromZshrc(home, "KUBECONFIG"); cfg != "" {
+			os.Setenv("KUBECONFIG", cfg)
+		}
+	}
 	// Enrich PATH if it looks minimal (missing /opt/homebrew/bin).
 	if !strings.Contains(os.Getenv("PATH"), "/opt/homebrew/bin") {
 		extra := []string{

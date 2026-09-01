@@ -268,6 +268,10 @@ describe("computeHiddenChipKeys (pure fold engine)", () => {
     expect(OVERFLOW_RANK.omp).toBeLessThan(OVERFLOW_RANK.panel);
     expect(OVERFLOW_RANK.panel).toBeLessThan(OVERFLOW_RANK.running);
     expect(OVERFLOW_RANK.running).toBe(OVERFLOW_RANK.pipeline);
+    // UX-2 (A2-5): jobs sits in the same actionable tier as
+    // running/pipeline — after telemetry, before the terminal chips.
+    expect(OVERFLOW_RANK.pipeline).toBe(OVERFLOW_RANK.jobs);
+    expect(OVERFLOW_RANK.jobs).toBeLessThan(OVERFLOW_RANK.finished);
     expect(OVERFLOW_RANK.pipeline).toBeLessThan(OVERFLOW_RANK.finished);
     expect(OVERFLOW_RANK.finished).toBe(OVERFLOW_RANK.bgruns);
     expect(OVERFLOW_RANK.bgruns).toBeLessThan(OVERFLOW_RANK.diffs);

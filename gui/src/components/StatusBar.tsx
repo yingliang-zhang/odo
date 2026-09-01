@@ -4,7 +4,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
-import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity, ShieldAlert } from "lucide-react";
+import { Check, LoaderCircle, GitCompareArrows, FileText, MapPin, Gauge, Boxes, AlertCircle, Ban, Activity, ShieldAlert, Container, X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { cn } from "../lib/utils";
 import { SLOT } from "../slots";
@@ -18,8 +18,9 @@ import type { PanelModel, PromptSnapshot } from "../stats";
 import { pipelineLabel } from "../pipeline";
 import type { PipelinePhase, PipelineState, GateDriftState } from "../pipeline";
 import type { PanelTab } from "../contrib";
-import { ompUsage } from "../api";
-import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent } from "../types";
+import { ompUsage, k8sStatus } from "../api";
+import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent, K8sStatus, K8sUnavailableReason } from "../types";
+import { activeJobCount, chipLabel, formatAge, formatCompletions, jobPhase, lastGoodAge, reasonLabel } from "../jobs";
 import { strings } from "../strings";
 
 // Tri-model header gap analysis: estimate bytes accumulated since the last
@@ -65,9 +66,19 @@ export interface BackgroundRun {
 // the chip when a new background run appears; `finished` renders a
 // completion chip even once the run list drains to zero — that transition
 // is the whole point, the list itself can't show it.
+export interface FinishedRun {
+  id: number;
+  name: string;
+  // UX-3a (A2-6a): the run's terminal was a real agent_error — the flash
+  // paints ✗ + error tint. Default false when the terminal is unknown
+  // (never-viewed workstream, truncated cached tail): declaring unknown
+  // is a fabrication risk, never a tint risk.
+  errored: boolean;
+}
+
 export interface BackgroundNotice {
   started: string[];
-  finished: string[];
+  finished: FinishedRun[];
 }
 
 interface Props {
@@ -174,6 +185,9 @@ export const OVERFLOW_RANK = {
   panel: 2,
   running: 3,
   pipeline: 3,
+  // UX-2 (A2-5): actionable tier — the Jobs chip triages cluster state;
+  // it outlasts read-only telemetry but folds before diffs/wiki/memory.
+  jobs: 3,
   finished: 4,
   bgruns: 4,
   diffs: 5,
@@ -208,6 +222,17 @@ interface OmpSummary {
   providers: number;
   grievances: number;
   unavailable: boolean;
+}
+
+// UX-2: the Jobs chip's +N-row summary. The chip stays MOUNTED with its
+// last snapshot while display:none'd so the fold row keeps values — but
+// unlike the OmpSummary posture it does NOT keep polling: each tick forks
+// a kubectl subprocess, and a hidden chip never pays execs (A2-1).
+interface JobsSummary {
+  label: string;
+  active: number;
+  unavailable: boolean;
+  reason?: string;
 }
 
 // Measured chip widths: dynamic string-keyed cache (chips appear/vanish
@@ -776,6 +801,182 @@ function OmpUsageChip({
   );
 }
 
+// UX-2 (D5 Stage 0 / A2-1): the k8s Jobs chip. 5s poll, VISIBILITY-GATED
+// because every tick forks a kubectl subprocess (NOT the OmpUsageChip
+// posture — its lazy fetch is a journal query, which display:none may keep
+// paying): a fold-hidden chip or a backgrounded window execs nothing, and
+// becoming visible again refetches immediately, then the cadence resumes.
+// Polling stops entirely when the daemon answers reason:"off" (off-by-
+// config → NO chip, no tab, no polling) or on unmount. Every other failure
+// keeps the chip VISIBLE with the cause class + the daemon's stderr tail +
+// the last-good snapshot's age (A2-1: a configured sensor never fails
+// silently; A2-2: keep last-good).
+const K8S_POLL_INTERVAL = 5_000;
+const K8S_TRANSPORT_ERR_CAP = 240;
+
+function capTransportErr(msg: string): string {
+  return msg.length > K8S_TRANSPORT_ERR_CAP ? `${msg.slice(0, K8S_TRANSPORT_ERR_CAP)}…` : msg;
+}
+
+function JobsChip({
+  projectRoot,
+  fold,
+  onSummaryChange,
+}: {
+  projectRoot: string | null;
+  fold: ChipFold;
+  onSummaryChange?: (s: JobsSummary | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [snap, setSnap] = useState<K8sStatus | null>(null);
+  const [unavailable, setUnavailable] = useState<K8sUnavailableReason | null>(null);
+  // The daemon's capped stderr tail behind a non-off reason (revise-1).
+  const [detail, setDetail] = useState<string | null>(null);
+  const [transportErr, setTransportErr] = useState<string | null>(null);
+  const [off, setOff] = useState(false);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const resp = await k8sStatus(projectRoot ?? undefined);
+      const st = resp.ok ? (resp.k8s_status ?? null) : null;
+      if (st == null) {
+        setTransportErr(capTransportErr(resp.ok ? "empty k8s_status payload" : (resp.error ?? "fetch failed")));
+        return;
+      }
+      if (!st.available) {
+        if (st.reason === "off") {
+          // Sticky for the page lifetime: polling resumes only on reload —
+          // the off pref is hand-edited, never hot-flipped.
+          setOff(true);
+          return;
+        }
+        setUnavailable(st.reason ?? "unreachable");
+        setDetail(st.detail ?? null);
+        return;
+      }
+      setSnap(st);
+      setUnavailable(null);
+      setTransportErr(null);
+      setDetail(null);
+    } catch (e) {
+      setTransportErr(capTransportErr(e instanceof Error ? e.message : String(e)));
+    }
+  }, [projectRoot]);
+
+  // Document visibility is not reactive — latch it (the App.tsx onVisible
+  // posture) so a backgrounded window pauses the fork.
+  const [docVisible, setDocVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const onVis = () => setDocVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // The 5s tick forks a kubectl subprocess every interval — gate it on
+  // visibility. A false edge stops the interval entirely (folded or
+  // backgrounded = zero execs); a true edge refetches instantly (one-shot
+  // on the visibility transition) and resumes the cadence. Mount and
+  // projectRoot changes ride the same true edge — this single effect owns
+  // what used to be a separate mount-fetch effect.
+  const polling = !off && !fold.hidden && docVisible;
+  useEffect(() => {
+    if (!polling) return;
+    void fetchStatus();
+    const timer = window.setInterval(() => void fetchStatus(), K8S_POLL_INTERVAL);
+    return () => window.clearInterval(timer);
+  }, [polling, fetchStatus]);
+
+  const jobs = snap?.jobs ?? [];
+  const active = activeJobCount(jobs);
+  const label = chipLabel(jobs, snap?.truncated ?? false);
+  const broken = unavailable != null || transportErr != null;
+  const reason = unavailable ?? (transportErr != null ? ("unreachable" as const) : undefined);
+  // Spill the chip summary for the +N overflow row; null until the first
+  // decided answer so the fold never badges an unknown state.
+  useEffect(() => {
+    if (off || (snap == null && !broken)) {
+      onSummaryChange?.(null);
+      return;
+    }
+    onSummaryChange?.({ label, active, unavailable: broken, reason });
+  }, [onSummaryChange, off, snap, broken, label, active, reason]);
+
+  if (off) return null;
+  if (snap == null && !broken) return null; // pre-first-answer: no chrome
+
+  const face = broken ? "Jobs · unavailable" : label;
+  const staleAge = lastGoodAge(Math.floor(Date.now() / 1000), snap?.fetched_unix);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-chip="jobs"
+          className={cn(STATUS_BADGE, "jobs-chip gap-1", broken && "jobs-unavailable opacity-60", fold.hidden && "chip-hidden hidden")}
+          title={broken ? `K8s Jobs: unavailable (${reasonLabel(reason)})` : `K8s jobs: ${label}${active > 0 ? ` · ${active} active` : ""} — click for details`}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+        >
+          <Container size={11} aria-hidden="true" />
+          {face}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="end"
+        sideOffset={6}
+        role="dialog"
+        aria-label="K8s jobs"
+        className="runs-menu jobs-popover max-h-[60vh] min-w-[320px] overflow-y-auto p-2"
+      >
+        <div className={CTX_POP_TITLE}>K8s jobs — read-only (never journaled)</div>
+        {transportErr != null && (
+          <div className="jobs-error-text p-1 text-micro text-err-text">
+            <div className="mono break-words whitespace-pre-wrap">{transportErr}</div>
+          </div>
+        )}
+        {broken && (
+          <div className="jobs-reason p-1 text-micro text-err-text">
+            {reasonLabel(reason)}
+            {snap != null && staleAge != null && (
+              <span className="jobs-last-good text-text-dim"> — last good {staleAge}</span>
+            )}
+          </div>
+        )}
+        {detail != null && (
+          // The daemon's capped stderr tail rides below the canned class
+          // sentence (revise-1): dimmed, monospace, 240-char display cap.
+          <div className="jobs-detail p-1 text-micro text-text-dim">
+            <div className="mono break-words whitespace-pre-wrap">{capTransportErr(detail)}</div>
+          </div>
+        )}
+        {snap == null && broken && (
+          <div className="jobs-dim p-1 text-micro text-text-dim">no snapshot yet — retrying every 5s</div>
+        )}
+        {snap != null && jobs.length === 0 && (
+          <div className="jobs-dim p-1 text-micro text-text-dim">no jobs in namespace</div>
+        )}
+        {jobs.map((job, i) => {
+          const name = job.metadata?.name ?? `job-${i}`;
+          return (
+            <div key={`${name}-${i}`} className="jobs-row flex items-baseline justify-between gap-2 border-t border-stroke-tertiary px-1 py-1.5">
+              <span className={cn(BG_RUN_NAME, "mono text-micro")}>{name}</span>
+              <span className="jobs-row-facts shrink-0 text-[10px] text-text-dim">
+                <span className={cn("jobs-phase", jobPhase(job) === "Complete" && "text-ok-text", (jobPhase(job) === "Failed") && "text-err-text")}>{jobPhase(job)}</span>
+                {` · ${formatCompletions(job)} · ${formatAge(Date.now(), job.metadata?.creationTimestamp)}`}
+              </span>
+            </div>
+          );
+        })}
+        {snap?.truncated === true && (
+          <div className="jobs-truncated p-1 text-[10px] text-text-dim">first 50 rows — set k8s_job_selector to narrow</div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export default function StatusBar({
   workstreamName,
   conversationId,
@@ -823,6 +1024,12 @@ export default function StatusBar({
 
   const startedFlash = (bgNotice?.started.length ?? 0) > 0;
   const finished = bgNotice?.finished ?? [];
+  // One ✗/✓ + tint per flash (UX-3a / A2-6a): an errored run flips the
+  // whole flash — the running-set transition alone could never say so.
+  const finishedFeedback = {
+    errored: finished.some((f) => f.errored),
+    names: finished.map((f) => f.name).join(", "),
+  };
 
   // ---------- U1.1 overflow engine ----------
   // The footer is width-stable (app-shell column child, shrink-0), so its
@@ -839,6 +1046,7 @@ export default function StatusBar({
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [pipelineSummary, setPipelineSummary] = useState<PipelineSummary | null>(null);
   const [ompSummary, setOmpSummary] = useState<OmpSummary | null>(null);
+  const [jobsSummary, setJobsSummary] = useState<JobsSummary | null>(null);
 
   // Chips the fold can touch, in DOM order (tie-break inside a rank).
   const chipKeys: ChipKey[] = [];
@@ -849,6 +1057,9 @@ export default function StatusBar({
   if (reviewPanel.length > 0) chipKeys.push("panel");
   if (pipelineStates.length > 0) chipKeys.push("pipeline");
   chipKeys.push("omp"); // always renders — degrades to "unavailable"
+  // UX-2: joined when JobsChip reports a decided (non-null) summary —
+  // pre-first-answer and off-by-config never occupy fold space (A2-1).
+  if (jobsSummary != null) chipKeys.push("jobs");
   if (pendingDiffs > 0) chipKeys.push("diffs");
   if (wikiNoteCount != null && wikiNoteCount > 0) chipKeys.push("wiki");
   if (pendingMemoryProposals > 0) chipKeys.push("memory");
@@ -934,8 +1145,8 @@ export default function StatusBar({
       case "finished":
         return (
           <div key={key} className={OVERFLOW_ROW_STATIC} role="status">
-            <Check size={11} aria-hidden />
-            <span className={BG_RUN_NAME}>{finished.join(", ")}</span>
+            {finishedFeedback.errored ? <X size={11} aria-hidden /> : <Check size={11} aria-hidden />}
+            <span className={BG_RUN_NAME}>{finishedFeedback.names}</span>
             <span className={BG_RUN_STATE}>finished</span>
           </div>
         );
@@ -1014,6 +1225,22 @@ export default function StatusBar({
                   >
                     {ompSummary?.grievances}
                   </span>
+                )}
+              </>
+            )}
+          </div>
+        );
+      case "jobs":
+        return (
+          <div key={key} className={OVERFLOW_ROW_STATIC}>
+            <Container size={11} aria-hidden />
+            {jobsSummary?.unavailable === true ? (
+              <span className={BG_RUN_NAME}>Jobs unavailable</span>
+            ) : (
+              <>
+                <span className={BG_RUN_NAME}>{jobsSummary?.label ?? "Jobs"}</span>
+                {(jobsSummary?.active ?? 0) > 0 && (
+                  <span className={BG_RUN_STATE}>{jobsSummary?.active} active</span>
                 )}
               </>
             )}
@@ -1133,8 +1360,12 @@ export default function StatusBar({
         </span>
       )}
       {finished.length > 0 && (
-        <span data-chip="finished" className={cn(STATUS_BADGE, "bg-flash-done", chipCls("finished"))} role="status">
-          <Check size={11} /> {finished.join(", ")} finished
+        <span
+          data-chip="finished"
+          className={cn(STATUS_BADGE, finishedFeedback.errored ? "bg-flash-error" : "bg-flash-done", chipCls("finished"))}
+          role="status"
+        >
+          {finishedFeedback.errored ? <X size={11} /> : <Check size={11} />} {finishedFeedback.names} finished
         </span>
       )}
       {backgroundRuns.length > 0 && (
@@ -1206,6 +1437,13 @@ export default function StatusBar({
         projectRoot={projectRoot}
         fold={foldChip("omp")}
         onSummaryChange={setOmpSummary}
+      />
+      {/* UX-2 (D5 Stage 0 / A2-1): k8s Jobs chip — off-by-config renders
+          nothing and never polls; broken stays visible with its reason. */}
+      <JobsChip
+        projectRoot={projectRoot}
+        fold={foldChip("jobs")}
+        onSummaryChange={setJobsSummary}
       />
       {/* Right: clickable badges */}
       {pendingDiffs > 0 && (

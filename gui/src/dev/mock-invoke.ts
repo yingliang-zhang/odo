@@ -710,6 +710,45 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true, wiki_path: "wiki/epoch-3.md", epoch: 3 };
     }
 
+    // ---------- UX-2 (D5 Stage 0 / A2-1) ----------
+    // Mirrors the daemon's degradation contract verbatim: off answers with
+    // no fields beyond reason; every other non-off class keeps
+    // available:false WITH its cause class, and `ok` pauses the rows
+    // through raw (no reshape — the GUI consumes kubectl's own schema).
+    case "k8s_status": {
+      const k = fx.k8sStatusFixture;
+      k.calls += 1; // poll instrumentation — the fold drill counts forks
+      if (k.scenario === "off") {
+        return { ok: true, k8s_status: { available: false, reason: "off" } };
+      }
+      if (k.scenario === "unavailable-ENOENT") {
+        return { ok: true, k8s_status: { available: false, reason: "ENOENT" } };
+      }
+      if (k.scenario === "unreachable") {
+        // revise-1 (panel #2): exec-shaped failures carry the daemon's
+        // capped stderr tail in `detail` (ENOENT/off exec nothing, so
+        // ONLY the unreachable-class scenarios exercise the GUI render).
+        return {
+          ok: true,
+          k8s_status: {
+            available: false,
+            reason: "unreachable",
+            detail: "Unable to connect to the server: dial tcp 10.96.0.1:443: connect: no route to host",
+          },
+        };
+      }
+      return {
+        ok: true,
+        k8s_status: {
+          available: true,
+          jobs: k.jobs,
+          pods: [],
+          truncated: false,
+          fetched_unix: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+
     // ---------- P2 (OMP stats) ----------
     case "omp_usage": {
       return {

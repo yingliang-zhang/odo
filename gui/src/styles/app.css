@@ -1699,6 +1699,19 @@ mark {
   animation: overlay-fade 0.15s var(--ease-standard);
 }
 
+/* UX-3a (A2-6a): failed-run flash — the completion flash's error twin;
+   same 4s glance posture with the reject-class tint (−ok +err tokens). */
+.status-badge.bg-flash-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--err-text);
+  border-color: var(--err);
+  background: color-mix(in srgb, var(--err) 15%, transparent);
+  cursor: default;
+  animation: overlay-fade 0.15s var(--ease-standard);
+}
+
 /* Wave A (#1): new-run flash — brief bg-run tint on the existing chip. */
 .status-badge.bg-flash-new {
   color: var(--bg-run);

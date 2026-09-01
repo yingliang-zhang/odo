@@ -19,6 +19,7 @@ import type {
   LedgerResponse,
   ListTopicsResponse,
   ListWikiResponse,
+  K8sJob,
   ListWorkstreamsResponse,
   MemoryProposal,
   MemoryProposalsResponse,
@@ -440,6 +441,45 @@ export const wikiNotes: WikiNoteInfo[] = [
   { path: "wiki/epoch-1.md", name: "Epoch 1 — Initial setup", epoch: 1, modified_at: "2026-07-20T12:00:00Z" },
   { path: "wiki/epoch-2.md", name: "Epoch 2 — GUI features F1-F7", epoch: 2, modified_at: "2026-08-06T20:00:00Z" },
 ];
+
+// ---------- UX-2 (D5 Stage 0 / A2-1): k8s Jobs chip ----------
+
+// Scenario seeded once at module load from the ?k8s= query param (the
+// ?nomock= precedent) so specs opt in BEFORE the chip's mount fetch —
+// the off state never polls, so a mid-session off→on flip is impossible
+// by design, and specs never wait out the 5s interval for first paint.
+// Mid-session degrade drills (ok → broken) mutate `scenario` and wait
+// one poll.
+export type K8sScenario = "off" | "unavailable-ENOENT" | "unreachable" | "ok";
+
+function initialK8sScenario(): K8sScenario {
+  if (typeof window === "undefined") return "off";
+  const v = new URLSearchParams(window.location.search).get("k8s");
+  return v === "ok" || v === "unavailable-ENOENT" ? v : "off";
+}
+
+// Two realistic kubectl Job items (raw passthrough shape): one Complete
+// 1/1, one Active 0/1. creationTimestamp is relative to page load so the
+// age column stays stable across reruns.
+export const k8sStatusFixture: { scenario: K8sScenario; jobs: K8sJob[]; calls: number } = {
+  scenario: initialK8sScenario(),
+  // e2e poll instrumentation (revise-1): mock-invoke increments this per
+  // k8s_status call — the fold drill proves a folded chip forks zero
+  // kubectl invocations and reappearing refetches immediately.
+  calls: 0,
+  jobs: [
+    {
+      metadata: { name: "train-3dgs-zz42", creationTimestamp: new Date(Date.now() - 2 * 3600 * 1000).toISOString() },
+      spec: { completions: 1, parallelism: 1 },
+      status: { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] },
+    },
+    {
+      metadata: { name: "cali-blender-k7", creationTimestamp: new Date(Date.now() - 12 * 60 * 1000).toISOString() },
+      spec: { completions: 1, parallelism: 1 },
+      status: { active: 1 },
+    },
+  ],
+};
 
 export const wikiContent = `# Epoch 2 — GUI Features F1-F7
 

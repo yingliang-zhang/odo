@@ -10,8 +10,34 @@ const BODY_LEN = 80;
 // is not re-litigated mid-session.
 let permission: "unknown" | "granted" | "denied" = "unknown";
 
-export async function notifyRunDone(workstreamName: string, summary: string): Promise<void> {
+// UX-3a (A2-6a) e2e seam (the __odoLoopNotify precedent): when a test
+// installs the hook it receives the exact run-notification payload instead
+// of the OS — the real plugin never loads in a browser. Absent in
+// production builds.
+export interface RunNotifyPayload {
+  title: string;
+  body: string;
+}
+declare global {
+  interface Window {
+    __odoRunNotify?: (payload: RunNotifyPayload) => void;
+  }
+}
+
+// Shared paint path for run-terminal notifications (done + failed): the
+// e2e hook short-circuits EVERYTHING (production never installs it),
+// otherwise the M3 spec §3b contract holds — notify only while hidden,
+// lazy-import the plugin, never throw into the poll loop.
+async function sendRunNotification(title: string, body: string): Promise<void> {
+  const payload: RunNotifyPayload = {
+    title,
+    body: body.length > BODY_LEN ? body.slice(0, BODY_LEN) : body,
+  };
   try {
+    if (typeof window !== "undefined" && window.__odoRunNotify != null) {
+      window.__odoRunNotify(payload);
+      return;
+    }
     if (typeof document === "undefined" || !document.hidden) return;
     const mod = await import("@tauri-apps/plugin-notification");
     if (permission === "unknown") {
@@ -22,13 +48,22 @@ export async function notifyRunDone(workstreamName: string, summary: string): Pr
       permission = granted ? "granted" : "denied";
     }
     if (permission !== "granted") return;
-    mod.sendNotification({
-      title: `Odo: run finished in ${workstreamName}`,
-      body: summary.length > BODY_LEN ? summary.slice(0, BODY_LEN) : summary,
-    });
+    mod.sendNotification(payload);
   } catch {
     // Best-effort by contract: never throw into the caller (the poll loop).
   }
+}
+
+export async function notifyRunDone(workstreamName: string, summary: string): Promise<void> {
+  await sendRunNotification(`Odo: run finished in ${workstreamName}`, summary);
+}
+
+// UX-3a (A2-6a): a failed background run notifies with a DISTINCT title —
+// "run failed" must never read like a completion. Body is the error's
+// first line only (multiline adapter dumps stay in the transcript).
+export async function notifyRunFailed(workstreamName: string, error: string): Promise<void> {
+  const firstLine = error.split("\n")[0]?.trim() ?? "";
+  await sendRunNotification(`Odo: run failed in ${workstreamName}`, firstLine === "" ? "unknown error" : firstLine);
 }
 
 // E2E seam (same posture as __odoFixtures): when a test installs the hook

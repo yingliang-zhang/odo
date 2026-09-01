@@ -134,3 +134,61 @@ describe("switch snapshot / rollback", () => {
     expect(view.lastSeq).toBe(0);
   });
 });
+
+describe("terminalError (UX-3a / A2-6a)", () => {
+  function terminal(seq: number, type: string, payload: Record<string, unknown> = {}): OdoEvent {
+    return { id: seq, conversation_id: 101, seq, type, payload: payload as OdoEvent["payload"], created_at: "" };
+  }
+
+  it("is true when the newest terminal is a real agent_error", () => {
+    const c = new SwitchCache();
+    c.record("/a", 1, 101);
+    c.warm("/a", 101, [terminal(1, "user_message"), terminal(2, "agent_error", { error: "boom" })]);
+    expect(c.terminalError("/a", 1)).toBe(true);
+  });
+
+  it("is false when the newest terminal is agent_done", () => {
+    const c = new SwitchCache();
+    c.record("/a", 1, 101);
+    c.warm("/a", 101, [terminal(1, "user_message"), terminal(2, "agent_done", { summary: "ok" })]);
+    expect(c.terminalError("/a", 1)).toBe(false);
+  });
+
+  it("walks PAST advisory rows (odo:true) to the real terminal", () => {
+    const c = new SwitchCache();
+    c.record("/a", 1, 101);
+    c.warm("/a", 101, [
+      terminal(1, "user_message"),
+      terminal(2, "agent_error", { error: "boom" }),
+      terminal(3, "agent_error", { error: "odo: advisory", odo: true }),
+    ]);
+    expect(c.terminalError("/a", 1)).toBe(true);
+  });
+
+  it("an advisory alone decides nothing — the last real terminal wins", () => {
+    const c = new SwitchCache();
+    c.record("/a", 1, 101);
+    c.warm("/a", 101, [
+      terminal(1, "user_message"),
+      terminal(2, "agent_done", { summary: "ok" }),
+      terminal(3, "agent_error", { error: "odo: advisory", odo: true }),
+    ]);
+    expect(c.terminalError("/a", 1)).toBe(false);
+  });
+
+  it("never-viewed workstreams and null roots default to the ok tint", () => {
+    const c = new SwitchCache();
+    expect(c.terminalError("/a", 99)).toBe(false);
+    c.record("/a", 1, 101);
+    c.warm("/a", 101, [terminal(1, "agent_error", { error: "boom" })]);
+    expect(c.terminalError(null, 1)).toBe(false);
+  });
+
+  it("does not fabricate from a truncated tail that starts after the terminal", () => {
+    const c = new SwitchCache();
+    c.record("/a", 1, 101);
+    // terminal at seq 1, tail starts at seq 21 — unseen terminal.
+    c.warm("/a", 101, [terminal(1, "agent_error", { error: "boom" }), ...range(21, MAX_CACHED_EVENTS + 20)]);
+    expect(c.terminalError("/a", 1)).toBe(false);
+  });
+});

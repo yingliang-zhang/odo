@@ -58,7 +58,10 @@ export type EventType =
 //   agent_tool_call   { tool, args }
 //   agent_tool_result { tool, result }
 //   agent_done        { summary }
-//   agent_error       { error }
+//   agent_error       { error, odo? } — odo:true marks a journaled DAEMON
+//                       advisory (journalRunAdvisory), never a run failure;
+//                       UX-3a (A2-6a) finally consumes the flag: failure
+//                       notifications and the finished-flash ✗ tint skip it.
 //   review_action     { action: "accept" | "reject", diff_id }
 //                       — also "distill" { epoch, wiki_path } (M1; plus
 //                       first_seq, last_seq, note_sha — explicit fold
@@ -286,6 +289,10 @@ export interface EventPayload {
   vision?: boolean;
   preview?: boolean;
   models?: { model: string; text: string; error?: string }[];
+  // agent_error provenance flag: daemon advisories (journalRunAdvisory)
+  // journal with odo:true so consumers can tell "the daemon says" from
+  // "the run failed" (UX-3a consumes the flag; UX-3b restyles the chips).
+  odo?: boolean;
   // preview_captured payload fields: the captured URL, PNG byte size,
   // full-sha256 audit hash, and the per-shot wall time.
   url?: string;
@@ -698,6 +705,13 @@ export interface Settings {
   // Read-only over IPC — hand-edited in prefs.md. Optional because a
   // pre-M19 daemon never sends it; absent reads as ON by the watcher.
   loop_notify_on_complete?: boolean;
+  // UX-2 (D5 Stage 0 / A2-3): k8s observability prefs. Always sent
+  // (Settings has no omitempty on the Go side); "" namespace = feature
+  // OFF — the k8s_status handler answers reason:"off" without exec'ing.
+  // Read-only over IPC (update_settings never writes them).
+  k8s_namespace?: string;
+  k8s_context?: string;
+  k8s_job_selector?: string;
 }
 
 // P1-1: Known sudo-provider models (Hermes custom_providers). Hardcoded for
@@ -1125,4 +1139,75 @@ export interface OmpUsageResponse {
   ok: boolean;
   error?: string;
   omp_usage?: OmpUsageMerged;
+}
+
+// ---------- UX-2 (D5 Stage 0 / A2-1): k8s_status wire types ----------
+// The daemon passes kubectl `get jobs,pods -o json` items through raw
+// (swap-friendly). The GUI reads only the fields its chip rows render;
+// unknown/extra kubectl fields are ignored (OmpUsage posture).
+
+export interface K8sRuntimeObjectMeta {
+  name?: string;
+  creationTimestamp?: string;
+}
+
+export interface K8sJobCondition {
+  type?: string; // Complete | FailureTarget | SuccessCriteriaMet | Suspended
+  status?: string; // "True" | "False" | "Unknown"
+  reason?: string;
+  message?: string;
+}
+
+export interface K8sJob {
+  metadata?: K8sRuntimeObjectMeta;
+  spec?: {
+    completions?: number;
+    parallelism?: number;
+  };
+  status?: {
+    active?: number;
+    succeeded?: number;
+    failed?: number;
+    startTime?: string;
+    completionTime?: string;
+    conditions?: K8sJobCondition[];
+  };
+}
+
+export interface K8sPod {
+  metadata?: K8sRuntimeObjectMeta;
+  status?: { phase?: string };
+}
+
+// Degradation contract (A2-1, verbatim): data may be absent, the reason
+// may never be absent. off = feature disabled (no chip, no tab, no
+// polling); every other class is a VISIBLE dimmed chip with the reason
+// in its popover. bad_namespace is rejected daemon-side before any exec.
+export type K8sUnavailableReason =
+  | "off"
+  | "ENOENT"
+  | "timeout"
+  | "auth"
+  | "unreachable"
+  | "bad_namespace";
+
+export interface K8sStatus {
+  available: boolean;
+  reason?: K8sUnavailableReason;
+  // kubectl's stderr tail behind a non-off reason — the daemon caps it at
+  // 1024 bytes AT CAPTURE (LimitReader pipe). The popover renders it dimmed
+  // below the canned reasonLabel sentence (display-capped ~240 via
+  // capTransportErr). Absent pre-exec (off/bad_namespace/ENOENT exec
+  // nothing, so there is no subprocess output to carry).
+  detail?: string;
+  jobs?: K8sJob[];
+  pods?: K8sPod[];
+  truncated?: boolean;
+  fetched_unix?: number;
+}
+
+export interface K8sStatusResponse {
+  ok: boolean;
+  error?: string;
+  k8s_status?: K8sStatus;
 }

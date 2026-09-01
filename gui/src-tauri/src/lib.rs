@@ -667,6 +667,17 @@ async fn omp_usage(project_root: Option<String>) -> Result<Value, String> {
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// UX-2 (D5 Stage 0): the StatusBar Jobs chip's read-only k8s snapshot.
+// The daemon shells out to `kubectl get jobs,pods -n <ns> -o json` with a
+// 10s timeout; degradation arrives inside the payload (available+reason),
+// never as an IPC error.
+#[tauri::command]
+async fn k8s_status(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "k8s_status", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M4 learning: read the three canonical memory files (project memory.md,
 // memory-archive.md, global user.md) through the daemon, which constructs
 // the paths itself and equality-checks the root against its bound root.
@@ -1465,6 +1476,7 @@ pub fn run() {
             autonomy_status,
             learning_status,
             omp_usage,
+            k8s_status,
             read_memory,
             memory_proposals,
             apply_memory,

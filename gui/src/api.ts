@@ -68,6 +68,7 @@ import type {
   UpdateSettingsResponse,
   ListSkillsResponse,
   OmpUsageResponse,
+  K8sStatusResponse,
   ReadSkillResponse,
   UpdateSkillResponse,
 } from "./types";
@@ -574,6 +575,15 @@ export async function deleteSkill(
 // read-only stats chip. The daemon shells out to omp with a 10s timeout.
 export function ompUsage(projectRoot?: string): Promise<OmpUsageResponse> {
   return invoke<OmpUsageResponse>("omp_usage", {
+    projectRoot: projectRoot ?? null,
+  });
+}
+
+// UX-2 (D5 Stage 0 / A2-1): the StatusBar Jobs chip's read-only k8s
+// snapshot. Degradation rides the payload (available:false + reason
+// class) — a configured broken sensor never surfaces as an IPC error.
+export function k8sStatus(projectRoot?: string): Promise<K8sStatusResponse> {
+  return invoke<K8sStatusResponse>("k8s_status", {
     projectRoot: projectRoot ?? null,
   });
 }

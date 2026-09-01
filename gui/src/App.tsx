@@ -47,12 +47,13 @@ import SettingsPanel from "./components/SettingsPanel";
 import ShortcutsPanel from "./components/ShortcutsPanel";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
+import type { BackgroundNotice } from "./components/StatusBar";
 import TasksPanel from "./components/TasksPanel";
 import TopBar from "./components/TopBar";
 import WikiBrowser from "./components/WikiBrowser";
 import { basename } from "./files";
 import { usePanelOverlay } from "./panel_overlay";
-import { notifyRunDone, notifyLoopTerminal } from "./notify";
+import { notifyRunDone, notifyRunFailed, notifyLoopTerminal } from "./notify";
 import {
   captureSwitchSnapshot,
   mergeEvents,
@@ -431,6 +432,12 @@ export default function App() {
       if (e.type === "agent_done") {
         void notifyRunDone(workstreamNameRef.current ?? "?", e.payload?.summary ?? "");
       }
+      // UX-3a (A2-6a): failures notify with a distinct title too. Daemon
+      // advisories (agent_error with odo:true, journalRunAdvisory) are
+      // NOT run failures — the first consumer of a flag nothing read.
+      if (e.type === "agent_error" && e.payload?.odo !== true) {
+        void notifyRunFailed(workstreamNameRef.current ?? "?", e.payload?.error ?? "");
+      }
       // M4 (spec §8): memory_update pops a toast. Deliberately NOT
       // handled in applyBootstrap — bootstrap replays history wholesale and
       // a stale memory_update must not re-chip. This callback only ever
@@ -723,7 +730,7 @@ export default function App() {
   // both lists: its lifecycle is already visible as the fg "running"
   // indicator. First observation only seeds the baseline (a long-running
   // bg run at launch is not "new").
-  const [bgNotice, setBgNotice] = useState<{ started: string[]; finished: string[] } | null>(null);
+  const [bgNotice, setBgNotice] = useState<BackgroundNotice | null>(null);
   const prevRunningRef = useRef<number[] | null>(null);
   const bgNoticeTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -735,7 +742,17 @@ export default function App() {
     if (startedIds.length === 0 && finishedIds.length === 0) return;
     const nameOf = (id: number) => workstreams.find((w) => w.id === id)?.name ?? `ws ${id}`;
     window.clearTimeout(bgNoticeTimerRef.current);
-    setBgNotice({ started: startedIds.map(nameOf), finished: finishedIds.map(nameOf) });
+    // UX-3a (A2-6a): the set transition knows WHO finished, not HOW. The
+    // switch cache holds the journals poll events already warmed this
+    // session — read the terminal status from there (no new IPC).
+    setBgNotice({
+      started: startedIds.map(nameOf),
+      finished: finishedIds.map((id) => ({
+        id,
+        name: nameOf(id),
+        errored: switchCacheRef.current.terminalError(projectRootRef.current ?? null, id),
+      })),
+    });
     // 4 s: shorter than toast confirmations (10 s) — a glanceable cue, not
     // an acknowledgment queue.
     bgNoticeTimerRef.current = window.setTimeout(() => setBgNotice(null), 4000);

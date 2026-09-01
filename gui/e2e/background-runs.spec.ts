@@ -99,6 +99,47 @@ test("start flash tints the chip when a run appears mid-session", async ({ page 
   await expect(page.locator(".status-bg-runs.bg-flash-new")).toBeVisible(BG_REFRESH);
 });
 
+test("UX-3a: finished flash tints ✗ when the drained run's cached terminal is agent_error", async ({ page }) => {
+  // Warm the switch cache: view the workstream whose run will fail, and
+  // let the poll deliver its agent_error mid-session (cache warming is
+  // the warm-on-events-update effect — exactly what the tint reads).
+  await page.locator(".sidebar .ws-item", { hasText: "fix-daemon-binary" }).click();
+  await expect(page.locator(".app-statusbar")).toContainText("fix-daemon-binary");
+
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
+    const e = fx.ev("agent_error", { error: "kaboom: wrapper exited 1" }, 3);
+    e.created_at = new Date().toISOString();
+    fx.events.push(e);
+  });
+  // The error renders in-chat — proof the journal tail (and client-side
+  // cache) carries the terminal before we leave this view.
+  await expect(page.locator(".bubble-error", { hasText: "kaboom" })).toBeVisible(FG_REFRESH);
+
+  // Back to main; fix-daemon-binary becomes a background run, then drains.
+  await page.locator(".sidebar .ws-item", { hasText: "main" }).first().click();
+  await expect(page.locator(".app-statusbar")).toContainText("main");
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
+    fx.runningWorkstreams.push(3);
+  });
+  const chip = page.locator(".status-bg-runs");
+  await expect(chip).toContainText("1 background run", BG_REFRESH);
+
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
+    fx.runningWorkstreams.length = 0;
+  });
+  const errFlash = page.locator(".bg-flash-error");
+  await expect(errFlash).toBeVisible(BG_REFRESH);
+  await expect(errFlash).toContainText("fix-daemon-binary finished");
+  // The ok-tint twin must NOT render for a failed run.
+  await expect(page.locator(".bg-flash-done")).toHaveCount(0);
+});
+
 test("sidebar orders needs-input → working → idle, stable ties", async ({ page }) => {
   const items = page.locator(".proj-group").first().locator(".ws-list .ws-item");
   await expect(items).toHaveCount(3);

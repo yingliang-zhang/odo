@@ -427,6 +427,10 @@ type Server struct {
 	// here to drill a hanging leg in wall-clock time (receiptBreachForTest
 	// seam precedent: production never sets it).
 	legTimeoutForTest time.Duration
+	// UX-2 test seam (the legTimeoutForTest precedent): shrinks the k8s
+	// kubectl deadline so the timeout cause class is drillable without a
+	// 10s wall-clock test. Production never sets it.
+	k8sTimeoutForTest time.Duration
 	// D2 test seam (the legTimeoutForTest precedent): non-empty forces
 	// the grounded-leg plan into init failure with this string as the
 	// detail — production never sets it.
@@ -856,6 +860,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleSaveAttachment(ctx, req)
 	case CmdOmpUsage:
 		resp, err = s.handleOmpUsage(ctx, req)
+	case CmdK8sStatus:
+		resp, err = s.handleK8sStatus(ctx, req)
 	case CmdReadFile:
 		resp, err = s.handleReadFile(ctx, req)
 	default:
