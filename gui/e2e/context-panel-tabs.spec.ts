@@ -12,7 +12,11 @@ import type { Page } from "@playwright/test";
 // unreachable at 659 — is archived in the epoch notes).
 
 async function openPanel(page: Page) {
-  await page.goto("/");
+  return openPanelUrl(page, "/");
+}
+
+async function openPanelUrl(page: Page, url: string) {
+  await page.goto(url);
   await expect(page.locator(".sidebar .proj-tree")).toBeVisible();
   await page.keyboard.press("Meta+j");
   await expect(page.locator(".context-panel")).toBeVisible();
@@ -135,4 +139,32 @@ test("‹ › controls DISAPPEAR at MAX — 9 tabs fit the 720px ceiling, every 
 
   // …and the leftmost tab likewise sits in view at rest.
   await expect(page.getByRole("tab", { name: /^Tasks/ })).toBeVisible();
+});
+
+// ---------- D5b (A3-3's conditional 10th) ----------
+// k8s off (fixture default): the static NINE tabs, jobs absent — the
+// A3-3 budget holds by construction in the no-k8s posture.
+// k8s on (?k8s=ok): TEN tabs render — arrows at the strip's max are the
+// LOCKED accepted trade (A3-3), so this asserts COUNT and clickability,
+// never the no-arrow fit.
+
+test("k8s off keeps NINE tabs and no Jobs entry (A3-3 static budget)", async ({ page }) => {
+  await openPanel(page);
+  await expect(page.getByRole("tab")).toHaveCount(9);
+  await expect(page.getByRole("tab", { name: /Jobs/ })).toHaveCount(0);
+});
+
+test("k8s on renders TEN tabs (arrows accepted at MAX) and the Jobs tab activates", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openPanelUrl(page, "/?k8s=ok");
+  await expect(page.getByRole("tab")).toHaveCount(10);
+  const jobs = page.getByRole("tab", { name: /Jobs/ });
+  await expect(jobs).toBeVisible();
+  await jobs.click();
+  await expect(jobs).toHaveAttribute("aria-selected", "true");
+  await expectActiveTabInStrip(page);
+  // The Jobs panel body renders the two locked sections (table + batches).
+  const jp = page.locator(".jobs-panel");
+  await expect(jp.locator(".jobs-table")).toBeVisible();
+  await expect(jp.getByText("batches", { exact: true })).toBeVisible();
 });

@@ -862,6 +862,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleOmpUsage(ctx, req)
 	case CmdK8sStatus:
 		resp, err = s.handleK8sStatus(ctx, req)
+	case CmdK8sBatchStatus:
+		resp, err = s.handleK8sBatchStatus(ctx, req)
 	case CmdReadFile:
 		resp, err = s.handleReadFile(ctx, req)
 	default:

@@ -41,8 +41,9 @@ test("configured cluster: count-only chip face and job rows with phase/completio
   await page.goto("/?k8s=ok");
   const chip = page.locator('[data-chip="jobs"]');
   await expect(chip).toBeVisible(POLL);
-  // A2-5: count-only face — the text pattern never grows a progress bar.
-  await expect(chip).toHaveText(/Jobs · 2$/);
+  // A2-5: count-only face — the text pattern never grows a progress bar;
+  // the active-batch count rides as "+ n" (fixture: 1 non-stale batch).
+  await expect(chip).toHaveText(/Jobs · 2 \+ 1$/);
   await chip.click();
   const rows = page.locator(".jobs-popover .jobs-row");
   await expect(rows).toHaveCount(2);
@@ -59,7 +60,7 @@ test("configured cluster: count-only chip face and job rows with phase/completio
 test("exec-shaped failures show the daemon's capped stderr tail below the reason", async ({ page }) => {
   await page.goto("/?k8s=ok");
   const chip = page.locator('[data-chip="jobs"]');
-  await expect(chip).toHaveText(/Jobs · 2$/, POLL);
+  await expect(chip).toHaveText(/Jobs · 2 \+ 1$/, POLL);
 
   // revise-1 (panel #2): flip mid-session to an unreachable cluster — an
   // exec-shaped failure, so the envelope carries `detail`.
@@ -81,7 +82,7 @@ test("exec-shaped failures show the daemon's capped stderr tail below the reason
 test("folded chip forks zero kubectl calls; reappearing refetches immediately", async ({ page }) => {
   await page.goto("/?k8s=ok");
   const chip = page.locator('[data-chip="jobs"]');
-  await expect(chip).toHaveText(/Jobs · 2$/, POLL);
+  await expect(chip).toHaveText(/Jobs · 2 \+ 1$/, POLL);
   const readCalls = () =>
     page.evaluate(() => {
       const fx = window.__odoFixtures;
@@ -110,7 +111,7 @@ test("folded chip forks zero kubectl calls; reappearing refetches immediately", 
 test("mid-session degrade keeps the last-good snapshot with its age", async ({ page }) => {
   await page.goto("/?k8s=ok");
   const chip = page.locator('[data-chip="jobs"]');
-  await expect(chip).toHaveText(/Jobs · 2$/, POLL);
+  await expect(chip).toHaveText(/Jobs · 2 \+ 1$/, POLL);
 
   await page.evaluate(() => {
     const fx = window.__odoFixtures;
@@ -125,4 +126,74 @@ test("mid-session degrade keeps the last-good snapshot with its age", async ({ p
   await expect(pop.getByText(/last good/)).toBeVisible(POLL);
   // The last-good table stays — a broken sensor never blanks its data.
   await expect(pop.locator(".jobs-row")).toHaveCount(2);
+});
+
+// ---------- D5b (A4 D3 + A2-5) ----------
+
+test("popover carries one row per configured namespace (A4 D3, no third chip state)", async ({ page }) => {
+  await page.goto("/?k8s=ok");
+  const chip = page.locator('[data-chip="jobs"]');
+  await expect(chip).toHaveText(/Jobs · 2 \+ 1$/, POLL);
+  await chip.click();
+  const pop = page.locator(".jobs-popover");
+  // Answering ns → count header; fixture configured order default,lab.
+  await expect(pop.getByText("default · 1 job")).toBeVisible();
+  await expect(pop.getByText("lab · 1 job · 1 active")).toBeVisible();
+  await expect(pop.locator(".jobs-row")).toHaveCount(2);
+});
+
+test("batch one-liners render under the divider and click through to the Jobs tab", async ({ page }) => {
+  await page.goto("/?k8s=ok");
+  const chip = page.locator('[data-chip="jobs"]');
+  await expect(chip).toHaveText(/Jobs · 2 \+ 1$/, POLL);
+  await chip.click();
+  const pop = page.locator(".jobs-popover");
+  // running w/ rate → ETA derived; stale row greys out; done row shows errs.
+  await expect(pop.getByText(/dsv-transcode 72% · ETA /)).toBeVisible();
+  await expect(pop.getByText(/dsv-push .*stale — last update/)).toBeVisible();
+  await expect(pop.getByText("dsv-verify done · 2 errs")).toBeVisible();
+
+  // A2-5: rows navigate to the ONE Jobs tab through App's single
+  // activation path — panel opens, jobs tab active, table + batch bars.
+  await pop.getByText(/dsv-transcode 72%/).click();
+  const panel = page.locator(".context-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole("tab", { name: /Jobs/ })).toHaveAttribute("aria-selected", "true");
+  const jp = panel.locator(".jobs-panel");
+  await expect(jp).toBeVisible();
+  // Jobs table: leading namespace column (A4 D4), configured-order rows.
+  await expect(jp.locator(".jobs-table")).toBeVisible();
+  await expect(jp.locator(".jobs-table-row")).toHaveCount(2);
+  await expect(jp.locator(".jobs-col-ns").nth(0)).toHaveText("default");
+  await expect(jp.locator(".jobs-col-ns").nth(1)).toHaveText("lab");
+  // Batches: TRUE progress bars live in the tab only (A2-5).
+  await expect(jp.getByRole("progressbar", { name: "dsv-transcode progress" })).toBeVisible();
+  await expect(jp.getByText(/180\/250 · 5\.3\/min · ETA /)).toBeVisible();
+  await expect(jp.getByText(/stale — last update/)).toBeVisible();
+});
+
+test("the in-tab namespace quick-switcher filters CLIENT-side only (zero extra IPC)", async ({ page }) => {
+  await page.goto("/?k8s=ok");
+  const chip = page.locator('[data-chip="jobs"]');
+  await expect(chip).toHaveText(/Jobs · 2 \+ 1$/, POLL);
+  await page.keyboard.press("Meta+j");
+  await page.getByRole("tab", { name: /^Jobs/ }).click();
+  const jp = page.locator(".jobs-panel");
+  await expect(jp.locator(".jobs-table-row")).toHaveCount(2);
+
+  const readCalls = () =>
+    page.evaluate(() => {
+      const fx = window.__odoFixtures;
+      if (!fx) throw new Error("__odoFixtures hook missing — mock invoke not engaged");
+      return fx.k8sStatusFixture.calls;
+    });
+  const before = await readCalls();
+  await jp.getByRole("button", { name: "lab" }).click();
+  await expect(jp.locator(".jobs-table-row")).toHaveCount(1);
+  await expect(jp.locator(".jobs-col-ns").nth(0)).toHaveText("default");
+  // Toggling the filter never widens the fetch (A4 D4).
+  await page.waitForTimeout(200);
+  expect(await readCalls()).toBe(before);
+  await jp.getByRole("button", { name: "lab" }).click();
+  await expect(jp.locator(".jobs-table-row")).toHaveCount(2);
 });

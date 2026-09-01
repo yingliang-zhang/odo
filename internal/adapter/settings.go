@@ -54,6 +54,10 @@ type Settings struct {
 	K8sNamespace   string `json:"k8s_namespace"`
 	K8sContext     string `json:"k8s_context"`
 	K8sJobSelector string `json:"k8s_job_selector"`
+	// D5b (A2-4): batch status.json directory — CPFS local mount is read
+	// first; a failed read falls back to kubectl exec cat (the ONLY
+	// whitelisted pod verb). "" = the batch bridge is off.
+	K8sBatchDir string `json:"k8s_batch_dir"`
 }
 
 // loopNotifyOff marks the loop_notify_on_complete: off pref values.
@@ -188,6 +192,7 @@ func ReadSettings() Settings {
 	s.K8sNamespace = LoadPrefsRaw("k8s_namespace")
 	s.K8sContext = LoadPrefsRaw("k8s_context")
 	s.K8sJobSelector = LoadPrefsRaw("k8s_job_selector")
+	s.K8sBatchDir = LoadPrefsRaw("k8s_batch_dir")
 	return s
 }
 
@@ -262,6 +267,9 @@ func UpdateSettings(up Settings) error {
 	}
 	if up.K8sJobSelector != "" {
 		set("k8s_job_selector", up.K8sJobSelector)
+	}
+	if up.K8sBatchDir != "" {
+		set("k8s_batch_dir", up.K8sBatchDir)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

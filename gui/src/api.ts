@@ -68,6 +68,7 @@ import type {
   ListSkillsResponse,
   OmpUsageResponse,
   K8sStatusResponse,
+  K8sBatchStatusResponse,
   ReadSkillResponse,
   UpdateSkillResponse,
 } from "./types";
@@ -576,6 +577,15 @@ export function ompUsage(projectRoot?: string): Promise<OmpUsageResponse> {
 // class) — a configured broken sensor never surfaces as an IPC error.
 export function k8sStatus(projectRoot?: string): Promise<K8sStatusResponse> {
   return invoke<K8sStatusResponse>("k8s_status", {
+    projectRoot: projectRoot ?? null,
+  });
+}
+
+// D5b (A2-4): the batch progress bridge — status.json rows (local CPFS
+// read first, kubectl exec cat fallback). Same containment: degradation
+// rides the payload, never the envelope.
+export function k8sBatchStatus(projectRoot?: string): Promise<K8sBatchStatusResponse> {
+  return invoke<K8sBatchStatusResponse>("k8s_batch_status", {
     projectRoot: projectRoot ?? null,
   });
 }

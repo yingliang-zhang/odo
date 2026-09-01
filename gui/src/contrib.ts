@@ -31,6 +31,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   BookMarked,
+  Container,
   Eye,
   FileText,
   GitCompareArrows,
@@ -57,6 +58,11 @@ export interface PanelBadgeInput {
   // UX-1 D2: the chip and the Tasks tab read one derive, so the badge
   // counts exactly what the tabs render.
   openTodos: number;
+  // D5b (A2-5): k8s Jobs tab badge inputs — the summed active jobs
+  // across ANSWERING namespaces (K8sNsStatusRow.ok legs of the flat
+  // payload) plus active (running & non-stale) batches.
+  activeJobs: number;
+  activeBatches: number;
 }
 
 // Zero state renders no badge — every derivation funnels through this so
@@ -100,6 +106,20 @@ const CONTRIBUTIONS = [
   { id: "learning", title: "Learning", icon: GraduationCap },
 ] as const satisfies readonly PanelContribution[];
 
+// D5b (A2-5 + A3-3): the CONDITIONAL 10th tab — rendered only while the
+// k8s setting is configured (A3-3's locked exception: the static budget
+// holds at 9 in the no-k8s state; k8s ON accepts the arrows posture).
+// NOT part of PANEL_CONTRIBUTIONS: the strip budget assertion and the
+// localStorage allowlist both pin the static 9, so a stored "jobs"
+// selection with k8s off fails the allowlist and falls back to "tasks".
+// Icon is Container, NOT Boxes (PanelChip already owns Boxes).
+export const K8S_CONTRIBUTION = {
+  id: "jobs",
+  title: "Jobs",
+  icon: Container,
+  badge: (i: PanelBadgeInput) => positive(i.activeJobs + i.activeBatches),
+} as const satisfies PanelContribution;
+
 // Exported AS the const tuple (not widened to PanelContribution[]): strip/
 // breadcrumbs index by `tab.id` and need the literal union, which a widened
 // export would erase. The `satisfies` above already forced the shape.
@@ -117,10 +137,14 @@ export function badgeFor(
   return c.badge?.(input);
 }
 
-// The tab union derives from the registry — ContextPanel/App/StatusBar can
-// never name a tab the strip cannot render.
-export type PanelTab = (typeof CONTRIBUTIONS)[number]["id"];
+// The tab union derives from the registry (PLUS the gated jobs entry —
+// adding "jobs" here is compile-breaking by design: App/ContextPanel/
+// StatusBar must enumerate their handling). ContextPanel/App/StatusBar
+// can never name a tab the strip cannot render.
+export type PanelTab = (typeof CONTRIBUTIONS)[number]["id"] | (typeof K8S_CONTRIBUTION)["id"];
 
 // Id list for validators (App's odo-panel-tab localStorage allowlist used
-// to be a hand-maintained duplicate of the union).
+// to be a hand-maintained duplicate of the union). STAYS the static 9:
+// the gated 10th must NOT pass the allowlist while k8s is off (stored
+// "jobs" falls back to "tasks" by construction).
 export const PANEL_TAB_IDS: readonly PanelTab[] = CONTRIBUTIONS.map((c) => c.id);

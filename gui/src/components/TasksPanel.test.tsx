@@ -121,7 +121,7 @@ describe("TasksPanel (UX-1 D2)", () => {
     expect(openTodos).toBe(3); // t1, t2, t3
     const tasks = PANEL_CONTRIBUTIONS.find((c) => c.id === "tasks");
     expect(tasks && badgeFor(tasks, {
-      pendingDiffs: 0, pendingReview: 0, wikiNotes: null, memoryProposals: 0, openTodos,
+      pendingDiffs: 0, pendingReview: 0, wikiNotes: null, memoryProposals: 0, openTodos, activeJobs: 0, activeBatches: 0,
     })).toBe(3);
   });
 

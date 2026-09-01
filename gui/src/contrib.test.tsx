@@ -4,7 +4,7 @@
 // render-from-registry path (titles, icons, badges, parked marker).
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
-import { PANEL_CONTRIBUTIONS, PANEL_TAB_IDS, badgeFor, type PanelBadgeInput } from "./contrib";
+import { K8S_CONTRIBUTION, PANEL_CONTRIBUTIONS, PANEL_TAB_IDS, badgeFor, type PanelBadgeInput } from "./contrib";
 import ContextPanel from "./components/ContextPanel";
 
 // jsdom has no layout engine — the tab strip scrolls the active tab into
@@ -60,6 +60,8 @@ describe("PANEL_CONTRIBUTIONS", () => {
       wikiNotes: 5,
       memoryProposals: 4,
       openTodos: 6,
+      activeJobs: 2,
+      activeBatches: 1,
     };
     const byId = Object.fromEntries(
       PANEL_CONTRIBUTIONS.map((c) => [c.id, badgeFor(c, input)]),
@@ -84,12 +86,64 @@ describe("PANEL_CONTRIBUTIONS", () => {
       wikiNotes: null,
       memoryProposals: 0,
       openTodos: 0,
+      activeJobs: 0,
+      activeBatches: 0,
     };
     for (const c of PANEL_CONTRIBUTIONS) expect(badgeFor(c, input) ?? null).toBeNull();
     // Wiki is a passthrough of pending_counts: an explicit 0 is a real
     // count, not "unknown" — the strip's count>0 gate hides it, not the derivation.
     const wiki = PANEL_CONTRIBUTIONS.find((c) => c.id === "wiki");
     expect(wiki ? badgeFor(wiki, { ...input, wikiNotes: 0 }) : null).toBe(0);
+  });
+});
+
+describe("K8S_CONTRIBUTION (D5b / A2-5)", () => {
+  it("stays OUT of the static 9 — the allowlist must not admit jobs while k8s is off", () => {
+    expect(PANEL_TAB_IDS).not.toContain("jobs");
+    expect(PANEL_CONTRIBUTIONS).toHaveLength(9);
+    expect(K8S_CONTRIBUTION.id).toBe("jobs");
+    expect(K8S_CONTRIBUTION.title).toBe("Jobs");
+  });
+
+  it("badge = active jobs + active batches (A2-5), zero renders none", () => {
+    const base: PanelBadgeInput = {
+      pendingDiffs: 0,
+      pendingReview: 0,
+      wikiNotes: null,
+      memoryProposals: 0,
+      openTodos: 0,
+      activeJobs: 0,
+      activeBatches: 0,
+    };
+    expect(badgeFor(K8S_CONTRIBUTION, base) ?? null).toBeNull();
+    expect(badgeFor(K8S_CONTRIBUTION, { ...base, activeJobs: 2 })).toBe(2);
+    expect(badgeFor(K8S_CONTRIBUTION, { ...base, activeBatches: 1 })).toBe(1);
+    expect(badgeFor(K8S_CONTRIBUTION, { ...base, activeJobs: 2, activeBatches: 3 })).toBe(5);
+  });
+
+  it("the gated strip renders TEN tabs with a jobs badge (App's k8s-on posture)", () => {
+    const { container } = render(
+      <ContextPanel
+        open
+        activeTab="jobs"
+        onTabChange={() => {}}
+        contributions={[...PANEL_CONTRIBUTIONS, K8S_CONTRIBUTION]}
+        badgeInput={{ pendingDiffs: 0, pendingReview: 0, wikiNotes: null, memoryProposals: 0, openTodos: 0, activeJobs: 2, activeBatches: 1 }}
+      />,
+    );
+    const tabs = [...container.querySelectorAll<HTMLElement>(".panel-tab")];
+    expect(tabs.length).toBe(10);
+    const jobsTab = tabs.find((b) => b.textContent?.includes("Jobs")) ?? null;
+    expect(jobsTab).not.toBeNull();
+    expect(jobsTab?.querySelector(".panel-tab-badge")?.textContent).toBe("3");
+  });
+
+  it("the default strip (k8s off posture) still renders 9 tabs and no jobs entry", () => {
+    const { container } = render(
+      <ContextPanel open activeTab="tasks" onTabChange={() => {}} />,
+    );
+    expect(container.querySelectorAll(".panel-tab").length).toBe(9);
+    expect([...container.querySelectorAll<HTMLElement>(".panel-tab")].some((b) => b.textContent?.includes("Jobs"))).toBe(false);
   });
 });
 
@@ -117,7 +171,7 @@ describe("ContextPanel renders from the registry", () => {
         open
         activeTab="changes"
         onTabChange={() => {}}
-        badgeInput={{ pendingDiffs: 7, pendingReview: 0, wikiNotes: 6, memoryProposals: 1, openTodos: 2 }}
+        badgeInput={{ pendingDiffs: 7, pendingReview: 0, wikiNotes: 6, memoryProposals: 1, openTodos: 2, activeJobs: 0, activeBatches: 0 }}
       />,
     );
     expect(badgesFor(container, "Changes")).toBe("7");

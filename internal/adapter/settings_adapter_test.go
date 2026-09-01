@@ -144,4 +144,18 @@ func TestK8sPrefsRoundTrip(t *testing.T) {
 	if s.K8sContext != "prod" || s.K8sJobSelector != "app=training" {
 		t.Errorf("context/selector = %q/%q, want prod/app=training (untouched)", s.K8sContext, s.K8sJobSelector)
 	}
+
+	// D5b (A2-4): k8s_batch_dir rides the same non-empty write branch —
+	// a multi-namespace comma list PLUS the batch dir both persist
+	// verbatim (A4 D1: no migration; "lab" ≡ ["lab"]).
+	if err := UpdateSettings(Settings{K8sBatchDir: "/cpfs/ylzhang/batches"}); err != nil {
+		t.Fatal(err)
+	}
+	s = ReadSettings()
+	if s.K8sBatchDir != "/cpfs/ylzhang/batches" {
+		t.Errorf("K8sBatchDir = %q, want /cpfs/ylzhang/batches", s.K8sBatchDir)
+	}
+	if s.K8sNamespace != "lab2" || s.K8sContext != "prod" || s.K8sJobSelector != "app=training" {
+		t.Errorf("siblings = %+q, want lab2/prod/app=training (untouched)", []string{s.K8sNamespace, s.K8sContext, s.K8sJobSelector})
+	}
 }

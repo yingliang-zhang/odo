@@ -155,6 +155,92 @@ function ReviewModelsInput({
   );
 }
 
+// A4 D1: the k8s_namespace chips input — add/remove chips round-tripping
+// to the ONE comma-joined pref string (the review_models storage
+// precedent). Client-side validation is a CONVENIENCE layer (RFC-1123
+// per chip, N ≤ 5, visible errors); the daemon re-validates fail-loud.
+// Reuses the ReviewModelsInput chip chrome (.model-chips) — one chip
+// look, no second convention.
+const K8S_NS_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+const K8S_NS_MAX = 5;
+
+function K8sNamespacesInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const chips = value
+    .split(",")
+    .map((c) => c.trim())
+    .filter((c) => c !== "");
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const commit = (next: string[]) => onChange(next.join(","));
+  const addChip = () => {
+    const raw = draft.trim();
+    if (raw === "") return;
+    if (!K8S_NS_PATTERN.test(raw)) {
+      setError(`"${raw}" is not an RFC-1123 namespace (lowercase, digits, '-')`);
+      return;
+    }
+    if (chips.length >= K8S_NS_MAX) {
+      setError(`at most ${K8S_NS_MAX} namespaces (the daemon refuses more)`);
+      return;
+    }
+    if (!chips.includes(raw)) commit([...chips, raw]);
+    setDraft("");
+    setError(null);
+  };
+
+  return (
+    <>
+      <div className="model-chips ns-chips">
+        {chips.map((c, i) => (
+          <span key={`${c}-${i}`} className="model-chip">
+            {c}
+            <button
+              type="button"
+              className="model-chip-remove"
+              aria-label={`Remove ${c}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                commit(chips.filter((x) => x !== c));
+              }}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          type="text"
+          className="model-chip-input ns-chip-input"
+          value={draft}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            if (error != null) setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === ",") {
+              e.preventDefault();
+              addChip();
+            }
+          }}
+          onBlur={addChip}
+          placeholder="Add namespace…"
+        />
+      </div>
+      {error != null && <div className="ns-chip-error settings-error">{error}</div>}
+      {chips.length === 0 && (
+        <div className="settings-hint">empty = k8s chip and Jobs tab off</div>
+      )}
+    </>
+  );
+}
+
 // Belt D: the theme persists in localStorage and is applied to <html> —
 // App reads the same key on mount, so the dialog never has to sync back.
 type Theme = "dark" | "light";
@@ -330,6 +416,45 @@ export default function SettingsPanel({ onClose, onSaved, projectRoot }: Props) 
                       onChange={(e) =>
                         set("max_concurrent_runs", e.target.value)
                       }
+                    />
+                  </label>
+
+                  {/* D5b (A2-3/A4): k8s observability prefs — namespaces as
+                      chips (comma string), context/selector/batch-dir as
+                      plain text. Daemon re-validates fail-loud at read. */}
+                  <div className="settings-section-head">Kubernetes</div>
+                  <label className="settings-field">
+                    <span>Namespaces</span>
+                    <K8sNamespacesInput
+                      value={settings.k8s_namespace ?? ""}
+                      onChange={(v) => set("k8s_namespace", v)}
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>Context (optional)</span>
+                    <input
+                      type="text"
+                      value={settings.k8s_context ?? ""}
+                      onChange={(e) => set("k8s_context", e.target.value)}
+                      placeholder="current context"
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>Job selector (optional)</span>
+                    <input
+                      type="text"
+                      value={settings.k8s_job_selector ?? ""}
+                      onChange={(e) => set("k8s_job_selector", e.target.value)}
+                      placeholder="app=training"
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>Batch status dir (optional)</span>
+                    <input
+                      type="text"
+                      value={settings.k8s_batch_dir ?? ""}
+                      onChange={(e) => set("k8s_batch_dir", e.target.value)}
+                      placeholder="/cpfs/…/batches"
                     />
                   </label>
                 </>

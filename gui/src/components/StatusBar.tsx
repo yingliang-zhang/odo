@@ -18,9 +18,10 @@ import type { PanelModel, PromptSnapshot } from "../stats";
 import { pipelineLabel } from "../pipeline";
 import type { PipelinePhase, PipelineState, GateDriftState } from "../pipeline";
 import type { PanelTab } from "../contrib";
-import { ompUsage, k8sStatus } from "../api";
-import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent, K8sStatus, K8sUnavailableReason } from "../types";
-import { activeJobCount, chipLabel, formatAge, formatCompletions, jobPhase, lastGoodAge, reasonLabel } from "../jobs";
+import { ompUsage } from "../api";
+import type { OmpUsageMerged, OmpUsageReport, OmpUsageLimit, OdoEvent } from "../types";
+import { capK8sErr, type K8sPoll } from "../k8s";
+import { activeBatchCount, activeJobCount, batchOneLiner, chipLabel, formatAge, formatCompletions, jobPhase, lastGoodAge, nsActiveCount, reasonLabel } from "../jobs";
 import { strings } from "../strings";
 
 // Tri-model header gap analysis: estimate bytes accumulated since the last
@@ -121,6 +122,15 @@ interface Props {
   wikiNoteCount: number | null;
   pendingMemoryProposals: number;
   onBadgeClick: (tab: PanelTab) => void;
+  // D5b (A4 D6): the shared k8s poll state — App owns the ONE poller
+  // (../k8s useK8sPoll); the chip consumes and NEVER fetches by itself.
+  k8s: K8sPoll;
+  // Jump to the Jobs tab through App's single activation path.
+  onOpenJobsTab: () => void;
+  // Reports whether the jobs chip is currently unfolded so App's hook
+  // gate can AND it against the tab-active signal (folded chip + closed
+  // tab ⇒ zero kubectl forks).
+  onJobsVisibilityChange?: (visible: boolean) => void;
 }
 
 // StatusBar popovers are Radix Popovers (Phase 6): outside-click dismiss,
@@ -801,114 +811,79 @@ function OmpUsageChip({
   );
 }
 
-// UX-2 (D5 Stage 0 / A2-1): the k8s Jobs chip. 5s poll, VISIBILITY-GATED
-// because every tick forks a kubectl subprocess (NOT the OmpUsageChip
-// posture — its lazy fetch is a journal query, which display:none may keep
-// paying): a fold-hidden chip or a backgrounded window execs nothing, and
-// becoming visible again refetches immediately, then the cadence resumes.
-// Polling stops entirely when the daemon answers reason:"off" (off-by-
-// config → NO chip, no tab, no polling) or on unmount. Every other failure
-// keeps the chip VISIBLE with the cause class + the daemon's stderr tail +
-// the last-good snapshot's age (A2-1: a configured sensor never fails
-// silently; A2-2: keep last-good).
-const K8S_POLL_INTERVAL = 5_000;
-const K8S_TRANSPORT_ERR_CAP = 240;
-
-function capTransportErr(msg: string): string {
-  return msg.length > K8S_TRANSPORT_ERR_CAP ? `${msg.slice(0, K8S_TRANSPORT_ERR_CAP)}…` : msg;
-}
-
-function JobsChip({
-  projectRoot,
+// UX-2 (D5 Stage 0 / A2-1) + A4 (multi-ns) + D5b (A2-4): the k8s Jobs
+// chip consuming App's SHARED useK8sPoll state — ONE poller app-wide, so
+// the chip owns no fetch/gate/guard machinery (the hook carries the 5s
+// cadence, the visibility gate, the in-flight guard, and the off-latch).
+// Three-state chrome is EXACTLY the A2-1 contract: off → render nothing;
+// broken → VISIBLE dimmed chip with the cause class + the daemon's capped
+// stderr tail + the last-good snapshot's age; healthy → count-only face.
+// A4 D3: partial namespace failure is NOT a third state — the chip stays
+// healthy and the popover carries the per-ns rows (answering ns → header
+// count; failed ns → dimmed reason row).
+export function JobsChip({
+  k8s,
   fold,
   onSummaryChange,
+  onOpenJobsTab,
 }: {
-  projectRoot: string | null;
+  k8s: K8sPoll;
   fold: ChipFold;
   onSummaryChange?: (s: JobsSummary | null) => void;
+  onOpenJobsTab?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [snap, setSnap] = useState<K8sStatus | null>(null);
-  const [unavailable, setUnavailable] = useState<K8sUnavailableReason | null>(null);
-  // The daemon's capped stderr tail behind a non-off reason (revise-1).
-  const [detail, setDetail] = useState<string | null>(null);
-  const [transportErr, setTransportErr] = useState<string | null>(null);
-  const [off, setOff] = useState(false);
+  const { status: snap, unavailable, detail, transportErr, daemonOff, batch } = k8s;
 
-  const fetchStatus = useCallback(async () => {
-    try {
-      const resp = await k8sStatus(projectRoot ?? undefined);
-      const st = resp.ok ? (resp.k8s_status ?? null) : null;
-      if (st == null) {
-        setTransportErr(capTransportErr(resp.ok ? "empty k8s_status payload" : (resp.error ?? "fetch failed")));
-        return;
-      }
-      if (!st.available) {
-        if (st.reason === "off") {
-          // Sticky for the page lifetime: polling resumes only on reload —
-          // the off pref is hand-edited, never hot-flipped.
-          setOff(true);
-          return;
-        }
-        setUnavailable(st.reason ?? "unreachable");
-        setDetail(st.detail ?? null);
-        return;
-      }
-      setSnap(st);
-      setUnavailable(null);
-      setTransportErr(null);
-      setDetail(null);
-    } catch (e) {
-      setTransportErr(capTransportErr(e instanceof Error ? e.message : String(e)));
-    }
-  }, [projectRoot]);
-
-  // Document visibility is not reactive — latch it (the App.tsx onVisible
-  // posture) so a backgrounded window pauses the fork.
-  const [docVisible, setDocVisible] = useState(() => !document.hidden);
-  useEffect(() => {
-    const onVis = () => setDocVisible(!document.hidden);
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, []);
-
-  // The 5s tick forks a kubectl subprocess every interval — gate it on
-  // visibility. A false edge stops the interval entirely (folded or
-  // backgrounded = zero execs); a true edge refetches instantly (one-shot
-  // on the visibility transition) and resumes the cadence. Mount and
-  // projectRoot changes ride the same true edge — this single effect owns
-  // what used to be a separate mount-fetch effect.
-  const polling = !off && !fold.hidden && docVisible;
-  useEffect(() => {
-    if (!polling) return;
-    void fetchStatus();
-    const timer = window.setInterval(() => void fetchStatus(), K8S_POLL_INTERVAL);
-    return () => window.clearInterval(timer);
-  }, [polling, fetchStatus]);
+  // pollNow on popover open (A4 D6): the cadence gate already covers the
+  // steady state; opening the details view pokes one guarded fan so the
+  // rows are never up-to-5s stale behind the glass.
+  const handleOpenChange = useCallback((v: boolean) => {
+    setOpen(v);
+    if (v) k8s.pollNow();
+  }, [k8s]);
 
   const jobs = snap?.jobs ?? [];
   const active = activeJobCount(jobs);
+  const activeBatches = activeBatchCount(batch?.batches ?? []);
   const label = chipLabel(jobs, snap?.truncated ?? false);
   const broken = unavailable != null || transportErr != null;
   const reason = unavailable ?? (transportErr != null ? ("unreachable" as const) : undefined);
+  // A2-5: count-only face; the batch count rides as "+ n" (progress bars
+  // NEVER in the chip face — the tab owns them).
+  const face = broken ? "Jobs · unavailable" : label + (activeBatches > 0 ? ` + ${activeBatches}` : "");
   // Spill the chip summary for the +N overflow row; null until the first
   // decided answer so the fold never badges an unknown state.
   useEffect(() => {
-    if (off || (snap == null && !broken)) {
+    if (daemonOff || (snap == null && !broken)) {
       onSummaryChange?.(null);
       return;
     }
-    onSummaryChange?.({ label, active, unavailable: broken, reason });
-  }, [onSummaryChange, off, snap, broken, label, active, reason]);
+    onSummaryChange?.({ label: face, active, unavailable: broken, reason });
+  }, [onSummaryChange, daemonOff, snap, broken, face, active, reason]);
 
-  if (off) return null;
+  if (daemonOff) return null;
   if (snap == null && !broken) return null; // pre-first-answer: no chrome
 
-  const face = broken ? "Jobs · unavailable" : label;
   const staleAge = lastGoodAge(Math.floor(Date.now() / 1000), snap?.fetched_unix);
+  const namespaces = snap?.namespaces ?? [];
+  const nowUnix = Math.floor(Date.now() / 1000);
+
+  const jobRow = (job: (typeof jobs)[number], key: string) => {
+    const name = job.metadata?.name ?? key;
+    return (
+      <div key={key} className="jobs-row flex items-baseline justify-between gap-2 border-t border-stroke-tertiary px-1 py-1.5">
+        <span className={cn(BG_RUN_NAME, "mono text-micro")}>{name}</span>
+        <span className="jobs-row-facts shrink-0 text-[10px] text-text-dim">
+          <span className={cn("jobs-phase", jobPhase(job) === "Complete" && "text-ok-text", jobPhase(job) === "Failed" && "text-err-text")}>{jobPhase(job)}</span>
+          {` · ${formatCompletions(job)} · ${formatAge(Date.now(), job.metadata?.creationTimestamp)}`}
+        </span>
+      </div>
+    );
+  };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -948,29 +923,86 @@ function JobsChip({
           // The daemon's capped stderr tail rides below the canned class
           // sentence (revise-1): dimmed, monospace, 240-char display cap.
           <div className="jobs-detail p-1 text-micro text-text-dim">
-            <div className="mono break-words whitespace-pre-wrap">{capTransportErr(detail)}</div>
+            <div className="mono break-words whitespace-pre-wrap">{capK8sErr(detail)}</div>
           </div>
         )}
         {snap == null && broken && (
           <div className="jobs-dim p-1 text-micro text-text-dim">no snapshot yet — retrying every 5s</div>
         )}
-        {snap != null && jobs.length === 0 && (
-          <div className="jobs-dim p-1 text-micro text-text-dim">no jobs in namespace</div>
-        )}
-        {jobs.map((job, i) => {
-          const name = job.metadata?.name ?? `job-${i}`;
-          return (
-            <div key={`${name}-${i}`} className="jobs-row flex items-baseline justify-between gap-2 border-t border-stroke-tertiary px-1 py-1.5">
-              <span className={cn(BG_RUN_NAME, "mono text-micro")}>{name}</span>
-              <span className="jobs-row-facts shrink-0 text-[10px] text-text-dim">
-                <span className={cn("jobs-phase", jobPhase(job) === "Complete" && "text-ok-text", (jobPhase(job) === "Failed") && "text-err-text")}>{jobPhase(job)}</span>
-                {` · ${formatCompletions(job)} · ${formatAge(Date.now(), job.metadata?.creationTimestamp)}`}
-              </span>
-            </div>
-          );
-        })}
+        {snap != null && (namespaces.length > 0 ? (
+          // A4 D3: one block per CONFIGURED namespace in configured order.
+          namespaces.map((row) => {
+            if (!row.ok) {
+              return (
+                <div key={row.name} className="jobs-ns-row jobs-ns-degraded flex flex-col gap-0.5 border-t border-stroke-tertiary px-1 py-1.5 opacity-70">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className={cn(BG_RUN_NAME, "mono text-micro")}>{row.name}</span>
+                    <span className="jobs-ns-reason shrink-0 text-[10px] text-err-text">{reasonLabel(row.reason ?? "unreachable")}</span>
+                  </div>
+                  {row.detail != null && (
+                    <div className="jobs-detail mono break-words whitespace-pre-wrap text-[10px] text-text-dim">{capK8sErr(row.detail)}</div>
+                  )}
+                </div>
+              );
+            }
+            const nsJobs = jobs.filter((j) => j.metadata?.namespace === row.name);
+            const nsActive = nsActiveCount(nsJobs, row.name);
+            return (
+              <div key={row.name} className="jobs-ns-row">
+                <div className="jobs-ns-header px-1 pb-0.5 pt-1 text-[10px] uppercase tracking-[0.06em] text-text-dim">
+                  {row.name} · {row.job_count ?? nsJobs.length} job{(row.job_count ?? nsJobs.length) === 1 ? "" : "s"}{nsActive > 0 ? ` · ${nsActive} active` : ""}
+                </div>
+                {nsJobs.map((job, i) => jobRow(job, `${row.name}-${job.metadata?.name ?? "job"}-${i}`))}
+              </div>
+            );
+          })
+        ) : (
+          // Pre-A4 daemon shape: a flat single-ns payload.
+          <>
+            {jobs.length === 0 && (
+              <div className="jobs-dim p-1 text-micro text-text-dim">no jobs in namespace</div>
+            )}
+            {jobs.map((job, i) => jobRow(job, `${job.metadata?.name ?? "job"}-${i}`))}
+          </>
+        ))}
         {snap?.truncated === true && (
-          <div className="jobs-truncated p-1 text-[10px] text-text-dim">first 50 rows — set k8s_job_selector to narrow</div>
+          <div className="jobs-truncated p-1 text-[10px] text-text-dim">first 50 rows per namespace — set k8s_job_selector to narrow</div>
+        )}
+        {batch?.available === true && (batch.batches?.length ?? 0) > 0 && (
+          // D5b (A2-5): batch one-liners under a divider — rate + ETA are
+          // derived annotations; the true N/M bars render in the Jobs tab.
+          <>
+            <div className={CTX_POP_TITLE}>batches</div>
+            {(batch.batches ?? []).map((b) => (
+              <button
+                key={`${b.batch}-${b.updated_unix ?? 0}`}
+                type="button"
+                className={cn(BG_RUN_ROW, "jobs-batch-row", b.stale === true && "opacity-70")}
+                title="Open the Jobs tab"
+                onClick={() => {
+                  setOpen(false);
+                  onOpenJobsTab?.();
+                }}
+              >
+                <span className={cn(BG_RUN_NAME, "mono text-micro")}>{batchOneLiner(b, nowUnix)}</span>
+              </button>
+            ))}
+          </>
+        )}
+        {batch != null && !batch.available && batch.reason !== "off" && (
+          <div className="jobs-dim p-1 text-[10px] text-text-dim">batches — {batch.reason}</div>
+        )}
+        {onOpenJobsTab != null && (
+          <button
+            type="button"
+            className={cn(BG_RUN_ROW, "jobs-open-tab mt-1 border-t border-stroke-tertiary")}
+            onClick={() => {
+              setOpen(false);
+              onOpenJobsTab();
+            }}
+          >
+            <span className={BG_RUN_NAME}>Open Jobs tab</span>
+          </button>
         )}
       </PopoverContent>
     </Popover>
@@ -997,6 +1029,9 @@ export default function StatusBar({
   wikiNoteCount,
   pendingMemoryProposals,
   onBadgeClick,
+  k8s,
+  onOpenJobsTab,
+  onJobsVisibilityChange,
 }: Props) {
   // Multi-target dropdown (Wave A #1): click opens the run list, a row
   // click jumps. Radix Popover handles dismiss/Esc (Phase 6).
@@ -1047,6 +1082,13 @@ export default function StatusBar({
   const [pipelineSummary, setPipelineSummary] = useState<PipelineSummary | null>(null);
   const [ompSummary, setOmpSummary] = useState<OmpSummary | null>(null);
   const [jobsSummary, setJobsSummary] = useState<JobsSummary | null>(null);
+
+  // D5b: the hook's gate reads "chip visible" from HERE (the fold
+  // engine's verdict), lifted to App so polling stops when the chip is
+  // display:none'd and NO jobs tab is mounted-active.
+  useEffect(() => {
+    onJobsVisibilityChange?.(!hiddenChips.has("jobs"));
+  }, [hiddenChips, onJobsVisibilityChange]);
 
   // Chips the fold can touch, in DOM order (tie-break inside a rank).
   const chipKeys: ChipKey[] = [];
@@ -1438,12 +1480,14 @@ export default function StatusBar({
         fold={foldChip("omp")}
         onSummaryChange={setOmpSummary}
       />
-      {/* UX-2 (D5 Stage 0 / A2-1): k8s Jobs chip — off-by-config renders
-          nothing and never polls; broken stays visible with its reason. */}
+      {/* UX-2 (D5 Stage 0 / A2-1) + A4 + D5b: k8s Jobs chip — off-by-config
+          renders nothing and never polls; broken stays visible with its
+          reason; partial ns failure degrades per-row, never a third state. */}
       <JobsChip
-        projectRoot={projectRoot}
+        k8s={k8s}
         fold={foldChip("jobs")}
         onSummaryChange={setJobsSummary}
+        onOpenJobsTab={onOpenJobsTab}
       />
       {/* Right: clickable badges */}
       {pendingDiffs > 0 && (

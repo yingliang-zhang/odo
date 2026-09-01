@@ -3,15 +3,22 @@
 // count-only chip face, and the degrade-path labels.
 
 import { describe, expect, it } from "vitest";
-import type { K8sJob } from "./types";
+import type { K8sBatch, K8sJob } from "./types";
 import {
+  activeBatchCount,
   activeJobCount,
+  batchEta,
+  batchFraction,
+  batchOneLiner,
   chipLabel,
   formatAge,
   formatCompletions,
   jobPhase,
   lastGoodAge,
+  nsActiveCount,
   reasonLabel,
+  sortJobsForTable,
+  staleLabel,
 } from "./jobs";
 
 function job(over: Partial<K8sJob> = {}): K8sJob {
@@ -115,6 +122,104 @@ describe("lastGoodAge", () => {
     expect(lastGoodAge(1_000_000, 1_000_000 - 400_000)).toBe("4d ago");
     expect(lastGoodAge(1_000_000, undefined)).toBeNull();
     expect(lastGoodAge(1_000_000, 0)).toBeNull();
+  });
+});
+
+// ---------- A4 (multi-ns) + D5b (batch bridge) ----------
+
+function nsJob(ns: string, name: string, createdAt: string, over: Partial<K8sJob> = {}): K8sJob {
+  return { metadata: { name, namespace: ns, creationTimestamp: createdAt }, ...over };
+}
+
+describe("nsActiveCount", () => {
+  it("counts live phases inside ONE namespace of a flat payload", () => {
+    const jobs = [
+      nsJob("default", "a", "2026-09-01T00:00:00Z", { status: { active: 1 } }),
+      nsJob("lab", "b", "2026-09-01T00:00:00Z", { status: { active: 1 } }),
+      nsJob("lab", "c", "2026-09-01T00:00:00Z", { status: { conditions: [{ type: "Complete", status: "True" }] } }),
+    ];
+    expect(nsActiveCount(jobs, "default")).toBe(1);
+    expect(nsActiveCount(jobs, "lab")).toBe(1);
+    expect(nsActiveCount(jobs, "absent")).toBe(0);
+  });
+});
+
+describe("sortJobsForTable", () => {
+  it("orders by configured namespace order, then age newest-first", () => {
+    const jobs = [
+      nsJob("lab", "old-lab", "2026-09-01T00:00:00Z"),
+      nsJob("default", "new-default", "2026-09-01T02:00:00Z"),
+      nsJob("lab", "new-lab", "2026-09-01T03:00:00Z"),
+      nsJob("default", "newer-default", "2026-09-01T04:00:00Z"),
+    ];
+    const sorted = sortJobsForTable(jobs, ["default", "lab"]);
+    expect(sorted.map((j) => j.metadata?.name)).toEqual([
+      "newer-default",
+      "new-default",
+      "new-lab",
+      "old-lab",
+    ]);
+  });
+
+  it("sinks rows outside the configured set after the known groups", () => {
+    const jobs = [
+      nsJob("default", "known", "2026-09-01T00:00:00Z"),
+      nsJob("stray", "stray", "2026-09-02T00:00:00Z"), // newer but unknown-ns
+    ];
+    const sorted = sortJobsForTable(jobs, ["default"]);
+    expect(sorted.map((j) => j.metadata?.name)).toEqual(["known", "stray"]);
+  });
+});
+
+function batch(over: Partial<K8sBatch>): K8sBatch {
+  return { batch: "b", status: "running", ...over };
+}
+
+describe("activeBatchCount", () => {
+  it("counts only running & fresh rows — stale and degraded never badge", () => {
+    expect(activeBatchCount([
+      batch({ status: "running", stale: false }),
+      batch({ status: "running", stale: true }),   // frozen = unknown (B4)
+      batch({ status: "done" }),
+      batch({ reason: "schema_mismatch" }),
+    ])).toBe(1);
+  });
+});
+
+describe("batchFraction + batchEta", () => {
+  it("clamps the fraction and hides on unknown totals", () => {
+    expect(batchFraction(batch({ total: 100, done: 72 }))).toBeCloseTo(0.72);
+    expect(batchFraction(batch({ total: 0, done: 3 }))).toBeNull();
+    expect(batchFraction(batch({ total: 10, done: 42 }))).toBe(1);
+  });
+
+  it("derives a CEIL'd ETA, hidden when the rate can't carry it", () => {
+    expect(batchEta(batch({ total: 250, done: 180, rate_per_min: 5.3 }))).toBe("14m");
+    expect(batchEta(batch({ total: 100, done: 100, rate_per_min: 5 }))).toBeNull();
+    expect(batchEta(batch({ total: 100, done: 0, rate_per_min: 0 }))).toBeNull();
+    expect(batchEta(batch({ total: 100, done: 50, rate_per_min: 0.5 }))).toBe("1h40m");
+    expect(batchEta(batch({ total: 100, done: 80, rate_per_min: 0.5 }))).toBe("40m");
+  });
+});
+
+describe("batchOneLiner + staleLabel", () => {
+  it("composes the running line with ETA, never a bar", () => {
+    expect(batchOneLiner(batch({ batch: "dsv", total: 250, done: 180, rate_per_min: 5.3 }), 1_000_000)).toBe("dsv 72% · ETA 14m");
+  });
+
+  it("flags staleness in the running line", () => {
+    const b = batch({ batch: "frozen", total: 10, done: 2, rate_per_min: 0, updated_unix: 1_000_000 - 300, stale: true });
+    expect(batchOneLiner(b, 1_000_000)).toBe("frozen 20% · stale — last update 5m ago");
+  });
+
+  it("done rows surface err counts; reason rows surface the class", () => {
+    expect(batchOneLiner(batch({ batch: "d", status: "done", errs: 3 }), 0)).toBe("d done · 3 errs");
+    expect(batchOneLiner(batch({ batch: "d", status: "done", errs: 0 }), 0)).toBe("d done");
+    expect(batchOneLiner(batch({ batch: "bad.json", reason: "schema_mismatch" }), 0)).toBe("bad.json — schema_mismatch");
+  });
+
+  it("staleLabel formats the heartbeat age", () => {
+        expect(staleLabel(batch({ updated_unix: 1_000_000 - 120 }), 1_000_000)).toBe("stale — last update 2m ago");
   });
 });
 

@@ -678,6 +678,16 @@ async fn k8s_status(project_root: Option<String>) -> Result<Value, String> {
     run_command(root, req, READ_TIMEOUT).await
 }
 
+// D5b (A2-4): the batch progress bridge — status.json rows read
+// local-first (CPFS mount), kubectl exec cat fallback. Same containment
+// as k8s_status: degradation rides the payload, never the IPC envelope.
+#[tauri::command]
+async fn k8s_batch_status(project_root: Option<String>) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "k8s_batch_status", "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
 // M4 learning: read the three canonical memory files (project memory.md,
 // memory-archive.md, global user.md) through the daemon, which constructs
 // the paths itself and equality-checks the root against its bound root.
@@ -1477,6 +1487,7 @@ pub fn run() {
             learning_status,
             omp_usage,
             k8s_status,
+            k8s_batch_status,
             read_memory,
             memory_proposals,
             apply_memory,

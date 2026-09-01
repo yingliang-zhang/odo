@@ -99,6 +99,19 @@ const BASE: Props = {
   pendingMemoryProposals: 0,
   onBadgeClick: vi.fn(),
   gateDrift: { drifted: false, seq: 0 },
+  // D5b: the chip consumes App's shared poll state — an idle hook shape
+  // (never fetched) keeps the fold drills k8s-free by default.
+  k8s: {
+    status: null,
+    unavailable: null,
+    detail: null,
+    transportErr: null,
+    daemonOff: false,
+    batch: null,
+    batchTransportErr: null,
+    pollNow: vi.fn(),
+  },
+  onOpenJobsTab: vi.fn(),
 };
 
 // Full house minus pipeline: bgruns, ctx, panel, omp + three count chips.

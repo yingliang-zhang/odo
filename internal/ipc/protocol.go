@@ -104,6 +104,11 @@ const (
 	// available:false reason:"off" with no exec; a configured broken sensor
 	// answers available:false WITH a cause class — never silently.
 	CmdK8sStatus = "k8s_status"
+	// D5b (A2-4): k8s_batch_status is the batch progress bridge —
+	// local-mount-first status.json reader with a pod-cat fallback. Same
+	// containment as k8s_status: read-only, one-shot per invoke, NEVER
+	// journaled. See docs/design/d5b-batch-status.md for the schema.
+	CmdK8sBatchStatus = "k8s_batch_status"
 	// read_file: inline file preview (tri-model right sidebar gap). Reads a
 	// project-contained text file with the same containment rule as the
 	// GUI's open_path (canonicalize-then-prefix-check); binary files and
@@ -516,6 +521,10 @@ type Response struct {
 	// are the kubectl `get jobs,pods -o json` item slices (swap-friendly
 	// passthrough — the daemon splits kinds and caps, never interprets).
 	K8sStatus *K8sStatus `json:"k8s_status,omitempty"`
+	// D5b (A2-4): the batch progress bridge — status.json snapshots read
+	// local-first (CPFS mount glob), kubectl exec cat fallback. NEVER
+	// journaled, same containment as k8s_status.
+	K8sBatchStatus *K8sBatchStatus `json:"k8s_batch_status,omitempty"`
 	// read_file: inline file preview (tri-model right sidebar gap). Content
 	// capped at readFileMaxBytes; truncated=true when the cap was hit.
 	// Binary files return an error; req.Path/journal are untouched (the
@@ -525,27 +534,95 @@ type Response struct {
 	FileTruncated bool   `json:"file_truncated,omitempty"`
 }
 
-// K8sStatus is the k8s_status payload (UX-2 / A2-1). Reason carries the
-// cause class when Available is false: "off" (feature disabled), "ENOENT"
-// (kubectl missing), "timeout", "auth", "unreachable", "bad_namespace"
-// (pref charset rejected daemon-side before any exec). Data may be
-// absent, the reason may never be absent (A2-1, verbatim).
+// K8sNsStatus is one configured namespace's outcome row (A4 D3): the
+// popover renders one row per CONFIGURED namespace in configured order.
+// A failed namespace degrades HERE — OK stays false and Reason/Detail
+// carry the cause (timeout/auth/unreachable classes, same k8sClassify
+// vocabulary as the whole-response Reason); the whole chip never gains a
+// third "partial" state (partial availability = healthy chip + degraded
+// per-ns rows).
+type K8sNsStatus struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+	// Detail is THIS leg's capped stderr tail (k8sStderrCap at capture).
+	Detail string `json:"detail,omitempty"`
+	// JobCount counts this namespace's jobs AFTER the row cap — the
+	// "ns · N jobs" popover header reads it without re-deriving.
+	JobCount int `json:"job_count"`
+}
+
+// K8sStatus is the k8s_status payload (UX-2 / A2-1 + A4 multi-ns).
+// Reason carries the cause class when Available is false: "off" (feature
+// disabled), "ENOENT" (kubectl missing), "timeout", "auth",
+// "unreachable", "bad_namespace" — the last one covers BOTH a rejected
+// namespace element and an over-cap list (N > k8sMaxNamespaces); the
+// Detail names the offending element(s) or the cap. Data may be absent,
+// the reason may never be absent (A2-1, verbatim).
 type K8sStatus struct {
 	Available bool   `json:"available"`
 	Reason    string `json:"reason,omitempty"`
-	// Detail is kubectl's stderr tail behind a non-off Reason — the
-	// diagnosis the GUI popover renders below the canned class sentence.
-	// Bounded at capture (k8sStderrCap via a LimitReader pipe); absent on
-	// pre-exec failures (off/bad_namespace/ENOENT produce no output).
+	// Detail is the diagnosis behind a non-off Reason — kubectl's capped
+	// stderr tail for exec-shaped failures, the parse diagnostic for
+	// pref-shaped ones (bad_namespace). Bounded at capture (k8sStderrCap
+	// via a LimitReader pipe); absent pre-exec (off/ENOENT exec nothing).
 	Detail string `json:"detail,omitempty"`
-	// Raw kubectl list-item slices (kind Job/Pod from `get jobs,pods -o
-	// json`), kept as passthrough so the GUI shape matches kubectl's own
-	// schema one-for-one. Truncated marks the 50-row job cap tripping
-	// (only reachable with an empty k8s_job_selector pref).
-	Jobs        json.RawMessage `json:"jobs,omitempty"`
-	Pods        json.RawMessage `json:"pods,omitempty"`
-	Truncated   bool            `json:"truncated"`
-	FetchedUnix int64           `json:"fetched_unix"`
+	// Raw kubectl list-item slices (kind Job/Pod) FLAT-MERGED across the
+	// answering namespaces (kubectl items carry metadata.namespace — the
+	// GUI groups by it). Truncated marks the 50-row PER-NS job cap
+	// tripping on ANY answering namespace (OR'd; only reachable with an
+	// empty k8s_job_selector pref).
+	Jobs      json.RawMessage `json:"jobs,omitempty"`
+	Pods      json.RawMessage `json:"pods,omitempty"`
+	Truncated bool            `json:"truncated"`
+	// Namespaces carries one row per CONFIGURED namespace, in configured
+	// order — present whenever the pref parses to a non-empty list,
+	// including on total failure (Available:false), so the popover can
+	// render every namespace's state without guessing.
+	Namespaces  []K8sNsStatus `json:"namespaces,omitempty"`
+	FetchedUnix int64         `json:"fetched_unix"`
+}
+
+// K8sBatchStatus is the k8s_batch_status payload (D5b / A2-4). The read
+// is LOCAL-FIRST: every *.json directly under k8s_batch_dir (the CPFS
+// mount on the Mac). Only when the dir read fails AND k8s is configured
+// does the kubectl exec fallback fire — resolving the pod per-read via
+// the k8s_job_selector labels (never a stored pod name) and `cat`-ing the
+// canonical status.json under the dir (the ONLY whitelisted exec verb).
+// Reason classes: "off" (k8s_batch_dir empty), "ENOENT" (kubectl missing
+// for the fallback), "local_missing" (configured dir unreadable and no
+// fallback source available). Rows carry their own Reason for per-file
+// degradations ("schema_mismatch", "pod_not_found", "ambiguous_pod",
+// "no_pod_selector") — the degradation contract at file granularity: a
+// row may be missing its data, its reason may never be absent.
+type K8sBatchStatus struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	// Batches sorts newest-first by UpdatedUnix, capped at
+	// k8sBatchRowCap (25 — a runaway glob must not flood the GUI);
+	// Truncated declares the cap was hit, never a silent drop.
+	Batches   []K8sBatch `json:"batches,omitempty"`
+	Truncated bool       `json:"truncated,omitempty"`
+}
+
+// K8sBatch is one status.json row — the schema pinned in
+// docs/design/d5b-batch-status.md. The daemon validates schema_version==1
+// and computes Stale from the heartbeat (updated_unix older than
+// k8sBatchStaleSeconds), shipping BOTH the raw stamp and the derived flag
+// so the GUI can render "stale 2m" without re-deriving the threshold.
+// Reason (only while set) marks rows the daemon could fill with NO data.
+type K8sBatch struct {
+	Batch       string  `json:"batch"`
+	Stage       string  `json:"stage,omitempty"`
+	Total       int     `json:"total"`
+	Done        int     `json:"done"`
+	Errs        int     `json:"errs"`
+	RatePerMin  float64 `json:"rate_per_min"`
+	UpdatedUnix int64   `json:"updated_unix"`
+	Status      string  `json:"status"` // running | done | failed
+	Stale       bool    `json:"stale"`
+	Reason      string  `json:"reason,omitempty"`
 }
 
 // AutoCapResumeInfo discloses an auto-distill daily-cap suspension through

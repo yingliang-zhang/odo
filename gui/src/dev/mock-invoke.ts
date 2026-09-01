@@ -740,7 +740,29 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
           jobs: k.jobs,
           pods: [],
           truncated: false,
+          // A4: one row per configured namespace, configured order.
+          namespaces: k.namespaces,
           fetched_unix: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
+
+    // ---------- D5b (A2-4) ----------
+    // Mirrors the daemon's priority contract: off when the bridge is not
+    // configured (scenario-doubled settings seeding); otherwise a fresh
+    // three-row table (one running ~72% with rate, one stale, one done)
+    // with updated_unix computed per call.
+    case "k8s_batch_status": {
+      const k = fx.k8sStatusFixture;
+      if (k.scenario === "off") {
+        return { ok: true, k8s_batch_status: { available: false, reason: "off" } };
+      }
+      return {
+        ok: true,
+        k8s_batch_status: {
+          available: true,
+          batches: fx.k8sBatchFixtureRows(),
+          truncated: false,
         },
       };
     }

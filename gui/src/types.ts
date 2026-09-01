@@ -714,6 +714,9 @@ export interface Settings {
   k8s_namespace?: string;
   k8s_context?: string;
   k8s_job_selector?: string;
+  // D5b (A2-4): status.json directory — CPFS local mount read first;
+  // kubectl exec cat is the fallback. "" = the batch bridge is off.
+  k8s_batch_dir?: string;
 }
 
 // P1-1: Known sudo-provider models (Hermes custom_providers). Hardcoded for
@@ -1146,6 +1149,10 @@ export interface OmpUsageResponse {
 
 export interface K8sRuntimeObjectMeta {
   name?: string;
+  // A4: kubectl items self-identify — the daemon flat-merges across
+  // namespaces and the GUI groups by this field; absent on legacy
+  // single-ns payloads (the ns is implied by configured-ness then).
+  namespace?: string;
   creationTimestamp?: string;
 }
 
@@ -1180,7 +1187,9 @@ export interface K8sPod {
 // Degradation contract (A2-1, verbatim): data may be absent, the reason
 // may never be absent. off = feature disabled (no chip, no tab, no
 // polling); every other class is a VISIBLE dimmed chip with the reason
-// in its popover. bad_namespace is rejected daemon-side before any exec.
+// in its popover. bad_namespace is rejected daemon-side before any exec —
+// it covers BOTH a rejected namespace element and an over-cap list (N > 5);
+// detail names the offender(s) or the cap.
 export type K8sUnavailableReason =
   | "off"
   | "ENOENT"
@@ -1188,6 +1197,18 @@ export type K8sUnavailableReason =
   | "auth"
   | "unreachable"
   | "bad_namespace";
+
+// A4 D3: one CONFIGURED namespace's outcome row, in configured order. A
+// failed namespace degrades HERE (ok:false + reason + the daemon's capped
+// detail tail) — partial availability is a healthy chip with degraded
+// rows, NEVER a third chip state.
+export interface K8sNsStatusRow {
+  name: string;
+  ok: boolean;
+  reason?: K8sUnavailableReason;
+  detail?: string;
+  job_count?: number;
+}
 
 export interface K8sStatus {
   available: boolean;
@@ -1198,10 +1219,53 @@ export interface K8sStatus {
   // capTransportErr). Absent pre-exec (off/bad_namespace/ENOENT exec
   // nothing, so there is no subprocess output to carry).
   detail?: string;
+  // FLAT-MERGED across the answering namespaces — group rows by
+  // metadata.namespace; no per-ns section headers anywhere.
   jobs?: K8sJob[];
   pods?: K8sPod[];
   truncated?: boolean;
+  // One row per CONFIGURED namespace in configured order — present
+  // whenever the pref parses non-empty, including total failure. Absent
+  // only on pre-A4 daemon replies (treated as single legacy ns).
+  namespaces?: K8sNsStatusRow[];
   fetched_unix?: number;
+}
+
+// ---------- D5b (A2-4): k8s_batch_status wire types ----------
+// status.json rows (schema pinned in docs/design/d5b-batch-status.md):
+// local CPFS mount read first, kubectl exec cat fallback. The daemon
+// computes stale (>90s heartbeat) and ships the raw stamp beside it.
+export interface K8sBatch {
+  batch: string;
+  stage?: string;
+  total?: number;
+  done?: number;
+  errs?: number;
+  rate_per_min?: number;
+  updated_unix?: number;
+  status?: "running" | "done" | "failed" | string;
+  stale?: boolean;
+  // Per-row degradation: schema_mismatch / unparseable / unreadable /
+  // pod_not_found / ambiguous_pod / no_pod_selector — the row stays
+  // VISIBLE with its cause, never silently dropped.
+  reason?: string;
+}
+
+export interface K8sBatchStatus {
+  available: boolean;
+  // Whole-response classes only: "off" (k8s_batch_dir unset), "ENOENT"
+  // (kubectl missing for the fallback), "local_missing" (dir unreadable
+  // and no k8s fallback configured).
+  reason?: string;
+  detail?: string;
+  batches?: K8sBatch[];
+  truncated?: boolean;
+}
+
+export interface K8sBatchStatusResponse {
+  ok: boolean;
+  error?: string;
+  k8s_batch_status?: K8sBatchStatus;
 }
 
 export interface K8sStatusResponse {

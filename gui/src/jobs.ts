@@ -4,7 +4,7 @@
 // inline and the table is unit-testable without a DOM (the stats.ts
 // posture).
 
-import type { K8sJob, K8sStatus } from "./types";
+import type { K8sBatch, K8sJob, K8sStatus } from "./types";
 
 // Phase vocabulary k8s itself uses (v1.28+ conditions): Complete,
 // FailureTarget (terminal), SuccessCriteriaMet, Suspended. kubectl counts
@@ -61,6 +61,86 @@ export function activeJobCount(jobs: readonly K8sJob[]): number {
 // 24px bar + fold-to-hidden = useless). "+" marks the daemon's 50-row cap.
 export function chipLabel(jobs: readonly K8sJob[], truncated: boolean): string {
   return `Jobs · ${jobs.length}${truncated ? "+" : ""}`;
+}
+
+// ---------- A4 (multi-ns): grouped derivations over flat payloads ----------
+// The daemon flat-merges answering namespaces; every kubectl row carries
+// metadata.namespace. Grouping is a VIEW derivation — never new IPC (the
+// deriveTodoState precedent: one fetch, many views).
+
+// Active jobs inside ONE namespace (flat payload filtered client-side).
+export function nsActiveCount(jobs: readonly K8sJob[], ns: string): number {
+  return activeJobCount(jobs.filter((j) => j.metadata?.namespace === ns));
+}
+
+// Configured-order sort, then age newest-first inside each group (A4 D4:
+// NO per-ns section headers in the table; the sort carries the grouping).
+// Jobs whose namespace isn't in the configured list (selector mismatches,
+// legacy payloads) sink after the known groups, still newest-first.
+export function sortJobsForTable(jobs: readonly K8sJob[], nsOrder: readonly string[]): K8sJob[] {
+  const rank = new Map(nsOrder.map((ns, i) => [ns, i]));
+  const age = (j: K8sJob): number => {
+    const t = Date.parse(j.metadata?.creationTimestamp ?? "");
+    return Number.isFinite(t) ? t : 0;
+  };
+  return [...jobs].sort((a, b) => {
+    const ra = rank.get(a.metadata?.namespace ?? "") ?? Number.MAX_SAFE_INTEGER;
+    const rb = rank.get(b.metadata?.namespace ?? "") ?? Number.MAX_SAFE_INTEGER;
+    if (ra !== rb) return ra - rb;
+    return age(b) - age(a); // newest first
+  });
+}
+
+// ---------- D5b (A2-4/A2-5): batch progress derivations ----------
+
+// A2-5's badge half: active = running AND fresh — a stale heartbeat is
+// UNKNOWN (B4: a frozen file is unknown, never progress), so it can't
+// badge.
+export function activeBatchCount(batches: readonly K8sBatch[]): number {
+  return batches.filter((b) => b.reason == null && b.status === "running" && b.stale !== true).length;
+}
+
+// N/M completion fraction; null when the file can't tell (no total).
+export function batchFraction(b: K8sBatch): number | null {
+  const total = b.total ?? 0;
+  if (total <= 0) return null;
+  const done = b.done ?? 0;
+  return Math.min(1, Math.max(0, done / total));
+}
+
+// Derived ETA annotation (A4: hide when rate_per_min <= 0 — a stalled or
+// unknown rate inventing a time is a lie). "8m" / "1h5m".
+export function batchEta(b: K8sBatch): string | null {
+  const rate = b.rate_per_min ?? 0;
+  const total = b.total ?? 0;
+  const done = b.done ?? 0;
+  if (rate <= 0 || total <= done) return null;
+  const mins = Math.ceil((total - done) / rate);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h${m}m` : `${h}h`;
+}
+
+// Heartbeat annotation for stale rows: "stale — last update 2m" (the
+// daemon ships the >90s flag; the AGE is the GUI's own lastGoodAge).
+export function staleLabel(b: K8sBatch, nowUnix: number): string {
+  return `stale — last update ${lastGoodAge(nowUnix, b.updated_unix) ?? "?"}`;
+}
+
+// The popover's one-line batch summary (A2-5: rate + ETA are derived
+// annotations; progress bars stay tab-only): "transcode 72% · ETA 8m",
+// done rows surface their error count, degraded rows their reason.
+export function batchOneLiner(b: K8sBatch, nowUnix: number): string {
+  if (b.reason != null) return `${b.batch} — ${b.reason}`;
+  if (b.status === "done") return `${b.batch} done${(b.errs ?? 0) > 0 ? ` · ${b.errs} errs` : ""}`;
+  if (b.status === "failed") return `${b.batch} failed${(b.errs ?? 0) > 0 ? ` · ${b.errs} errs` : ""}`;
+  const frac = batchFraction(b);
+  const parts: string[] = [frac != null ? `${Math.round(frac * 100)}%` : "…"];
+  const eta = batchEta(b);
+  if (eta != null) parts.push(`ETA ${eta}`);
+  if (b.stale === true) parts.push(staleLabel(b, nowUnix));
+  return `${b.batch} ${parts.join(" · ")}`;
 }
 
 // Age of the last-good snapshot for the degrade path: "(2m ago)" so a

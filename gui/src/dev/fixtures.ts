@@ -19,6 +19,7 @@ import type {
   ListTopicsResponse,
   ListWikiResponse,
   K8sJob,
+  K8sBatch,
   ListWorkstreamsResponse,
   MemoryProposal,
   MemoryProposalsResponse,
@@ -458,27 +459,82 @@ function initialK8sScenario(): K8sScenario {
 }
 
 // Two realistic kubectl Job items (raw passthrough shape): one Complete
-// 1/1, one Active 0/1. creationTimestamp is relative to page load so the
-// age column stays stable across reruns.
-export const k8sStatusFixture: { scenario: K8sScenario; jobs: K8sJob[]; calls: number } = {
+// 1/1 in "default", one Active 0/1 in "lab" (A4: metadata.namespace rides
+// every row; creationTimestamp is relative to page load so the age
+// column stays stable across reruns).
+export const k8sStatusFixture: {
+  scenario: K8sScenario;
+  jobs: K8sJob[];
+  // One row per CONFIGURED namespace (default,lab) mirroring the daemon's
+  // A4 shape — job_count shadows jobs.length per namespace.
+  namespaces: { name: string; ok: boolean; job_count: number }[];
+  calls: number;
+} = {
   scenario: initialK8sScenario(),
   // e2e poll instrumentation (revise-1): mock-invoke increments this per
   // k8s_status call — the fold drill proves a folded chip forks zero
   // kubectl invocations and reappearing refetches immediately.
   calls: 0,
+  namespaces: [
+    { name: "default", ok: true, job_count: 1 },
+    { name: "lab", ok: true, job_count: 1 },
+  ],
   jobs: [
     {
-      metadata: { name: "train-3dgs-zz42", creationTimestamp: new Date(Date.now() - 2 * 3600 * 1000).toISOString() },
+      metadata: { name: "train-3dgs-zz42", namespace: "default", creationTimestamp: new Date(Date.now() - 2 * 3600 * 1000).toISOString() },
       spec: { completions: 1, parallelism: 1 },
       status: { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] },
     },
     {
-      metadata: { name: "cali-blender-k7", creationTimestamp: new Date(Date.now() - 12 * 60 * 1000).toISOString() },
+      metadata: { name: "cali-blender-k7", namespace: "lab", creationTimestamp: new Date(Date.now() - 12 * 60 * 1000).toISOString() },
       spec: { completions: 1, parallelism: 1 },
       status: { active: 1 },
     },
   ],
 };
+
+// D5b (A2-4): the batch bridge fixture — one running batch ~72% with a
+// rate (ETA derivable), one running-but-stale (>90s heartbeat), one done
+// with errors, mirroring the dsv-transcode ledger-loop shape. updated_unix
+// is computed per call in mock-invoke so staleness survives slow pages.
+export function k8sBatchFixtureRows(): K8sBatch[] {
+  const now = Math.floor(Date.now() / 1000);
+  return [
+    {
+      batch: "dsv-transcode",
+      stage: "transcode",
+      total: 250,
+      done: 180,
+      errs: 0,
+      rate_per_min: 5.3,
+      updated_unix: now - 15,
+      status: "running",
+      stale: false,
+    },
+    {
+      batch: "dsv-push",
+      stage: "push",
+      total: 60,
+      done: 12,
+      errs: 1,
+      rate_per_min: 1.1,
+      updated_unix: now - 400,
+      status: "running",
+      stale: true,
+    },
+    {
+      batch: "dsv-verify",
+      stage: "verify",
+      total: 25,
+      done: 25,
+      errs: 2,
+      rate_per_min: 0,
+      updated_unix: now - 3600,
+      status: "done",
+      stale: false,
+    },
+  ];
+}
 
 export const wikiContent = `# Epoch 2 — GUI Features F1-F7
 
@@ -520,6 +576,12 @@ export const defaultSettings: Settings = {
   // carries an explicit off-shape value. loop.spec.ts's pref-off case
   // mutates this through the same settings round-trip.
   loop_notify_on_complete: true,
+  // D5b (A4 + A2-5): the Jobs tab gates on the SETTING (locked: "exactly
+  // like the chip" — presence keyed on configured-ness, not the off
+  // latch). A k8s-on scenario must therefore SEED the namespace list so
+  // the striped 10th tab + the Settings chips render under ?k8s=.
+  k8s_namespace: k8sStatusFixture.scenario === "off" ? "" : "default,lab",
+  k8s_batch_dir: k8sStatusFixture.scenario === "off" ? "" : "/cpfs/ylzhang/batches",
 };
 
 // E2E probe for the dual Esc gate: the mock's cancel case increments this,

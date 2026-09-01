@@ -16,6 +16,7 @@ import {
   PANEL_CONTRIBUTIONS,
   badgeFor,
   type PanelBadgeInput,
+  type PanelContribution,
   type PanelTab,
 } from "../contrib";
 import {
@@ -33,6 +34,8 @@ const NO_BADGES: PanelBadgeInput = {
   wikiNotes: null,
   memoryProposals: 0,
   openTodos: 0,
+  activeJobs: 0,
+  activeBatches: 0,
 };
 
 interface Props {
@@ -52,6 +55,10 @@ interface Props {
   // the strip keeps the tab and marks it so the user sees where dormant
   // React state went (restore remounts + refetches on click).
   parked?: ReadonlySet<PanelTab>;
+  // D5b (A3-3): the strip source. Defaults to the static registry (every
+  // existing test and the off-by-config posture); App passes the static
+  // 9 + K8S_CONTRIBUTION only while the k8s setting is configured.
+  contributions?: readonly PanelContribution[];
 }
 
 export default function ContextPanel({
@@ -61,6 +68,7 @@ export default function ContextPanel({
   onTabChange,
   badgeInput,
   parked,
+  contributions = PANEL_CONTRIBUTIONS,
   children,
 }: Props) {
   // U2.2/U2.3: width persists to localStorage (clamped on read); the
@@ -246,7 +254,7 @@ export default function ContextPanel({
           </button>
         )}
         <div className="panel-tabs flex gap-px flex-1 min-w-0 overflow-x-auto" role="tablist" ref={tabsRef} data-slot={SLOT.panelTabs}>
-          {PANEL_CONTRIBUTIONS.map((tab) => {
+          {contributions.map((tab) => {
             const count = badgeFor(tab, badgeInput ?? NO_BADGES);
             const isActive = activeTab === tab.id;
             return (
@@ -255,7 +263,7 @@ export default function ContextPanel({
                 type="button"
                 role="tab"
                 ref={(el) => {
-                  tabRefs.current[tab.id] = el;
+                  tabRefs.current[tab.id as PanelTab] = el;
                 }}
                 aria-selected={isActive}
                 className={cn(
@@ -265,11 +273,11 @@ export default function ContextPanel({
                   "hover:text-[var(--text)] hover:bg-[var(--bg-input)]",
                   isActive && "active text-[var(--text)] bg-[var(--bg-input)] font-semibold",
                 )}
-                onClick={() => onTabChange(tab.id)}
+                onClick={() => onTabChange(tab.id as PanelTab)}
               >
                 <tab.icon size={12} />
                 {tab.title}
-                {parked?.has(tab.id) && (
+                {parked?.has(tab.id as PanelTab) && (
                   <span
                     className="panel-tab-parked"
                     data-slot={SLOT.parkedBadge}

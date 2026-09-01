@@ -35,10 +35,13 @@ import {
 import ChatSurface from "./components/ChatSurface";
 import CommandPalette, { type PaletteAction } from "./components/CommandPalette";
 import ContextPanel from "./components/ContextPanel";
-import { PANEL_TAB_IDS, type PanelTab } from "./contrib";
+import { K8S_CONTRIBUTION, PANEL_CONTRIBUTIONS, PANEL_TAB_IDS, type PanelTab } from "./contrib";
+import { useK8sPoll } from "./k8s";
+import { activeBatchCount, activeJobCount } from "./jobs";
 import { ESC_PRIORITY, dispatchEscape, useEscLayer } from "./esc-registry";
 import DiffViewer from "./components/DiffViewer";
 import LearningPanel from "./components/LearningPanel";
+import JobsPanel from "./components/JobsPanel";
 import MemoryPanel from "./components/MemoryPanel";
 import ReviewInbox from "./components/ReviewInbox";
 import SkillsPanel from "./components/SkillsPanel";
@@ -588,6 +591,43 @@ export default function App() {
     setAppSettings(null);
     void refreshSettings();
   }, [project?.root_path, refreshSettings]);
+
+  // ---------- D5b (A4 + A2-5): k8s gate + the ONE poller ----------
+  // The TAB's presence and the POLL's master switch key on the SAME
+  // settings read the chip's off detection uses (the lock's "gate the
+  // tab's registry presence on the k8s setting exactly like the chip").
+  const k8sConfigured = (appSettings?.k8s_namespace ?? "").trim() !== "";
+  // Reports from StatusBar's fold engine: is the chip unfolded right now?
+  // Default true — pre-first-measure the chip renders unfolded.
+  const [jobsChipVisible, setJobsChipVisible] = useState(true);
+  const jobsTabActive = k8sConfigured && panelOpen && panelTab === "jobs" && mountedPanelTabs.has("jobs");
+  // one poller app-wide: chip + tab share state; gate = configured &&
+  // docVisible && (chip unfolded || jobs tab active) — the hook latches
+  // docVisible itself (A4 D6).
+  const k8s = useK8sPoll(
+    project?.root_path ?? null,
+    k8sConfigured,
+    jobsChipVisible || jobsTabActive,
+  );
+  // Configured-namespace order: the Jobs table's group order + filter
+  // chips. scope edits live ONLY in Settings (A4 D4).
+  const k8sNamespaces = useMemo(
+    () => (appSettings?.k8s_namespace ?? "").split(",").map((s) => s.trim()).filter((s) => s !== ""),
+    [appSettings],
+  );
+  const { activeJobsCount, activeBatchCountForBadge } = useMemo(
+    () => ({
+      activeJobsCount: activeJobCount(k8s.status?.jobs ?? []),
+      activeBatchCountForBadge: activeBatchCount(k8s.batch?.batches ?? []),
+    }),
+    [k8s.status, k8s.batch],
+  );
+  // A3-3: static 9 vs. gated 10th — arrows at the 720px MAX are the
+  // LOCKED accepted trade while k8s is configured.
+  const panelContributions = useMemo(
+    () => (k8sConfigured ? [...PANEL_CONTRIBUTIONS, K8S_CONTRIBUTION] : PANEL_CONTRIBUTIONS),
+    [k8sConfigured],
+  );
 
   // Wave B #5: the last prompt closure is journaled data the UI already
   // holds — the meter reads the newest carrier (user_message send/slash or
@@ -2553,12 +2593,15 @@ export default function App() {
         activeTab={panelTab}
         onTabChange={openTab}
         parked={parkState.parked}
+        contributions={panelContributions}
         badgeInput={{
           pendingDiffs: diffs.length,
           pendingReview: pendingTotal,
           wikiNotes: wikiNoteCount,
           memoryProposals: pendingMemoryProposals,
           openTodos: openTodoCount,
+          activeJobs: activeJobsCount,
+          activeBatches: activeBatchCountForBadge,
         }}
       >
         {/* Keep-alive (tri-review P1 #5, 2026-08-24) + P2.4 LRU park:
@@ -2711,6 +2754,16 @@ export default function App() {
             />
           )}
         </div>
+        {k8sConfigured && (
+          // D5b (A2-5 + A3-3): the gated conditional 10th tab — mounted
+          // through the same keep-alive/LRU wrapper as every other body;
+          // absent entirely while the setting is off-by-config.
+          <div hidden={panelTab !== "jobs"}>
+            {mountedPanelTabs.has("jobs") && (
+              <JobsPanel k8s={k8s} namespaces={k8sNamespaces} />
+            )}
+          </div>
+        )}
         <div hidden={panelTab !== "learning"}>
           {mountedPanelTabs.has("learning") && (
             // D9-W3 (learning control plane, pure observability):
@@ -2746,6 +2799,9 @@ export default function App() {
         wikiNoteCount={wikiNoteCount}
         pendingMemoryProposals={pendingMemoryProposals}
         onBadgeClick={(tab) => openPanelTab(tab)}
+        k8s={k8s}
+        onOpenJobsTab={() => openPanelTab("jobs")}
+        onJobsVisibilityChange={setJobsChipVisible}
       />
     </div>
   );
