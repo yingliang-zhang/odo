@@ -289,6 +289,12 @@ type ReviewResult struct {
 	// valve (Fix 1) vetoes truncated legs: a truncated review could have
 	// ended in reject — outvoting it is fail-open.
 	Truncated bool `json:"truncated,omitempty"`
+	// Blockers (P1 borrow — the audit's OMP output-schema fallback,
+	// verdict_json.go): the structured verdict's blocker list, populated
+	// only when the leg answered in the RESPONSE FORMAT JSON object;
+	// empty for legacy text verdicts. Additive on every journaled
+	// reviews row (moa_review / blocked rows carry it automatically).
+	Blockers []string `json:"blockers,omitempty"`
 	// ThinkingMD (M18 batch B) journals the leg's reasoning text, capped
 	// at 4KB, ONLY for non-accept verdicts (accept legs stay unjournaled —
 	// journal noise discipline). Real data: the moa client's thinking

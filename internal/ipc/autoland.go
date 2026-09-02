@@ -368,6 +368,62 @@ func (s *Server) autoLand(ctx context.Context, d store.Diff, worktreePath, goal 
 		s.journalAutoLandBlocked(ctx, d, reason, detail, nil, "")
 		return
 	}
+	// Declarative rules overlay (.odo/rules.json — P1 borrow, item 12):
+	// loaded once at pipeline start, AFTER the gate-policy risk gate and
+	// BEFORE any rebase/verify spend. The file can only TIGHTEN: deny
+	// blocks the diff for the human (reason rule_deny:<rule.reason>);
+	// ask forces the panel (the armed M20 canon panels every diff
+	// unconditionally today — the journal row records the forced
+	// posture; forward-compat against any future mechanical fast path);
+	// allow is passthrough and never wins on gate-protected paths
+	// (rule_override_ignored rows name each attempt). Absent file ⇒
+	// zero rules, zero rows, zero overhead; malformed file fails SAFE
+	// (zero active rules + a rules_parse_error row — the overlay never
+	// blocks on its own defects).
+	if rules, rulesErr := loadRulesFile(s.projectRoot); rulesErr != nil {
+		s.journalRulesEvent(ctx, d, map[string]interface{}{
+			"action": "rules_parse_error",
+			"detail": rulesErr.Error() + " — running with zero declarative rules",
+		})
+	} else if len(rules) > 0 {
+		rulePaths, rpErr := git.PatchPaths(d.PathOnDisk)
+		if rpErr != nil {
+			// autoLandCheck already parsed the patch — this is the
+			// fail-closed backstop, never the ordinary path.
+			s.journalAutoLandBlocked(ctx, d, "unparseable_diff", rpErr.Error(), nil, "")
+			return
+		}
+		ruleAction, ruleHits, ruleIgnored := evalRulesDetailed(rules, rulePaths)
+		for _, ig := range ruleIgnored {
+			s.journalRulesEvent(ctx, d, map[string]interface{}{
+				"action":     "rule_override_ignored",
+				"rule_index": ig.RuleIndex,
+				"rule":       ig.Pattern,
+				"paths":      capRulePaths(ig.Paths),
+				"reason":     "cannot loosen gate-tier protection",
+			})
+		}
+		switch ruleAction {
+		case "deny":
+			h := ruleHits[0]
+			s.journalAutoLandBlocked(ctx, d, "rule_deny:"+h.Reason,
+				fmt.Sprintf("declarative rule #%d (%q) denies %d path(s) [%s]; the diff stays pending — the human Accept click remains the escape",
+					h.RuleIndex, h.Pattern, len(h.Paths), strings.Join(capRulePaths(h.Paths), ", ")), nil, "")
+			return
+		case "ask":
+			// The panel below runs unconditionally (M20); journal the
+			// forced-review posture as evidence.
+			for _, h := range ruleHits {
+				s.journalRulesEvent(ctx, d, map[string]interface{}{
+					"action":     "rule_ask",
+					"rule_index": h.RuleIndex,
+					"rule":       h.Pattern,
+					"reason":     h.Reason,
+					"paths":      capRulePaths(h.Paths),
+				})
+			}
+		}
+	}
 
 	// The verify below attests the run's worktree (diff base + diff), but
 	// the land applies onto the main checkout's CURRENT HEAD. If HEAD has

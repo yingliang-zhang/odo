@@ -4258,17 +4258,39 @@ func (s *Server) reviewWithModel(ctx context.Context, m reviewModel, prompt stri
 	return rr
 }
 
-// reviewVerdict folds one model response into a ReviewResult. Truncation
-// forces needs_fixes even when the partial text parses clean: a cut-off
-// stream cannot prove the model's final position, and honoring the
-// truncated verdict would count a review the model never finished (M16
-// panel finding — the truncated/early-ACCEPT unanimity bypass).
+// reviewVerdict folds one model response into a ReviewResult. The
+// structured contract (P1 borrow — the audit's OMP output-schema
+// fallback, verdict_json.go) is tried FIRST: a leg answering the
+// prompt's RESPONSE FORMAT section yields verdict/comments/blockers
+// straight from the parsed object; a leg answering with valid JSON that
+// VIOLATES the schema acknowledged the contract and broke it — not a
+// verdict, an infra failure (same class as a timeout leg: the round
+// fails closed via panelInfraLeg, never misread as dissent). Anything
+// else falls back to parseVerdict's legacy final-line token scan —
+// backward compat: the structured path is a preference, never a
+// requirement, and structured/legacy legs aggregate under the same
+// consensusVerdict semantics. Truncation forces needs_fixes whether the
+// partial text parses structured, legacy, or clean: a cut-off stream
+// cannot prove the model's final position (M16 panel finding — the
+// truncated/early-ACCEPT unanimity bypass).
 func reviewVerdict(label, text string, truncated bool) ReviewResult {
+	const truncForced = "[review truncated at the model's hard output cap — verdict forced fail-closed] "
+	if rr, structured, malformed := parseStructuredVerdict(label, text); structured {
+		if truncated {
+			rr.Verdict = "needs_fixes"
+			rr.Truncated = true
+			rr.Comments = truncForced + rr.Comments
+		}
+		return rr
+	} else if malformed {
+		return ReviewResult{Model: label, Verdict: "needs_fixes", Infra: true, Truncated: truncated,
+			Comments: "structured verdict malformed (valid JSON violating the response schema) — the leg is an infra failure, not a verdict"}
+	}
 	rr := parseVerdict(label, text)
 	if truncated {
 		rr.Verdict = "needs_fixes"
 		rr.Truncated = true
-		rr.Comments = "[review truncated at the model's hard output cap — verdict forced fail-closed] " + rr.Comments
+		rr.Comments = truncForced + rr.Comments
 	}
 	return rr
 }

@@ -663,6 +663,11 @@ func (s *Server) reviewWithModelGrounded(ctx context.Context, m reviewModel, pro
 	}
 	v := reviewVerdict(label, res.Text, res.Truncated)
 	rr.Verdict, rr.Comments, rr.Truncated = v.Verdict, v.Comments, v.Truncated
+	// Structured-verdict propagation: the blockers list rides the
+	// journaled row, and a malformed structured answer marks the leg
+	// Infra regardless of the grounded posture (the model acknowledged
+	// the schema and broke it — never direction evidence).
+	rr.Blockers, rr.Infra = v.Blockers, v.Infra
 	rr.RequestSHA16, rr.RequestBytes = res.RequestSHA16, res.RequestBytes
 	if rr.Verdict != "accept" {
 		// M18 batch B discipline, mirrored from reviewWithModel: a
