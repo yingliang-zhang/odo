@@ -87,6 +87,8 @@ func main() {
 			os.Exit(runModelsCLI(args[1:]))
 		case "preview-setup":
 			os.Exit(runPreviewSetupCLI(args[1:]))
+		case "spawn":
+			os.Exit(runSpawnCLI(args[1:]))
 		}
 	}
 

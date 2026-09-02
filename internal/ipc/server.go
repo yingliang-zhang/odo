@@ -182,6 +182,15 @@ type Server struct {
 	mu     sync.Mutex
 	runs   map[string]*runMeta // adapter runID -> meta
 	byConv map[int64]string    // conversationID -> adapter runID (active run)
+	// subagents (P1 #7): in-flight subagent runs keyed by subagent_id
+	// ("sub-" + runDirID), journaled into the PARENT conversation with a
+	// subagent_id payload marker. Lifecycle is drain-driven like runs —
+	// pollLocked and the liveness tick advance them — so the registry
+	// needs no waitgroup: shutdown kills the child processes with the
+	// same adapter CloseAll every run rides, and a restart's boot
+	// recovery journals the synthetic subagent_done for orphaned ids.
+	// Guarded by s.mu with the run maps above.
+	subagents map[string]*subAgentRun
 
 	// gateDrift is the D1 drift latch (gatepolicy.go): set once per boot by
 	// checkGatePolicy BEFORE any recovery can fire a landing pipeline (and
@@ -507,6 +516,7 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 		mgr:          mgr,
 		runs:         make(map[string]*runMeta),
 		byConv:       make(map[int64]string),
+		subagents:    make(map[string]*subAgentRun),
 		parked:       make(map[int64][]parkedGoal),
 		distilling:   make(map[int64]struct{}),
 		distillKind:  make(map[int64]string),
@@ -560,6 +570,11 @@ func NewServer(st *store.Store, projectRoot string, ad adapter.Adapter, mgr *wor
 	// old process (memory-only queue) — close the ledger once per
 	// conversation so the GUI never repopulates undeletable ghost rows.
 	s.recoverOpenSteers(context.Background())
+	// Subagent parallel of the orphan close above (P1 #7): spawned ids
+	// with no subagent_done died with the old process — journal the
+	// synthetic close so the RunsPanel never renders a phantom "running"
+	// row and the audit fold never dangles.
+	s.recoverOrphanedSubAgents(context.Background())
 	// M19 (V7): restart recovery for /loop — mid-audit/design loops
 	// (side-effect-free) re-run; mid-run loops suspend restart_mid_run.
 	s.recoverLoops(context.Background())
@@ -870,6 +885,10 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleWriteMemory(ctx, req)
 	case CmdRunCommand:
 		resp, err = s.handleRunCommand(ctx, req)
+	case CmdForkConversation:
+		resp, err = s.handleForkConversation(ctx, req)
+	case CmdSpawnSubagent:
+		resp, err = s.handleSpawnSubagent(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}
@@ -2125,6 +2144,12 @@ func (s *Server) pollLocked(ctx context.Context, req Request) (Response, int64, 
 			}
 		}
 	}
+	// Subagent drain (P1 #7): the conversation's isolated children advance
+	// on the same poll cadence as its main run — the subagent_done row
+	// and the tagged agent events land in this journal.
+	if err := s.drainSubAgentsLocked(ctx, c.ID); err != nil {
+		return Response{}, 0, err
+	}
 
 	events, err := s.store.ListEvents(ctx, c.ID, req.AfterSeq)
 	if err != nil {
@@ -2633,13 +2658,21 @@ func (s *Server) drainActiveRuns() {
 	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	for _, meta := range s.runs {
 		if meta.finished {
 			continue
 		}
-		if err := s.drainRun(context.Background(), meta); err != nil {
+		if err := s.drainRun(ctx, meta); err != nil {
 			log.Printf("ipc: liveness drain: run %s: %v (retrying next tick)", meta.runID, err)
 		}
+	}
+	// Subagents drain through the daemon tick too (P1 #7): a GUI-closed
+	// window must not wedge a finished child mid-report — its
+	// subagent_done row and diff registration ride the same liveness
+	// contract as runs (C11).
+	if err := s.drainSubAgentsLocked(ctx, 0); err != nil {
+		log.Printf("ipc: liveness drain: subagent: %v (retrying next tick)", err)
 	}
 }
 

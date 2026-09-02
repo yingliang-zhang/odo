@@ -14,14 +14,30 @@ import (
 // objective, verbatim ("" stores NULL) — the anchor every later review of
 // this row judges against (schema v3).
 func (s *Store) InsertDiff(ctx context.Context, conversationID int64, pathOnDisk, baseSHA, worktreePath, goal string) (Diff, error) {
+	return s.insertDiff(ctx, conversationID, pathOnDisk, baseSHA, worktreePath, goal, "")
+}
+
+// InsertSubagentDiff records a diff produced by an isolated subagent run
+// (schema v5): identical shape to InsertDiff plus the subagent marker —
+// the recoverPendingDiffs exclusion and any future provenance read key
+// off subagent_id, while sweeper/retire/review treat the row like any
+// other pending diff.
+func (s *Store) InsertSubagentDiff(ctx context.Context, conversationID int64, pathOnDisk, baseSHA, worktreePath, goal, subagentID string) (Diff, error) {
+	if subagentID == "" {
+		return Diff{}, fmt.Errorf("store: insert subagent diff: subagent_id is required")
+	}
+	return s.insertDiff(ctx, conversationID, pathOnDisk, baseSHA, worktreePath, goal, subagentID)
+}
+
+func (s *Store) insertDiff(ctx context.Context, conversationID int64, pathOnDisk, baseSHA, worktreePath, goal, subagentID string) (Diff, error) {
 	d := Diff{
 		ConversationID: conversationID,
 		PathOnDisk:     pathOnDisk,
 		Status:         DiffPending,
 	}
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO diffs (conversation_id, path_on_disk, base_sha, worktree_path, goal) VALUES (?, ?, ?, ?, ?)
-		 RETURNING id, created_at`, conversationID, pathOnDisk, nullString(baseSHA), nullString(worktreePath), nullString(goal)).
+		`INSERT INTO diffs (conversation_id, path_on_disk, base_sha, worktree_path, goal, subagent_id) VALUES (?, ?, ?, ?, ?, ?)
+		 RETURNING id, created_at`, conversationID, pathOnDisk, nullString(baseSHA), nullString(worktreePath), nullString(goal), nullString(subagentID)).
 		Scan(&d.ID, &d.CreatedAt)
 	if err != nil {
 		return Diff{}, fmt.Errorf("store: insert diff: %w", err)
@@ -35,13 +51,16 @@ func (s *Store) InsertDiff(ctx context.Context, conversationID int64, pathOnDisk
 	if goal != "" {
 		d.Goal = &goal
 	}
+	if subagentID != "" {
+		d.SubagentID = &subagentID
+	}
 	return d, nil
 }
 
 // GetDiff fetches a diff by ID.
 func (s *Store) GetDiff(ctx context.Context, diffID int64) (Diff, error) {
 	d, err := s.scanDiff(s.db.QueryRowContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, subagent_id, status, created_at
 		 FROM diffs WHERE id = ?`, diffID))
 	if err != nil {
 		return Diff{}, fmt.Errorf("store: get diff %d: %w", diffID, err)
@@ -53,7 +72,7 @@ func (s *Store) GetDiff(ctx context.Context, diffID int64) (Diff, error) {
 // or sql.ErrNoRows when none exists.
 func (s *Store) LatestDiff(ctx context.Context, conversationID int64) (Diff, error) {
 	d, err := s.scanDiff(s.db.QueryRowContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, subagent_id, status, created_at
 		 FROM diffs
 		 WHERE conversation_id = ?
 		 ORDER BY id DESC LIMIT 1`, conversationID))
@@ -98,7 +117,7 @@ func (s *Store) UpdateDiffBaseSHA(ctx context.Context, diffID int64, baseSHA str
 // the run events that produced them.
 func (s *Store) ListDiffs(ctx context.Context, conversationID int64) ([]Diff, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, subagent_id, status, created_at
 		 FROM diffs WHERE conversation_id = ? ORDER BY id`, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list diffs: %w", err)
@@ -118,7 +137,7 @@ func (s *Store) ListDiffs(ctx context.Context, conversationID int64) ([]Diff, er
 // ListPendingDiffs returns all pending diffs for a conversation, ordered by id.
 func (s *Store) ListPendingDiffs(ctx context.Context, conversationID int64) ([]Diff, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, status, created_at
+		`SELECT id, conversation_id, path_on_disk, base_sha, worktree_path, goal, subagent_id, status, created_at
 		 FROM diffs WHERE conversation_id = ? AND status = ? ORDER BY id`,
 		conversationID, DiffPending)
 	if err != nil {
@@ -154,7 +173,7 @@ type PendingDiffRow struct {
 func (s *Store) ListAllPendingDiffs(ctx context.Context, projectID int64) ([]PendingDiffRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT d.id, d.conversation_id, d.path_on_disk, d.base_sha,
-		        d.worktree_path, d.goal, d.status, d.created_at,
+		        d.worktree_path, d.goal, d.subagent_id, d.status, d.created_at,
 		        w.id, w.name
 		 FROM diffs d
 		 JOIN conversations c ON d.conversation_id = c.id
@@ -170,7 +189,7 @@ func (s *Store) ListAllPendingDiffs(ctx context.Context, projectID int64) ([]Pen
 	for rows.Next() {
 		var r PendingDiffRow
 		if err := rows.Scan(&r.ID, &r.ConversationID, &r.PathOnDisk, &r.BaseSHA,
-			&r.WorktreePath, &r.Goal, &r.Status, &r.CreatedAt,
+			&r.WorktreePath, &r.Goal, &r.SubagentID, &r.Status, &r.CreatedAt,
 			&r.WorkstreamID, &r.WorkstreamName); err != nil {
 			return nil, fmt.Errorf("store: list all pending diffs: scan: %w", err)
 		}
@@ -206,7 +225,7 @@ func (s *Store) PendingDiffCountsByWorkstream(ctx context.Context, projectID int
 
 func (s *Store) scanDiff(row interface{ Scan(...interface{}) error }) (Diff, error) {
 	var d Diff
-	err := row.Scan(&d.ID, &d.ConversationID, &d.PathOnDisk, &d.BaseSHA, &d.WorktreePath, &d.Goal, &d.Status, &d.CreatedAt)
+	err := row.Scan(&d.ID, &d.ConversationID, &d.PathOnDisk, &d.BaseSHA, &d.WorktreePath, &d.Goal, &d.SubagentID, &d.Status, &d.CreatedAt)
 	return d, err
 }
 

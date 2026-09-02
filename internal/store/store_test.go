@@ -52,11 +52,13 @@ func TestOpenMigrates(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	// Fresh journals record v3 from schemaV1, then migrateV4 stamps 4 —
-	// the v4 index lives outside schemaV1's unconditional DDL because old
-	// databases may carry duplicate active names that must dedupe first.
-	if version != 4 {
-		t.Fatalf("schema_version = %d, want 4", version)
+	// Fresh journals record v3 from schemaV1, then migrateV4 stamps 4 and
+	// migrateV5 (forked_from/subagent_id) stamps 5 — the v4 index lives
+	// outside schemaV1's unconditional DDL because old databases may
+	// carry duplicate active names that must dedupe first; v5's columns
+	// arrive only via migration for the same uniformity reason.
+	if version != 5 {
+		t.Fatalf("schema_version = %d, want 5", version)
 	}
 	var idxName string
 	if err := s.DB().QueryRowContext(ctx,
@@ -156,8 +158,8 @@ func TestMigrateV1ToV3(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if version != 4 {
-		t.Fatalf("schema_version = %d, want 4 after upgrade", version)
+	if version != 5 {
+		t.Fatalf("schema_version = %d, want 5 after upgrade", version)
 	}
 
 	// Rows survive the upgrade with the new columns NULL on legacy diffs.
@@ -251,8 +253,8 @@ func TestMigrateV2ToV3(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if version != 4 {
-		t.Fatalf("schema_version = %d, want 4 after upgrade", version)
+	if version != 5 {
+		t.Fatalf("schema_version = %d, want 5 after upgrade", version)
 	}
 	d, err := s.GetDiff(ctx, 1)
 	if err != nil {

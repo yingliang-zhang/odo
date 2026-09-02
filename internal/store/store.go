@@ -36,6 +36,14 @@ const (
 	// BY DESIGN, unlike the k8s status pollers (cluster state never
 	// enters the journal); a command's result is project history.
 	EventCommandResult = "command_result"
+	// P1 borrow (subagent wave): subagent runs journal in the PARENT
+	// conversation with a subagent_id payload key on their agent events;
+	// the lifecycle endpoints are these two dedicated types — spawned
+	// carries {subagent_id, goal, worktree_path, parent_run_id?}, done
+	// carries {subagent_id, goal, exit_code, summary?, diff_path?,
+	// diff_id?, error?}.
+	EventSubagentSpawned = "subagent_spawned"
+	EventSubagentDone    = "subagent_done"
 )
 
 // Diff statuses.
@@ -82,6 +90,12 @@ type Workstream struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	CreatedAt string `json:"created_at"`
+	// ForkedFrom (schema v5, turn-fork): the source conversation id when
+	// this lane was created by fork_conversation. Populated ONLY by
+	// ListWorkstreams' join (the sidebar's data source); plain row
+	// fetches leave it nil — the canonical provenance lives on the
+	// conversation row (Conversation.ForkedFrom).
+	ForkedFrom *int64 `json:"forked_from,omitempty"`
 }
 
 type Conversation struct {
@@ -90,7 +104,12 @@ type Conversation struct {
 	Epoch         int     `json:"epoch"`
 	State         string  `json:"state"`
 	BaseCommitSHA *string `json:"base_commit_sha,omitempty"`
-	CreatedAt     string  `json:"created_at"`
+	// ForkedFrom (schema v5): the conversation this one was fork-copied
+	// from (turn-fork: a journal COPY of the source's prefix events,
+	// never a move — the source conversation is untouched). NULL on
+	// ordinary conversations.
+	ForkedFrom *int64 `json:"forked_from,omitempty"`
+	CreatedAt  string `json:"created_at"`
 }
 
 // Event is one journaled entry. Payload is the raw JSON payload_json column,
@@ -123,6 +142,13 @@ type Diff struct {
 	Goal      *string `json:"goal,omitempty"`
 	Status    string  `json:"status"`
 	CreatedAt string  `json:"created_at"`
+	// SubagentID (schema v5): non-empty marks a SUBAGENT diff — a
+	// proposal produced by an isolated spawn_subagent run and journaled
+	// back into the parent conversation. It is never an auto-land
+	// candidate (recoverPendingDiffs excludes it; the pipeline's
+	// "not auto-landed" contract) — the parent conversation's human or
+	// agent decides via the ordinary accept/reject path.
+	SubagentID *string `json:"subagent_id,omitempty"`
 }
 
 // Store owns the journal database. SQLite is opened with a single
@@ -232,8 +258,12 @@ func OpenReadOnly(path string) (*Store, error) {
 }
 
 func migrate(db *sql.DB) error {
-	// schemaV1 (kept name; its DDL is the CURRENT shape) creates fresh
-	// databases at v3. Existing v1/v2 journals upgrade via migrateV2/V3.
+	// schemaV1 (kept name; its DDL is the CURRENT shape through v4 —
+	// v5's conversations.forked_from / diffs.subagent_id arrive via
+	// migrateV5 for every database: fresh seeds record version 3 so
+	// v4's index must still apply, which leaves v5's ALTERs their one
+	// uniform add path) creates fresh databases at v3.
+	// Existing v1/v2 journals upgrade via migrateV2/V3.
 	if _, err := db.Exec(schemaV1); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
@@ -261,6 +291,38 @@ func migrate(db *sql.DB) error {
 		if err := migrateV4(db); err != nil {
 			return err
 		}
+	}
+	if version < 5 {
+		if err := migrateV5(db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV5 (P1 borrow, turn-fork + subagent waves): conversations gain
+// forked_from (the fork provenance; NULL on ordinary lanes), diffs gain
+// subagent_id (NULL = regular run diff; non-empty marks a subagent
+// proposal the auto-land recovery must never pipeline). Atomic like
+// V2/V3: a crash retries the whole upgrade.
+func migrateV5(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: migrate v5: begin: %w", err)
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		`ALTER TABLE conversations ADD COLUMN forked_from INTEGER REFERENCES conversations(id)`,
+		`ALTER TABLE diffs ADD COLUMN subagent_id TEXT`,
+		`UPDATE schema_version SET version = 5`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("store: migrate v5: %s: %w", q, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: migrate v5: commit: %w", err)
 	}
 	return nil
 }
@@ -422,10 +484,18 @@ func scanWorkstream(row interface{ Scan(...interface{}) error }) (Workstream, er
 	return w, err
 }
 
+// scanWorkstreamForked scans a ListWorkstreams row (the plain columns plus
+// the joined forked_from provenance column).
+func scanWorkstreamForked(row interface{ Scan(...interface{}) error }) (Workstream, error) {
+	var w Workstream
+	err := row.Scan(&w.ID, &w.ProjectID, &w.Name, &w.Status, &w.CreatedAt, &w.ForkedFrom)
+	return w, err
+}
+
 // scanConversation scans a full conversations row.
 func scanConversation(row interface{ Scan(...interface{}) error }) (Conversation, error) {
 	var c Conversation
-	err := row.Scan(&c.ID, &c.WorkstreamID, &c.Epoch, &c.State, &c.BaseCommitSHA, &c.CreatedAt)
+	err := row.Scan(&c.ID, &c.WorkstreamID, &c.Epoch, &c.State, &c.BaseCommitSHA, &c.ForkedFrom, &c.CreatedAt)
 	return c, err
 }
 

@@ -791,6 +791,14 @@ func (s *Server) recoverPendingDiffs(ctx context.Context) {
 		}
 		stranded = keep
 	}
+	// P1 #7: subagent diffs are PROPOSALS to the parent conversation —
+	// the borrow's "not auto-landed" contract. The pipeline must never
+	// seed one, at boot no less; registration (drainSubAgent's settle)
+	// already skips maybeAutoLand, so this skip is the restart half.
+	stranded, skippedSub := nonSubagentRows(stranded)
+	if skippedSub > 0 {
+		log.Printf("recover-pending-diffs: %d pending subagent diff(s) — proposals are human/agent-reviewed, never re-fired", skippedSub)
+	}
 	for _, r := range stranded {
 		wtPath := ""
 		if r.WorktreePath != nil {
@@ -842,6 +850,21 @@ func strandedPendingDiffs(ctx context.Context, st *store.Store, rows []store.Pen
 		}
 	}
 	return out, nil
+}
+
+// nonSubagentRows drops subagent-proposal diffs (P1 #7, "not
+// auto-landed") from a recovery candidate set, reporting how many.
+func nonSubagentRows(rows []store.PendingDiffRow) ([]store.PendingDiffRow, int) {
+	var keep []store.PendingDiffRow
+	skipped := 0
+	for _, r := range rows {
+		if r.SubagentID != nil && *r.SubagentID != "" {
+			skipped++
+			continue
+		}
+		keep = append(keep, r)
+	}
+	return keep, skipped
 }
 
 // pipelineTerminalDiffIDs returns the diff IDs the auto-land pipeline has

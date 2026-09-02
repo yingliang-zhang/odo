@@ -154,6 +154,19 @@ const (
 	// `odo learning drop|apply|promote --global` (learning_actions.go):
 	// one actuation path, journaled with actor:"human".
 	CmdLearningAction = "learning_action"
+	// P1 borrow #6 (turn-fork): fork_conversation branch-copies the
+	// conversation's journal prefix (seq 1..from_seq) into a NEW
+	// conversation on a fresh workstream lane — a COPY, never a move; the
+	// source lane is untouched (append-only invariant). The reply carries
+	// the new workstream and conversation so the GUI switches lanes
+	// through its ordinary path.
+	CmdForkConversation = "fork_conversation"
+	// P1 borrow #7 (subagent report + isolation): spawn_subagent starts
+	// an isolated OMP run in its own "sub-" worktree, journaled into the
+	// PARENT conversation with a subagent_id marker; its extracted diff
+	// is a proposal (a subagent_id-marked row), never an auto-land
+	// candidate; the reply carries the subagent identity.
+	CmdSpawnSubagent = "spawn_subagent"
 )
 
 // Request is one command line on the socket.
@@ -222,6 +235,17 @@ type Request struct {
 	// Content is the full replacement body.
 	File    string `json:"file,omitempty"`
 	Content string `json:"content,omitempty"`
+	// fork_conversation (P1 #6): FromSeq is the journal seq to fork from
+	// (everything BEFORE and INCLUDING it copies to the new lane).
+	FromSeq int `json:"from_seq,omitempty"`
+	// spawn_subagent (P1 #7): req.Goal (the design_moa slot, disjoint
+	// command) is the subagent's prompt; Context (when non-empty)
+	// prepends as a "## Context" section. SubagentID MARKS a spawn
+	// invoked from inside a subagent (the `odo spawn` CLI reads the
+	// git-dir marker) — the handler refuses non-empty (one level of
+	// isolation only).
+	Context    string `json:"context,omitempty"`
+	SubagentID string `json:"subagent_id,omitempty"`
 }
 
 // AutoDistillInfo is one scheduled auto-distill for the pending_counts
@@ -564,6 +588,19 @@ type Response struct {
 	// same fields as the journaled command_result payload, so the Runs
 	// tab badge flips on the invoke response without waiting on a poll.
 	CommandResult *CommandResult `json:"command_result,omitempty"`
+	// spawn_subagent (P1 #7): the admitted subagent's identity. The run
+	// lifecycle afterwards rides the journal (subagent_spawned /
+	// subagent_done + subagent_id-tagged agent events in the parent
+	// conversation) — the reply is only an acknowledgment.
+	Subagent *SubagentInfo `json:"subagent,omitempty"`
+}
+
+// SubagentInfo is spawn_subagent's admission receipt: the journaled
+// subagent id, the adapter run id, and the isolated worktree.
+type SubagentInfo struct {
+	SubagentID   string `json:"subagent_id"`
+	RunID        string `json:"run_id"`
+	WorktreePath string `json:"worktree_path"`
 }
 
 // CommandResult is run_command's outcome (Odo DX wave): exit code, the

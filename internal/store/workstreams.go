@@ -69,13 +69,20 @@ func (s *Store) GetWorkstream(ctx context.Context, id int64) (Workstream, error)
 
 // ListWorkstreams returns all active workstreams for a project, ordered by
 // created_at (ties broken by id). Soft-deleted workstreams (status='deleted')
-// are excluded from the list.
+// are excluded from the list. The LEFT JOIN projects the lane's active
+// conversation's forked_from (schema v5): fork-created lanes surface their
+// provenance in the sidebar without a second round-trip; ordinary lanes
+// come back NULL.
 func (s *Store) ListWorkstreams(ctx context.Context, projectID int64) ([]Workstream, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, project_id, name, status, created_at
-		 FROM workstreams
-		 WHERE project_id = ? AND status = ?
-		 ORDER BY created_at ASC, id ASC`, projectID, WorkstreamActive)
+		`SELECT w.id, w.project_id, w.name, w.status, w.created_at, fc.forked_from
+		 FROM workstreams w
+		 LEFT JOIN conversations fc ON fc.id = (
+		     SELECT MAX(id) FROM conversations
+		     WHERE workstream_id = w.id AND state = 'active' AND forked_from IS NOT NULL
+		 )
+		 WHERE w.project_id = ? AND w.status = ?
+		 ORDER BY w.created_at ASC, w.id ASC`, projectID, WorkstreamActive)
 	if err != nil {
 		return nil, fmt.Errorf("store: list workstreams: %w", err)
 	}
@@ -83,7 +90,7 @@ func (s *Store) ListWorkstreams(ctx context.Context, projectID int64) ([]Workstr
 
 	var ws []Workstream
 	for rows.Next() {
-		w, err := scanWorkstream(rows)
+		w, err := scanWorkstreamForked(rows)
 		if err != nil {
 			return nil, fmt.Errorf("store: list workstreams: scan: %w", err)
 		}

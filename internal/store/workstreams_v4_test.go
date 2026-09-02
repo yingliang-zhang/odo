@@ -81,8 +81,10 @@ func TestMigrateV4DedupesActiveNames(t *testing.T) {
 	if err := s.DB().QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
 		t.Fatalf("schema_version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("schema_version = %d, want 4", version)
+	// v5 (forked_from/subagent_id) applied on open: v4's dedupe test then
+	// sees the CURRENT version — bump on the next migration's landing.
+	if version != 5 {
+		t.Errorf("schema_version = %d, want 5", version)
 	}
 }
 

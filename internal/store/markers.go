@@ -29,7 +29,7 @@ const autoDistillPayloadMatch = `e.type = 'review_action'
 // startup compensation scan's input.
 func (s *Store) ListActiveConversations(ctx context.Context, projectID int64) ([]Conversation, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.workstream_id, c.epoch, c.state, c.base_commit_sha, c.created_at
+		`SELECT c.id, c.workstream_id, c.epoch, c.state, c.base_commit_sha, c.forked_from, c.created_at
 		 FROM conversations c
 		 JOIN workstreams w ON c.workstream_id = w.id
 		 WHERE w.project_id = ? AND w.status = ? AND c.state = ?

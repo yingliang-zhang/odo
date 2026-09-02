@@ -959,6 +959,20 @@ func ListTreeNames(repoPath, sha string) ([]string, error) {
 	return names, nil
 }
 
+// GitDir returns repoPath's git metadata directory (`git rev-parse
+// --git-dir`). In a linked worktree this is an ABSOLUTE path inside the
+// main repository's .git/worktrees/<id> — writable metadata outside the
+// checkout bytes (and outside every ExtractDiff surface), which is where
+// the daemon parks per-worktree markers a CLI must find without touching
+// the diff.
+func GitDir(repoPath string) (string, error) {
+	out, err := run(repoPath, "rev-parse", "--git-dir")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // CurrentSHA returns the full HEAD commit SHA of repoPath.
 func CurrentSHA(repoPath string) (string, error) {
 	out, err := run(repoPath, "rev-parse", "HEAD")
