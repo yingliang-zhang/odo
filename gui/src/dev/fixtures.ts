@@ -626,6 +626,11 @@ export const commandCtl: Record<
 // composer path, and the real daemon journals the send before answering;
 // specs arm this where they need that journal-first truth.
 export const sendCtl = { pushPlainSends: false };
+// P1 borrow #7 (quad-audit follow-up): the mock spawn_subagent id
+// counter — a knob (not ambient detection) so sequential specs never
+// share ids; the done receipt is spec-driven (push a subagent_done row
+// through fx.ev like the daemon's drain would).
+export const subAgentCtl = { counter: 0 };
 
 // ---------- Pending counts ----------
 

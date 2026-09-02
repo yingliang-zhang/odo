@@ -75,7 +75,10 @@ export function latestCommandResults(events: OdoEvent[]): Map<string, CommandRes
     if (typeof p.name !== "string" || p.name === "") continue;
     out.set(p.name, {
       name: p.name,
-      exit_code: p.exit_code ?? 0,
+      // Quad-audit P3: default 1, never 0 — a malformed row folding as
+      // GREEN would lie about a command nobody saw succeed. Corrupt rows
+      // must fail visible (the badge reds as "exit 1").
+      exit_code: p.exit_code ?? 1,
       stdout_tail: p.stdout_tail,
       stderr_tail: p.stderr_tail,
       duration_ms: p.duration_ms ?? 0,

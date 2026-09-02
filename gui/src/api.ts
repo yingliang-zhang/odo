@@ -39,6 +39,7 @@ import type {
   CreateWorkstreamResponse,
   CurateResponse,
   DistillResponse,
+  ForkConversationResponse,
   GetSettingsResponse,
   LearningStatusResponse,
   ListAllPendingDiffsResponse,
@@ -217,6 +218,22 @@ export function saveAttachment(
 // ended before the cancel landed — a benign race, so callers may ignore it.
 export function cancel(conversationId: number, projectRoot?: string): Promise<CancelResponse> {
   return invoke<CancelResponse>("cancel", { conversationId, projectRoot: projectRoot ?? null });
+}
+// P1 borrow #6 (turn-fork, quad-audit follow-up): branch-copy the
+// conversation's journal prefix (everything up to and INCLUDING fromSeq)
+// into a fresh lane + worktree, then switch over — matches the
+// GitFork affordance on user_message bubbles. Refusals (from_seq below
+// the journal floor / past its end) come back IPC-side as errors.
+export function forkConversation(
+  conversationId: number,
+  fromSeq: number,
+  projectRoot?: string,
+): Promise<ForkConversationResponse> {
+  return invoke<ForkConversationResponse>("fork_conversation", {
+    conversationId,
+    fromSeq,
+    projectRoot: projectRoot ?? null,
+  });
 }
 
 // M19 (/loop): GUI chip buttons + design-gate verbs + notification

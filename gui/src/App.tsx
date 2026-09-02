@@ -12,6 +12,7 @@ import {
   distill,
   errorMessage,
   getSettings,
+  forkConversation,
   listAllPendingDiffs,
   listProjects,
   listTopics,
@@ -2224,6 +2225,44 @@ export default function App() {
     },
     [handleSwitchWorkstream],
   );
+  // P1 borrow #6 (turn-fork, quad-audit follow-up): the bubble GitFork
+  // affordance lands here. The daemon branch-copies the journal prefix
+  // into a fresh lane; the GUI switches over the ORDINARY path
+  // (handleSwitchWorkstream — a new lane just cold-bootstraps: no local
+  // switch-cache entry yet). Re-list like handleCreateWorkstream so the
+  // sidebar shows the lane before the switch lands on it. The bubble
+  // level already disables mid-run; the belt guard below mirrors
+  // handleRetry's second check (the prop could arrive from a stale
+  // render in the same tick the agent started).
+  const handleForkMessage = useCallback(
+    async (fromSeq: number) => {
+      const cid = conversationRef.current;
+      const root = projectRootRef.current;
+      if (cid == null) return;
+      if (agentRunning) return;
+      try {
+        const resp = unwrap(await forkConversation(cid, fromSeq, root ?? undefined));
+        const lane = resp.workstream;
+        if (lane == null || lane.id == null) {
+          setError("fork failed: the daemon reply carried no workstream");
+          return;
+        }
+        if (root != null) {
+          try {
+            const list = unwrap(await listWorkstreams(root));
+            setWorkstreams(list.workstreams ?? []);
+          } catch {
+            // A stale sidebar list is cosmetic — the next project poll
+            // re-lists; block the switch on nothing.
+          }
+        }
+        await handleSwitchWorkstream(lane.id);
+      } catch (e) {
+        setError(`fork failed: ${errorMessage(e)}`);
+      }
+    },
+    [agentRunning, handleSwitchWorkstream],
+  );
 
   // Drop the chips' dismiss timers on unmount.
   useEffect(() => {
@@ -2601,6 +2640,7 @@ export default function App() {
           // Steer queue: the panel's Drop; rows derive from `events`
           // (already passed above).
           onDropSteer={handleDropSteer}
+          onForkMessage={handleForkMessage}
         />
       </main>
       <ContextPanel
@@ -2758,6 +2798,7 @@ export default function App() {
               conversationId={conversation.id}
               agentRunning={agentRunning}
               onJumpToSeq={handleJumpToSeq}
+              onOpenChanges={handleOpenChanges}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>

@@ -443,6 +443,20 @@ async fn cancel(conversation_id: i64, project_root: Option<String>) -> Result<Va
     let req = json!({"cmd": "cancel", "conversation_id": conversation_id});
     run_command(root, req, READ_TIMEOUT).await
 }
+// P1 borrow #6 (turn-fork, quad-audit follow-up): branch-copy the
+// journal prefix at from_seq into a fresh lane + worktree. Pass-through
+// like cancel — the reply carries the new workstream + conversation
+// identity the GUI switches to over the ordinary bootstrap path.
+#[tauri::command]
+async fn fork_conversation(
+    conversation_id: i64,
+    from_seq: i64,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "fork_conversation", "conversation_id": conversation_id, "from_seq": from_seq});
+    run_command(root, req, READ_TIMEOUT).await
+}
 
 // W6 (goal queue): activate one parked goal now (the manual path when the
 // queue is held — prefs manual, errored run, or simply impatience). The
@@ -1497,6 +1511,7 @@ pub fn run() {
             bootstrap,
             send_message,
             cancel,
+            fork_conversation,
             resume_parked_goal,
             drop_parked_goal,
             loop_ctl,

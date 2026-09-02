@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yingliang-zhang/odo/internal/adapter"
@@ -38,6 +39,13 @@ const commandsFileName = "commands.json"
 // tailWriter slides the front off as bytes arrive) — a flooding command
 // can never grow a daemon buffer past the cap.
 const commandTailCap = 2048
+
+// commandKillDrain bounds the post-kill wait: after the group kill lands,
+// a grandchild that somehow missed it (or a lagging pipe teardown) can no
+// longer wedge the handler past this delay — Wait returns, the pipe copy
+// stays bounded, and the journaled timeout row is never hostage to a
+// leaked child holding a write fd.
+const commandKillDrain = time.Second
 
 // Per-command timeout policy (seconds in the schema): 0/absent takes the
 // default; anything longer is clamped to the ceiling so a hand-edited
@@ -177,6 +185,18 @@ func (s *Server) handleRunCommand(ctx context.Context, req Request) (Response, e
 	defer cancel()
 	proc := exec.CommandContext(cctx, "sh", "-c", spec.Cmd)
 	proc.Dir = dir
+	// Process-group kill (quad-audit P2, preview.go's per-shot lifecycle
+	// guarantee): sh -c is only the WRAPPER — a command that backgrounds a
+	// dev server or watcher otherwise loses its grandchildren at the
+	// deadline (the child's Kill reaches the shell only), and the survivors
+	// hold the stdout/stderr pipe write-ends open, wedging the io copy past
+	// the 600s clamp. Setpgid + a Cancel that kills the NEGATED pid retires
+	// the whole group; WaitDelay bounds the final teardown.
+	proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.Cancel = func() error {
+		return syscall.Kill(-proc.Process.Pid, syscall.SIGKILL)
+	}
+	proc.WaitDelay = commandKillDrain
 	// EnrichedEnv: the same PATH/gateway reach the agent's shell tools see
 	// — a Finder-launched daemon otherwise runs commands against a
 	// environment no login shell ever produced (k8sExec's A2-2 lesson).

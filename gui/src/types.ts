@@ -310,6 +310,17 @@ export interface EventPayload {
   stdout_tail?: string;
   stderr_tail?: string;
   duration_ms?: number;
+  // subagent_spawned / subagent_done payload fields (P1 borrow #7,
+  // quad-audit follow-up; internal/ipc/subagent.go): the isolated OMP
+  // child's identity + goal at spawn; the terminal receipt carries the
+  // child exit code, the truncated final agent_text (summary), and —
+  // when the isolated worktree produced one — the registered proposal
+  // diff's id/path (a PROPOSAL, reviewed through the ordinary
+  // accept/reject path; never auto-landed).
+  subagent_id?: string;
+  goal?: string;
+  diff_path?: string;
+  worktree_path?: string;
 
   // (timed_out rides the earlier defensive declaration at the review-
   // marker block — a deadline kill carries the same flag.)
@@ -375,6 +386,18 @@ export interface ListAllPendingDiffsResponse {
   ok: boolean;
   error?: string;
   all_pending_diffs?: DiffInfoEx[];
+}
+// fork_conversation (P1 borrow #6, quad-audit follow-up): the daemon
+// branch-copies the journal prefix (seq 1..from_seq) into a NEW
+// conversation on a fresh "<src>-fork-N" lane and replies with the new
+// lane + conversation identity — the GUI switches over the ordinary
+// bootstrap path. `path` is the fork's fresh worktree.
+export interface ForkConversationResponse {
+  ok: boolean;
+  error?: string;
+  workstream?: Workstream;
+  conversation?: Conversation;
+  path?: string;
 }
 
 export interface BootstrapResponse {

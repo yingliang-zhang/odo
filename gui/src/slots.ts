@@ -38,6 +38,10 @@ export const SLOT = {
   runsRetry: "runs-retry",
   commandsSection: "commands-section",
   commandRow: "command-row",
+  // P1 borrow #6/#7 (quad-audit follow-up): the user-bubble GitFork
+  // hover button and one nested subagent row under its parent run.
+  bubbleFork: "bubble-fork",
+  runsSubagent: "runs-subagent",
 } as const;
 
 export type SlotName = keyof typeof SLOT;

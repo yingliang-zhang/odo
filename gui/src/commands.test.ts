@@ -70,6 +70,14 @@ describe("latestCommandResults", () => {
     expect(out.get("lint")).toMatchObject({ exit_code: 2 });
     expect(out.size).toBe(2);
   });
+  // Quad-audit P3: a malformed row (no exit_code journaled) MUST fail
+  // visible — folding it as 0 would render a GREEN badge for a command
+  // outcome nobody witnessed.
+  it("a row without exit_code defaults to 1 so the badge reds", () => {
+    const res = latestCommandResults([ev(1, { name: "mystery", stdout_tail: "huh?" })]).get("mystery")!;
+    expect(res.exit_code).toBe(1);
+    expect(commandBadge(res)).toEqual({ ok: false, text: "exit 1" });
+  });
 });
 
 describe("commandBadge / formatCommandDuration", () => {

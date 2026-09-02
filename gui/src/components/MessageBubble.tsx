@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, Check, Copy, ExternalLink, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, ExternalLink, GitFork, Loader2, X } from "lucide-react";
 import { basename } from "../files";
 import { openPath, readFile } from "../api";
 import { extractHttpUrls, findImageRefs, imageDataUrl, isImagePath, isLocalPreviewUrl, looksLikeFilePath } from "../preview";
@@ -127,6 +127,51 @@ function CopyBubbleButton({ text }: { text: string }) {
     </button>
   );
 }
+// P1 borrow #6 (turn-fork, quad-audit follow-up): hover GitFork
+// affordance in the bubble-copy slot's left neighbor (top-1.5 right-7 —
+// right-2 hosts the 20px copy chip). Click branch-copies the journal
+// through THIS bubble's seq into a fresh lane and the App handler
+// switches over (the ordinary bootstrap path). Guard mirrors the DX
+// Retry button: a fork mid-run would race the daemon's write lane, so
+// the button disables while the agent runs with the same busy tooltip.
+const FORK_BUSY_LABEL = "Forking…";
+function ForkBubbleButton({ seq, agentRunning, onFork }: { seq: number; agentRunning?: boolean; onFork: (seq: number) => Promise<void> | void }) {
+  const [busy, setBusy] = useState(false);
+  const disabled = busy || agentRunning === true;
+  const label = busy
+    ? FORK_BUSY_LABEL
+    : agentRunning === true
+      ? "Agent busy — wait for the current run to finish before forking"
+      : "Fork conversation from this message";
+  return (
+    <button
+      type="button"
+      data-slot={SLOT.bubbleFork}
+      className="bubble-fork absolute top-1.5 right-7 z-10 inline-flex cursor-pointer items-center gap-0.5 rounded-md border border-border bg-panel-float p-1 text-text-dim opacity-0 transition-opacity hover:text-text group-hover/bubble:opacity-100 focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
+      aria-label={busy ? FORK_BUSY_LABEL : disabled ? "Agent busy — wait for the current run to finish before forking" : `Fork conversation from message #${seq}`}
+      title={label}
+      disabled={disabled}
+      onClick={() => {
+        setBusy(true);
+        // Busy clears when the handler settles; a successful fork swaps
+        // the transcript out from under this button (unmount), so the
+        // reset matters only for the refusal path.
+        Promise.resolve(onFork(seq))
+          .catch(() => {})
+          .finally(() => setBusy(false));
+      }}
+    >
+      {busy ? (
+        <>
+          <Loader2 size={12} className="animate-spin" aria-hidden />
+          <span className="text-[9px]">forking…</span>
+        </>
+      ) : (
+        <GitFork size={12} aria-hidden />
+      )}
+    </button>
+  );
+}
 
 // Hover timestamp: short clock label, absolute date-time on the tooltip.
 // Invalid/missing created_at (never expected from the journal) renders nothing.
@@ -226,7 +271,7 @@ function OpenLiveButton({ url, onOpenLiveUrl }: { url: string; onOpenLiveUrl: (u
 // Belt B: agent_text renders as markdown; `highlight` wraps occurrences of
 // the chat-search query in <mark>. The .bubble-mount wrapper carries the
 // data-seq jump anchor without disturbing the flex layout (display: contents).
-export default memo(function MessageBubble({ event, highlight, onEditUserMessage, projectRoot, onPreviewFile, onOpenLiveUrl }: {
+export default memo(function MessageBubble({ event, highlight, onEditUserMessage, projectRoot, onPreviewFile, onOpenLiveUrl, onForkMessage, agentRunning }: {
   event: OdoEvent;
   highlight?: string;
   onEditUserMessage?: (text: string) => void;
@@ -236,6 +281,13 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
   // keep rendering; each affordance mounts only when its callback exists.
   onPreviewFile?: (path: string) => void;
   onOpenLiveUrl?: (url: string) => void;
+  // P1 borrow #6: App-wired fork affordance, threaded by ChatSurface (an
+  // async handler — the busy state clears when the invoke + switch
+  // settle). Optional like the other leaf affordances; the button mounts
+  // only when the callback exists (foreign surfaces keep rendering).
+  onForkMessage?: (fromSeq: number) => Promise<void> | void;
+  // Retry-pattern guard: fork refuses while a run is live.
+  agentRunning?: boolean;
 }) {
   const p = event.payload ?? {};
   // GLM B4: copy feedback for tool results (mirrors CodeBlock pattern).
@@ -247,6 +299,7 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
       body = (
         <div className="bubble bubble-user group/bubble relative self-end bg-accent-user text-white flex flex-col rounded-[12px_12px_4px_12px] shadow-[0_1px_2px_rgba(0,0,0,0.25)] max-w-[82%] px-3.5 pt-2.5 pb-[20px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <CopyBubbleButton text={p.text ?? ""} />
+          {onForkMessage && <ForkBubbleButton seq={event.seq} agentRunning={agentRunning} onFork={onForkMessage} />}
           <div className="bubble-text">{highlightText(p.text ?? "", highlight, "u")}</div>
           {p.steer && (
             <div className="steer-tag inline-block mt-1.5 self-end rounded-lg border border-white/28 bg-white/8 px-2 py-px font-mono text-micro text-white/72" title="steered the running agent — consumed by the follow-up run">

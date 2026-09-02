@@ -331,3 +331,82 @@ describe("commands hub (Odo DX wave, Feature 5)", () => {
     await waitFor(() => expect(getByText(/no command named/)).toBeTruthy());
   });
 });
+
+// P1 borrow #7 (subagent report, quad-audit follow-up): nested rows under
+// the parent run — prefix/goal/status/dot, the view-diff link riding the
+// Changes-tab path, and the flat fallback for unattributed rows.
+describe("subagent rows", () => {
+  it("nests spawned children under their parent run, in spawn order", () => {
+    const { container } = renderPanel([
+      ev(1, "user_message", { text: "parent goal" }),
+      ev(2, "subagent_spawned", { subagent_id: "sub-1", goal: "first child" }),
+      ev(3, "subagent_spawned", { subagent_id: "sub-2", goal: "second child" }),
+      ev(4, "subagent_done", { subagent_id: "sub-2", exit_code: 0, summary: "done" }),
+      ev(5, "agent_done", { summary: "parent done" }),
+    ]);
+    const subs = [...container.querySelectorAll<HTMLElement>('[data-slot="runs-subagent"]')];
+    expect(subs).toHaveLength(2);
+    expect(subs[0].dataset.subagent).toBe("sub-1");
+    expect(subs[0].dataset.status).toBe("running");
+    expect(subs[1].dataset.subagent).toBe("sub-2");
+    expect(subs[1].dataset.status).toBe("done");
+    // Nesting contract: the sub rows immediately FOLLOW the parent run
+    // row in DOM order, before any later run row.
+    const ordered = [...container.querySelectorAll<HTMLElement>(".runs-row, .runs-subrow")].map((el) =>
+      el.dataset.subagent ?? el.dataset.seq,
+    );
+    expect(ordered).toEqual(["1", "sub-1", "sub-2"]);
+    expect(container.querySelectorAll(".runs-sub-prefix")).toHaveLength(2);
+  });
+
+  it("marks failures and renders the view-diff link only when a diff registered", () => {
+    const onOpenChanges = vi.fn();
+    const { container, queryByText, getByText } = renderPanel(
+      [
+        ev(1, "user_message", { text: "parent goal" }),
+        ev(2, "subagent_spawned", { subagent_id: "sub-1", goal: "child with proposal" }),
+        ev(3, "subagent_done", { subagent_id: "sub-1", exit_code: 0, diff_id: 42 }),
+        ev(4, "agent_done", { summary: "parent done" }),
+        ev(5, "user_message", { text: "second goal" }),
+        ev(6, "subagent_spawned", { subagent_id: "sub-2", goal: "failed child" }),
+        ev(7, "subagent_done", { subagent_id: "sub-2", exit_code: 1 }),
+        ev(8, "agent_done", { summary: "done" }),
+      ],
+      { onOpenChanges },
+    );
+    expect(container.querySelector<HTMLElement>('[data-subagent="sub-2"]')!.dataset.status).toBe("failed");
+    const link = getByText("view diff");
+    expect((link as HTMLElement).getAttribute("title")).toContain("diff #42");
+    fireEvent.click(link);
+    expect(onOpenChanges).toHaveBeenCalledTimes(1);
+    // The diff-less failed row stays inert: no link, no button role.
+    expect(queryByText("view diff", { selector: '[data-subagent="sub-2"] *' })).toBeNull();
+  });
+
+  it("the whole row opens the Changes tab when a diff is registered", () => {
+    const onOpenChanges = vi.fn();
+    const { container } = renderPanel(
+      [
+        ev(1, "user_message", { text: "parent goal" }),
+        ev(2, "subagent_spawned", { subagent_id: "sub-1", goal: "child" }),
+        ev(3, "subagent_done", { subagent_id: "sub-1", exit_code: 0, diff_id: 7 }),
+        ev(4, "agent_done", { summary: "done" }),
+      ],
+      { onOpenChanges },
+    );
+    const row = container.querySelector<HTMLElement>('[data-subagent="sub-1"]')!;
+    expect(row.getAttribute("role")).toBe("button");
+    fireEvent.click(row);
+    expect(onOpenChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it("unattributed rows fall back to the flat section instead of vanishing", () => {
+    const { container, getByText } = renderPanel([
+      ev(1, "subagent_spawned", { subagent_id: "sub-orphan", goal: "no run ever opened" }),
+      ev(2, "subagent_done", { subagent_id: "sub-orphan", exit_code: 0 }),
+    ]);
+    expect(getByText(/without an attributed run/i)).toBeTruthy();
+    const row = container.querySelector<HTMLElement>('[data-subagent="sub-orphan"]')!;
+    expect(row.dataset.status).toBe("done");
+  });
+});

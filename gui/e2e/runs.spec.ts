@@ -206,3 +206,65 @@ test("commands hub: registered commands run and badge from the result", async ({
   await expect(lintRow.locator(".command-badge")).toContainText("exit 1", POLL);
   await expect(lintRow.locator(".command-stderr")).toContainText("gofmt");
 });
+
+// P1 borrow #6/#7 (quad-audit follow-up): the isolated child's lifecycle
+// rows fold under their parent run; the registered proposal diff opens
+// through the SAME pending-diff flow a normal run's diff uses (Changes
+// tab, DiffViewer card — no new viewer).
+test("subagent rows nest under the parent run; view diff opens Changes", async ({ page }) => {
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    const e = fx.ev("user_message", { text: "parent run goal — spawns a child" }, 1);
+    fx.events.push(e);
+    fx.events.push(fx.ev("subagent_spawned", {
+      subagent_id: "sub-e2e-1",
+      goal: "audit the panel fold",
+      run_dir_id: "sub-e2e-1",
+      worktree_path: "/mock/worktrees/sub-e2e-1",
+    }, 1));
+    fx.events.push(fx.ev("subagent_done", {
+      subagent_id: "sub-e2e-1",
+      goal: "audit the panel fold",
+      exit_code: 0,
+      summary: "fold audited",
+      diff_id: 42,
+      diff_path: ".odo/diffs/sub-e2e-1.patch",
+    }, 1));
+    fx.events.push(fx.ev("agent_done", { summary: "parent settled" }, 1));
+    // The registered proposal diff: the Changes tab's pending list is its
+    // surface (subagent diffs are pending diffs, never auto-landed).
+    fx.changesDiffs.push({
+      id: 42,
+      status: "pending",
+      path: ".odo/diffs/sub-e2e-1.patch",
+      content: "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+    });
+  });
+  await openRunsTab(page);
+  const row = page.locator('[data-slot="runs-subagent"]', { hasText: "audit the panel fold" });
+  await expect(row).toBeVisible(POLL);
+  await expect(row).toHaveAttribute("data-status", "done");
+  await expect(row).toContainText("└ sub:");
+  await row.locator('text=view diff').click();
+  // The SAME path a normal pending diff takes: Changes tab with the card.
+  await expect(page.locator('[data-slot="diff-card"]').first()).toBeVisible(POLL);
+});
+
+// P1 borrow #6 (turn-fork): the user-bubble GitFork affordance forks the
+// journal prefix through fork_conversation and lands the app on the fresh
+// lane — the sidebar row and the trimmed transcript are the observable
+// contract (the mock mirrors the daemon's prefix copy).
+test("fork from a user bubble switches to the new fork lane", async ({ page }) => {
+  const fork = page.locator(".bubble-user .bubble-fork").first();
+  await expect(page.locator(".bubble-user").first()).toBeVisible(POLL);
+  await fork.click({ force: true }); // opacity-0 until hover; force keeps the hover race out
+  // The re-listed sidebar shows the fresh lane…
+  const sidebar = page.locator(".sidebar");
+  await expect(sidebar).toContainText("main-fork-1", POLL);
+  // …and the app lands on the forked conversation: the fixture's first
+  // bubble was seq 1, so the copied prefix holds exactly ONE user bubble
+  // and none of the agent rows that followed it in the source lane.
+  await expect(page.locator(".bubble-user")).toHaveCount(1, POLL);
+  await expect(page.locator(".bubble-user").first()).toContainText("Add a GFM table renderer");
+});

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Odo DX wave — run_command (Run/Test hub) coverage: config validation
@@ -164,6 +165,33 @@ func TestRunCommandTimeout(t *testing.T) {
 	rows := commandResultPayloads(t, rig, convID)
 	if len(rows) != 1 || rows[0]["timed_out"] != true {
 		t.Fatalf("journaled timeout row = %v, want one timed_out true", rows)
+	}
+}
+
+// TestRunCommandKillsProcessGroup: the deadline retires the whole process
+// GROUP, not just the sh -c wrapper (quad-audit P2). The command
+// background-forks a sleeper AND blocks on a foreground one: pre-fix the
+// shell died alone, the surviving grandchild kept the stdout/stderr pipe
+// write-ends open, and the handler wedged on the io copy until the sleeper
+// exited on its own (300s here). Post-fix the group dies with the parent,
+// the copy sees EOF, and the handler returns around the 1s budget.
+func TestRunCommandKillsProcessGroup(t *testing.T) {
+	rig, root, convID := commandsRig(t)
+	writeCommandsJSON(t, root, `{"version": 1, "commands": [
+		{"name": "nested", "cmd": "sleep 300 & sleep 300", "timeout": 1}
+	]}`)
+	start := time.Now()
+	res := rig.call(t, Request{Cmd: CmdRunCommand, ProjectRoot: root, ConversationID: convID, Name: "nested"}).CommandResult
+	elapsed := time.Since(start)
+	if res == nil || !res.TimedOut || res.ExitCode != -1 {
+		t.Fatalf("nested-timeout result = %+v, want exit -1 with timed_out", res)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("handler took %v — the leaked grandchild wedged the wait (want ~1s; the sleeper runs 300s untouched)", elapsed)
+	}
+	rows := commandResultPayloads(t, rig, convID)
+	if len(rows) != 1 || rows[0]["timed_out"] != true {
+		t.Fatalf("journaled group-kill row = %v, want one timed_out true", rows)
 	}
 }
 

@@ -234,6 +234,67 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       fx.cancelCount.n += 1;
       return { ok: true };
     }
+    // P1 borrow #6 (turn-fork): mirrors handleForkConversation's honest
+    // shape — prefix-copy (seq ≤ from_seq, same types/payloads) into a
+    // fresh "<src>-fork-N" lane + conversation, refusal classes by
+    // message text. The GUI then boots the new lane via bootstrap, which
+    // makeBootstrap resolves (lane + conversation registered below).
+    case "fork_conversation": {
+      const convId = Number(args?.conversationId ?? 1);
+      const fromSeq = Number(args?.fromSeq ?? 0);
+      const sourceRows = fx.events.filter((e) => e.conversation_id === convId);
+      const maxSeq = sourceRows.reduce((m, e) => Math.max(m, e.seq), 0);
+      if (fromSeq < 1) throw new Error(`fork_conversation: from_seq ${fromSeq} is below the journal floor`);
+      if (fromSeq > maxSeq) throw new Error(`fork_conversation: source journal ends at seq ${maxSeq} — cannot fork from ${fromSeq}`);
+      const root = (args?.projectRoot as string) ?? fx.projects[0].root;
+      const lanes = (fx.workstreams[root] ??= []);
+      const srcLane = lanes.find((w) => w.id === fx.conversations[convId]?.workstream_id) ?? lanes[0];
+      const baseName = `${srcLane?.name ?? "lane"}-fork-`;
+      let n = 1;
+      while (lanes.some((w) => w.name === `${baseName}${n}`)) n += 1;
+      const newId = Math.max(...lanes.map((w) => w.id), 0) + 1;
+      const workstream = {
+        id: newId,
+        project_id: srcLane?.project_id ?? 1,
+        name: `${baseName}${n}`,
+        branch: srcLane?.branch ?? "main",
+        status: "active" as const,
+        created_at: new Date().toISOString(),
+      };
+      lanes.push(workstream);
+      const newConvId = 1000 + newId;
+      const conversation = {
+        id: newConvId,
+        workstream_id: newId,
+        epoch: 1,
+        state: "active" as const,
+        created_at: new Date().toISOString(),
+      };
+      // makeBootstrap keys conversations by WORKSTREAM id (the daemon's
+      // active-conversation-per-lane row) — register under the lane id.
+      fx.conversations[newId] = conversation;
+      for (const e of sourceRows.filter((e) => e.seq <= fromSeq)) {
+        fx.events.push(fx.ev(e.type, e.payload as Record<string, unknown>, newConvId));
+      }
+      return { ok: true, workstream, conversation, path: `/mock/worktrees/${workstream.name}` };
+    }
+    // P1 borrow #7 (subagent report): `odo spawn` is CLI→socket, so NO
+    // GUI surface invokes this — the case exists so browser dev and e2e
+    // can journal a spawned child without a daemon, then settle it by
+    // pushing the subagent_done receipt through fx.ev like any spec.
+    case "spawn_subagent": {
+      const goal = String(args?.goal ?? "").trim();
+      if (goal === "") throw new Error("spawn_subagent: goal is required");
+      const convId = Number(args?.conversationId ?? 1);
+      const id = `sub-mock-${fx.subAgentCtl.counter += 1}`;
+      fx.events.push(fx.ev("subagent_spawned", {
+        subagent_id: id,
+        goal,
+        run_dir_id: id,
+        worktree_path: `/mock/worktrees/${id}`,
+      }, convId));
+      return { ok: true, subagent: { subagent_id: id, run_id: id, worktree_path: `/mock/worktrees/${id}` } };
+    }
     // M19 (/loop): chip buttons + notification receipt. Journals the
     // daemon-true row so the poll path delivers exactly what
     // loop_journal.go's journalLoop would (the fold reads payload.kind);

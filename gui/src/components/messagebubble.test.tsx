@@ -287,3 +287,78 @@ describe("ANSI agent_text (Odo DX wave, Feature 4)", () => {
     expect(container.querySelector(".ansi-text")).toBeNull();
   });
 });
+
+// P1 borrow #6 (turn-fork, quad-audit follow-up): the hover GitFork
+// affordance on user_message bubbles — mount gating, the seq argument,
+// the busy flip, and the disabled-while-running guard (Retry pattern).
+describe("fork affordance (bubble-fork)", () => {
+  it("renders on user bubbles only when onForkMessage is threaded", () => {
+    const withCb = render(
+      <MessageBubble event={eventWithPayload("user_message", { text: "forkable" })} onForkMessage={() => {}} />,
+    );
+    expect(withCb.container.querySelector(".bubble-fork")).not.toBeNull();
+    withCb.unmount();
+
+    const withoutCb = render(<MessageBubble event={eventWithPayload("user_message", { text: "no fork" })} />);
+    expect(withoutCb.container.querySelector(".bubble-fork")).toBeNull();
+    withoutCb.unmount();
+
+    const agent = render(
+      <MessageBubble event={event("agent_text", "agent bubble")} onForkMessage={() => {}} />,
+    );
+    expect(agent.container.querySelector(".bubble-fork")).toBeNull();
+  });
+
+  it("reveal rides group-hover/bubble like the copy chip", () => {
+    const { container } = render(
+      <MessageBubble event={eventWithPayload("user_message", { text: "hover me" })} onForkMessage={() => {}} />,
+    );
+    const btn = container.querySelector<HTMLElement>(".bubble-fork")!;
+    expect(btn.className).toContain("opacity-0");
+    expect(btn.className).toContain("group-hover/bubble:opacity-100");
+  });
+
+  it("hands the bubble's OWN seq to the handler and flips to the busy label until it settles", async () => {
+    let resolve: () => void = () => {};
+    const onFork = vi.fn(() => new Promise<void>((r) => { resolve = r; }));
+    const evseq = { ...eventWithPayload("user_message", { text: "branch here" }), seq: 41 };
+    const { container } = render(<MessageBubble event={evseq} onForkMessage={onFork} />);
+    const btn = container.querySelector<HTMLButtonElement>(".bubble-fork")!;
+    expect(btn.getAttribute("aria-label")).toBe("Fork conversation from message #41");
+    fireEvent.click(btn);
+    expect(onFork).toHaveBeenCalledTimes(1);
+    expect(onFork).toHaveBeenCalledWith(41);
+    expect(btn.getAttribute("aria-label")).toBe("Forking…");
+    expect(btn.disabled).toBe(true);
+    resolve();
+    await waitFor(() => expect(btn.getAttribute("aria-label")).toBe("Fork conversation from message #41"));
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("disables with the Retry-pattern busy tooltip while the agent runs", () => {
+    const onFork = vi.fn();
+    const { container } = render(
+      <MessageBubble
+        event={eventWithPayload("user_message", { text: "mid run" })}
+        onForkMessage={onFork}
+        agentRunning={true}
+      />,
+    );
+    const btn = container.querySelector<HTMLButtonElement>(".bubble-fork")!;
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute("title")).toContain("Agent busy");
+    fireEvent.click(btn);
+    expect(onFork).not.toHaveBeenCalled();
+  });
+
+  it("clears the busy label on a rejected fork (the refusal path keeps the button alive)", async () => {
+    const onFork = vi.fn(() => Promise.reject(new Error("fork_conversation: past the journal end")));
+    const { container } = render(
+      <MessageBubble event={eventWithPayload("user_message", { text: "refused" })} onForkMessage={onFork} />,
+    );
+    const btn = container.querySelector<HTMLButtonElement>(".bubble-fork")!;
+    fireEvent.click(btn);
+    await waitFor(() => expect(btn.disabled).toBe(false));
+    expect(btn.getAttribute("aria-label")).toContain("Fork conversation");
+  });
+});

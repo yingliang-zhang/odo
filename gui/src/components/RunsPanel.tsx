@@ -11,11 +11,11 @@
 // events actually change and needs no activation refetch — the journal
 // is the cache.
 
-import { memo, useMemo } from "react";
+import { memo, useMemo, Fragment } from "react";
 import type { KeyboardEvent } from "react";
 import type { OdoEvent } from "../types";
 import { cn } from "../lib/utils";
-import { deriveRuns, type RunRow } from "../runs";
+import { deriveRuns, subagentRows, type RunRow, type SubagentRow } from "../runs";
 import { formatBytes, formatTokens } from "../stats";
 import { SLOT } from "../slots";
 import { reviewReceipts, ReviewRow } from "./ReviewReceipts";
@@ -48,6 +48,11 @@ interface Props {
   // Read-only transcript jump: row click → the run start's seq (App owns
   // the data-seq anchor scroll; P2.4 deep-link).
   onJumpToSeq?: (seq: number) => void;
+  // P1 borrow #7 (quad-audit follow-up): a subagent row carrying a
+  // registered proposal diff opens the Changes tab through the SAME path
+  // the chat affordance uses (handleOpenChanges — the panel's existing
+  // diff flow; no new viewer).
+  onOpenChanges?: () => void;
   // Odo DX wave (Feature 1): retry affordance guard — while a run is
   // live the button renders disabled with the busy tooltip (a second
   // send behind the daemon's queue would collide at the next write).
@@ -64,6 +69,83 @@ const STATUS_DOT: Record<RunRow["status"], string> = {
   ok: "bg-[var(--ok)]",
   error: "bg-[var(--err)]",
 };
+
+// Subagent row dot: same ramp as the run rows (running docks on the
+// bg-run tint, terminal rows read their verdict).
+const SUBAGENT_DOT: Record<SubagentRow["status"], string> = {
+  running: "bg-[var(--bg-run)]",
+  done: "bg-[var(--ok)]",
+  failed: "bg-[var(--err)]",
+};
+
+// P1 borrow #7 (subagent report): one nested row under its parent run —
+// "└ sub:" prefix, the 60-char goal excerpt, status chip, and the
+// view-diff link when the done receipt registered a proposal diff. The
+// whole row is the diff click target (open the Changes tab — the
+// pending-diff flow runs there); without a diff the row is inert and
+// click-free. Evidence (summary/extraction error) rides the title.
+function SubagentRowView({ row, onOpenChanges }: { row: SubagentRow; onOpenChanges?: () => void }) {
+  const open = row.diffId != null && onOpenChanges != null ? () => onOpenChanges() : null;
+  const title = [
+    `subagent ${row.id} — spawned at seq ${row.spawnSeq}`,
+    row.exitCode != null ? `exit ${row.exitCode}` : null,
+    row.summary ?? null,
+    row.error ?? null,
+  ]
+    .filter((s) => s != null)
+    .join("\n");
+  return (
+    <div
+      className={cn(
+        "runs-subrow flex items-baseline gap-2 border-b border-[var(--border)] bg-[var(--bg-raised)] py-1.5 pr-3 pl-9",
+        open != null && "cursor-pointer hover:bg-[var(--bg)]",
+      )}
+      data-slot={SLOT.runsSubagent}
+      data-subagent={row.id}
+      data-status={row.status}
+      title={title}
+      onClick={open ?? undefined}
+      role={open != null ? "button" : undefined}
+      tabIndex={open != null ? 0 : undefined}
+      onKeyDown={
+        open != null
+          ? (e: KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                open();
+              }
+            }
+          : undefined
+      }
+    >
+      <span className={cn("runs-dot inline-block h-1.5 w-1.5 shrink-0 self-center rounded-full", SUBAGENT_DOT[row.status])} aria-hidden />
+      <span className="runs-sub-prefix shrink-0 font-mono text-[11px] text-[var(--text-dim)]" aria-hidden>└ sub:</span>
+      <span className="runs-sub-goal min-w-0 flex-1 truncate text-[12px] text-[var(--text-dim)]">{row.goal}</span>
+      <span
+        className={cn(
+          "runs-sub-status shrink-0 text-[11px]",
+          row.status === "failed" ? "text-[var(--err-text)]" : "text-[var(--text-dim)]",
+        )}
+      >
+        {row.status}
+      </span>
+      {row.diffId != null && (
+        <button
+          type="button"
+          className="runs-sub-diff inline-flex shrink-0 cursor-pointer items-center gap-0.5 rounded border border-[var(--border)] bg-transparent px-1.5 py-px text-[10px] text-[var(--text-dim)] hover:border-[var(--accent)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={onOpenChanges == null}
+          title={`view proposal diff #${row.diffId} in the Changes tab`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenChanges?.();
+          }}
+        >
+          view diff
+        </button>
+      )}
+    </div>
+  );
+}
 
 // M3 run-status formatting (ChatSurface's formatElapsed, private there):
 // `<m>m <s>s`, bare seconds under a minute ("35s").
@@ -232,9 +314,29 @@ function RunRowView({ run, onJumpToSeq, agentRunning, retrying, onRetry }: {
   );
 }
 
-function RunsPanel({ events, currentModel, onJumpToSeq, agentRunning, conversationId, projectRoot }: Props) {
+function RunsPanel({ events, currentModel, onJumpToSeq, agentRunning, conversationId, projectRoot, onOpenChanges }: Props) {
   const runs = useMemo(() => deriveRuns(events), [events]);
   const receipts = useMemo(() => reviewReceipts(events), [events]);
+  // P1 borrow #7: isolated-child rows, grouped for nesting under the
+  // parent run. A row attributed to a run that fell outside the 100-row
+  // cap (or journaled before any run — defensive) renders in the flat
+  // fallback section: nothing a real journal could produce vanishes.
+  const { subByParent, subFlat } = useMemo(() => {
+    const inPanel = new Set(runs.map((r) => r.startSeq));
+    const byParent = new Map<number, SubagentRow[]>();
+    const flat: SubagentRow[] = [];
+    for (const s of subagentRows(events)) {
+      const host = s.parentRunStartSeq;
+      if (host != null && inPanel.has(host)) {
+        const list = byParent.get(host) ?? [];
+        list.push(s);
+        byParent.set(host, list);
+      } else {
+        flat.push(s);
+      }
+    }
+    return { subByParent: byParent, subFlat: flat };
+  }, [events, runs]);
   const hub = conversationId != null ? (
     <CommandsSection conversationId={conversationId} projectRoot={projectRoot} events={events} />
   ) : null;
@@ -261,7 +363,7 @@ function RunsPanel({ events, currentModel, onJumpToSeq, agentRunning, conversati
     },
     [agentRunning, retryBusy, projectRoot],
   );
-  if (runs.length === 0 && receipts.length === 0) {
+  if (runs.length === 0 && receipts.length === 0 && subFlat.length === 0) {
     return (
       <div className="mem-body">
         {currentModel != null && (
@@ -278,15 +380,27 @@ function RunsPanel({ events, currentModel, onJumpToSeq, agentRunning, conversati
         <div className="mem-section-title">coding model: {currentModel}</div>
       )}
       {runs.map((run) => (
-        <RunRowView
-          key={run.startSeq}
-          run={run}
-          onJumpToSeq={onJumpToSeq}
-          agentRunning={agentRunning}
-          retrying={retryBusy === run.startSeq}
-          onRetry={handleRetry}
-        />
+        <Fragment key={run.startSeq}>
+          <RunRowView
+            run={run}
+            onJumpToSeq={onJumpToSeq}
+            agentRunning={agentRunning}
+            retrying={retryBusy === run.startSeq}
+            onRetry={handleRetry}
+          />
+          {subByParent.get(run.startSeq)?.map((s) => (
+            <SubagentRowView key={s.id} row={s} onOpenChanges={onOpenChanges} />
+          ))}
+        </Fragment>
       ))}
+      {subFlat.length > 0 && (
+        <>
+          <div className="mem-section-title">subagents — journal receipts without an attributed run</div>
+          {subFlat.map((s) => (
+            <SubagentRowView key={s.id} row={s} onOpenChanges={onOpenChanges} />
+          ))}
+        </>
+      )}
       {retryError != null && <div className="settings-error">{retryError}</div>}
       {hub}
       {receipts.length > 0 && (

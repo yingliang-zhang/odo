@@ -138,6 +138,11 @@ interface Props {
   // tab in file mode, localhost URLs open it in live (sandboxed) mode.
   onPreviewFile?: (path: string) => void;
   onOpenLiveUrl?: (url: string) => void;
+  // P1 borrow #6 (turn-fork, quad-audit follow-up): App-wired fork
+  // affordance on user_message bubbles (GitFork hover chip). Async — the
+  // bubble's "forking…" state clears when the invoke + lane switch
+  // settle. ChatSurface threads it to MessageBubble like onPreviewFile.
+  onForkMessage?: (fromSeq: number) => Promise<void> | void;
   // P2.2: Runs-tab jump — `{seq, n}` re-fires identical requests via the
   // nonce (memoryFocus pattern); the target's run group is forced into
   // the render window before scrolling to its data-seq anchor.
@@ -555,6 +560,7 @@ function ChatSurface({
   onOpenChanges,
   onPreviewFile,
   onOpenLiveUrl,
+  onForkMessage,
   focusSeq = null,
   onFocusSeqLanded,
   distillLocked = false,
@@ -1697,7 +1703,7 @@ function ChatSurface({
                 const items = runRenderItems(group.events);
                 return items.map((item, itemIdx) => {
                   if (item.kind === "bubble") {
-                    return <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} />;
+                    return <MessageBubble key={item.event.seq} event={item.event} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} onForkMessage={onForkMessage} agentRunning={agentRunning} />;
                   }
                   // ui/message-stream (Hermes parity): a lone call+result
                   // renders inline — a "1 tool call" wrapper costs a click
@@ -1707,7 +1713,7 @@ function ChatSurface({
                     return (
                       <Fragment key={`tools-${item.events[0].seq}`}>
                         {item.events.map((ev) => (
-                          <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} />
+                          <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} onForkMessage={onForkMessage} agentRunning={agentRunning} />
                         ))}
                       </Fragment>
                     );
@@ -1733,7 +1739,7 @@ function ChatSurface({
                         )}
                       </summary>
                       {item.events.map((ev) => (
-                        <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} />
+                        <MessageBubble key={ev.seq} event={ev} highlight={activeHighlight} onEditUserMessage={handleEditMessage} projectRoot={projectRoot} onPreviewFile={onPreviewFile} onOpenLiveUrl={onOpenLiveUrl} onForkMessage={onForkMessage} agentRunning={agentRunning} />
                       ))}
                     </details>
                   );

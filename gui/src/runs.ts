@@ -183,3 +183,94 @@ export function deriveRuns(events: OdoEvent[], cap: number = 100): RunRow[] {
   runs.sort((a, b) => b.startSeq - a.startSeq);
   return runs.slice(0, cap);
 }
+// P1 borrow #7 (subagent report, quad-audit follow-up): one row per
+// isolated spawn_subagent child, folded from the parent conversation's
+// subagent_spawned / subagent_done rows (internal/ipc/subagent.go — the
+// daemon journals into the PARENT journal with a subagent_id tag, so the
+// panel needs zero new IPC, same journal-replay posture as deriveRuns).
+export interface SubagentRow {
+  // "sub-"-prefixed runDirID — the security boundary name the daemon
+  // journaled (also the subagent_id payload key on tagged agent events).
+  id: string;
+  goal: string;
+  spawnSeq: number;
+  // running = spawned, no done row yet (a daemon crash renders exactly
+  // this until boot recovery journals the synthetic done); failed =
+  // exit_code ≠ 0 on the done receipt; done otherwise.
+  status: "running" | "done" | "failed";
+  doneSeq?: number;
+  summary?: string;
+  // Registration/extraction trouble rides the done row's error field —
+  // NOT a run failure (status reads exit_code alone); the row surfaces
+  // it in the title like the run evidence line does.
+  error?: string;
+  exitCode?: number;
+  // The registered proposal diff (never auto-landed) — the row grows the
+  // "view diff" link when present.
+  diffId?: number;
+  // Attribution: the startSeq of the parent RUN open when the spawn
+  // journaled (the row nests under it). Absent only when no run ever
+  // opened before the spawn (a spawn CAN only journal mid-run today —
+  // `odo spawn` rides the agent's run — the flat fallback keeps any
+  // journal nightmare visible instead of dropping it).
+  parentRunStartSeq?: number;
+}
+
+export const SUBAGENT_GOAL_EXCERPT = 60;
+
+// Parent-run window helper for subagent attribution: deriveRuns' own
+// grammar in miniature (plain send / run_prompt opens, terminal closes)
+// so the fold knows which run was open at each spawn's seq.
+function parentRunAt(sorted: OdoEvent[], spawnSeq: number): number | undefined {
+  let open: number | undefined;
+  let last: number | undefined;
+  for (const ev of sorted) {
+    if (ev.seq >= spawnSeq) break;
+    const p: EventPayload = ev.payload ?? {};
+    if (ev.type === "user_message" && !p.steer && !p.park && (p.text ?? "").trim() !== "") {
+      open = ev.seq;
+      last = ev.seq;
+    } else if (ev.type === "review_action" && p.action === "run_prompt") {
+      open = ev.seq;
+      last = ev.seq;
+    } else if (ev.type === "agent_done" || (ev.type === "agent_error" && p.odo !== true)) {
+      open = undefined;
+    }
+  }
+  return open ?? last;
+}
+
+export function subagentRows(events: OdoEvent[]): SubagentRow[] {
+  const sorted = [...events].sort((a, b) => a.seq - b.seq);
+  const rows: SubagentRow[] = [];
+  const byId = new Map<string, SubagentRow>();
+  for (const ev of sorted) {
+    const p: EventPayload = ev.payload ?? {};
+    if (ev.type === "subagent_spawned") {
+      const id = typeof p.subagent_id === "string" ? p.subagent_id : "";
+      if (id === "" || byId.has(id)) continue; // malformed/dup rows fold to nothing
+      const flat = (p.goal ?? "").trim().replace(/\s+/g, " ");
+      byId.set(id, {
+        id,
+        goal: flat.length > SUBAGENT_GOAL_EXCERPT ? `${flat.slice(0, SUBAGENT_GOAL_EXCERPT)}…` : flat,
+        spawnSeq: ev.seq,
+        status: "running",
+        parentRunStartSeq: parentRunAt(sorted, ev.seq),
+      });
+      rows.push(byId.get(id)!);
+    } else if (ev.type === "subagent_done") {
+      const id = typeof p.subagent_id === "string" ? p.subagent_id : "";
+      const row = byId.get(id);
+      if (row == null || row.doneSeq != null) continue; // orphan/dup done closes nothing twice
+      row.doneSeq = ev.seq;
+      row.exitCode = typeof p.exit_code === "number" ? p.exit_code : 1;
+      row.status = row.exitCode === 0 ? "done" : "failed";
+      if (typeof p.summary === "string" && p.summary !== "") row.summary = p.summary;
+      if (typeof p.error === "string" && p.error !== "") row.error = p.error;
+      if (typeof p.diff_id === "number" && p.diff_id > 0) row.diffId = p.diff_id;
+    }
+  }
+  // Newest-spawned last in push order; viewers render under the parent
+  // run row in spawn order within one run.
+  return rows;
+}

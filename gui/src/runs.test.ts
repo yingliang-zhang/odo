@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveRuns } from "./runs";
+import { SUBAGENT_GOAL_EXCERPT, deriveRuns, subagentRows } from "./runs";
 import type { EventPayload, OdoEvent } from "./types";
 
 function ev(seq: number, type: OdoEvent["type"], payload: EventPayload = {}): OdoEvent {
@@ -251,5 +251,103 @@ describe("deriveRuns advisory handling (UX-3b)", () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: "ok", endSeq: 2 });
+  });
+});
+
+
+// P1 borrow #7 (subagent report, quad-audit follow-up): journal-folded
+// isolated-child rows for the Runs tab — derived from subagent_spawned /
+// subagent_done receipts with deriveRuns' open/close grammar naming the
+// parent run.
+function spawnRow(seq: number, id: string, goal: string): OdoEvent {
+  return ev(seq, "subagent_spawned", { subagent_id: id, goal, worktree_path: "/wt/" + id });
+}
+
+function doneRow(seq: number, id: string, payload: EventPayload = {}): OdoEvent {
+  return ev(seq, "subagent_done", { subagent_id: id, exit_code: 0, ...payload });
+}
+
+describe("subagentRows", () => {
+  it("opens a running row attributed to the run open at spawn time", () => {
+    const rows = subagentRows([
+      ev(1, "user_message", { text: "parent goal" }),
+      spawnRow(2, "sub-1", "scan the subsystem"),
+      ev(3, "agent_done", { summary: "parent finished" }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "sub-1", goal: "scan the subsystem", spawnSeq: 2, status: "running", parentRunStartSeq: 1 });
+    expect(rows[0].doneSeq).toBeUndefined();
+  });
+
+  it("closes done on exit 0 and keeps the summary + proposal diff id", () => {
+    const rows = subagentRows([
+      ev(1, "user_message", { text: "parent goal" }),
+      spawnRow(2, "sub-1", "fix the flaky gate"),
+      doneRow(3, "sub-1", { summary: "gate fixed", diff_id: 42 }),
+      ev(4, "agent_done", { summary: "parent done" }),
+    ]);
+    expect(rows[0]).toMatchObject({ status: "done", doneSeq: 3, exitCode: 0, summary: "gate fixed", diffId: 42 });
+  });
+
+  it("marks exit_code ≠ 0 as failed; a registration error rides the row without flipping a clean exit", () => {
+    const [failed] = subagentRows([spawnRow(1, "sub-1", "boom"), doneRow(2, "sub-1", { exit_code: 1 })]);
+    expect(failed).toMatchObject({ status: "failed", exitCode: 1 });
+    const [warned] = subagentRows([
+      spawnRow(1, "sub-1", "scan only"),
+      doneRow(2, "sub-1", { error: "this subagent diff was NOT registered: patch unparseable" }),
+    ]);
+    expect(warned).toMatchObject({ status: "done", exitCode: 0, error: "this subagent diff was NOT registered: patch unparseable" });
+  });
+
+  it("truncates the goal to the 60-char excerpt and flattens newlines", () => {
+    const long = "fix " + "x".repeat(80) + "\nwith a newline";
+    const [row] = subagentRows([spawnRow(1, "sub-1", long)]);
+    expect(row.goal).toHaveLength(SUBAGENT_GOAL_EXCERPT + 1); // excerpt + ellipsis
+    expect(row.goal.endsWith("…")).toBe(true);
+    expect(row.goal).not.toContain("\n");
+  });
+
+  it("ignores orphan and duplicate done receipts; the spawn-less journal folds to nothing", () => {
+    expect(subagentRows([doneRow(1, "sub-ghost")])).toHaveLength(0);
+    const rows = subagentRows([
+      spawnRow(1, "sub-1", "goal"),
+      doneRow(2, "sub-1", { summary: "first close wins" }),
+      doneRow(3, "sub-1", { exit_code: 1, summary: "dup" }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "done", summary: "first close wins" });
+  });
+
+  it("attributes by deriveRuns' grammar: steers and the closed run both resolve correctly", () => {
+    // Run opens at 1, closes at 3; a mid-run steer opens nothing; the
+    // spawn at 4 lands while NO run is open → the last run hosts it.
+    const rows = subagentRows([
+      ev(1, "user_message", { text: "run goal" }),
+      ev(2, "user_message", { text: "mid-run note", steer: true }),
+      ev(3, "agent_done", { summary: "closed" }),
+      spawnRow(4, "sub-1", "post-run audit"),
+    ]);
+    expect(rows[0].parentRunStartSeq).toBe(1);
+    // A spawn before ANY run is unattributed (the panel's flat fallback).
+    const [orphan] = subagentRows([spawnRow(1, "sub-0", "impossible shape")]);
+    expect(orphan.parentRunStartSeq).toBeUndefined();
+    // run_prompt receipts open runs for attribution too.
+    const [viaPrompt] = subagentRows([
+      ev(1, "user_message", { text: "starter" }),
+      ev(2, "agent_done", { summary: "s" }),
+      ev(5, "review_action", { action: "run_prompt", origin: "retry" }),
+      spawnRow(6, "sub-2", "retry child"),
+    ]);
+    expect(viaPrompt.parentRunStartSeq).toBe(5);
+  });
+
+  it("drops malformed spawn rows (no id, duplicate id) instead of inventing rows", () => {
+    const rows = subagentRows([
+      ev(1, "subagent_spawned", { goal: "no id" }),
+      spawnRow(2, "sub-1", "first"),
+      spawnRow(3, "sub-1", "duplicate id folds away"),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "sub-1", goal: "first", spawnSeq: 2 });
   });
 });
