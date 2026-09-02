@@ -259,3 +259,31 @@ describe("P2.2 tool-arg Preview-in-panel affordance (adoption-lock)", () => {
     expect(container.textContent).toContain("src/main.go");
   });
 });
+
+// Odo DX wave (Feature 4): ANSI agent_text — SGR payloads render via
+// renderAnsi → dangerouslySetInnerHTML with escaped entities; plain text
+// keeps the markdown path (regression pin).
+describe("ANSI agent_text (Odo DX wave, Feature 4)", () => {
+  it("renders SGR colors as inline-style spans", () => {
+    const { container } = render(<MessageBubble event={event("agent_text", "\x1b[1;32m100% tests passed\x1b[0m")} />);
+    const ansi = container.querySelector<HTMLElement>(".ansi-text")!;
+    expect(ansi).not.toBeNull();
+    const span = ansi.querySelector("span")!;
+    expect(span.getAttribute("style")).toContain("font-weight");
+    expect(span.getAttribute("style")).toContain("#4e9a06");
+    expect(span.textContent).toBe("100% tests passed");
+  });
+
+  it("escapes HTML entities inside colored output (no injection)", () => {
+    const { container } = render(<MessageBubble event={event("agent_text", "\x1b[31m<b>not-bold</b> & \"q\"\x1b[0m")} />);
+    const ansi = container.querySelector<HTMLElement>(".ansi-text")!;
+    // The source tag survives as inert TEXT, never a real <b> element.
+    expect(ansi.querySelector("b")).toBeNull();
+    expect(ansi.textContent).toBe('<b>not-bold</b> & "q"');
+  });
+
+  it("keeps plain text on the markdown path (regression pin)", () => {
+    const { container } = render(<MessageBubble event={event("agent_text", "plain **bold** text")} />);
+    expect(container.querySelector(".ansi-text")).toBeNull();
+  });
+});

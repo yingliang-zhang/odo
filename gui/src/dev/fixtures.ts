@@ -606,6 +606,27 @@ export const userContent = `# USER.md
 - Practical guarded MVPs over speculative rewrites
 `;
 
+// Odo DX wave (Feature 3): write_memory's mock ledger — every accepted
+// write is recorded AND overrides the served content, so a spec can
+// assert the call args AND the refreshed files-tab content post-save.
+export const memoryOverrides: { memory?: string; pins?: string } = {};
+export const memoryWrites: Array<{ file: string; content: string }> = [];
+
+// Odo DX wave (Feature 5): per-name canned outcomes for run_command.
+// An absent name answers the daemon's unknown-command refusal — specs
+// arm entries here (and .odo/commands.json via fx.previewFiles).
+export const commandCtl: Record<
+  string,
+  { exitCode?: number; stdout?: string; stderr?: string; durationMs?: number; timedOut?: boolean }
+> = {};
+
+// Odo DX wave (Feature 1 e2e): default false keeps the composer's long-
+// standing mock contract (a plain send answers without journaling — the
+// App appends the optimistic row itself). The Runs-tab retry HAS no
+// composer path, and the real daemon journals the send before answering;
+// specs arm this where they need that journal-first truth.
+export const sendCtl = { pushPlainSends: false };
+
 // ---------- Pending counts ----------
 
 // P1a: ws2's count is 1 — the inboxDiffs row on feat-sidebar-tree is part

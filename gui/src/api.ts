@@ -61,6 +61,8 @@ import type {
   ReviewDiffResponse,
   SendMessageRequest,
   SearchEventsResponse,
+  WriteMemoryResponse,
+  RunCommandResponse,
   SendMessageResponse,
   Settings,
   UpdateSettingsRequest,
@@ -478,6 +480,38 @@ export function resolveHealConflict(
 // shape and unwrap semantics as readMemory.
 export async function readPins(projectRoot?: string): Promise<ReadPinsResponse> {
   return unwrap(await invoke<ReadPinsResponse>("read_pins", { projectRoot: projectRoot ?? null }));
+}
+
+// Odo DX wave: the Memory tab's direct-edit shortcut — full-body replace
+// of memory.md / pins.md through the same daemon containment + layer caps
+// (user.md stays cross-project-owned). A refusal (unknown layer, over the
+// layer cap) throws via unwrap; nothing is written.
+export async function writeMemory(
+  file: "memory.md" | "pins.md",
+  content: string,
+  projectRoot?: string,
+): Promise<WriteMemoryResponse> {
+  return unwrap(await invoke<WriteMemoryResponse>("write_memory", {
+    file,
+    content,
+    projectRoot: projectRoot ?? null,
+  }));
+}
+
+// Odo DX wave (Run/Test hub): execute one named .odo/commands.json
+// command. Validation failures (missing/malformed config, unknown name)
+// throw via unwrap; an EXECUTED command answers its outcome — exit 0 or
+// not — and the daemon journals the same row as command_result.
+export async function runCommand(
+  conversationId: number,
+  name: string,
+  projectRoot?: string,
+): Promise<RunCommandResponse> {
+  return unwrap(await invoke<RunCommandResponse>("run_command", {
+    conversationId,
+    name,
+    projectRoot: projectRoot ?? null,
+  }));
 }
 
 // M5 curation: topic pages for the wiki browser's Topics tab; the

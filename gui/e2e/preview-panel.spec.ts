@@ -118,3 +118,27 @@ test("non-local URLs never get an Open-live affordance (frame-src lock)", async 
   await resultCard.locator("summary").click();
   await expect(resultCard.locator('[data-slot="preview-live"]')).toHaveCount(0);
 });
+
+// Odo DX wave (Feature 2): the focus-hint banner — with a run live
+// (fx.runState.foreground arms the poll's agent_running) the run starter's
+// goal renders as the dismissible amber bar above the preview body.
+test("focus hint renders the active run's goal and dismisses per goal", async ({ page }) => {
+  
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    fx.events.push(fx.ev("user_message", { text: "stabilize the sidebar e2e suite before landing" }, 1));
+    fx.runState.foreground = true;
+  });
+  await page.keyboard.press("Meta+j");
+  await page.locator('.context-panel [role="tab"]', { hasText: "Preview" }).click();
+
+  const banner = page.locator('[data-slot="preview-focus-hint"]');
+  await expect(banner).toBeVisible({ timeout: 4000 });
+  await expect(banner).toContainText("Focus: stabilize the sidebar e2e suite before landing");
+  // Zero clutter for the body — no target, so the placeholder copy stays.
+  await expect(page.locator(".context-panel")).toContainText("Nothing to preview");
+
+  await banner.locator("button").click();
+  await expect(banner).toHaveCount(0);
+});

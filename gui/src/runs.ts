@@ -30,6 +30,16 @@ export interface RunRow {
   endSummary?: string;
   endError?: string;
   promptBytesEst?: number;
+  // Odo DX wave (Feature 1): the retry button's replay text. A
+  // user_message-opened run carries its own send verbatim; a run_prompt-
+  // opened continuation/retry inherits the nearest STARTER user_message
+  // at or before its start (the continuation's exact assembled prompt is
+  // constructed daemon-side — the journaled human prompt is the honest
+  // replayable text). Absent when nothing precedes the run.
+  promptText?: string;
+  // The owning conversation, from the journal row — ThreadsPanel e2e
+  // fixtures and the retry button both need it without a new prop.
+  conversationId?: number;
   // Measured D3 usage when a loop_run_usage receipt landed (duplicate
   // receipts per covers_spawn_seq fold newest-wins, Go parity);
   // "unavailable" is the fail-soft row (usage_available:false) — the
@@ -65,6 +75,10 @@ function startRun(ev: OdoEvent, p: EventPayload): RunRow {
     status: "running",
     goal: p.action === "run_prompt" ? originLabel(p) : excerpt(p.text ?? ""),
   };
+  // Feature 1: the retry button re-sends through send_message — the
+  // run's own journal row names its conversation, so the panel never
+  // waits on a prop thread to become clickable.
+  run.conversationId = ev.conversation_id;
   if (typeof p.origin === "string") run.origin = p.origin;
   if (typeof p.total_prompt_bytes === "number" && p.total_prompt_bytes > 0) {
     run.promptBytesEst = p.total_prompt_bytes;
@@ -106,15 +120,22 @@ export function deriveRuns(events: OdoEvent[], cap: number = 100): RunRow[] {
   const byStart = new Map<number, RunRow>();
   const receipts: { seq: number; p: EventPayload }[] = [];
   let open: RunRow | null = null;
+  // Feature 1: the nearest STARTER prompt seen so far — the retry text
+  // a continuation row inherits. Steers/parked goals are never starters
+  // (steer_queue's latestStarterIndex grammar, mirrored above).
+  let lastStarterPrompt: string | undefined;
 
   for (const ev of sorted) {
     const p: EventPayload = ev.payload ?? {};
     if (ev.type === "user_message" && !p.steer && !p.park && (p.text ?? "").trim() !== "") {
       open = startRun(ev, p);
+      open.promptText = p.text?.trim();
+      lastStarterPrompt = open.promptText;
       runs.push(open);
       byStart.set(ev.seq, open);
     } else if (ev.type === "review_action" && p.action === "run_prompt") {
       open = startRun(ev, p);
+      if (lastStarterPrompt !== undefined) open.promptText = lastStarterPrompt;
       runs.push(open);
       byStart.set(ev.seq, open);
     } else if (ev.type === "agent_done" || (ev.type === "agent_error" && p.odo !== true)) {

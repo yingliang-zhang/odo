@@ -16,7 +16,7 @@
 // instead of loading. All failures render inline; the panel never throws.
 
 import { Fragment, memo, useEffect, useRef, useState } from "react";
-import { Check, Copy, ExternalLink } from "lucide-react";
+import { Check, Copy, ExternalLink, X } from "lucide-react";
 import { errorMessage, openPath, readFile } from "../api";
 import { languageFromPath, tokenize } from "../highlight";
 import {
@@ -35,16 +35,52 @@ interface Props {
   // Keep-alive activation signal: parent mounts this body once and flips
   // `active` on tab switches; file mode refetches on the false→true edge.
   active: boolean;
+  // Odo DX wave (Feature 2): the current run's goal while the agent
+  // runs (App derives: run-starter user_message, ≤120 chars; undefined
+  // while idle). Renders as the dismissible Focus banner so vision /
+  // preview work stays legible in context without tab-flipping.
+  focusHint?: string;
 }
 
-export default memo(function PreviewPanel({ target, projectRoot, active }: Props) {
-  if (target === null) {
-    return <div className="panel-empty">Nothing to preview — open a file or live URL to see it here.</div>;
-  }
-  return target.kind === "file" ? (
-    <PreviewFilePane path={target.path} projectRoot={projectRoot} active={active} />
-  ) : (
-    <PreviewUrlPane url={target.url} />
+export default memo(function PreviewPanel({ target, projectRoot, active, focusHint }: Props) {
+  // Feature 2: dismissal is per panel-tab-session local state and keyed
+  // to the hint TEXT — a new run (new goal) re-arms the banner instead
+  // of inheriting a dismissal meant for the previous goal.
+  const [dismissedHint, setDismissedHint] = useState<string | null>(null);
+  const hint = focusHint != null && focusHint !== "" && focusHint !== dismissedHint ? focusHint : null;
+  return (
+    <div className="preview-shell flex h-full min-h-0 flex-col">
+      {hint !== null && (
+        // Slim amber bar above the preview body: one clipped line, the
+        // full goal on the title; × dismisses for THIS goal only.
+        <div
+          className="preview-focus-hint flex shrink-0 items-center gap-2 border-b border-[var(--warn)] bg-[rgba(211,156,53,0.08)] px-2.5 py-1 text-caption text-[var(--warn)]"
+          data-slot={SLOT.previewFocusHint}
+        >
+          <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap" title={hint}>
+            Focus: {hint}
+          </span>
+          <button
+            type="button"
+            className="preview-focus-dismiss inline-flex shrink-0 cursor-pointer items-center rounded border border-transparent bg-transparent p-0.5 text-[var(--warn)] hover:border-[var(--warn)]"
+            aria-label="Dismiss focus hint"
+            title="Dismiss"
+            onClick={() => setDismissedHint(hint)}
+          >
+            <X size={12} aria-hidden />
+          </button>
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        {target === null ? (
+          <div className="panel-empty">Nothing to preview — open a file or live URL to see it here.</div>
+        ) : target.kind === "file" ? (
+          <PreviewFilePane path={target.path} projectRoot={projectRoot} active={active} />
+        ) : (
+          <PreviewUrlPane url={target.url} />
+        )}
+      </div>
+    </div>
   );
 });
 

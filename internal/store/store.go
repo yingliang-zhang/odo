@@ -31,6 +31,11 @@ const (
 	// loop_started through loop_notified — split by the payload's kind
 	// key (docs/design/loop-design-lock.md V1).
 	EventLoopEvent = "loop_event"
+	// Odo DX wave (Run/Test hub): run_command journals its outcome as a
+	// run artifact (name, exit_code, output tails, duration) — journaled
+	// BY DESIGN, unlike the k8s status pollers (cluster state never
+	// enters the journal); a command's result is project history.
+	EventCommandResult = "command_result"
 )
 
 // Diff statuses.

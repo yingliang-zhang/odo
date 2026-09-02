@@ -50,6 +50,7 @@ export type EventType =
   | "memory_update"
   | "preview_captured"
   | "loop_event"
+  | "command_result"
   | (string & {});
 
 // Payload keys by event type (ADR-0002):
@@ -300,6 +301,18 @@ export interface EventPayload {
   bytes?: number;
   sha256?: string;
   wait_ms?: number;
+  // command_result payload fields (Odo DX wave, Run/Test hub): the hub's
+  // executed-command artifact — the .odo/commands.json entry name, exit
+  // code (-1 + timed_out on the clamped deadline), bounded output tails
+  // (2KB each at capture), and wall time.
+  name?: string;
+  exit_code?: number;
+  stdout_tail?: string;
+  stderr_tail?: string;
+  duration_ms?: number;
+
+  // (timed_out rides the earlier defensive declaration at the review-
+  // marker block — a deadline kill carries the same flag.)
 }
 
 // /panel heartbeat: the daemon's in-memory fan-out tally for the polled
@@ -985,6 +998,34 @@ export interface ReadPinsResponse {
   ok: boolean;
   error?: string;
   memory_content?: string;
+}
+
+// write_memory (Odo DX wave): the Memory tab's direct-edit shortcut —
+// full-body replace of memory.md / pins.md. A refusal (unknown layer,
+// cap overflow naming the byte size) arrives as ok:false; nothing is
+// written.
+export interface WriteMemoryResponse {
+  ok: boolean;
+  error?: string;
+  applied?: boolean;
+}
+
+// run_command (Odo DX wave, Run/Test hub): the executed outcome — the
+// same fields the journal's command_result row carries (the handler
+// journals it too, so a refresh folds to the same badge).
+export interface CommandResult {
+  name: string;
+  exit_code: number;
+  stdout_tail?: string;
+  stderr_tail?: string;
+  duration_ms: number;
+  timed_out?: boolean;
+}
+
+export interface RunCommandResponse {
+  ok: boolean;
+  error?: string;
+  command_result?: CommandResult;
 }
 
 // list_topics: one WikiNoteInfo per wiki/topics/<slug>.md — Name is the

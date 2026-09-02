@@ -814,6 +814,22 @@ export default function App() {
     return "Running";
   }, [agentRunning, workstream, runningWorkstreams, events]);
 
+  // Odo DX wave (Feature 2): the Preview tab's focus hint — the run
+  // STARTER's text (steers and parked goals excluded, the deriveRuns
+  // run-grammar) while the agent runs, flattened and clipped at 120.
+  // Undefined while idle: the banner renders nothing in quiet tabs.
+  const focusHint = useMemo(() => {
+    if (!agentRunning) return undefined;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if (ev.type === "user_message" && ev.payload?.steer !== true && ev.payload?.park !== true) {
+        const flat = (ev.payload?.text ?? "").trim().replace(/\s+/g, " ");
+        if (flat !== "") return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+      }
+    }
+    return undefined;
+  }, [agentRunning, events]);
+
   // Wiki note + topic counts for the sidebar. Failures degrade to
   // "unknown" (the lines are omitted); they never surface in the error
   // banner.
@@ -2713,6 +2729,9 @@ export default function App() {
               // daemon's default-ON posture.
               autoDistillEnabled={appSettings?.auto_distill !== "never"}
               events={panelTab === "memory" ? events : memoryEventsRef.current}
+              // Odo DX wave (Feature 3): the direct editor's save
+              // confirmation rides the shared toast viewport.
+              onToast={pushToast}
             />
           ) : (
             <div className="panel-empty">No active conversation.</div>
@@ -2736,6 +2755,8 @@ export default function App() {
               projectRoot={project?.root_path ?? null}
               active={panelTab === "runs"}
               currentModel={appSettings?.coding_model ?? undefined}
+              conversationId={conversation.id}
+              agentRunning={agentRunning}
               onJumpToSeq={handleJumpToSeq}
             />
           ) : (
@@ -2751,6 +2772,7 @@ export default function App() {
               target={previewTarget}
               projectRoot={project?.root_path ?? null}
               active={panelTab === "preview"}
+              focusHint={focusHint}
             />
           )}
         </div>

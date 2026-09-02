@@ -866,6 +866,10 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 		resp, err = s.handleK8sBatchStatus(ctx, req)
 	case CmdReadFile:
 		resp, err = s.handleReadFile(ctx, req)
+	case CmdWriteMemory:
+		resp, err = s.handleWriteMemory(ctx, req)
+	case CmdRunCommand:
+		resp, err = s.handleRunCommand(ctx, req)
 	default:
 		err = fmt.Errorf("unknown command %q", req.Cmd)
 	}

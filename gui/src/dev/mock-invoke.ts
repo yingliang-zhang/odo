@@ -118,6 +118,14 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
           file_mime: armed.mime,
         };
       }
+      // Odo DX wave (Feature 5): the hub config is ABSENT by default —
+      // refuse like the daemon's read_file on a missing file (the Runs
+      // tab's zero-clutter posture), never the dev stub body (which would
+      // parse as a malformed config and spam the section header). Arm
+      // fx.previewFiles[".odo/commands.json"].content to register commands.
+      if (args?.path === ".odo/commands.json") {
+        throw new Error("read_file: stat .odo/commands.json: no such file or directory");
+      }
       // Browser dev mode: return the fixture root path with a short stub
       // content so the preview dialog renders in dev.
       return {
@@ -211,7 +219,16 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
         fx.events.push(event);
         return { ok: true, event };
       }
-      return { ok: true, event: fx.ev("user_message", { text: args?.text ?? "" }, convId) };
+      {
+        // Odo DX wave (Feature 1): the daemon journals a plain send
+        // BEFORE answering — the poll's afterSeq tail delivers it. The
+        // composer hides this via its optimistic append; send paths with
+        // no composer (the Runs-tab retry) arm the knob to see the
+        // journal-first truth.
+        const event = fx.ev("user_message", { text: args?.text ?? "" }, convId);
+        if (fx.sendCtl.pushPlainSends) fx.events.push(event);
+        return { ok: true, event };
+      }
     }
     case "cancel": {
       fx.cancelCount.n += 1;
@@ -532,7 +549,26 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
 
     // ---------- Memory ----------
     case "read_memory": {
-      return { ok: true, memory_content: fx.memoryContent, archive_content: "", user_content: fx.userContent };
+      // Feature 3: a direct-edit save overrides the served body (the
+      // files tab refresh after write_memory must READ the new content).
+      return {
+        ok: true,
+        memory_content: fx.memoryOverrides.memory ?? fx.memoryContent,
+        archive_content: "",
+        user_content: fx.userContent,
+      };
+    }
+    case "write_memory": {
+      // Feature 3: argv validation mirrors the daemon's cheapest-first
+      // refusal; accepted writes join the ledger AND the override.
+      const file = String(args?.file ?? "");
+      const content = String(args?.content ?? "");
+      if (file !== "memory.md" && file !== "pins.md") {
+        return { ok: false, error: `write_memory: refused "${file}" — only memory.md and pins.md are GUI-editable` };
+      }
+      fx.memoryWrites.push({ file, content });
+      if (file === "memory.md") fx.memoryOverrides.memory = content; else fx.memoryOverrides.pins = content;
+      return { ok: true, applied: true };
     }
     case "memory_proposals": {
       return { ok: true, ...fx.memoryProposals };
@@ -563,7 +599,29 @@ export async function mockInvoke(cmd: string, args?: Record<string, any>): Promi
       return { ok: true, applied: true };
     }
     case "read_pins": {
-      return { ok: true, memory_content: fx.pinsContent };
+      return { ok: true, memory_content: fx.memoryOverrides.pins ?? fx.pinsContent };
+    }
+    case "run_command": {
+      // Odo DX wave (Feature 5): knob-driven canned outcome per name —
+      // absent = the daemon's unknown-command refusal. The mock mirrors
+      // the daemon's BOTH-SIDES contract: the response carries the result
+      // AND the row journals, so the poll fold shows the same badge a
+      // reload (bootstrap replay) would fold.
+      const name = String(args?.name ?? "");
+      const ctl = fx.commandCtl[name];
+      if (ctl == null) {
+        return { ok: false, error: `run_command: no command named "${name}" in .odo/commands.json` };
+      }
+      const res = {
+        name,
+        exit_code: ctl.exitCode ?? 0,
+        stdout_tail: ctl.stdout ?? "",
+        stderr_tail: ctl.stderr ?? "",
+        duration_ms: ctl.durationMs ?? 12,
+        timed_out: ctl.timedOut ?? false,
+      };
+      fx.events.push(fx.ev("command_result", res, args?.conversationId ?? 1));
+      return { ok: true, command_result: res };
     }
 
     case "contradictions": {

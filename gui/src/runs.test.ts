@@ -184,7 +184,6 @@ describe("deriveRuns", () => {
     ]);
     expect(rows[0].usage).toMatchObject({ input: 2, output: 2 });
   });
-
   it("ignores receipts that predate every run", () => {
     const rows = deriveRuns([
       usageRow(2, { kind_run: "fix", run_id: "r6", covers_spawn_seq: 0, usage_available: true, input_tokens: 9, output_tokens: 9 }),
@@ -192,6 +191,30 @@ describe("deriveRuns", () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0].usage).toBeUndefined();
+  });
+
+  it("carries promptText from the opening send (retry button's replay text)", () => {
+    const rows = deriveRuns([
+      ev(3, "user_message", { text: "  fix the bug  " }),
+      ev(4, "agent_done", { summary: "s" }),
+    ]);
+    expect(rows[0].promptText).toBe("fix the bug");
+    expect(rows[0].conversationId).toBe(1);
+  });
+
+  it("a continuation inherits the nearest starter prompt, not a steer or parked goal", () => {
+    const rows = deriveRuns([
+      ev(1, "user_message", { text: "original goal" }),
+      ev(2, "agent_done", { summary: "s" }),
+      ev(3, "user_message", { text: "steer text", steer: true }),
+      ev(4, "user_message", { text: "queued", park: true }),
+      ev(9, "review_action", { action: "run_prompt", origin: "continuation", steer_seqs: [3] }),
+    ]);
+    const continuation = rows.find((r) => r.startSeq === 9)!;
+    expect(continuation.promptText).toBe("original goal");
+    // A run_prompt with NO preceding starter stays retry-less.
+    const orphan = deriveRuns([ev(9, "review_action", { action: "run_prompt", origin: "retry" })]);
+    expect(orphan[0].promptText).toBeUndefined();
   });
 });
 

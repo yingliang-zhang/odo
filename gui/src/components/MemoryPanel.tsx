@@ -1,5 +1,7 @@
 import { memo, useCallback, useMemo, useEffect, useRef, useState } from "react";
 import { applyMemory, errorMessage, memoryProposals, readMemory, readPins, resolveHealConflict } from "../api";
+import { Pencil } from "lucide-react";
+import { writeMemory } from "../api";
 import type { AutoDistillCapResume, MemoryProposal, OdoEvent, PendingMemoryBatch, ReadMemoryResponse, ReviewResult, StrandedOp } from "../types";
 import { deriveAutoBackoff } from "../memory";
 import LoadingInline from "./LoadingInline";
@@ -78,6 +80,9 @@ interface Props {
   // (deriveAutoBackoff). Optional so existing mounts/tests without a
   // journal source render as quiet.
   events?: OdoEvent[];
+  // Odo DX wave (Feature 3): the direct editor's save confirmation —
+  // App's shared toast viewport (ambient 10s auto-dismiss).
+  onToast?: (toast: { text: string }) => void;
 }
 
 // Split the mixed proposals array into per-target sections while keeping
@@ -235,7 +240,7 @@ function SkillProposalRow({
   );
 }
 
-function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved, autoDistillCapResume, autoDistillEnabled = true, onDraftChange, events }: Props) {
+function MemoryPanel({ conversationId, workstreamName, focus, onApplied, projectRoot, active, strandedTotal, strandedOps, onResolved, autoDistillCapResume, autoDistillEnabled = true, onDraftChange, events, onToast }: Props) {
   // UX-3c: latest-row-per-layer fold over the same poll events the chat
   // has; empty array = no events prop (quiet) and renders no line.
   const backoff = useMemo(() => deriveAutoBackoff(events ?? []), [events]);
@@ -256,6 +261,12 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
   const [rejects, setRejects] = useState<Set<number>>(new Set());
   const [applyBusy, setApplyBusy] = useState(false);
   const [applyResult, setApplyResult] = useState<string | null>(null);
+  // Odo DX wave (Feature 3): the in-flight direct edit — non-null while a
+  // draft is open (a full-body draft of memory.md or pins.md); Save
+  // replaces the file through write_memory (one atomic rename, capped).
+  const [editor, setEditor] = useState<{ file: "memory.md" | "pins.md"; text: string } | null>(null);
+  const [editorBusy, setEditorBusy] = useState(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
   const [files, setFiles] = useState<ReadMemoryResponse | null>(null);
   // M5: pins.md reads come from read_pins (separate daemon command) so the
   // files tab can show them beside memory.md and user.md.
@@ -276,10 +287,13 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
-  // P2.4: report draft-exemption state to App's LRU on every flip.
+
+  // P2.4: report draft-exemption state to App's LRU on every flip — the
+  // editor draft counts too (Feature 3): a park must never unmount away
+  // an unsaved textarea body.
   useEffect(() => {
-    onDraftChange?.(rejects.size > 0);
-  }, [rejects, onDraftChange]);
+    onDraftChange?.(rejects.size > 0 || editor != null);
+  }, [rejects, editor, onDraftChange]);
 
   // Mirror of the batch state for refresh-time identity comparison (the
   // async callback below can't read the closure's stale `batch`).
@@ -371,6 +385,30 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
   useEffect(() => {
     if (tab === "files") void loadFiles();
   }, [tab, loadFiles]);
+
+  // Feature 3 (direct edit, docs/design lock): replace .odo/<file> in one
+  // atomic write_memory call — a human shortcut, deliberately NOT routed
+  // through proposals (that flow is untouched). After save: close the
+  // editor, re-read the files tab, and confirm through the App toast.
+  const saveEditor = async () => {
+    if (editor == null || editorBusy) return;
+    setEditorBusy(true);
+    setEditorError(null);
+    try {
+      await writeMemory(editor.file, editor.text, projectRoot ?? undefined);
+      if (!mountedRef.current) return;
+      const saved = editor.file;
+      setEditor(null);
+      await loadFiles();
+      onToast?.({ text: `saved .odo/${saved}` });
+    } catch (e) {
+      // A daemon refusal (unknown layer, cap overflow) lands inline — the
+      // draft stays open so the user can shrink and retry.
+      if (mountedRef.current) setEditorError(errorMessage(e));
+    } finally {
+      if (mountedRef.current) setEditorBusy(false);
+    }
+  };
 
   // Activation edge (the Props contract): refetch the batch, and the
   // files when that sub-tab is open. refreshBatch keeps in-flight
@@ -663,13 +701,89 @@ function MemoryPanel({ conversationId, workstreamName, focus, onApplied, project
           {filesError && <div className="wiki-hint">read failed: {filesError}</div>}
           {files && !filesLoading && (
             <>
-              <div className="mem-section-title">memory.md (current)</div>
+              {/* Feature 3 (direct edit): the in-flight editor mounts above
+                  the read-only sections; the draft survives a proposals ↔
+                  files sub-tab flip (park draft-exemption covers LRU). */}
+              {editor != null && (
+                <div
+                  className="mem-editor mb-3 rounded-md border border-[var(--accent-user)] bg-[var(--bg)] p-2"
+                  data-file={editor.file}
+                >
+                  <div className="mem-section-title">
+                    editing .odo/{editor.file} — direct write (daemon-capped, atomic)
+                  </div>
+                  <textarea
+                    className="mem-editor-area w-full rounded-md border border-[var(--border)] bg-[var(--bg-input)] px-2 py-1.5 font-mono text-[12px] leading-[1.5] text-[var(--text)]"
+                    aria-label={`Edit ${editor.file} content`}
+                    rows={Math.min(20, editor.text.split("\n").length + 1)}
+                    value={editor.text}
+                    onChange={(e) => setEditor({ ...editor, text: e.target.value })}
+                  />
+                  {editorError != null && <div className="settings-error">{editorError}</div>}
+                  <div className="mem-editor-actions mt-2 flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="default"
+                      disabled={editorBusy}
+                      onClick={() => void saveEditor()}
+                    >
+                      {editorBusy ? "Saving…" : `Save ${editor.file}`}
+                    </Button>
+                    <button
+                      type="button"
+                      className="mem-editor-cancel cursor-pointer rounded-md border border-[var(--border)] bg-transparent px-2.5 py-1 text-[12px] text-[var(--text-dim)] hover:text-[var(--text)] disabled:opacity-50"
+                      disabled={editorBusy}
+                      onClick={() => {
+                        setEditor(null);
+                        setEditorError(null);
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <span className="text-[11px] text-[var(--text-dim)]">
+                      caps: memory.md 4KB · pins.md 2KB — the daemon refuses overflow
+                    </span>
+                  </div>
+                </div>
+              )}
+              {/* Feature 3: the two PROJECT layers are editable; user.md
+                  stays cross-project-owned and the archive stays daemon-
+                  append-only (no edit affordance on either). */}
+              <div className="mem-section-title flex items-center gap-1.5">
+                memory.md (current)
+                <button
+                  type="button"
+                  className="mem-edit-btn inline-flex cursor-pointer items-center gap-0.5 rounded border border-[var(--border)] bg-transparent px-1 py-px text-[10px] text-[var(--text-dim)] hover:border-[var(--accent-user)] hover:text-[var(--text)]"
+                  aria-label="Edit memory.md"
+                  title="Edit memory.md directly — full-body replace, bypasses the proposal flow"
+                  onClick={() => {
+                    setEditor({ file: "memory.md", text: files.memory_content ?? "" });
+                    setEditorError(null);
+                  }}
+                >
+                  <Pencil size={9} aria-hidden /> edit
+                </button>
+              </div>
               <pre className="wiki-content mem-file">{files.memory_content || "(empty)"}</pre>
               <div className="mem-section-title">memory-archive.md (append-only)</div>
               <pre className="wiki-content mem-file">{files.archive_content || "(empty)"}</pre>
               <div className="mem-section-title">user.md (global)</div>
               <pre className="wiki-content mem-file">{files.user_content || "(empty)"}</pre>
-              <div className="mem-section-title">pins.md (user-authored, verbatim)</div>
+              <div className="mem-section-title flex items-center gap-1.5">
+                pins.md (user-authored, verbatim)
+                <button
+                  type="button"
+                  className="mem-edit-btn inline-flex cursor-pointer items-center gap-0.5 rounded border border-[var(--border)] bg-transparent px-1 py-px text-[10px] text-[var(--text-dim)] hover:border-[var(--accent-user)] hover:text-[var(--text)]"
+                  aria-label="Edit pins.md"
+                  title="Edit pins.md directly — full-body replace, bypasses the proposal flow"
+                  onClick={() => {
+                    setEditor({ file: "pins.md", text: pins ?? "" });
+                    setEditorError(null);
+                  }}
+                >
+                  <Pencil size={9} aria-hidden /> edit
+                </button>
+              </div>
               <pre className="wiki-content mem-file">{pins || "(empty)"}</pre>
             </>
           )}

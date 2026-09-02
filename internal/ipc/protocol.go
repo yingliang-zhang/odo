@@ -114,6 +114,23 @@ const (
 	// GUI's open_path (canonicalize-then-prefix-check); binary files and
 	// escape attempts are rejected. Capped at readFileMaxBytes.
 	CmdReadFile = "read_file"
+	// Odo DX wave (Memory tab direct edit): write_memory replaces the
+	// full body of a PROJECT memory layer — .odo/memory.md or
+	// .odo/pins.md ONLY (Request.File argv-validated; user.md stays
+	// owned by ~/.odo edits). Atomic (writeFileWithin tmp+rename), held
+	// to the layer's cap (memoryCap/pinsCap, refuse-on-overflow), and
+	// journaled nowhere: a rename lands whole or not at all, so there
+	// is no multi-step state to recover. The proposal/auto-apply flow
+	// is untouched.
+	CmdWriteMemory = "write_memory"
+	// Odo DX wave (Run/Test hub): run_command executes one named
+	// command from the project's .odo/commands.json via sh -c at the
+	// project root (user-authored config — same trust class as
+	// .odo-verify's verify line, runVerify's posture) with EnrichedEnv,
+	// bounded output tails, and a clamped per-command timeout. The
+	// outcome JOURNALS as command_result — a run artifact,
+	// deliberately unlike the k8s pollers, which journal nothing.
+	CmdRunCommand = "run_command"
 	// M19 (/loop): loop_ctl is the GUI-only control surface — Mode B
 	// design gate (approve_design | amend_design with Request.Text |
 	// veto_design), chip buttons (stop | resume with Request.LoopBudget),
@@ -200,6 +217,11 @@ type Request struct {
 	// learning_action (D9-W6): the candidate artifact hash or its unique
 	// prefix.
 	Hash string `json:"hash,omitempty"`
+	// write_memory (Odo DX wave): File is the daemon-owned layer name
+	// ("memory.md" | "pins.md" — nothing else passes validation);
+	// Content is the full replacement body.
+	File    string `json:"file,omitempty"`
+	Content string `json:"content,omitempty"`
 }
 
 // AutoDistillInfo is one scheduled auto-distill for the pending_counts
@@ -532,6 +554,23 @@ type Response struct {
 	FileContent   string `json:"file_content,omitempty"`
 	FileResolved  string `json:"file_resolved,omitempty"`
 	FileTruncated bool   `json:"file_truncated,omitempty"`
+	// run_command (Odo DX wave): the executed command's outcome — the
+	// same fields as the journaled command_result payload, so the Runs
+	// tab badge flips on the invoke response without waiting on a poll.
+	CommandResult *CommandResult `json:"command_result,omitempty"`
+}
+
+// CommandResult is run_command's outcome (Odo DX wave): exit code, the
+// bounded output tails (commandTailCap each, bounded at capture), wall
+// time, and the timeout flag — a timed-out exec reports exit_code -1
+// with TimedOut true; the badge reds on either.
+type CommandResult struct {
+	Name       string `json:"name"`
+	ExitCode   int    `json:"exit_code"`
+	StdoutTail string `json:"stdout_tail,omitempty"`
+	StderrTail string `json:"stderr_tail,omitempty"`
+	DurationMs int64  `json:"duration_ms"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
 }
 
 // K8sNsStatus is one configured namespace's outcome row (A4 D3): the

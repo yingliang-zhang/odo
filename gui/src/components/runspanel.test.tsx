@@ -1,5 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
+import { waitFor } from "@testing-library/react";
+
+// Odo DX wave (Features 1 + 5): retry rides send_message and the hub
+// lists/executes through readFile/runCommand — hoisted mocks keep the
+// panel's invoke surface assertable without the Tauri bridge.
+const { readFileMock, runCommandMock, sendMessageMock } = vi.hoisted(() => ({
+  readFileMock: vi.fn(),
+  runCommandMock: vi.fn(),
+  sendMessageMock: vi.fn(),
+}));
+vi.mock("../api", async (importOriginal) => {
+  const real = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...real,
+    readFile: readFileMock,
+    runCommand: runCommandMock,
+    sendMessage: sendMessageMock,
+  };
+});
 
 // P2.4 (docs/design/adoption-lock.md): the Runs tab — journaled rows with
 // the P1.2 slot marker, click-to-jump deep-link, empty state, and the
@@ -20,7 +39,15 @@ function ev(seq: number, type: OdoEvent["type"], payload: EventPayload = {}, at?
   };
 }
 
-beforeEach(cleanup);
+beforeEach(() => {
+  cleanup();
+  readFileMock.mockReset();
+  // Feature 5 default: .odo/commands.json ABSENT → the hub renders
+  // nothing (zero clutter), like the daemon's missing-file refusal.
+  readFileMock.mockRejectedValue(new Error("read_file: no such file"));
+  runCommandMock.mockReset();
+  sendMessageMock.mockReset();
+});
 
 function renderPanel(events: OdoEvent[], over: Partial<Parameters<typeof RunsPanel>[0]> = {}) {
   return render(
@@ -178,5 +205,129 @@ describe("receipts section (A3-2)", () => {
     ]);
     expect(queryByText(/No runs yet/)).toBeNull();
     expect(container.querySelectorAll(".ledger-review-row")).toHaveLength(1);
+  });
+});
+
+// Odo DX wave (Feature 1): the hover retry affordance on failed runs —
+// error rows with a replayable prompt offer it; ok/running rows never do;
+// a live agent disables it with the busy tooltip. The click re-sends the
+// journaled prompt through send_message and is swallowed from the row's
+// transcript jump.
+describe("retry button (Odo DX wave, Feature 1)", () => {
+  const failedRun = [
+    ev(3, "user_message", { text: "fix the flaky gate" }),
+    ev(4, "agent_error", { error: "adapter exploded" }),
+  ];
+
+  it("offers retry on an error row and never on an ok row", () => {
+    const { container } = renderPanel([
+      ...failedRun,
+      ev(5, "user_message", { text: "succeeded goal" }),
+      ev(6, "agent_done", { summary: "fine" }),
+    ]);
+    const rows = [...container.querySelectorAll<HTMLElement>(`[data-slot="${SLOT.runsRow}"]`)];
+    expect(rows).toHaveLength(2);
+    const errorRow = rows.find((r) => r.dataset.status === "error")!;
+    const okRow = rows.find((r) => r.dataset.status === "ok")!;
+    expect(errorRow.querySelector(`[data-slot="${SLOT.runsRetry}"]`)).not.toBeNull();
+    expect(okRow.querySelector(`[data-slot="${SLOT.runsRetry}"]`)).toBeNull();
+  });
+
+  it("re-sends the run's original prompt through send_message, swallowing the row jump", () => {
+    sendMessageMock.mockResolvedValue({ ok: true });
+    const onJumpToSeq = vi.fn();
+    const { container } = renderPanel(failedRun, { onJumpToSeq });
+    const button = container.querySelector<HTMLElement>(`[data-slot="${SLOT.runsRetry}"]`)!;
+    fireEvent.click(button);
+    expect(sendMessageMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageMock).toHaveBeenCalledWith(1, "fix the flaky gate", [], { projectRoot: undefined });
+    // The click must not bubble into the transcript jump.
+    expect(onJumpToSeq).not.toHaveBeenCalled();
+  });
+
+  it("disables the button with the busy tooltip while the agent runs", () => {
+    const { container } = renderPanel(failedRun, { agentRunning: true });
+    const button = container.querySelector<HTMLElement>(`[data-slot="${SLOT.runsRetry}"]`)! as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toContain("Agent busy");
+  });
+
+  it("surfaces a thrown send refusal inline instead of crashing", async () => {
+    sendMessageMock.mockRejectedValue(new Error("daemon: run already active"));
+    const { container, getByText } = renderPanel(failedRun);
+    fireEvent.click(container.querySelector(`[data-slot="${SLOT.runsRetry}"]`)!);
+    await waitFor(() => expect(getByText(/retry failed: daemon: run already active/)).toBeTruthy());
+  });
+});
+
+// Odo DX wave (Feature 5): the Run/Test hub — zero clutter without
+// .odo/commands.json, buttons per registered command, a journaled row's
+// badge folded from the events prop, and the click path through
+// run_command with an immediate badge flip from the invoke response.
+describe("commands hub (Odo DX wave, Feature 5)", () => {
+  const hubConfig = {
+    file_content: JSON.stringify({
+      version: 1,
+      commands: [
+        { name: "tests", cmd: "go test ./...", timeout: 120 },
+        { name: "lint", cmd: "gofmt -l ." },
+      ],
+    }),
+  };
+
+  it("renders nothing when commands.json is absent (zero clutter)", async () => {
+    const { container } = renderPanel([ev(1, "user_message", { text: "goal" })], { conversationId: 1 });
+    await waitFor(() => expect(readFileMock).toHaveBeenCalledWith(".odo/commands.json", null));
+    expect(container.querySelector(`[data-slot="${SLOT.commandsSection}"]`)).toBeNull();
+  });
+
+  it("renders no hub at all without a conversation", () => {
+    const { container } = renderPanel([ev(1, "user_message", { text: "goal" })]);
+    expect(container.querySelector(`[data-slot="${SLOT.commandsSection}"]`)).toBeNull();
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it("names a malformed existing config on one line instead of hiding it", async () => {
+    readFileMock.mockResolvedValue({ file_content: "not json {" });
+    const { getByText } = renderPanel([ev(1, "user_message", { text: "goal" })], { conversationId: 1 });
+    await waitFor(() => expect(getByText(/not valid JSON/)).toBeTruthy());
+  });
+
+  it("folds a journaled command_result into the row badge without any click", async () => {
+    readFileMock.mockResolvedValue(hubConfig);
+    const { container, getByText } = renderPanel(
+      [
+        ev(1, "user_message", { text: "goal" }),
+        ev(2, "command_result", { name: "tests", exit_code: 1, stdout_tail: "FAIL pkg/x", duration_ms: 2300 }),
+      ],
+      { conversationId: 1 },
+    );
+    await waitFor(() => expect(container.querySelectorAll(`[data-slot="${SLOT.commandRow}"]`)).toHaveLength(2));
+    expect(getByText(/exit 1 · 2s/)).toBeTruthy();
+    // The journaled tail carries the expandable output.
+    expect(container.textContent).toContain("FAIL pkg/x");
+  });
+
+  it("executes on click and flips the badge from the invoke response", async () => {
+    readFileMock.mockResolvedValue(hubConfig);
+    runCommandMock.mockResolvedValue({
+      ok: true,
+      command_result: { name: "tests", exit_code: 0, stdout_tail: "ok all", duration_ms: 640 },
+    });
+    const { container, getByText } = renderPanel([ev(1, "user_message", { text: "goal" })], { conversationId: 7 });
+    await waitFor(() => expect(container.querySelectorAll(".command-run")).toHaveLength(2));
+    fireEvent.click(getByText("tests"));
+    await waitFor(() => expect(getByText(/ok · 640ms/)).toBeTruthy());
+    expect(runCommandMock).toHaveBeenCalledWith(7, "tests", undefined);
+    expect(container.textContent).toContain("ok all");
+  });
+
+  it("shows the run refusal inline (unknown command, daemon validation)", async () => {
+    readFileMock.mockResolvedValue(hubConfig);
+    runCommandMock.mockRejectedValue(new Error('run_command: no command named "tests" in .odo/commands.json'));
+    const { container, getByText } = renderPanel([ev(1, "user_message", { text: "goal" })], { conversationId: 1 });
+    await waitFor(() => expect(container.querySelectorAll(".command-run")).toHaveLength(2));
+    fireEvent.click(getByText("tests"));
+    await waitFor(() => expect(getByText(/no command named/)).toBeTruthy());
   });
 });

@@ -31,6 +31,13 @@ export const SLOT = {
   failureReload: "failure-reload",
   // P2.4: parked badge on a keep-alive LRU-parked ContextPanel tab.
   parkedBadge: "parked-badge",
+  // Odo DX wave: the Preview tab's dismissible run-goal banner (Feature
+  // 2), the Runs row hover retry affordance (Feature 1), and the Run/Test
+  // hub section + its per-command rows (Feature 5).
+  previewFocusHint: "preview-focus-hint",
+  runsRetry: "runs-retry",
+  commandsSection: "commands-section",
+  commandRow: "command-row",
 } as const;
 
 export type SlotName = keyof typeof SLOT;

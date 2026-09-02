@@ -66,6 +66,11 @@ const REVIEW_READ_TIMEOUT: Duration = Duration::from_secs(900);
 /// the answer for the next poll. 700s ≈ worst observed × 1.8.
 const SLASH_READ_TIMEOUT: Duration = Duration::from_secs(700);
 
+/// Odo DX wave (Run/Test hub): run_command's per-command timeout clamps
+/// at 600s daemon-side; the bridge read deadline sits just above that
+/// ceiling so a clamped command still answers instead of racing the timer.
+const COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(620);
+
 /// How long to wait for a freshly spawned daemon to answer its socket.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -796,6 +801,35 @@ async fn read_pins(project_root: Option<String>) -> Result<Value, String> {
     let req = json!({"cmd": "read_pins", "project_root": root});
     run_command(root, req, READ_TIMEOUT).await
 }
+// Odo DX wave: the Memory tab's direct-edit shortcut — replaces the full
+// body of .odo/memory.md or .odo/pins.md (the daemon argv-validates the
+// file name and enforces the layer cap; nothing else is writable).
+#[tauri::command]
+async fn write_memory(
+    file: String,
+    content: String,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "write_memory", "file": file, "content": content, "project_root": root});
+    run_command(root, req, READ_TIMEOUT).await
+}
+
+// Odo DX wave (Run/Test hub): execute one named .odo/commands.json
+// command in the project via the daemon. Per-command timeouts clamp at
+// 600s daemon-side, so the bridge read deadline sits above the ceiling.
+// The JS-side name stays "run_command"; the Rust fn is suffixed so it
+// can share the module with the blocking-socket helper above.
+#[tauri::command(rename = "run_command")]
+async fn run_command_ipc(
+    conversation_id: i64,
+    name: String,
+    project_root: Option<String>,
+) -> Result<Value, String> {
+    let root = resolve_root(project_root)?;
+    let req = json!({"cmd": "run_command", "conversation_id": conversation_id, "name": name, "project_root": root});
+    run_command(root, req, COMMAND_READ_TIMEOUT).await
+}
 
 // M8 (Skills): list all discovered skill metadata (global ~/.odo/skills/
 // + project .odo/skills/). Read-only, generic READ_TIMEOUT.
@@ -1494,6 +1528,8 @@ pub fn run() {
             curate,
             pin,
             read_pins,
+            write_memory,
+            run_command_ipc,
             list_skills,
             read_skill,
             update_skill,

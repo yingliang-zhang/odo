@@ -8,6 +8,7 @@ import { SLOT } from "../slots";
 import { loopEventLabel } from "../loop";
 import type { OdoEvent, RecallItem } from "../types";
 import Markdown, { highlightText, ZoomableImage } from "./Markdown";
+import { renderAnsi } from "../ansi";
 import { looksLikeUnifiedDiff, ToolDiffView } from "./DiffViewer";
 import { Badge } from "./ui/badge";
 
@@ -299,7 +300,25 @@ export default memo(function MessageBubble({ event, highlight, onEditUserMessage
         <div className="bubble bubble-agent group/bubble relative w-full max-w-[var(--chat-column-width,100%)] mx-auto bg-bg-raised text-[var(--agent-text)] border border-stroke-secondary rounded-[12px_12px_12px_4px] shadow-[0_1px_2px_rgba(0,0,0,0.18)] px-3.5 pt-2.5 pb-[20px] whitespace-pre-wrap break-words text-body leading-[1.6] animate-[bubble-in_0.18s_var(--ease-out)]">
           <CopyBubbleButton text={p.text ?? ""} />
           <div className="bubble-text">
-            <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />
+            {(p.text ?? "").includes("\x1b[") ? (
+              // Odo DX wave (Feature 4): SGR-colored output (OMP --mode
+              // json tool results) renders via renderAnsi →
+              // dangerouslySetInnerHTML. renderAnsi HTML-escapes every
+              // text chunk FIRST and emits only fixed-table inline-style
+              // spans — no user markup can ride the injection. This path
+              // BYPASSES Markdown: the renderer is deliberately
+              // dSIH-free, so escaped spans would double-escape back to
+              // literal text. The ⌘F highlight is Markdown-internal, so
+              // colored payloads render unhighlighted (colored test
+              // streams are the rare case; plain bubbles keep it).
+              <div
+                className="ansi-text"
+                // eslint-disable-next-line react/no-danger
+                dangerouslySetInnerHTML={{ __html: renderAnsi(p.text ?? "") }}
+              />
+            ) : (
+              <Markdown content={p.text ?? ""} highlight={highlight} projectRoot={projectRoot} />
+            )}
           </div>
           <BubbleTime when={event.created_at} side="left" />
         </div>

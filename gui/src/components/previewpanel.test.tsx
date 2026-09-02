@@ -114,3 +114,57 @@ describe("PreviewPanel url targets (P2.3 design lock)", () => {
     expect(container.textContent).toContain("never requested");
   });
 });
+
+// Odo DX wave (Feature 2): the focus-hint banner — renders "Focus: <goal>"
+// while a run is active, nothing when idle, dismissible for the CURRENT
+// goal only (a new run's goal re-arms the banner), and it coexists with
+// every target mode (null/file/url).
+describe("PreviewPanel focus hint (Odo DX wave, Feature 2)", () => {
+  it("renders the banner above the body when a hint is threaded", () => {
+    readFileMock.mockResolvedValue({ file_content: "x", file_resolved: "/root/a.txt" });
+    const { container } = render(
+      <PreviewPanel
+        target={{ kind: "file", path: "a.txt" }}
+        projectRoot="/root"
+        active
+        focusHint="stabilize the e2e sidebar suite"
+      />,
+    );
+    const banner = container.querySelector<HTMLElement>(`[data-slot="${SLOT.previewFocusHint}"]`)!;
+    expect(banner).not.toBeNull();
+    expect(banner.textContent).toContain("Focus: stabilize the e2e sidebar suite");
+    // The full goal rides the title (the visible line clips).
+    expect(banner.textContent && banner.querySelector("span")!.title).toBe("stabilize the e2e sidebar suite");
+  });
+
+  it("renders no banner when the hint is absent or empty (zero clutter)", () => {
+    const idle = render(<PreviewPanel target={null} projectRoot="/root" active />);
+    expect(idle.container.querySelector(`[data-slot="${SLOT.previewFocusHint}"]`)).toBeNull();
+    cleanup();
+    const empty = render(<PreviewPanel target={null} projectRoot="/root" active focusHint="" />);
+    expect(empty.container.querySelector(`[data-slot="${SLOT.previewFocusHint}"]`)).toBeNull();
+  });
+
+  it("dismisses for THIS goal and re-arms on a new one", () => {
+    const { container, rerender } = render(<PreviewPanel target={null} projectRoot={null} active focusHint="goal alpha" />);
+    expect(container.querySelector(`[data-slot="${SLOT.previewFocusHint}"]`)).not.toBeNull();
+
+    fireEvent.click(container.querySelector<HTMLElement>("button[aria-label='Dismiss focus hint']")!);
+    expect(container.querySelector(`[data-slot="${SLOT.previewFocusHint}"]`)).toBeNull();
+
+    // Same goal re-render: still dismissed (per-session local state).
+    rerender(<PreviewPanel target={null} projectRoot={null} active focusHint="goal alpha" />);
+    expect(container.querySelector(`[data-slot="${SLOT.previewFocusHint}"]`)).toBeNull();
+
+    // A NEW run's goal re-arms the banner — the dismissal was for alpha.
+    rerender(<PreviewPanel target={null} projectRoot={null} active focusHint="goal beta" />);
+    expect(container.querySelector(`[data-slot="${SLOT.previewFocusHint}"]`)).not.toBeNull();
+  });
+
+  it("presents the banner alongside the empty-target placeholder too", () => {
+    const { container } = render(<PreviewPanel target={null} projectRoot={null} active focusHint="any goal" />);
+    expect(container.querySelector(`[data-slot="${SLOT.previewFocusHint}"]`)).not.toBeNull();
+    // And the empty-target state still never fetches.
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+});

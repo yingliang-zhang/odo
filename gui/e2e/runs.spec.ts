@@ -135,3 +135,74 @@ test("empty states: a workstream with no runs shows the empty message", async ({
     page.locator(".context-panel .panel-body > div:not([hidden]) .mem-body").first(),
   ).toBeVisible(POLL);
 });
+
+// Odo DX wave (Feature 1): the error row's hover retry re-sends the
+// journaled prompt through send_message — the mock's journal-first knob
+// (fx.sendCtl.pushPlainSends) models the daemon writing the row before
+// answering, so the poll grows a NEW row for the same goal.
+test("retry on an error row re-sends the prompt and grows a new running row", async ({ page }) => {
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    fx.sendCtl.pushPlainSends = true;
+    const e = fx.ev("user_message", { text: "retryable goal — flaky gate fix" }, 1);
+    e.created_at = new Date(Date.now() - 60_000).toISOString();
+    fx.events.push(e);
+    const err = fx.ev("agent_error", { error: "adapter exploded" }, 1);
+    err.created_at = new Date(Date.now() - 55_000).toISOString();
+    fx.events.push(err);
+  });
+  await openRunsTab(page);
+  const retry = page.locator('[data-slot="runs-retry"]');
+  await expect(retry).toBeVisible(POLL);
+  await expect(retry).toHaveAttribute("title", "Retry this prompt as a new run");
+  await retry.click({ force: true }); // opacity-0 until hover; force keeps the poll race out of it
+  // The journaled re-send folds in as a NEW leading row, same goal,
+  // status running (the mock adapter runs no agent — the row never
+  // terminates here, which is exactly the freshly-sent state).
+  await expect(page.locator('[data-slot="runs-row"]').first()).toHaveAttribute("data-status", "running", POLL);
+  
+  const rows = page.locator('[data-slot="runs-row"]', { hasText: "retryable goal" });
+  await expect(rows).toHaveCount(2, POLL);
+  await expect(rows.nth(1)).toHaveAttribute("data-status", "error");
+});
+
+// Odo DX wave (Feature 5): the Run/Test hub — registered .odo/commands.json
+// entries render as buttons; the click runs through run_command (the mock
+// answers the canned outcome AND journals the row, so the badge and the
+// poll fold agree). Absent file = zero clutter, covered in runspanel.test.tsx.
+test("commands hub: registered commands run and badge from the result", async ({ page }) => {
+  await page.evaluate(() => {
+    const fx = window.__odoFixtures;
+    if (!fx) throw new Error("__odoFixtures hook missing");
+    const e = fx.ev("user_message", { text: "hub-host goal" }, 1);
+    fx.events.push(e);
+    fx.previewFiles[".odo/commands.json"] = {
+      content: JSON.stringify({
+        version: 1,
+        commands: [
+          { name: "tests", cmd: "go test ./...", timeout: 120 },
+          { name: "lint", cmd: "gofmt -l ." },
+        ],
+      }),
+    };
+    fx.commandCtl["tests"] = { exitCode: 0, stdout: "ok github.com/odo/...\n", durationMs: 640 };
+    fx.commandCtl["lint"] = { exitCode: 1, stderr: "main.go needs gofmt\n", durationMs: 12 };
+  });
+  await openRunsTab(page);
+  const hub = page.locator('[data-slot="commands-section"]');
+  await expect(hub).toBeVisible(POLL);
+  await expect(hub.locator('[data-slot="command-row"]')).toHaveCount(2);
+
+  // Green path: click → invoke-fresh badge, expandable output.
+  await hub.locator('[data-slot="command-row"][data-name="tests"] .command-run').click();
+  const testsRow = hub.locator('[data-slot="command-row"][data-name="tests"]');
+  await expect(testsRow.locator(".command-badge")).toContainText("ok · 640ms", POLL);
+  await expect(testsRow.locator(".command-stdout")).toContainText("ok github.com/odo/...");
+
+  // Red path: exit 1 reds with the code and the stderr tail.
+  await hub.locator('[data-slot="command-row"][data-name="lint"] .command-run').click();
+  const lintRow = hub.locator('[data-slot="command-row"][data-name="lint"]');
+  await expect(lintRow.locator(".command-badge")).toContainText("exit 1", POLL);
+  await expect(lintRow.locator(".command-stderr")).toContainText("gofmt");
+});
