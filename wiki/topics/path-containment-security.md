@@ -1,0 +1,12 @@
+# Path Containment & Security Hardening
+
+- The canonical `projectRoot` is the final trust anchor: the guard verifies the resolved dir stays inside the project AND rejects symlinks at the root nodes themselves (`.odo`, `wiki`, `wiki/topics`); the write side carries the same guard, not just reads (main-epoch-34)
+- Only project-side paths are constrained — global `~/.odo` files (user.md, pins) sit outside the threat model because restricting them would break legitimate dotfiles symlinks; `wiki/` is committable, so it is in scope (main-epoch-30)
+- Containment violations degrade to `vanished`/`absent` semantics, never new error faces (main-epoch-30)
+- Accept refuses dirty patch-own paths: `git apply --3way` atomically refuses dirty paths, yet rollback still wiped user content — `DirtyPaths` guards both apply sites, and the refusal keeps the diff pending for clean-and-retry (main-epoch-28)
+- `/preview` redirect bypass: precheck (HEAD) and screenshot (GET) are separate requests, so 204-to-HEAD + 302-to-GET bypasses without a race — fixed with an in-process loopback-only filtering proxy env-injected into the Playwright child, plus Go-side per-hop redirect validation and final-URL capture; JS/meta-refresh redirects remain the documented v1 boundary (main-epoch-32)
+- Bounded reads are enforced during read, before allocation: loop task files use a size pre-check + capped reader instead of read-then-limit, and >512 KiB previews stream via `os.Open` + `io.LimitReader` (main-epoch-42)
+- Loop artifacts fail closed on tamper: `loopArtifactBody` guards containment plus `<field>_sha16` comparison at both read sites; staged-only edits are caught via real index-vs-HEAD comparison (`IndexEditsBeyondHEAD`) before `git add` can clobber a divergent index (main-epoch-38)
+- Skill surfaces: the skill dir chain resolves through `guardedBase` — a symlinked `.odo`/`.odo/skills` degrades the whole project scope to absent; delete carries the same write guard as update; a 64KB per-file cap with continue-not-break so one oversized skill cannot starve smaller relevant ones (main-epoch-38)
+- AGENTS.md carries only the stable protocol — dynamic memory/pins copy blocks removed so the model sees exactly one receipted copy (main-epoch-38)
+- alreadyLanded uses per-file byte-level comparison (temp-index post-image vs worktree hash-object) so stray edits cannot ride an `odo: accept diff #N` commit (main-epoch-30)

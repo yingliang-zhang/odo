@@ -1,3 +1,5 @@
+> SUPERSEDED by curator: fully merged into topic pages — retained for citation liveness, excluded from recall injection.
+
 # Session summary — no technical work performed
 
 This conversation contained no substantive exchange prior to the summarization request itself. This note records that fact and the harness metadata that accompanied the request, so the artifact is not mistaken for an incomplete summary.

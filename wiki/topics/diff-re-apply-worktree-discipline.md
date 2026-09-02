@@ -1,0 +1,14 @@
+# Diff Re-Apply & Worktree Discipline
+
+- Flake-blocked diffs are re-applied verbatim from the journal archive — journal lookup -> patch path -> kill `:1420` -> `git apply --3way` -> stage — with zero content edits and fast gates only, because prior full-suite evidence stands when bytes are unchanged (bug-fix-epoch-54)
+- Byte-identity is the re-apply contract: `cmp` the staged diff against the archived patch, match file counts, leave zero unstaged/untracked residue — even preserving the patch's own trailing-whitespace warnings deliberately (bug-fix-epoch-56)
+- A fixed-but-unextracted staged tree is re-extracted as a new pipeline diff: `git diff --cached` from the source worktree -> `git apply` into the fresh run worktree -> `git add -A`, no content edits and no local verify — the daemon owns it (bug-fix-epoch-57)
+- The own fresh worktree is the only canonical checkout; sibling `.odo/worktrees/` dirs are read-only reference — stage only in your own worktree, leave it dirty with zero commits (bug-fix-epoch-38)
+- A changeset whose worktree was swept survives in the diff archive: a 27-file W5 set was fully recovered from `.odo/diffs/*.diff` via `git apply --3way`, resolving ours-half-done vs theirs-complete conflicts per-hunk by taking theirs (bug-fix-epoch-36)
+- Fresh worktrees lack `gui/node_modules`: provision via APFS clone `cp -Rc` from the main checkout (the bare `cp -c` form fails on directories), and never re-clone into an existing node_modules — a nested `node_modules/node_modules` duplicate React caused 35 false vitest failures (bug-fix-epoch-53)
+- The shell cwd parameter is unreliable — it dropped repeatedly, producing green-gates-in-the-wrong-tree twice and once polluting main's server.go; use explicit in-band `cd ... &&` with pwd assertions before gate runs (bug-fix-epoch-53)
+- GUI gates must run with cwd = `gui/`: from the repo root, vitest collects `gui/e2e/*.spec.ts` as unit files and `npx` misses `gui/node_modules` (bug-fix-epoch-29)
+- Verify the assigned worktree actually holds the changeset before gating — dispatch repeatedly attached sessions to clean worktrees while the diff sat in a sibling; locate by ground truth (journal/store queries), never by the task brief (bug-fix-epoch-34)
+- Edit-tool discipline: every body row carries the `+` prefix including comment continuations; range ops can swallow adjacent lines (once damaging an evidence line, once deleting a test) — re-read and repair after each multi-op edit, and on partial failure roll back the whole op set and re-send with smaller anchors (bug-fix-epoch-55)
+- Background full-suite runs must survive the session: a plain nohup run died when the tool session reaped its process group — launch async or setsid-isolated and wait via the hub (bug-fix-epoch-35)
+- Sessions with no technical exchange still produce an epoch note explicitly recording zero decisions/changes, so the artifact is not mistaken for an incomplete summary (bug-fix-epoch-46)

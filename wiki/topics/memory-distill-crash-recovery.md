@@ -1,0 +1,12 @@
+# Memory Distill & Crash Recovery
+
+- Marker-first / journal-first on every write path: intent markers are journaled before file writes (apply, pins, promote), closing the crash window where work is done but never marked (main-epoch-39)
+- Heal walks ALL stranded markers as multi-marker, per-layer newest-wins claims — and must also run on the consumed-refusal path and in the auto-gate sweep, because `handleApplyMemory` refuses consumed batches before the core heals (main-epoch-39)
+- Consumed-batch retries distinguish heal that completes the epoch's work this call (`Applied: true`) from heal no-op (keep rejecting) — reconciling the legacy idempotency pin with the crash-window pin semantically rather than gaming either test (main-epoch-40)
+- The project-level outbox replays planner intents, not raw content: a boot-time replayer across all workstreams, globally ordered by `store.Event.ID`, re-runs the original planner against the CURRENT file (idempotent rebase), with a retract filter preventing resurrection of retracted rules (main-epoch-42)
+- Explanation-set gating: a file hash is writable only if explained by journal `after_sha` values or outbox receipts — manual edits are neither clobbered nor cause rule resurrection; chosen over hash-equality gating (main-epoch-42)
+- `memMu` is a single-writer leaf lock (never touching `s.mu`/`acceptMu`) with the journal re-folded under it for pending/consumed recheck — closing double-consumption and cross-workstream last-rename-wins for batches and pins (main-epoch-38)
+- The write-failed crash window (file write before journal write) is deliberately kept: `normalizeRule` dedupe makes replay idempotent, so the window is benign — the real gap was the missing concurrent single-writer (main-epoch-38)
+- Run-start duplication is guarded by an atomic struct flag checked-and-set under the delete path's lock, wired at every start site (send_message tail, slash routes, auto fire/arm, distill entry, loop start) (main-epoch-39)
+- Goroutine lifecycle: auto-distill spawns, timer callbacks, and `recoverPendingDiffs` fan-out all ride the Server waitgroup so stop drains in-flight work instead of writing to a closed store after TempDir teardown (main-epoch-42)
+- v4 migration dedupes fossil duplicate workstream names (survivor keeps the name, old gets a `-dup-<id>` suffix) plus a partial unique index on `status='active'`, deliberately excluded from unconditional schemaV1 DDL because legacy DBs need dedupe first; v4 event dedupe is collision-free in the store (main-epoch-38)
